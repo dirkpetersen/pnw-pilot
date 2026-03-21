@@ -2,7 +2,8 @@ from typing import Optional
 import pyray as rl
 from cereal import log
 
-from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
+from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer, ALERT_PADDING
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.selfdrive.ui.bp.lib.ui_debug_logger import bp_ui_log
 
@@ -34,6 +35,14 @@ class AlertRendererBP(AlertRenderer):
     bp_ui_log.state("AlertRenderer", "has_alert", alert is not None)
     if alert:
       bp_ui_log.state("AlertRenderer", "alert_size", alert.size)
+
+    # SunnyPilot on-road screen-off timer (OnroadScreenOffBrightness / OnroadScreenOffTimer) is
+    # driven from here every frame — must match stock AlertRenderer._render (MICI does this in
+    # mici/onroad/alert_renderer.py). Calling super()._render for non-informational alerts would
+    # duplicate this and double-decrement the timer.
+    if gui_app.sunnypilot_ui():
+      ui_state.onroad_brightness_handle_alerts(ui_state.started, alert)
+
     if not alert:
       return
 
@@ -49,8 +58,16 @@ class AlertRendererBP(AlertRenderer):
         )
         self._draw_pill_text(text_rect, alert)
     else:
-      # Delegate to stock AlertRenderer for all other alerts (including orange alerts)
-      super()._render(rect)
+      # Same drawing as AlertRenderer._render after brightness hook (do not call super()._render)
+      alert_rect = self._get_alert_rect(rect, alert.size)
+      self._draw_background(alert_rect, alert)
+      text_rect = rl.Rectangle(
+        alert_rect.x + ALERT_PADDING,
+        alert_rect.y + ALERT_PADDING,
+        alert_rect.width - 2 * ALERT_PADDING,
+        alert_rect.height - 2 * ALERT_PADDING
+      )
+      self._draw_text(text_rect, alert)
 
   def _get_pill_rect(self, rect: rl.Rectangle, alert) -> Optional[rl.Rectangle]:
     """Calculate pill-shaped notification rectangle below speed display, centered, full width."""
