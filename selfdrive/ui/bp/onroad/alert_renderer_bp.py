@@ -10,17 +10,16 @@ from openpilot.selfdrive.ui.bp.lib.ui_debug_logger import bp_ui_log
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
 
-# BluePilot: Pill positioned below speed display (speed unit center=290, font~66)
-# Bottom of speed area ~323. Gap 17px, pill starts at 340.
-PILL_TOP_Y = 340
+# BluePilot: Pill positioned at bottom of display
+PILL_BOTTOM_MARGIN = 40
 PILL_SIDE_MARGIN = 60
-PILL_PADDING_H = 30
-PILL_PADDING_V = 15
-PILL_LINE1_FONT_SIZE = 48
-PILL_LINE2_FONT_SIZE = 40  # Slightly smaller for subtitle (matches upstream mid alert)
-PILL_LINE_SPACING = 8
-PILL_HEIGHT_SINGLE = 78
-PILL_HEIGHT_DOUBLE = 130
+PILL_PADDING_H = 40
+PILL_PADDING_V = 22
+PILL_LINE1_FONT_SIZE = 66
+PILL_LINE2_FONT_SIZE = 56
+PILL_LINE_SPACING = 10
+PILL_HEIGHT_SINGLE = 110
+PILL_HEIGHT_DOUBLE = 175
 
 # Pill notification colors
 PILL_BACKGROUND_COLOR = rl.Color(45, 45, 45, 255)
@@ -70,7 +69,7 @@ class AlertRendererBP(AlertRenderer):
       self._draw_text(text_rect, alert)
 
   def _get_pill_rect(self, rect: rl.Rectangle, alert) -> Optional[rl.Rectangle]:
-    """Calculate pill-shaped notification rectangle below speed display, centered, full width."""
+    """Calculate pill-shaped notification rectangle at bottom of display, centered."""
     line1 = alert.text1 or ""
     line2 = alert.text2 or ""
     if not line1 and not line2:
@@ -94,7 +93,7 @@ class AlertRendererBP(AlertRenderer):
 
     pill_width = min(text_width + 2 * PILL_PADDING_H, available_width)
     pill_x = rect.x + (rect.width - pill_width) / 2
-    pill_y = rect.y + PILL_TOP_Y
+    pill_y = rect.y + rect.height - pill_height - PILL_BOTTOM_MARGIN
 
     return rl.Rectangle(pill_x, pill_y, pill_width, pill_height)
 
