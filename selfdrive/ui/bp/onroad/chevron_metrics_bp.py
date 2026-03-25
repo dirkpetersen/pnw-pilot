@@ -156,6 +156,8 @@ class ChevronMetricsBP(ChevronMetrics):
                                 VISION_BORDER_COLOR_BASE.b, alpha)
 
       border_thickness = max(2, int(6 * scale))
+      # Gap between triangle outline and box edge so the outline doesn't bleed into the box
+      tri_gap = border_thickness / 2 + 1
 
       box_rects = []
       for line, text_size in zip(text_lines, text_sizes):
@@ -187,21 +189,25 @@ class ChevronMetricsBP(ChevronMetrics):
       if box != None:
         center_x = box.x + box.width / 2
         if inverted:
-          # Chevron flipped: wide base at top (touching overlay bottom), apex pointing down
-          base_y = y + box_height
+          # Chevron flipped: wide base at bottom of boxes, apex pointing down
+          # Offset base below box bottom so outline doesn't overlap into box
+          base_y = y + box_height + tri_gap
           apex_y = base_y + CHEVRON_H
           chevron = [rl.Vector2(center_x, apex_y),
                      rl.Vector2(box.x, base_y),
                      rl.Vector2(box.x + box.width, base_y)]
         else:
-          # Normal: apex above (point toward lead), base below (touching overlay top)
-          chevron = [rl.Vector2(center_x, y - CHEVRON_H),
-                     rl.Vector2(box.x, y),
-                     rl.Vector2(box.x + box.width, y)]
+          # Normal: apex above (point toward lead), base above box top
+          # Offset base above box top so outline doesn't overlap into box
+          base_y = y - tri_gap
+          chevron = [rl.Vector2(center_x, base_y - CHEVRON_H),
+                     rl.Vector2(box.x, base_y),
+                     rl.Vector2(box.x + box.width, base_y)]
       else:
         chevron = lead_vehicle.glow
 
-      # Draw modified chevron
+      # Draw triangle connecting chevron to boxes (drawn before boxes are on screen,
+      # so z-order is: filled triangle behind, boxes on top)
       rl.draw_triangle_fan(chevron, len(chevron), border_color)
       rl.draw_line_ex(chevron[0], chevron[1], border_thickness, glow_color)
       rl.draw_line_ex(chevron[1], chevron[2], border_thickness, glow_color)
