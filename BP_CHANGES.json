@@ -1,5 +1,47 @@
 {
   "versions": {
+    "6.0.1": {
+      "agnos_version": "13.1",
+      "changes": [
+        "Synced with latest upstream SunnyPilot changes",
+        "On-device MICI vehicle selector with support for all makes|C4",
+        "Flat and arched powerflow meter style options with large/small sizes|C3X",
+        "BluePilot and SunnyPilot BSM can now be toggled separately",
+        "Enhanced ACC coasting behavior with option to disable downhill assist for vehicles that handle it natively",
+        "Auto lane change now disables under a specified speed instead of fully disabling lateral control",
+        "Improved chevron rendering with better outline overlap prevention",
+        "Improved radar overlay with cleaner visuals and centered messages to prevent truncation",
+        "Onroad performance: Cached per-frame Params reads to reduce video stutter",
+        "Enabled additional GPS signals for better location lock",
+        "Preferred WiFi network selector for MICI devices|C4",
+        "Pill alerts moved to bottom of display with increased sizes",
+        "Organized C3X settings menu|C3X",
+        "Renamed Hands Free UI option to BlueCruise Dash Icon",
+        "Ford: Added Ford Edge MK2 to vehicle menu and fingerprints",
+        "Ford: Block BlueCruise hands-free message on CAN vehicles",
+        "Ford ICBM: Multiple improvements to speed target handling and button detection"
+      ],
+      "fixes": [
+        "Fixed TICI screen dimming behavior|C3X",
+        "Fixed stale scons lock file on boot",
+        "Fixed confidence ball display in reverse and speedometer hiding",
+        "Fixed MICI powerflow style toggle and menu consistency|C4",
+        "Fixed broken MICI float button behavior|C4",
+        "Fixed MICI blindspot description|C4",
+        "Fixed driver monitoring and battery stat widget display",
+        "Fixed sidebar and recent changes panel crashes|C3X",
+        "Fixed broken items from SunnyPilot sync including controlStateBP",
+        "Fixed WiFi manager with upstream sync and improved error handling",
+        "Synced onroad brightness timeout logic with upstream SunnyPilot",
+        "Ford ICBM: Fixed initial cruise speed capture, button timers, and PCM initialization",
+        "Ford ICBM-SLA: Fixed button detection for ICBM vehicles",
+        "General stability improvements and UI crash prevention"
+      ],
+      "removals": [
+        "Removed SunnyLink integration",
+        "Removed orphan parameters and unused logic"
+      ]
+    },
     "6.0.0": {
       "agnos_version": "13.1",
       "changes": [
