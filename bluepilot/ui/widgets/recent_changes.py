@@ -19,7 +19,7 @@ from openpilot.system.ui.lib.application import MousePos
 from bluepilot.ui.lib.colors import BPColors
 
 # Layout constants
-HEADER_HEIGHT = 170
+HEADER_HEIGHT = 110
 CONTENT_MARGIN = 50
 SECTION_SPACING = 36
 FRAME_PADDING = 22
@@ -46,9 +46,29 @@ CATEGORIES = [
 
 _BP_ROOT = os.path.join(os.path.dirname(__file__), '../../..')
 
+# Device badge constants
+DEVICE_BADGE_FONT_SIZE = 34
+DEVICE_BADGE_PAD_X = 14
+DEVICE_BADGE_PAD_Y = 6
+DEVICE_BADGE_RADIUS = 10
+DEVICE_BADGE_GAP = 8  # gap between badges and before first badge
+
+DEVICE_BADGE_COLORS = {
+  "C3X": BPColors.BADGE_C3X,
+  "C4": BPColors.BADGE_C4,
+}
+
 CLOSE_CIRCLE_RADIUS = 40
 CLOSE_X_SIZE = 18
 CLOSE_X_WIDTH = 5
+
+
+def _parse_item_tags(raw: str) -> tuple[str, list[str]]:
+  """Parse device tags from an item string. E.g. 'Some feature|C3X|C4' -> ('Some feature', ['C3X', 'C4'])"""
+  parts = raw.split("|")
+  text = parts[0]
+  tags = [p.strip() for p in parts[1:] if p.strip()]
+  return text, tags
 
 
 class _CloseButton(Widget):
@@ -153,7 +173,8 @@ class RecentChangesDialog(Widget):
       y += CATEGORY_TITLE_SIZE * line_height + 8
       # Items
       usable_width = content_width - 2 * FRAME_PADDING - 28  # bullet + spacing
-      for item_text in items:
+      for item_raw in items:
+        item_text, _tags = _parse_item_tags(item_raw)
         lines = wrap_text(item_font, item_text, ITEM_FONT_SIZE, int(usable_width))
         y += max(len(lines), 1) * ITEM_FONT_SIZE * line_height + 4
       # Frame bottom padding + section spacing
@@ -263,7 +284,8 @@ class RecentChangesDialog(Widget):
 
     frame_h = FRAME_PADDING  # top padding
     frame_h += CATEGORY_TITLE_SIZE * line_height + 8  # title + gap
-    for item_text in items:
+    for item_raw in items:
+      item_text, _tags = _parse_item_tags(item_raw)
       lines = wrap_text(font_normal, item_text, ITEM_FONT_SIZE, usable_text_w)
       frame_h += max(len(lines), 1) * ITEM_FONT_SIZE * line_height + 4
     frame_h += FRAME_PADDING  # bottom padding
@@ -281,18 +303,44 @@ class RecentChangesDialog(Widget):
     cur_y += CATEGORY_TITLE_SIZE * line_height + 8
 
     # Items
-    for item_text in items:
+    badge_font = gui_app.font(FontWeight.SEMI_BOLD)
+    for item_raw in items:
+      item_text, tags = _parse_item_tags(item_raw)
+
       # Bullet
       rl.draw_text_ex(font_bold, "\u2022", rl.Vector2(int(x + FRAME_PADDING), int(cur_y)),
                       ITEM_FONT_SIZE, 0, color)
 
       # Wrapped text
       lines = wrap_text(font_normal, item_text, ITEM_FONT_SIZE, usable_text_w)
-      for line in lines:
+      last_line_end_x = 0.0
+      for i, line in enumerate(lines):
+        text_x = int(x + FRAME_PADDING + bullet_offset)
         rl.draw_text_ex(font_normal, line,
-                        rl.Vector2(int(x + FRAME_PADDING + bullet_offset), int(cur_y)),
+                        rl.Vector2(text_x, int(cur_y)),
                         ITEM_FONT_SIZE, 0, BPColors.CHANGES_TEXT)
+        if i == len(lines) - 1:
+          last_line_end_x = text_x + measure_text_cached(font_normal, line, ITEM_FONT_SIZE).x
         cur_y += ITEM_FONT_SIZE * line_height
+
+      # Device badges after last line
+      if tags:
+        badge_y = cur_y - ITEM_FONT_SIZE * line_height  # back up to last line
+        badge_x = last_line_end_x + DEVICE_BADGE_GAP
+        badge_h = int(DEVICE_BADGE_FONT_SIZE * line_height + DEVICE_BADGE_PAD_Y * 2)
+        badge_center_y = badge_y + (ITEM_FONT_SIZE * line_height - badge_h) / 2
+        for tag in tags:
+          tag_color = DEVICE_BADGE_COLORS.get(tag, BPColors.DISABLED)
+          tag_w = int(measure_text_cached(badge_font, tag, DEVICE_BADGE_FONT_SIZE).x + DEVICE_BADGE_PAD_X * 2)
+          badge_rect = rl.Rectangle(badge_x, badge_center_y, tag_w, badge_h)
+          roundness = DEVICE_BADGE_RADIUS / (badge_h / 2) if badge_h > 0 else 0.5
+          rl.draw_rectangle_rounded(badge_rect, roundness, 8, tag_color)
+          text_y_offset = badge_center_y + (badge_h - DEVICE_BADGE_FONT_SIZE * line_height) / 2
+          rl.draw_text_ex(badge_font, tag,
+                          rl.Vector2(int(badge_x + DEVICE_BADGE_PAD_X), int(text_y_offset)),
+                          DEVICE_BADGE_FONT_SIZE, 0, rl.BLACK)
+          badge_x += tag_w + DEVICE_BADGE_GAP
+
       cur_y += 4  # gap between items
 
     return y + frame_h
