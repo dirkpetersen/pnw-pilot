@@ -99,9 +99,9 @@ class OptionControlSP(ItemAction):
 
     control_width = (BUTTON_WIDTH * 2) + self.label_width + (BUTTON_SPACING * 2)
     total_width = control_width + (CONTAINER_PADDING * 2)
+    self._rect.width = total_width
 
-    # Right-justify: position control at the right edge of the assigned rect
-    start_x = rect.x + rect.width - total_width
+    start_x = self._rect.x + self._rect.width - control_width - (CONTAINER_PADDING * 2)
     component_y = rect.y + (rect.height - BUTTON_HEIGHT) / 2
     self.container_rect = rl.Rectangle(start_x, component_y, total_width, BUTTON_HEIGHT)
 
