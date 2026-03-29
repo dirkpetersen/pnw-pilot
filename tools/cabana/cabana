@@ -33,6 +33,11 @@ fi
 
 # Build _cabana
 cd "$ROOT"
-scons -j"$(nproc)" tools/cabana/_cabana
+if [[ "$(uname)" == "Darwin" ]]; then
+  NPROC=$(sysctl -n hw.ncpu)
+else
+  NPROC=$(nproc)
+fi
+scons -j"$NPROC" tools/cabana/_cabana
 
 exec "$DIR/_cabana" "$@"
