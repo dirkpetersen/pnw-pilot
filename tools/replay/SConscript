@@ -8,7 +8,10 @@ base_libs = [common, messaging, cereal, visionipc, 'm', 'ssl', 'crypto', 'pthrea
 
 replay_lib_src = ["replay.cc", "consoleui.cc", "camera.cc", "filereader.cc", "logreader.cc", "framereader.cc",
                   "route.cc", "util.cc", "seg_mgr.cc", "timeline.cc", "py_downloader.cc"]
-if arch != "Darwin":
+if arch == "Darwin":
+  base_frameworks = ['CoreFoundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'Security', 'CoreServices']
+  base_libs += ['bz2', 'iconv']
+else:
   replay_lib_src.append("qcom_decoder.cc")
 replay_lib = replay_env.Library("replay", replay_lib_src, LIBS=base_libs, FRAMEWORKS=base_frameworks)
 Export('replay_lib')
