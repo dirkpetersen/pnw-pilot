@@ -56,6 +56,7 @@ class BluePilotLayout(Widget):
     # Toggle refresh list
     self._refresh_toggles = (
       ("send_hands_free_cluster_msg", self._show_hands_free_ui),
+      ("BPDisableLaneLineStatusColor", self._disable_lane_line_status_color),
       ("ShowBlindspotOverlay", self._show_blindspot),
       ("ShowBrakeStatus", self._show_brake_status),
       ("BPHideOnroadBorder", self._hide_onroad_border),
@@ -86,6 +87,15 @@ class BluePilotLayout(Widget):
       lambda: tr("Display BlueCruise UI on the cluster for supported vehicles."),
       initial_state=self._safe_get_bool(self._params, "send_hands_free_cluster_msg"),
       callback=lambda state: self._toggle_callback(state, "send_hands_free_cluster_msg"),
+      icon="monitoring.png"
+    )
+
+    # Lane line status color toggle (issue #109: option to keep lane lines grey instead of green when engaged)
+    self._disable_lane_line_status_color = toggle_item(
+      lambda: tr("Disable Lane Line Status Color"),
+      lambda: tr("Keep lane lines grey instead of changing to green when engaged."),
+      initial_state=self._safe_get_bool(self._params, "BPDisableLaneLineStatusColor"),
+      callback=lambda state: self._toggle_callback(state, "BPDisableLaneLineStatusColor"),
       icon="monitoring.png"
     )
 
@@ -408,6 +418,7 @@ class BluePilotLayout(Widget):
       self._vbatt_pause_charging,
       SectionHeader(tr("Visuals")),
       self._hide_onroad_border,
+      self._disable_lane_line_status_color,
       self._show_blindspot,
       self._show_brake_status,
       self._show_confidence_ball,

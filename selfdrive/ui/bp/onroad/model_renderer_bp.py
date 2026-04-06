@@ -48,8 +48,9 @@ class ModelRendererBP(ModelRenderer):
     # BluePilot: Overlay size scale factor (read from param periodically)
     self._overlay_scale = 1.0
 
-    # BluePilot: Cache param to avoid per-frame disk I/O (refreshed in existing 60-frame block)
+    # BluePilot: Cache params to avoid per-frame disk I/O (refreshed in existing 60-frame block)
     self.ford_overlay_enabled = self._bp_params.get_bool("FordPrefShowRadarLeadOverlay")
+    self._disable_lane_line_status_color = self._bp_params.get_bool("BPDisableLaneLineStatusColor")
 
     # BluePilot: Lead position smoothing filters to reduce radar jitter
     dt = 1 / gui_app.target_fps
@@ -91,8 +92,9 @@ class ModelRendererBP(ModelRenderer):
       except (TypeError, ValueError):
         size_val = 1
       self._overlay_scale = OVERLAY_SCALE_FACTORS.get(size_val, 1.0)
-      # BluePilot: Refresh cached param (avoids per-frame disk I/O)
+      # BluePilot: Refresh cached params (avoids per-frame disk I/O)
       self.ford_overlay_enabled = self._bp_params.get_bool("FordPrefShowRadarLeadOverlay")
+      self._disable_lane_line_status_color = self._bp_params.get_bool("BPDisableLaneLineStatusColor")
     self._counter += 1
 
     if sm.updated['carParams']:
@@ -259,11 +261,12 @@ class ModelRendererBP(ModelRenderer):
 
     Current lanes use status color (green when engaged, gray on override, black when disengaged).
     Outer lanes use white. All lanes go black when disengaged.
+    When BPDisableLaneLineStatusColor is enabled, current lanes use white instead of status color.
     """
     if ui_state.status == UIStatus.DISENGAGED:
       return rl.Color(0, 0, 0, 255)
 
-    if not is_current_lane:
+    if not is_current_lane or self._disable_lane_line_status_color:
       return rl.Color(255, 255, 255, 255)
 
     base = LANE_LINE_COLORS_BP.get(ui_state.status, LANE_LINE_COLORS_BP[UIStatus.DISENGAGED])
@@ -415,7 +418,10 @@ class ModelRendererBP(ModelRenderer):
     left_edge = points[:mid_point]
     right_edge = points[mid_point:][::-1]
 
-    edge_color = LANE_LINE_COLORS_BP.get(ui_state.status, LANE_LINE_COLORS_BP[UIStatus.DISENGAGED])
+    if self._disable_lane_line_status_color and ui_state.status != UIStatus.DISENGAGED:
+      edge_color = rl.Color(255, 255, 255, 255)
+    else:
+      edge_color = LANE_LINE_COLORS_BP.get(ui_state.status, LANE_LINE_COLORS_BP[UIStatus.DISENGAGED])
 
     # Convert each polyline edge into a thin ribbon polygon (2 draw_polygon calls vs ~65 draw_line_ex).
     # This preserves the ~4px visual thickness while batching into 2 GPU calls.
