@@ -40,7 +40,7 @@ class BluePilotLayoutMici(NavWidget):
     self.enable_web_routes = BigParamControlBP("enable web routes server", "EnableWebRoutesServer")
     self.show_web_routes_qr = BigButtonBP("show QR code", "", "icons_mici/settings/network/wifi_strength_full.png")
     self.show_web_routes_qr.set_click_callback(self._show_qr_dialog)
-    self.show_hands_free_ui = BigParamControlBP("show BlueCruise icon on dash", "send_hands_free_cluster_msg")
+    self.show_hands_free_ui = BigParamControlBP("show BlueCruise UI on Cluster", "send_hands_free_cluster_msg")
     self.show_lead_vehicle = BigMultiParamToggleBP("Lower Right Display", "mici_complication", ["off", "lead car speed", "speed", "lead car distance", "time to lead car"])
     self.show_brake_status = BigParamControlBP("show brake status", "ShowBrakeStatus")
     self.show_blindspot_ui = BigParamControlBP("show blindspot overlay", "ShowBlindspotOverlay")
@@ -253,7 +253,7 @@ class BluePilotLayoutMici(NavWidget):
         else:
           current_favorite = str(favorite_value).strip("\x00")
       if current_favorite:
-        saved_connections = self._wifi_manager._get_connections()
+        saved_connections = self._wifi_manager._connections
         if current_favorite not in saved_connections:
           self._params.put("WifiFavoriteSSID", "")
           cloudlog.info(f"Cleared preferred network '{current_favorite}' - network no longer saved in NetworkManager")

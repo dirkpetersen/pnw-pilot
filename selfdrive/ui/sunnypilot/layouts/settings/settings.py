@@ -24,10 +24,11 @@ from openpilot.selfdrive.ui.sunnypilot.layouts.settings.sunnylink import Sunnyli
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.trips import TripsLayout
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.vehicle import VehicleLayout
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.visuals import VisualsLayout
-# BluePilot: START - BP settings tab imports
-from openpilot.selfdrive.ui.bp.layouts.settings.bluepilot import BluePilotLayout
-from openpilot.selfdrive.ui.bp.layouts.settings.bp_web_panel import BPWebPanel
-# BluePilot: END - BP settings tab imports
+# BluePilot: settings panel imports
+from openpilot.common.bluepilot import is_bluepilot
+if is_bluepilot():
+  from openpilot.selfdrive.ui.bp.layouts.settings.bluepilot import BluePilotLayout
+  from openpilot.selfdrive.ui.bp.layouts.settings.bp_web_panel import BPWebPanel
 from openpilot.system.ui.lib.application import gui_app, MousePos
 from openpilot.system.ui.lib.multilang import tr_noop
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -54,9 +55,7 @@ OP.PanelType = IntEnum(
     "NAVIGATION",
     "TRIPS",
     "VEHICLE",
-    "BLUEPILOT",  # BluePilot: START/END - BP settings panel type
-    "BP_PORTAL",  # BluePilot: BP Web Portal panel
-  ],
+  ] + (["BLUEPILOT", "BP_PORTAL"] if is_bluepilot() else []),  # BluePilot: settings panels
   start=0,
 )
 
@@ -88,8 +87,7 @@ class NavButton(Widget):
 
     if self.panel_info.icon:
       icon_texture = gui_app.texture(self.panel_info.icon, ICON_SIZE, ICON_SIZE, keep_aspect_ratio=True)
-      rl.draw_texture(icon_texture, int(content_x), int(rect.y + (OP.NAV_BTN_HEIGHT - icon_texture.height) / 2),
-                      rl.WHITE)
+      rl.draw_texture_ex(icon_texture, rl.Vector2(content_x, rect.y + (OP.NAV_BTN_HEIGHT - icon_texture.height) / 2), 0.0, 1.0, rl.WHITE)
       content_x += ICON_SIZE + 20
 
     # Draw button text (right-aligned)
@@ -132,8 +130,9 @@ class SettingsLayoutSP(OP.SettingsLayout):
       OP.PanelType.VEHICLE: PanelInfo(tr_noop("Vehicle"), VehicleLayout(), icon="../../sunnypilot/selfdrive/assets/offroad/icon_vehicle.png"),
       OP.PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout(), icon="../../sunnypilot/selfdrive/assets/offroad/icon_firehose.png"),
       OP.PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayoutSP(), icon="icons/shell.png"),
-      OP.PanelType.BLUEPILOT: PanelInfo(tr_noop("BluePilot"), BluePilotLayout(), icon="icons/chffr_wheel.png"),  # BluePilot: START/END - BP settings panel entry
-      OP.PanelType.BP_PORTAL: PanelInfo(tr_noop("BP Portal"), BPWebPanel(), icon="icons/network.png"),  # BluePilot: BP Web Portal panel
+      # BluePilot: settings and portal panels
+      **(({OP.PanelType.BLUEPILOT: PanelInfo(tr_noop("BluePilot"), BluePilotLayout(), icon="icons/chffr_wheel.png"),
+           OP.PanelType.BP_PORTAL: PanelInfo(tr_noop("BP Portal"), BPWebPanel(), icon="icons/network.png")}) if is_bluepilot() else {}),
     }
 
   def _draw_sidebar(self, rect: rl.Rectangle):

@@ -82,8 +82,8 @@ class BluePilotLayout(Widget):
 
     # BlueCruise icon on dash toggle
     self._show_hands_free_ui = toggle_item(
-      lambda: tr("Show BlueCruise Icon on Dash"),
-      lambda: tr("Display BlueCruise icon in the gauge cluster for supported vehicles."),
+      lambda: tr("Show BlueCruise UI on Cluster"),
+      lambda: tr("Display BlueCruise UI on the cluster for supported vehicles."),
       initial_state=self._safe_get_bool(self._params, "send_hands_free_cluster_msg"),
       callback=lambda state: self._toggle_callback(state, "send_hands_free_cluster_msg"),
       icon="monitoring.png"
@@ -522,7 +522,7 @@ class BluePilotLayout(Widget):
           current_favorite = str(favorite_value).strip('\x00')
       if current_favorite:
         # Check NetworkManager's saved connections directly
-        saved_connections = self._wifi_manager._get_connections()
+        saved_connections = self._wifi_manager._connections
         if current_favorite not in saved_connections:
           # Network is no longer saved, clear preferred setting
           self._params.put("WifiFavoriteSSID", "")

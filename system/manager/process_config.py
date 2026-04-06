@@ -46,6 +46,9 @@ def not_joystick(started: bool, params: Params, CP: car.CarParams) -> bool:
 def long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("LongitudinalManeuverMode")
 
+def lat_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started and params.get_bool("LateralManeuverMode")
+
 def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not params.get_bool("LongitudinalManeuverMode")
 
@@ -97,14 +100,6 @@ def uploader_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
 
   return always_run(started, params, CP)
 
-def portal_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  """BluePilot Portal - always run when enabled (rate-limited onroad)"""
-  return params.get_bool("EnableWebRoutesServer")
-
-def route_preprocessor_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  """Route preprocessor - only run when portal enabled and offroad"""
-  return params.get_bool("EnableWebRoutesServer") and only_offroad(started, params, CP)
-
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -150,6 +145,7 @@ procs = [
   PythonProcess("pigeond", "system.ubloxd.pigeond", ublox, enabled=TICI),
   PythonProcess("plannerd", "selfdrive.controls.plannerd", not_long_maneuver),
   PythonProcess("maneuversd", "tools.longitudinal_maneuvers.maneuversd", long_maneuver),
+  PythonProcess("lateral_maneuversd", "tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
@@ -187,13 +183,17 @@ procs += [
   NativeProcess("locationd_llk", "sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),
 ]
 
-# bluepilot
-procs += [
-  # BluePilot: Portal (routes, video streaming, exports, system metrics)
-  PythonProcess("bp_portal", "bluepilot.backend.bp_portal", portal_enabled),
-  # Route preprocessor (runs in background during idle time)
-  PythonProcess("bp_route_preprocessor", "bluepilot.backend.routes.preprocessor", route_preprocessor_enabled),
-]
+# BluePilot: portal and route preprocessor processes
+from openpilot.common.bluepilot import is_bluepilot
+if is_bluepilot():
+  def _bp_portal_enabled(started, params, CP):
+    return params.get_bool("EnableWebRoutesServer")
+  def _bp_route_preprocessor_enabled(started, params, CP):
+    return params.get_bool("EnableWebRoutesServer") and only_offroad(started, params, CP)
+  procs += [
+    PythonProcess("bp_portal", "bluepilot.backend.bp_portal", _bp_portal_enabled),
+    PythonProcess("bp_route_preprocessor", "bluepilot.backend.routes.preprocessor", _bp_route_preprocessor_enabled),
+  ]
 
 if os.path.exists("./github_runner.sh"):
   procs += [NativeProcess("github_runner_start", "system/manager", ["./github_runner.sh", "start"], and_(only_offroad, use_github_runner), sigkill=False)]

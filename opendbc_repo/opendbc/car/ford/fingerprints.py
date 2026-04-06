@@ -24,21 +24,7 @@ FW_VERSIONS = {
       b'M1PT-14F397-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
   },
-  CAR.FORD_EDGE_MK2: {
-    (Ecu.eps, 0x730, None): [
-      b'M2GC-14D003-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.abs, 0x760, None): [
-      b'M2GC-2D053-CB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'M2GC-2D053-EA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdRadar, 0x764, None): [
-      b'JX7T-14D049-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'KT4T-14F397-AF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-  },
+  # BluePilot: FORD_EDGE_MK2 FW_VERSIONS moved to sunnypilot/car/ford/fingerprints_ext.py
   CAR.FORD_ESCAPE_MK4: {
     (Ecu.eps, 0x730, None): [
       b'LX6C-14D003-AF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -121,10 +107,12 @@ FW_VERSIONS = {
   },
   CAR.FORD_F_150_MK14: {
     (Ecu.eps, 0x730, None): [
+      b'ML3V-14D003-BA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3V-14D003-BC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3V-14D003-BD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
     (Ecu.abs, 0x760, None): [
+      b'ML34-2D053-AJ\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'NL34-2D053-CA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PL34-2D053-CA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PL34-2D053-CC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -132,6 +120,7 @@ FW_VERSIONS = {
       b'PL3V-2D053-BB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
     (Ecu.fwdRadar, 0x764, None): [
+      b'ML3T-14D049-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3T-14D049-AK\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3T-14D049-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
@@ -139,6 +128,7 @@ FW_VERSIONS = {
       b'ML3T-14H102-ABR\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3T-14H102-ABS\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'ML3T-14H102-ABT\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'ML3T-14H102-ACA\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PJ6T-14H102-ABJ\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PJ6T-14H102-ABS\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'RJ6T-14H102-ACJ\x00\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -226,6 +216,7 @@ FW_VERSIONS = {
       b'PB3C-2D053-ZD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PB3C-2D053-ZG\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'PB3C-2D053-ZJ\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'RB3C-2D053-AK\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
     (Ecu.fwdRadar, 0x764, None): [
       b'ML3T-14D049-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
@@ -236,3 +227,8 @@ FW_VERSIONS = {
     ],
   },
 }
+
+# BluePilot: merge BP-only platform FW_VERSIONS (Ford Edge MK2)
+from opendbc.sunnypilot.car.fingerprints_ext import merge_fw_versions
+from opendbc.sunnypilot.car.ford.fingerprints_ext import FW_VERSIONS_EXT
+FW_VERSIONS = merge_fw_versions(FW_VERSIONS, FW_VERSIONS_EXT)

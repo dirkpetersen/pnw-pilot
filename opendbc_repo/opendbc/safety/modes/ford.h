@@ -81,11 +81,10 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
 
 #define FORD_INACTIVE_CURVATURE 1000U
 #define FORD_INACTIVE_CURVATURE_RATE 4096U
-#define FORD_INACTIVE_CURVATURE_RATE_CANFD 1024U
 #define FORD_INACTIVE_PATH_OFFSET 512U
 #define FORD_INACTIVE_PATH_ANGLE 1000U
 
-// #define FORD_CANFD_INACTIVE_CURVATURE_RATE 1024U
+#define FORD_CANFD_INACTIVE_CURVATURE_RATE 1024U
 
 // Control signal limits
 #define FORD_CURVATURE_MIN -0.012f
@@ -571,7 +570,7 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // }
 
     // Check curvature rate value limits (convert to signed values first)
-    int desired_curvature_rate = raw_curvature_rate - FORD_INACTIVE_CURVATURE_RATE_CANFD;
+    int desired_curvature_rate = raw_curvature_rate - FORD_CANFD_INACTIVE_CURVATURE_RATE;
     // Convert physical limits to CAN units using DBC scaling: physical = (raw * 1E-006) - 0.001024
     // So: raw = (physical + 0.001024) / 1E-006 = (physical + 0.001024) * 1000000
     int curvature_rate_min_can = (int)(FORD_CURVATURE_RATE_MIN * FORD_CURVATURE_RATE_LIMITS_CANFD.angle_deg_to_can);
