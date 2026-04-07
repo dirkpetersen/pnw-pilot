@@ -51,11 +51,7 @@ LateralResult = namedtuple('LateralResult', [
 
 
 def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
-  """Smoothing filter used in disable_BP_lat_UI fallback mode.
-
-  Also exists in stock carcontroller.py for Bronco/F-150 anti-overshoot.
-  This copy is used by the lateral ext fallback path.
-  """
+  """Smoothing filter preserved for legacy compatibility."""
   diff = 0.1
   tau = 5  # 5s smooths over the overshoot
   dt = DT_CTRL * CarControllerParams.STEER_STEP
@@ -126,12 +122,10 @@ class LateralExt:
     self.enable_human_turn_detection = True
     self.enable_lane_positioning = False
     self.custom_profile = 0
-    self.disable_BP_lat_UI = False
 
     # Precision/ramp control
     self.precision_type = 1  # 1=Precise, 0=Comfortable
     self.lateralUncertainty = 0.0
-    self.anti_overshoot_curvature_last = 0.0
 
     # Predicted curvature blending
     self.curvature_lookup_time = 0.2  # seconds into the future for curvature extraction
@@ -220,7 +214,6 @@ class LateralExt:
     self.enable_lanefull_mode = params.get_bool("enable_lane_full_mode")
     self.custom_profile = int(params.get("custom_profile", return_default=True))
     self.LC_PID_gain_UI = float(params.get("LC_PID_gain_UI", return_default=True))
-    self.disable_BP_lat_UI = params.get_bool("disable_BP_lat_UI") if params.get("disable_BP_lat_UI") is not None else False
 
   def update_sm(self):
     """Update SubMaster and vehicle model. Called each frame before lateral/long update."""
@@ -440,25 +433,6 @@ class LateralExt:
 
       # Zero path_offset before CAN send (path_offset and path_angle can conflict, causing discomfort)
       path_offset = 0.0
-
-      # disable_BP_lat_UI fallback: revert to upstream curvature-only mode
-      if self.disable_BP_lat_UI:
-        reset_steering = 0
-        path_offset = 0
-        path_angle = 0
-        desired_curvature_rate = 0
-        ramp_type = 1
-
-        self.anti_overshoot_curvature_last = anti_overshoot(desired_curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
-        apply_curvature = self.anti_overshoot_curvature_last
-
-        current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-        apply_curvature_last, max_curvature = apply_ford_curvature_limits_ext(
-          apply_curvature, apply_curvature_last, current_curvature,
-          CS.out.vEgoRaw, 0., CC.latActive, CP)
-        apply_curvature = apply_curvature_last
-
-        lateralUncertainty = self._calculate_lateral_uncertainty(requested_curvature, apply_curvature, max_curvature)
 
       # Ramp type selection
       if reset_steering == 1:

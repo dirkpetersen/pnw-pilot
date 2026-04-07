@@ -9,7 +9,7 @@ from opendbc.car.interfaces import CarControllerBase, V_CRUISE_MAX
 from openpilot.common.params import Params
 
 # BluePilot: extension imports for lateral, longitudinal, and HUD control
-from opendbc.sunnypilot.car.ford.lateral_ext import LateralExt
+from opendbc.sunnypilot.car.ford.lateral_curv_ext import LateralCurvExt
 from opendbc.sunnypilot.car.ford.longitudinal_ext import LongitudinalExt
 from opendbc.sunnypilot.car.ford.hud_ext import HudExt
 from opendbc.sunnypilot.car.ford import fordcan_ext
@@ -69,12 +69,12 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
 # BluePilot: CarController inherits from LateralExt, LongitudinalExt, HudExt, and ICBM
 # for full 4-signal lateral control, follow-aware longitudinal, and enhanced HUD messaging.
 # Init order: CarControllerBase first (sets self.CP, self.frame), then ext classes.
-class CarController(CarControllerBase, LateralExt, LongitudinalExt, HudExt,
+class CarController(CarControllerBase, LateralCurvExt, LongitudinalExt, HudExt,
                     IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     # BluePilot: initialize extension classes
-    LateralExt.__init__(self, CP, CP_SP)
+    LateralCurvExt.__init__(self, CP, CP_SP)
     LongitudinalExt.__init__(self, CP, CP_SP)
     HudExt.__init__(self, CP, CP_SP)
     # ICBM: base class sets state used at runtime, init for robustness
@@ -85,6 +85,8 @@ class CarController(CarControllerBase, LateralExt, LongitudinalExt, HudExt,
     self.CAN = fordcan.CanBus(CP)
 
     self.apply_curvature_last = 0
+    self.anti_overshoot_curvature_last = 0
+    self.disable_BP_lat_UI = False
     self.accel = 0.0
     self.gas = 0.0
     self.last_button_frame = 0  # BluePilot: ICBM button press tracking
@@ -95,10 +97,11 @@ class CarController(CarControllerBase, LateralExt, LongitudinalExt, HudExt,
     can_sends = []
 
     # BluePilot: update SubMaster (modelV2, liveParameters, selfdriveState, radarState) and vehicle model
-    LateralExt.update_sm(self)
+    LateralCurvExt.update_sm(self)
 
     # BluePilot: read runtime params from UI
-    LateralExt.update_lateral_params(self, self.params)
+    LateralCurvExt.update_lateral_params(self, self.params)
+    self.disable_BP_lat_UI = self.params.get_bool("disable_BP_lat_UI")
     LongitudinalExt.update_long_params(self, self.params)
     HudExt.update_hud_params(self, self.params, self.CP)
 
@@ -130,27 +133,47 @@ class CarController(CarControllerBase, LateralExt, LongitudinalExt, HudExt,
     can_sends.extend(icbm_can_sends)
 
     ### lateral control ###
-    # BluePilot: full 4-signal lateral control via LateralExt
-    # Computes curvature, curvature_rate, path_offset, path_angle using predicted curvature,
-    # PID lane centering, laneline-aware offset, and lane change smoothing.
+    # BluePilot: keep stock lateral path in carcontroller, and run BP 4-signal lateral
+    # only when bypass is disabled.
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
-      lat = LateralExt.update(self, CC, CS, actuators, self.apply_curvature_last, self.CP)
-      self.apply_curvature_last = lat.apply_curvature
-      self.lateralUncertainty = lat.lateralUncertainty
-
-      lat_active = CC.latActive
-      if self.CP.flags & FordFlags.CANFD:
-        mode = 1 if lat_active else 0
-        counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-        can_sends.append(fordcan_ext.create_lat_ctl2_msg(
-          self.packer, self.CAN, mode, lat.ramp_type, lat.precision_type,
-          -lat.path_offset, -lat.path_angle, -lat.apply_curvature, -lat.curvature_rate, counter
-        ))
+      # Stock upstream lateral path (curvature-only).
+      if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
+        self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
+        apply_curvature = self.anti_overshoot_curvature_last
       else:
-        can_sends.append(fordcan_ext.create_lat_ctl_msg(
-          self.packer, self.CAN, lat_active, lat.ramp_type, lat.precision_type,
-          -lat.path_offset, -lat.path_angle, -lat.apply_curvature, -lat.curvature_rate
-        ))
+        apply_curvature = actuators.curvature
+
+      current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
+      self.apply_curvature_last = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature,
+                                                              CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+
+      # BluePilot: bypass flag is owned by stock carcontroller path.
+      bypass_bp_lat = self.disable_BP_lat_UI
+      if bypass_bp_lat:
+        if self.CP.flags & FordFlags.CANFD:
+          mode = 1 if CC.latActive else 0
+          counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
+          can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
+        else:
+          can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
+      else:
+        lat = LateralCurvExt.update(self, CC, CS, actuators, self.apply_curvature_last, self.CP)
+        self.apply_curvature_last = lat.apply_curvature
+        self.lateralUncertainty = lat.lateralUncertainty
+
+        lat_active = CC.latActive
+        if self.CP.flags & FordFlags.CANFD:
+          mode = 1 if lat_active else 0
+          counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
+          can_sends.append(fordcan_ext.create_lat_ctl2_msg(
+            self.packer, self.CAN, mode, lat.ramp_type, lat.precision_type,
+            -lat.path_offset, -lat.path_angle, -lat.apply_curvature, -lat.curvature_rate, counter
+          ))
+        else:
+          can_sends.append(fordcan_ext.create_lat_ctl_msg(
+            self.packer, self.CAN, lat_active, lat.ramp_type, lat.precision_type,
+            -lat.path_offset, -lat.path_angle, -lat.apply_curvature, -lat.curvature_rate
+          ))
 
     # send lka msg at 33Hz
     if (self.frame % CarControllerParams.LKA_STEP) == 0:
