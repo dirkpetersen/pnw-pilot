@@ -195,14 +195,18 @@ bool steer_angle_cmd_checks(int desired_angle, bool steer_control_enabled, const
     int delta_angle_up = (safety_interpolate(limits.angle_rate_up_lookup, fudged_speed) * limits.angle_deg_to_can) + 1.;
     int delta_angle_down = (safety_interpolate(limits.angle_rate_down_lookup, fudged_speed) * limits.angle_deg_to_can) + 1.;
     if (test) {
-      FORD_SAFETY_DBG("steer_angle_cmd_checks 1: desired_angle: %d desired_angle_last: %d delta_angle_down: %d delta_angle_up: %d \n",
-                      desired_angle, desired_angle_last, delta_angle_down, delta_angle_up);
+      FORD_SAFETY_DBG("steer_angle_cmd_checks 1: desired_angle: %d desired_angle_last: %d fudged_speed %d delta_angle_down: %d delta_angle_up: %d \n",
+                      desired_angle, desired_angle_last, fudged_speed, delta_angle_down, delta_angle_up);
     }
 
     // allow down limits at zero since small floats from openpilot will be rounded to 0
     // TODO: openpilot should be cognizant of this and not send small floats
     int highest_desired_angle = desired_angle_last + ((desired_angle_last > 0) ? delta_angle_up : delta_angle_down);
     int lowest_desired_angle = desired_angle_last - ((desired_angle_last >= 0) ? delta_angle_down : delta_angle_up);
+    if (test) {
+      FORD_SAFETY_DBG("steer_angle_cmd_checks 1-0: lowest_desired_angle: %d highest_desired_angle: %d \n",
+                      lowest_desired_angle, highest_desired_angle);
+    }
 
     // check that commanded angle value isn't too far from measured, used to limit torque for some safety modes
     // ensure we start moving in direction of meas while respecting relaxed rate limits if error is exceeded
@@ -223,29 +227,28 @@ bool steer_angle_cmd_checks(int desired_angle, bool steer_control_enabled, const
 
       // the MAX is to allow the desired angle to hit the edge of the bounds and not require going under it
       if (desired_angle_last > highest_desired_angle_error) {
-        if(test) {
-          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-1: desired_angle_last: %d highest_desired_angle_error: %d \n",
-                          desired_angle_last, highest_desired_angle_error);
-        }
         const int delta = (desired_angle_last >= 0) ? delta_angle_down_relaxed : delta_angle_up_relaxed;
         highest_desired_angle = SAFETY_MAX(desired_angle_last - delta, highest_desired_angle_error);
+        if(test) {
+          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-1: desired_angle_last: %d delta: %d highest_desired_angle: %d \n",
+                          desired_angle_last, delta, highest_desired_angle);
+        }
 
       } else if (desired_angle_last < lowest_desired_angle_error) {
-        if(test) {
-          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-2: desired_angle_last: %d lowest_desired_angle_error: %d \n",
-                          desired_angle_last, lowest_desired_angle_error);
-        }
         const int delta = (desired_angle_last <= 0) ? delta_angle_down_relaxed : delta_angle_up_relaxed;
         lowest_desired_angle = SAFETY_MIN(desired_angle_last + delta, lowest_desired_angle_error);
-
-      } else {
         if(test) {
-          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-3: desired_angle_last: %d highest_desired_angle_error: %d lowest_desired_angle_error: %d \n",
-                          desired_angle_last, highest_desired_angle_error, lowest_desired_angle_error);
+          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-2: desired_angle_last: %d delta: %d lowest_desired_angle: %d \n",
+                          desired_angle_last, delta, lowest_desired_angle);
         }
+      } else {
         // already inside error boundary, don't allow commanding outside it
         highest_desired_angle = SAFETY_MIN(highest_desired_angle, highest_desired_angle_error);
         lowest_desired_angle = SAFETY_MAX(lowest_desired_angle, lowest_desired_angle_error);
+        if(test) {
+          FORD_SAFETY_DBG("steer_angle_cmd_checks 1-2-3: desired_angle_last: %d lowest_desired_angle: %d highest_desired_angle: %d \n",
+                          desired_angle_last, lowest_desired_angle, highest_desired_angle);
+        }
       }
 
       if(test) {
@@ -292,9 +295,9 @@ bool steer_angle_cmd_checks(int desired_angle, bool steer_control_enabled, const
 
     // check for violation;
     violation |= safety_max_limit_check(desired_angle, highest_desired_angle, lowest_desired_angle);
-  }
-  if(test) {
-    FORD_SAFETY_DBG("steer_angle_cmd_checks 2: violation: %d \n", (int)violation);
+    if(test) {
+      FORD_SAFETY_DBG("steer_angle_cmd_checks 1-5: violation: %d, desired_angle: %d, desired_angle_last: %d, highest_desired_angle: %d, lowest_desired_angle: %d \n", (int)violation, desired_angle, desired_angle_last, highest_desired_angle, lowest_desired_angle);
+    }
   }
 
   desired_angle_last = desired_angle;
