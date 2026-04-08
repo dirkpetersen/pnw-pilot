@@ -1,7 +1,9 @@
 import time
 import pyray as rl
 from cereal import messaging, car
+from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
@@ -37,6 +39,9 @@ class MiciAugmentedRoadViewBP(AugmentedRoadView, BlindspotRendererMixin):
     self._complication = MiciComplication()
 
     self._model_renderer = ModelRendererBP()
+
+    # BluePilot: TICI uses AugmentedRoadViewSP for this; upstream MICI no longer does — BP _render still fades the overlay.
+    self._fade_alpha_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
 
   def _render(self, _):
     """Override render to place confidence ball on left, offset driver state, and conditionally hide border."""
