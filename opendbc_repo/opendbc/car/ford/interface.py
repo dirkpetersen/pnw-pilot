@@ -102,7 +102,7 @@ class CarInterface(CarInterfaceBase):
     ret.centerToFront = ret.wheelbase * 0.44
 
     # BluePilot: apply extension params (HEV detection, tuning, alpha long, radar config)
-    apply_ford_ext_params(ret, ret, car_fw, fingerprint)
+    apply_ford_ext_params(ret, ret, car_fw, fingerprint, alpha_long)
 
     return ret
 

@@ -13,10 +13,10 @@ Includes:
 """
 
 from opendbc.car import Bus, structs
-from opendbc.car.ford.values import DBC, FordFlags, RADAR
+from opendbc.car.ford.values import DBC, FordFlags, RADAR, FordSafetyFlags
 
 
-def apply_ford_ext_params(ret: structs.CarParams, CP, car_fw, fingerprint) -> None:
+def apply_ford_ext_params(ret: structs.CarParams, CP, car_fw, fingerprint, alpha_long: bool) -> None:
   """
   Apply BluePilot parameter overrides to CarParams.
 
@@ -41,9 +41,18 @@ def apply_ford_ext_params(ret: structs.CarParams, CP, car_fw, fingerprint) -> No
   if DBC[candidate][Bus.radar] == RADAR.DELPHI_MRR_64:
     ret.radarDelay = 0.1  # 20 Hz / 4 scan modes = 100 ms
 
-  # BluePilot: alpha longitudinal always available for all Ford platforms
-  # Upstream only enables for CANFD. We allow CAN vehicles to use Ford ACC too.
+  # BluePilot: alpha longitudinal always available for all Ford platforms.
+  # This enables the developer toggle on both CAN and CANFD Ford vehicles.
   ret.alphaLongitudinalAvailable = True
+
+  # BluePilot: make the alpha toggle authoritative for longitudinal mode.
+  # True  -> openpilot longitudinal (alpha)
+  # False -> Ford ACC (stock longitudinal)
+  ret.openpilotLongitudinalControl = bool(alpha_long)
+  if ret.openpilotLongitudinalControl:
+    ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
+  else:
+    ret.safetyConfigs[-1].safetyParam &= ~FordSafetyFlags.LONG_CONTROL.value
 
   # BluePilot: HEV flag auto-detection from CAN fingerprint
   # Cluster_HEV_Data2 (0x365) indicates hybrid cluster data is available
