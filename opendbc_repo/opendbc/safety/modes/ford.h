@@ -213,6 +213,7 @@ static int desired_path_angle_last = 0;
 // Prevents exploitation by requiring reset state first and having a timeout
 static uint8_t reset_bypass_latch_counter = 0;
 static const uint8_t RESET_BYPASS_LATCH_DURATION = 60;  // ~3.0 seconds at 20Hz
+static bool test = false;
 
 static bool path_angle_cmd_checks(int desired_path_angle, bool steer_control_enabled, const AngleSteeringLimits limits) {
   bool violation = false;
@@ -226,22 +227,19 @@ static bool path_angle_cmd_checks(int desired_path_angle, bool steer_control_ena
     int lowest_desired_path_angle = desired_path_angle_last - delta_path_angle_roc;
 
     violation |= safety_max_limit_check(desired_path_angle, highest_desired_path_angle, lowest_desired_path_angle);
-    // print("path_angle_cmd_checks 1: ");
-    // print("desired_path_angle: "); puti(desired_path_angle); print(" ");
-    // print("desired_path_angle_last: "); puti(desired_path_angle_last); print(" ");
-    // print("highest_desired_path_angle: "); puti(highest_desired_path_angle); print(" ");
-    // print("lowest_desired_path_angle: "); puti(lowest_desired_path_angle); print(" ");
-    // print("violation: "); puti(violation); print(" ");
-    // print("`\n");
+    if (test) {
+      FORD_SAFETY_DBG("path_angle_cmd_checks 1: desired_path_angle: %d desired_path_angle_last: %d highest_desired_path_angle: %d lowest_desired_path_angle: %d violation: %d \n",
+                      desired_path_angle, desired_path_angle_last, highest_desired_path_angle, lowest_desired_path_angle, (int)violation);
+    }
   }
   desired_path_angle_last = desired_path_angle;
 
   if (!steer_control_enabled) {
     violation |= (desired_path_angle != 0);
   }
-  // print("path_angle_cmd_checks 2: ");
-  // print("violation: "); puti(violation); print(" ");
-  // print("`\n");
+  if (test) {
+    FORD_SAFETY_DBG("path_angle_cmd_checks 2: violation: %d \n", (int)violation);
+  }
 
   return violation;
 }
@@ -260,13 +258,10 @@ static bool path_offset_cmd_checks(int desired_path_offset, bool steer_control_e
     int lowest_desired_path_offset = desired_path_offset_last - delta_path_offset_roc;
 
     violation |= safety_max_limit_check(desired_path_offset, highest_desired_path_offset, lowest_desired_path_offset);
-    // print("path_offset_cmd_checks 1: ");
-    // print("desired_path_offset: "); puti(desired_path_offset); print(" ");
-    // print("desired_path_offset_last: "); puti(desired_path_offset_last); print(" ");
-    // print("highest_desired_path_offset: "); puti(highest_desired_path_offset); print(" ");
-    // print("lowest_desired_path_offset: "); puti(lowest_desired_path_offset); print(" ");
-    // print("violation: "); puti(violation); print(" ");
-    // print("`\n");
+    if (test) {
+      FORD_SAFETY_DBG("path_offset_cmd_checks 1: desired_path_offset: %d desired_path_offset_last: %d highest_desired_path_offset: %d lowest_desired_path_offset: %d violation: %d \n",
+                      desired_path_offset, desired_path_offset_last, highest_desired_path_offset, lowest_desired_path_offset, (int)violation);
+    }
 
   }
   desired_path_offset_last = desired_path_offset;
@@ -274,9 +269,9 @@ static bool path_offset_cmd_checks(int desired_path_offset, bool steer_control_e
   if (!steer_control_enabled) {
     violation |= (desired_path_offset != 0);
   }
-  // print("path_offset_cmd_checks 2: ");
-  // print("violation: "); puti(violation); print(" ");
-  // print("`\n");
+  if (test) {
+    FORD_SAFETY_DBG("path_offset_cmd_checks 2: violation: %d \n", (int)violation);
+  }
 
   return violation;
 }
@@ -295,13 +290,10 @@ static bool curvature_rate_cmd_checks(int desired_curvature_rate, bool steer_con
     int lowest_desired_curvature_rate = desired_curvature_rate_last - desired_curvature_rate_roc;
 
     violation |= safety_max_limit_check(desired_curvature_rate, highest_desired_curvature_rate, lowest_desired_curvature_rate);
-    // print("curvature_rate_cmd_checks 1: ");
-    // print("desired_curvature_rate: "); puti(desired_curvature_rate); print(" ");
-    // print("desired_curvature_rate_last: "); puti(desired_curvature_rate_last); print(" ");
-    // print("highest_desired_curvature_rate: "); puti(highest_desired_curvature_rate); print(" ");
-    // print("lowest_desired_curvature_rate: "); puti(lowest_desired_curvature_rate); print(" ");
-    // print("violation: "); puti(violation); print(" ");
-    // print("`\n");
+    if (test) {
+      FORD_SAFETY_DBG("curvature_rate_cmd_checks 1: desired_curvature_rate: %d desired_curvature_rate_last: %d highest_desired_curvature_rate: %d lowest_desired_curvature_rate: %d violation: %d \n",
+                      desired_curvature_rate, desired_curvature_rate_last, highest_desired_curvature_rate, lowest_desired_curvature_rate, (int)violation);
+    }
   }
   desired_curvature_rate_last = desired_curvature_rate;
 
@@ -309,9 +301,9 @@ static bool curvature_rate_cmd_checks(int desired_curvature_rate, bool steer_con
   if (!steer_control_enabled) {
     violation |= (desired_curvature_rate != 0);
   }
-  // print("curvature_rate_cmd_checks 2: ");
-  // print("violation: "); puti(violation); print(" ");
-  // print("`\n");
+  if (test) {
+    FORD_SAFETY_DBG("curvature_rate_cmd_checks 2: violation: %d \n", (int)violation);
+  }
 
   return violation;
 }
@@ -390,7 +382,6 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
   };
 
   bool tx = true;
-  // bool test = true;
 
   // Safety check for ACCDATA accel and brake requests
   if (msg->addr == FORD_ACCDATA) {
@@ -467,9 +458,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int curvature_min_can = (int)(FORD_CURVATURE_MIN * FORD_STEERING_LIMITS.angle_deg_to_can);
     int curvature_max_can = (int)(FORD_CURVATURE_MAX * FORD_STEERING_LIMITS.angle_deg_to_can);
     violation |= (desired_curvature < curvature_min_can) || (desired_curvature > curvature_max_can);
-    // if(test){
-    //   print("CAN Out: `desired_curvature:"); puti(desired_curvature); print(", curvature_min_can:"); puti(curvature_min_can); print(", curvature_max_can:"); puti(curvature_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: `desired_curvature:%d, curvature_min_can:%d, curvature_max_can:%d, violation: %d\n",
+                      desired_curvature, curvature_min_can, curvature_max_can, (int)violation);
+    }
 
     // Check curvature rate value limits (convert to signed values first)
     int desired_curvature_rate = raw_curvature_rate - FORD_INACTIVE_CURVATURE_RATE;
@@ -478,9 +470,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int curvature_rate_min_can = (int)(FORD_CURVATURE_RATE_MIN * FORD_CURVATURE_RATE_LIMITS_CAN.angle_deg_to_can);
     int curvature_rate_max_can = (int)(FORD_CURVATURE_RATE_MAX * FORD_CURVATURE_RATE_LIMITS_CAN.angle_deg_to_can);
     violation |= (desired_curvature_rate < curvature_rate_min_can) || (desired_curvature_rate > curvature_rate_max_can);
-    // if(test){
-    //   print("CAN Out: `desired_curvature_rate:"); puti(desired_curvature_rate); print(", curvature_rate_min_can:"); puti(curvature_rate_min_can); print(", curvature_rate_max_can:"); puti(curvature_rate_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: `desired_curvature_rate:%d, curvature_rate_min_can:%d, curvature_rate_max_can:%d, violation: %d\n",
+                      desired_curvature_rate, curvature_rate_min_can, curvature_rate_max_can, (int)violation);
+    }
 
     // Check path offset value limits (convert to signed values first)
     int desired_path_offset = raw_path_offset - FORD_INACTIVE_PATH_OFFSET;
@@ -489,9 +482,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int path_offset_min_can = (int)(FORD_PATH_OFFSET_MIN * FORD_PATH_OFFSET_LIMITS.angle_deg_to_can);
     int path_offset_max_can = (int)(FORD_PATH_OFFSET_MAX * FORD_PATH_OFFSET_LIMITS.angle_deg_to_can);
     violation |= (desired_path_offset < path_offset_min_can) || (desired_path_offset > path_offset_max_can);
-    // if(test){
-    //   print("CAN Out: `desired_path_offset:"); puti(desired_path_offset); print(", path_offset_min_can:"); puti(path_offset_min_can); print(", path_offset_max_can:"); puti(path_offset_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: `desired_path_offset:%d, path_offset_min_can:%d, path_offset_max_can:%d, violation: %d\n",
+                      desired_path_offset, path_offset_min_can, path_offset_max_can, (int)violation);
+    }
 
     // Check path angle value limits (convert to signed values first)
     int desired_path_angle = raw_path_angle - FORD_INACTIVE_PATH_ANGLE;
@@ -500,33 +494,34 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int path_angle_min_can = (int)(FORD_PATH_ANGLE_MIN * FORD_PATH_ANGLE_LIMITS.angle_deg_to_can);
     int path_angle_max_can = (int)(FORD_PATH_ANGLE_MAX * FORD_PATH_ANGLE_LIMITS.angle_deg_to_can);
     violation |= (desired_path_angle < path_angle_min_can) || (desired_path_angle > path_angle_max_can);
-    // if(test){
-    //   print("CAN Out: `desired_path_angle:"); puti(desired_path_angle); print(", path_angle_min_can:"); puti(path_angle_min_can); print(", path_angle_max_can:"); puti(path_angle_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: `desired_path_angle:%d, path_angle_min_can:%d, path_angle_max_can:%d, violation: %d\n",
+                      desired_path_angle, path_angle_min_can, path_angle_max_can, (int)violation);
+    }
 
     // Check angle error and steer_control_enabled for curvature
     violation |= steer_angle_cmd_checks(desired_curvature, steer_control_enabled, FORD_STEERING_LIMITS);
-    // if(test){
-    //  print("CAN Out: 1. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: 1. desired_curvature violation: %d\n", (int)violation);
+    }
 
     // Check path angle rate of change limits
     violation |= path_angle_cmd_checks(desired_path_angle, steer_control_enabled, FORD_PATH_ANGLE_LIMITS);
-    // if(test){
-    //   print("CAN Out: 2. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: 2. desired_path_angle violation: %d\n", (int)violation);
+    }
 
     // Check path offset rate of change limits
     violation |= path_offset_cmd_checks(desired_path_offset, steer_control_enabled, FORD_PATH_OFFSET_LIMITS);
-    // if(test){
-    //   print("CAN Out: 3. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: 3. desired_path_offset violation: %d\n", (int)violation);
+    }
 
     // Check curvature rate rate of change limits
     violation |= curvature_rate_cmd_checks(desired_curvature_rate, steer_control_enabled, FORD_CURVATURE_RATE_LIMITS_CAN);
-    // if(test){
-    //   print("CAN Out: 4. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CAN Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
+    }
 
     // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
     // This allows smooth ramp-up after human turn detection without blocked messages
@@ -566,9 +561,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int curvature_min_can = (int)(FORD_CURVATURE_MIN * FORD_STEERING_LIMITS.angle_deg_to_can);
     int curvature_max_can = (int)(FORD_CURVATURE_MAX * FORD_STEERING_LIMITS.angle_deg_to_can);
     violation |= (desired_curvature < curvature_min_can) || (desired_curvature > curvature_max_can);
-    // if(test){
-    //   print("CANFD Out: `desired_curvature:"); puti(desired_curvature); print(", curvature_min_can:"); puti(curvature_min_can); print(", curvature_max_can:"); puti(curvature_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: `desired_curvature: %d, curvature_min_can: %d, curvature_max_can: %d, violation: %d\n",
+                      desired_curvature, curvature_min_can, curvature_max_can, (int)violation);
+    }
 
     // Check curvature rate value limits (convert to signed values first)
     int desired_curvature_rate = raw_curvature_rate - FORD_CANFD_INACTIVE_CURVATURE_RATE;
@@ -577,9 +573,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int curvature_rate_min_can = (int)(FORD_CURVATURE_RATE_MIN * FORD_CURVATURE_RATE_LIMITS_CANFD.angle_deg_to_can);
     int curvature_rate_max_can = (int)(FORD_CURVATURE_RATE_MAX * FORD_CURVATURE_RATE_LIMITS_CANFD.angle_deg_to_can);
     violation |= (desired_curvature_rate < curvature_rate_min_can) || (desired_curvature_rate > curvature_rate_max_can);
-    // if(test){
-    //   print("CANFD Out: `desired_curvature_rate:"); puti(desired_curvature_rate); print(", curvature_rate_min_can:"); puti(curvature_rate_min_can); print(", curvature_rate_max_can:"); puti(curvature_rate_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: `desired_curvature_rate: %d, curvature_rate_min_can: %d, curvature_rate_max_can: %d, violation: %d\n",
+                      desired_curvature_rate, curvature_rate_min_can, curvature_rate_max_can, (int)violation);
+    }
 
     // Check path offset value limits (convert to signed values first)
     int desired_path_offset = raw_path_offset - FORD_INACTIVE_PATH_OFFSET;
@@ -588,9 +585,10 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int path_offset_min_can = (int)(FORD_PATH_OFFSET_MIN * FORD_PATH_OFFSET_LIMITS.angle_deg_to_can);
     int path_offset_max_can = (int)(FORD_PATH_OFFSET_MAX * FORD_PATH_OFFSET_LIMITS.angle_deg_to_can);
     violation |= (desired_path_offset < path_offset_min_can) || (desired_path_offset > path_offset_max_can);
-    // if(test){
-    //   print("CANFD Out: `desired_path_offset:"); puti(desired_path_offset); print(", path_offset_min_can:"); puti(path_offset_min_can); print(", path_offset_max_can:"); puti(path_offset_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: `desired_path_offset: %d, path_offset_min_can: %d, path_offset_max_can: %d, violation: %d\n",
+                      desired_path_offset, path_offset_min_can, path_offset_max_can, (int)violation);
+    }
 
     // Check path angle value limits (convert to signed values first)
     int desired_path_angle = raw_path_angle - FORD_INACTIVE_PATH_ANGLE;
@@ -599,33 +597,34 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int path_angle_min_can = (int)(FORD_PATH_ANGLE_MIN * FORD_PATH_ANGLE_LIMITS.angle_deg_to_can);
     int path_angle_max_can = (int)(FORD_PATH_ANGLE_MAX * FORD_PATH_ANGLE_LIMITS.angle_deg_to_can);
     violation |= (desired_path_angle < path_angle_min_can) || (desired_path_angle > path_angle_max_can);
-    // if(test){
-    //   print("CANFD Out: `desired_path_angle:"); puti(desired_path_angle); print(", path_angle_min_can:"); puti(path_angle_min_can); print(", path_angle_max_can:"); puti(path_angle_max_can); print(", violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: `desired_path_angle: %d, path_angle_min_can: %d, path_angle_max_can: %d, violation: %d\n",
+                      desired_path_angle, path_angle_min_can, path_angle_max_can, (int)violation);
+    }
 
     // Check angle error and steer_control_enabled for curvature
     violation |= steer_angle_cmd_checks(desired_curvature, steer_control_enabled, FORD_CANFD_STEERING_LIMITS);
-    // if(test){
-    //   print("CANFD Out: 1. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: 1. desired_curvature violation: %d\n", (int)violation);
+    }
 
     // Check path angle rate of change limits
     violation |= path_angle_cmd_checks(desired_path_angle, steer_control_enabled, FORD_PATH_ANGLE_LIMITS);
-    // if(test){
-    //   print("CANFD Out: 2. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: 2. desired_path_angle violation: %d\n", (int)violation);
+    }
 
     // Check path offset rate of change limits
     violation |= path_offset_cmd_checks(desired_path_offset, steer_control_enabled, FORD_PATH_OFFSET_LIMITS);
-    // if(test){
-    //   print("CANFD Out: 3. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: 3. desired_path_offset violation: %d\n", (int)violation);
+    }
 
     // Check curvature rate rate of change limits
     violation |= curvature_rate_cmd_checks(desired_curvature_rate, steer_control_enabled, FORD_CURVATURE_RATE_LIMITS_CANFD);
-    // if(test){
-    //   print("CANFD Out: 4. violation:"); puti(violation); print("`\n");
-    // }
+    if (test) {
+      FORD_SAFETY_DBG("CANFD Out: 4. desired_curvature_rate violation: %d\n", (int)violation);
+    }
 
     // Reset latch: activate when both curvature and path_angle are zero (reset/neutral state)
     // This allows smooth ramp-up after human turn detection without blocked messages
@@ -641,6 +640,9 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
 
     if (violation) {
       tx = false;
+    }
+    if(test) {
+      FORD_SAFETY_DBG("CANFD Out - final: violation: %d\n", (int)violation);
     }
   }
 

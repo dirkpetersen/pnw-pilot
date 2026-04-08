@@ -1,6 +1,28 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <time.h>
+#include <sys/time.h>
+
+// BluePilot: Ford safety debug → stdout for replay (FORD_SAFETY_DBG defaults to no-op in declarations.h)
+static void ford_safety_dbg(const char *fmt, ...) {
+  struct timeval tv;
+  struct tm tm_buf;
+  (void)gettimeofday(&tv, NULL);
+  (void)localtime_r(&tv.tv_sec, &tm_buf);
+  const int ms = (int)(tv.tv_usec / 1000);
+  printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] ", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+         tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+  va_list ap;
+  va_start(ap, fmt);
+  (void)vprintf(fmt, ap);
+  va_end(ap);
+  fflush(stdout);
+}
+
+#define FORD_SAFETY_DBG(...) ford_safety_dbg(__VA_ARGS__)
+// End BluePilot
 
 // TODO: time should just be passed into the hooks we expose
 uint32_t timer_cnt = 0;
