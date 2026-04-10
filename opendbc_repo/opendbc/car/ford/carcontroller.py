@@ -66,7 +66,7 @@ def apply_creep_compensation(accel: float, v_ego: float) -> float:
   return float(accel)
 
 
-# BluePilot: CarController inherits from LateralExt, LongitudinalExt, HudExt, and ICBM
+# BluePilot: CarController inherits from LateralCurvExt, LongitudinalExt, HudExt, and ICBM
 # for full 4-signal lateral control, follow-aware longitudinal, and enhanced HUD messaging.
 # Init order: CarControllerBase first (sets self.CP, self.frame), then ext classes.
 class CarController(CarControllerBase, LateralCurvExt, LongitudinalExt, HudExt,
@@ -136,20 +136,20 @@ class CarController(CarControllerBase, LateralCurvExt, LongitudinalExt, HudExt,
     # BluePilot: keep stock lateral path in carcontroller, and run BP 4-signal lateral
     # only when bypass is disabled.
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
-      # Stock upstream lateral path (curvature-only).
-      if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
-        self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
-        apply_curvature = self.anti_overshoot_curvature_last
-      else:
-        apply_curvature = actuators.curvature
-
       current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-      self.apply_curvature_last = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature,
-                                                              CS.out.vEgoRaw, 0., CC.latActive, self.CP)
-
       # BluePilot: bypass flag is owned by stock carcontroller path.
       bypass_bp_lat = self.disable_BP_lat_UI
       if bypass_bp_lat:
+        # Stock curvature-only path only. Anti-overshoot is not used when BP lateral is active (disable_BP_lat_UI off).
+        if self.CP.carFingerprint in (CAR.FORD_BRONCO_SPORT_MK1, CAR.FORD_F_150_MK14):
+          self.anti_overshoot_curvature_last = anti_overshoot(actuators.curvature, self.anti_overshoot_curvature_last, CS.out.vEgoRaw)
+          apply_curvature = self.anti_overshoot_curvature_last
+        else:
+          apply_curvature = actuators.curvature
+
+        self.apply_curvature_last = apply_ford_curvature_limits(
+          apply_curvature, self.apply_curvature_last, current_curvature,
+          CS.out.vEgoRaw, 0., CC.latActive, self.CP)
         if self.CP.flags & FordFlags.CANFD:
           mode = 1 if CC.latActive else 0
           counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
@@ -157,6 +157,9 @@ class CarController(CarControllerBase, LateralCurvExt, LongitudinalExt, HudExt,
         else:
           can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
       else:
+        # BluePilot: do not run apply_ford_curvature_limits here or overwrite apply_curvature_last before
+        # LateralCurvExt.update. Panda rate-checks desired_curvature vs the last TX on the bus; that must match
+        # the prior frame's lat.apply_curvature only (not an intermediate stock-limited value).
         lat = LateralCurvExt.update(self, CC, CS, actuators, self.apply_curvature_last, self.CP)
         self.apply_curvature_last = lat.apply_curvature
         self.lateralUncertainty = lat.lateralUncertainty

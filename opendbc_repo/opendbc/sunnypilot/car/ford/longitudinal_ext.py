@@ -43,7 +43,7 @@ class LongitudinalExt:
   computes op_accel/op_gas using upstream logic, then calls
   LongitudinalExt.update() to apply BP follow control on top.
 
-  The SubMaster (for radarState) is owned by LateralExt and shared via self.sm
+  The SubMaster (for radarState) is owned by LateralCurvExt and shared via self.sm
   since both classes are mixed into the same CarController instance.
   """
 

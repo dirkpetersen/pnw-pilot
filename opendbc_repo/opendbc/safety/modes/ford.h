@@ -115,6 +115,7 @@ static bool ford_get_quality_flag_valid(const CANPacket_t *msg) {
                                                                                                 \
   /* no blending at low speed due to lack of torque wind-up and inaccurate current curvature */ \
   .angle_error_min_speed = 10.0,    /* m/s */                                                   \
+  .frequency = 20U,                 /* LateralMotionControl / LateralMotionControl2 @ 20 Hz */   \
                                                                                                 \
   .angle_is_curvature = (limit_lateral_acceleration),                                           \
   .enforce_angle_error = true,                                                                  \
@@ -211,6 +212,8 @@ static int desired_path_angle_last = 0;
 // This enables smooth ramp-up after human turn detection without blocked messages
 // Latch activates when reset detected, stays active for ~3 seconds (60 frames at 20Hz)
 // Prevents exploitation by requiring reset state first and having a timeout
+// BluePilot: openpilot must send curvature_rate ~= 0 during reset and keep apply_curvature_last
+// aligned with the prior TX (see carcontroller BP path); else curvature_rate_cmd_checks can trip.
 static uint8_t reset_bypass_latch_counter = 0;
 static const uint8_t RESET_BYPASS_LATCH_DURATION = 60;  // ~3.0 seconds at 20Hz
 static bool test = false;
