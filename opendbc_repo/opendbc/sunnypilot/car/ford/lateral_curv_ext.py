@@ -26,7 +26,7 @@ from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, DT_CTRL
 from opendbc.car.lateral import ISO_LATERAL_ACCEL, apply_std_steer_angle_limits
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.car.ford.values import CarControllerParams, FordFlags
-from opendbc.sunnypilot.car.ford.values_ext import CURVATURE_MAX
+from opendbc.sunnypilot.car.ford.values_ext import BP_ANGLE_LIMITS, CURVATURE_MAX
 from selfdrive.modeld.constants import ModelConstants
 
 
@@ -70,12 +70,12 @@ def apply_ford_curvature_limits_ext(apply_curvature, apply_curvature_last, curre
   # Curvature rate limit after driver torque limit (same inputs/order as apply_ford_curvature_limits)
   apply_curvature_before_std = apply_curvature
   apply_curvature = apply_std_steer_angle_limits(apply_curvature_before_std, apply_curvature_last, v_ego_raw,
-                                                  steering_angle, lat_active, CarControllerParams.ANGLE_LIMITS)
+                                                  steering_angle, lat_active, BP_ANGLE_LIMITS)
 
   # Max one-step envelope for UI: steer_up must use pre-limit curvature (see apply_std_steer_angle_limits)
   steer_up = (apply_curvature_last * apply_curvature_before_std >= 0.0
               and abs(apply_curvature_before_std) > abs(apply_curvature_last))
-  rate_limits = CarControllerParams.ANGLE_LIMITS.ANGLE_RATE_LIMIT_UP if steer_up else CarControllerParams.ANGLE_LIMITS.ANGLE_RATE_LIMIT_DOWN
+  rate_limits = BP_ANGLE_LIMITS.ANGLE_RATE_LIMIT_UP if steer_up else BP_ANGLE_LIMITS.ANGLE_RATE_LIMIT_DOWN
   std_steer_angle_rate_limit = np.interp(v_ego_raw, rate_limits[0], rate_limits[1])
   std_steer_angle_limit = abs(apply_curvature_last) + abs(std_steer_angle_rate_limit)
   max_curvature = np.minimum(max_curvature, std_steer_angle_limit)
@@ -335,7 +335,7 @@ class LateralCurvExt:
       if self.post_reset_ramp_active:
         apply_curvature = apply_std_steer_angle_limits(
           requested_curvature, apply_curvature_last,
-          CS.out.vEgoRaw, 0, CC.latActive, CarControllerParams.ANGLE_LIMITS)
+          CS.out.vEgoRaw, 0, CC.latActive, BP_ANGLE_LIMITS)
 
         curvature_error = abs(requested_curvature - apply_curvature)
         curvature_threshold = max(abs(requested_curvature) * 0.1, 0.001)
