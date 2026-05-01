@@ -2,8 +2,10 @@
 import os
 import traceback
 from datetime import datetime
-import sentry_sdk
 from enum import Enum
+from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+import sentry_sdk
 from sentry_sdk.integrations.threading import ThreadingIntegration
 
 from openpilot.common.params import Params
@@ -116,6 +118,28 @@ def get_properties() -> tuple[str, str, str]:
   return dongle_id, git_username, sunnylink_dongle_id
 
 
+# BluePilot: enable_logs exists only on sentry-sdk >= ~2.35; older builds (incl. some AGNOS venvs) raise TypeError.
+def _sentry_sdk_supports_enable_logs() -> bool:
+  # sentry_sdk.init(enable_logs=...) raises TypeError on SDKs that predates the option (e.g. some AGNOS venvs).
+  try:
+    v = pkg_version("sentry-sdk")
+  except PackageNotFoundError:
+    return False
+  parts: list[int] = []
+  for segment in v.split(".")[:3]:
+    digits = "".join(ch for ch in segment if ch.isdigit())
+    if not digits:
+      break
+    parts.append(min(int(digits), 9999))
+    if len(parts) == 3:
+      break
+  while len(parts) < 3:
+    parts.append(0)
+  return tuple(parts) >= (2, 35, 0)
+
+
+# End BluePilot
+
 def init(project: SentryProject) -> bool:
   build_metadata = get_build_metadata()
 
@@ -126,14 +150,20 @@ def init(project: SentryProject) -> bool:
   if project == SentryProject.SELFDRIVE:
     integrations.append(ThreadingIntegration(propagate_hub=True))
 
-  sentry_sdk.init(project.value,
-                  default_integrations=False,
-                  release=get_version(),
-                  enable_logs=True,
-                  integrations=integrations,
-                  traces_sample_rate=1.0,
-                  max_value_length=8192,
-                  environment=env)
+  # BluePilot: gate enable_logs on installed sentry-sdk (see helper above).
+  init_kw = dict(
+    default_integrations=False,
+    release=get_version(),
+    integrations=integrations,
+    traces_sample_rate=1.0,
+    max_value_length=8192,
+    environment=env,
+  )
+  if _sentry_sdk_supports_enable_logs():
+    init_kw["enable_logs"] = True
+
+  sentry_sdk.init(project.value, **init_kw)
+  # End BluePilot
 
   sentry_sdk.set_user({"id": dongle_id, "name": git_username})
   sentry_sdk.set_tag("dirty", build_metadata.openpilot.is_dirty)
