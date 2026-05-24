@@ -5,7 +5,7 @@ from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.tesla.teslacan import get_steer_ctrl_type
-from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, TeslaFlags
+from opendbc.car.tesla.values import DBC, CANBUS, CAR, GEAR_MAP, STEER_THRESHOLD, TeslaFlags, LEGACY_CARS
 
 from opendbc.sunnypilot.car.tesla.carstate_ext import CarStateExt
 
@@ -38,6 +38,9 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled_prev = cruise_enabled
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
+    if self.CP.carFingerprint in LEGACY_CARS:
+      return self.update_legacy(can_parsers)
+
     cp_party = can_parsers[Bus.party]
     cp_ap_party = can_parsers[Bus.ap_party]
     ret = structs.CarState()
@@ -146,8 +149,100 @@ class CarState(CarStateBase, CarStateExt):
 
     return ret, ret_sp
 
+  def update_legacy(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
+    cp_party = can_parsers[Bus.party]
+    cp_ap_party = can_parsers[Bus.ap_party]
+    cp_pt = can_parsers[Bus.pt]
+    cp_ap_pt = can_parsers[Bus.ap_pt]
+    cp_chassis = can_parsers[Bus.chassis]
+    ret = structs.CarState()
+    ret_sp = structs.CarStateSP()
+
+    # Vehicle speed
+    ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
+    ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
+
+    # Gas pedal
+    ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > 0
+
+    # Brake pedal
+    ret.brake = 0
+    ret.brakePressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+
+    # Steering wheel
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
+      epas_status = cp_party.vl["EPAS_sysStatus"]
+    else:
+      epas_status = cp_chassis.vl["EPAS_sysStatus"]
+    self.hands_on_level = epas_status["EPAS_handsOnLevel"]
+    ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
+    ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
+    ret.steeringTorque = -epas_status["EPAS_torsionBarTorque"]
+
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
+
+    eac_status = self.can_define.dv["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
+    ret.steerFaultPermanent = eac_status == "EAC_FAULT"
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+
+    eac_error_code = self.can_define.dv["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
+    ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
+                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
+
+    # Cruise state
+    cruise_state = self.can_define.dv["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
+    speed_units = self.can_define.dv["DI_state"]["DI_speedUnits"].get(int(cp_chassis.vl["DI_state"]["DI_speedUnits"]), None)
+    cruise_enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
+
+    ret.cruiseState.enabled = cruise_enabled
+    if speed_units == "KPH":
+      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.KPH_TO_MS, 1e-3)
+    elif speed_units == "MPH":
+      ret.cruiseState.speed = max(cp_chassis.vl["DI_state"]["DI_digitalSpeed"] * CV.MPH_TO_MS, 1e-3)
+    ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    ret.cruiseState.standstill = False
+    ret.standstill = cruise_state == "STANDSTILL"
+    ret.accFaulted = cruise_state == "FAULT"
+
+    # Gear
+    ret.gearShifter = GEAR_MAP[self.can_define.dv["DI_torque2"]["DI_gear"].get(int(cp_chassis.vl["DI_torque2"]["DI_gear"]), "DI_GEAR_INVALID")]
+
+    # Doors
+    DOORS = ["DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE"]
+    ret.doorOpen = any((self.can_define.dv["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "OPEN") == "OPEN") for door in DOORS)
+
+    # Blinkers
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_X_HW1:
+      ret.leftBlinker = cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"] == 1
+      ret.rightBlinker = cp_chassis.vl["STW_ACTN_RQ"]["TurnIndLvr_Stat"] == 2
+    else:
+      ret.leftBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
+      ret.rightBlinker = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+
+    # Seatbelt
+    ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
+
+    # AEB
+    ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
+
+    # LKAS
+    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
+
+    # Messages needed by carcontroller
+    self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
+
+    return ret, ret_sp
+
   @staticmethod
   def get_can_parsers(CP, CP_SP):
+    if CP.carFingerprint in LEGACY_CARS:
+      return {
+        Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
+        Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.autopilot_party),
+        Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.powertrain),
+        Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CANBUS.autopilot_powertrain),
+        Bus.chassis: CANParser(DBC[CP.carFingerprint][Bus.chassis], [], CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party),
+      }
     return {
       Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.party),
       Bus.ap_party: CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.autopilot_party),
