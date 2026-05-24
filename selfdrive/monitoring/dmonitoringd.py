@@ -24,9 +24,10 @@ def dmonitoringd_thread():
       continue
 
     valid = sm.all_checks()
+    experimental_mode = sm['selfdriveState'].experimentalMode
     if demo_mode and sm.valid['driverStateV2']:
       DM.run_step(sm, demo=demo_mode)
-    elif valid:
+    elif valid and not experimental_mode:
       DM.run_step(sm, demo=demo_mode)
 
     # publish
