@@ -1,6 +1,7 @@
 [submodule "panda"]
 	path = panda
-	url = https://github.com/sunnyhaibin/panda.git
+	url = https://github.com/dirkpetersen/panda.git
+	branch = dirk
 [submodule "msgq"]
   path = msgq_repo
   url = https://github.com/commaai/msgq.git
