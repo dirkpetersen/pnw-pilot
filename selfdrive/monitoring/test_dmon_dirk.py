@@ -136,14 +136,26 @@ def _install_stubs():
         drive = "drive"; low = "low"; park = "park"; reverse = "reverse"; neutral = "neutral"
 
     class _DriverData:
+        # Provides BOTH old (bp-6.0) and new (bp-dev) DriverData API fields so
+        # this test works whether helpers.py uses leftBlinkProb / rightBlinkProb /
+        # leftEyeProb / rightEyeProb / sunglassesProb (bp-6.0 release schema)
+        # or the newer eyesVisibleProb / eyesClosedProb (bp-dev development schema).
         def __init__(self):
             self.faceOrientation = [0., 0., 0.]
             self.facePosition = [0., 0.]
             self.faceOrientationStd = [0., 0., 0.]
             self.facePositionStd = [0., 0.]
             self.faceProb = 0.
+            # new API (bp-dev)
             self.eyesVisibleProb = 0.
             self.eyesClosedProb = 0.
+            # old API (bp-6.0)
+            self.leftEyeProb = 0.
+            self.rightEyeProb = 0.
+            self.leftBlinkProb = 0.
+            self.rightBlinkProb = 0.
+            self.sunglassesProb = 0.
+            # both
             self.phoneProb = 0.
 
     class FakeDriverStateV2:
@@ -209,12 +221,15 @@ def make_msg(face=True, pose_distracted=False, blink_distracted=False, phone_pro
 
 
 def run_seconds(dm: DriverMonitoring, seconds: float, msg_factory, driver_engaged=False, op_engaged=True, standstill=False):
-    """Tick the DM at 20 Hz for `seconds`. msg_factory(frame_idx) -> DriverStateV2."""
+    """Tick the DM at 20 Hz for `seconds`. msg_factory(frame_idx) -> DriverStateV2.
+
+    Note: _update_states' signature differs between bp-dev (has steering_angle_deg)
+    and bp-6.0 (no steering_angle_deg). Use positional args only so we work on both.
+    """
     n = int(seconds / DT)
     last_events = None
     for i in range(n):
-        dm._update_states(msg_factory(i), [0, 0, 0], 30.0, op_engaged, standstill,
-                          steering_angle_deg=0.)
+        dm._update_states(msg_factory(i), [0, 0, 0], 30.0, op_engaged, standstill)
         dm._update_events(driver_engaged, op_engaged, standstill, False, 30.0)
         last_events = dm.current_events
     return last_events
