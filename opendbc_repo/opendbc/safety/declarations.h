@@ -33,6 +33,8 @@
 #define SAFETY_PSA 31U
 #define SAFETY_RIVIAN 33U
 #define SAFETY_VOLKSWAGEN_MEB 34U
+#define SAFETY_MG 35U
+#define SAFETY_TESLA_LEGACY 36U
 
 #define GET_BIT(msg, b) ((bool)!!(((msg)->data[((b) / 8U)] >> ((b) % 8U)) & 0x1U))
 #define GET_FLAG(value, mask) (((value) & (mask)) == (mask))
@@ -339,6 +341,7 @@ extern const safety_hooks nissan_hooks;
 extern const safety_hooks subaru_hooks;
 extern const safety_hooks subaru_preglobal_hooks;
 extern const safety_hooks tesla_hooks;
+extern const safety_hooks tesla_legacy_hooks;
 extern const safety_hooks toyota_hooks;
 extern const safety_hooks volkswagen_mlb_hooks;
 extern const safety_hooks volkswagen_mqb_hooks;

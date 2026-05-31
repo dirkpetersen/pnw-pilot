@@ -49,6 +49,38 @@ FW_VERSIONS = {
       b'TeM3_SP_XP002p2_0.0.0 (36),XPR003.10.0',
     ],
   },
+  # dirk: legacy Model S/X (HW1/HW2/HW3 Raven) EPS fingerprints, cherry-picked
+  # from xnor-tech/openpilot. These cars fingerprint ONLY the EPS at 0x730 (no
+  # fallback ECU). NOTE: on the Raven harness the EPS sits on CAN bus 1 while the
+  # FW query runs on bus 0, so auto-match can fail — the reliable selection path
+  # is the fixed fingerprint (CarPlatformBundle param). See RAVEN.md.
+  CAR.TESLA_MODEL_X_HW1: {
+    (Ecu.eps, 0x730, None): [
+      b'1057658-00-00B\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+  },
+  CAR.TESLA_MODEL_X_HW2: {
+    (Ecu.eps, 0x730, None): [
+      b'\x10#\x81',
+    ],
+  },
+  CAR.TESLA_MODEL_S_HW1: {
+    (Ecu.eps, 0x730, None): [
+      b'1016704-00-HAA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'\x10\x00A',
+    ],
+  },
+  CAR.TESLA_MODEL_S_HW2: {
+    (Ecu.eps, 0x730, None): [
+      b'\x10#\x01',
+    ],
+  },
+  CAR.TESLA_MODEL_S_HW3: {
+    (Ecu.eps, 0x730, None): [
+      b'SX_0.0.0 (99),S013.7',
+      b'SX_0.0.0 (99),SR013.7',
+    ],
+  },
 }
 
 FW_VERSIONS = merge_fw_versions(FW_VERSIONS, FW_VERSIONS_EXT)
