@@ -8,6 +8,55 @@ Device: `comma@192.168.13.154` (host key changes on reinstall → `ssh-keygen -R
 
 ---
 
+## ⛔ KNOWN BLOCKER — dual-panda flash gets into an unrecoverable state (DEFERRED)
+
+**Status (2026-05-31): the BluePilot-6.0 Raven panda path is BLOCKED and deferred.**
+The opendbc/Python side of this branch is correct and verified (Raven fingerprints,
+imports, builds, carState parses). The problem is purely the **panda firmware
+flash on this device**, and it is not easily recoverable:
+
+**What happens:** this comma 4 enumerates **two pandas** —
+- `3f001b000651333038363231` = the **internal** panda (the one wired to the car)
+- `2e0050001051323430373133` = a **second/unprovisioned** panda reporting an
+  unsupported `hw_type` and a mismatched firmware (`health version v0`)
+
+After building + flashing our firmware to the internal panda and power-cycling,
+pandad falls into a loop:
+```
+2 panda(s) found
+Panda 2e0050001051323430373133 is not supported (hw_type: 0x03), skipping flash...
+Internal panda is missing
+No pandas found, resetting internal panda
+```
+i.e. pandad rejects the second panda AND then declares the internal one "missing",
+so it never initializes. Symptoms downstream: `pandaStates` never goes alive, no
+CAN reaches the message bus, `canValid=False`, the UI shows
+**"CANbus disconnected / likely faulty cable"** (a misleading generic message —
+the cable is NOT the problem; we proved CAN flows at the panda).
+
+**Why it's hard to recover:**
+- A `sudo reboot` does NOT reload panda firmware (rails stay up). Only a full
+  ignition power-cycle does — but the power-cycle sometimes lands in the
+  "internal panda missing" loop instead of recovering, and it's inconsistent.
+- Direct `Panda(serial=...)` calls intermittently grab the WRONG panda (the
+  unprovisioned `2e00...`), producing `health/CAN packet version mismatch:
+  panda's firmware v0 ... Reflash panda` — which looks like our flash failed but
+  is actually the wrong device being opened.
+- DFU recovery (`panda/board/recover.py`) is the next escalation but was not
+  attempted; it risks the working internal panda if the wrong one is targeted.
+
+**Contrast with what works:** the **xnor prebuilt install** drives this exact car
+with this exact hardware reliably. The difference is NOT the opendbc code (we
+matched it) and NOT the CAN packet hash (panda↔library versions matched:
+`325027879`). It is something about how BluePilot's pandad + our on-device flash
+interact with the two-panda enumeration that xnor's shipped/prebuilt path avoids.
+
+**Decision: DEFER the BluePilot panda path.** Do not keep cycling the panda flash.
+See "Forward plan" below — we pivot to applying these changes on **SunnyPilot**
+instead (BluePilot's own upstream), where the panda story may differ.
+
+---
+
 ## What this branch already contains (no manual patching needed)
 
 Everything that used to be applied by the on-device `patch-raven.py` is now
@@ -167,3 +216,58 @@ them too. Ignore them.
 | Ford detected as Tesla after car swap | sticky CarPlatformBundle left set | step 7 cleanup (remove CarPlatformBundle) |
 
 See `../RAVEN.md` and `../XNOR2BP.md` (repo root) for the full root-cause writeups.
+
+---
+
+## Forward plan — pivot to SunnyPilot (deferring the BluePilot panda blocker)
+
+Because the BluePilot-6.0 panda flash is blocked (see top of this doc), the new
+plan is to route the work through **SunnyPilot** (the fork BluePilot is built on),
+where the panda/build/flash path may behave differently and is closer to the
+upstream that xnor itself derives from.
+
+Two-phase plan:
+
+**Phase 1 — add Tesla Raven support to SunnyPilot (same as we did for BluePilot):**
+1. In the `sunnypilot` worktree (branch `sunnypilot-dirk`), bring in the Raven
+   legacy support exactly as `xnor2bp` did here: the opendbc Tesla port
+   (`teslacan_legacy.py`, `tesla_raven_party.dbc`, `tesla_legacy.h`, values/
+   carstate/carcontroller/interface/radar legacy logic), the safety-model
+   registration (`car.capnp` teslaLegacy@36 + `declarations.h` + `safety.h`),
+   `docs_definitions.py` harness entries, `torque_data/override.toml` rows,
+   `opendbc/safety/ignition.h`, the `tesla_can.dbc` superset, and the seatbelt
+   SDM1 branch. (SunnyPilot already has the `CarStateExt` SP layer, so the
+   3-way-merge adaptations from this branch transfer directly.)
+2. Point/build the panda the same way, but **test the panda flash on SunnyPilot
+   first** — the open question is whether SunnyPilot's pandad avoids the
+   dual-panda "internal panda missing" loop that blocks BluePilot.
+
+**Phase 2 — bring the BluePilot Ford changes INTO SunnyPilot:**
+1. Re-apply the most important BluePilot Ford/Lightning changes on top of the
+   SunnyPilot+Raven base — primarily the Ford control logic
+   (`opendbc/car/ford/carcontroller.py` + `lateral_curv_ext.py` + Ford params)
+   and the 2025 Lightning fingerprint. Find them via `grep -r "BluePilot:"` and
+   the `FordPref*`/`BP*` param families.
+2. Goal: a single SunnyPilot-based install that drives BOTH the Lightning and the
+   Raven — the same dual-car goal as `xnor2bp`, but on a base whose panda path
+   we can actually flash reliably.
+
+The `xnor2bp` branch + this DEPLOY.md remain the reference for WHAT the Raven
+needs (every file, every gotcha); only the HOST fork changes.
+
+---
+
+## Software updates (DisableUpdates) — IMPORTANT
+
+After every deploy, **`DisableUpdates` must be set to `1`**. BluePilot/openpilot's
+auto-updater will otherwise pull a fresh copy and **silently overwrite all our
+on-device changes** (this has bitten us before). It was set during this deploy:
+```bash
+PYTHONPATH=/data/openpilot python3 -c "from openpilot.common.params import Params; Params().put_bool('DisableUpdates', True)"
+# verify:
+cat /data/params/d/DisableUpdates   # must print 1
+```
+NOTE: a **full reinstall** (via the installer URL) resets this param and the SSH
+host key — so re-set `DisableUpdates` immediately after any reinstall, before the
+updater runs. (If the device's SSH host key changes unexpectedly, suspect a
+reinstall/reset and re-verify both `DisableUpdates` and that our changes survived.)
