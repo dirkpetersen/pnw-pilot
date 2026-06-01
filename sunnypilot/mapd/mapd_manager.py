@@ -106,22 +106,67 @@ def osm_data_present() -> bool:
   return False
 
 
+def _read_mem_param_file(key: str) -> bytes | None:
+  """mapd2xnor: read a /dev/shm params value straight off disk.
+
+  The mapd binary writes OSMDownloadProgress / OSMDownloadLocations with its own Go
+  param writer, which does NOT register keys. The Python Params wrapper validates keys
+  and raises UnknownKeyName for OSMDownloadProgress (it isn't in params_keys.h), so we
+  read the file directly to avoid both a registration dependency and that exception.
+  """
+  try:
+    with open(os.path.join("/dev/shm/params/d", key), "rb") as f:
+      return f.read()
+  except (FileNotFoundError, OSError):
+    return None
+
+
+def osm_download_complete() -> bool:
+  """mapd2xnor: True only when the binary's OSMDownloadProgress shows every tile
+  fetched (downloaded_files >= total_files, total > 0). The binary writes this
+  param as it downloads and clears OSMDownloadLocations when the single pass ends.
+
+  This is the correct 'done' signal — NOT mere file presence. The binary does one
+  sequential pass with no resume (v1.12.0); if it's killed partway (e.g. boot/restart
+  mid-download), partial .tar.gz tiles remain but the download is incomplete, so we
+  must re-arm. Treating 'any file exists' as done froze the download at the partial
+  state. A frozen progress where downloaded < total likewise means interrupted -> re-arm.
+  """
+  raw = _read_mem_param_file("OSMDownloadProgress")
+  if not raw:
+    return False
+  try:
+    prog = json.loads(raw)
+    total = int(prog.get("total_files", 0))
+    done = int(prog.get("downloaded_files", 0))
+  except (ValueError, TypeError, AttributeError):
+    return False
+  return total > 0 and done >= total
+
+
+def download_in_flight() -> bool:
+  """mapd2xnor: a download is actively armed/running if the binary still has a
+  pending OSMDownloadLocations request (it clears it when the pass ends)."""
+  return bool(_read_mem_param_file("OSMDownloadLocations"))
+
+
 def update_osm_db() -> None:
   # mapd2xnor: the OSM map download is gated on the "Speed limit display/warning (MAPD)"
-  # toggle (ShowSpeedLimit). When the toggle is ON and no map data is present yet, KEEP
-  # arming the download every loop until data actually lands — the previous one-shot
-  # (guarded by OsmAutoRequested) misfired and could never retry. ShowSpeedLimit OFF =
-  # never download (the feature is disabled). Re-read live so toggling takes effect.
+  # toggle (ShowSpeedLimit). When the toggle is ON and the download is not yet complete,
+  # (re)arm it — throttled — until OSMDownloadProgress shows all tiles fetched. The
+  # binary does a single non-resuming pass and clears OSMDownloadLocations when done, so
+  # an interrupted download (boot/restart mid-pass) must be re-armed to finish. The old
+  # check ('any .pbf file present') froze partial downloads. ShowSpeedLimit OFF = never
+  # download. Re-read live so toggling takes effect.
   if not params.get_bool("ShowSpeedLimit"):
     return
 
-  # retry-until-lands (throttled): while the toggle is ON and no map data is present,
-  # re-arm the download every OSM_DOWNLOAD_RETRY_S so a failed/missed first attempt
-  # recovers on its own — instead of the old one-shot that got stuck on OsmAutoRequested.
-  if not osm_data_present():
+  # retry-until-complete (throttled): re-arm every OSM_DOWNLOAD_RETRY_S while the toggle
+  # is ON and the download is neither complete nor currently in flight.
+  if not osm_download_complete() and not download_in_flight():
     now = time.monotonic()
     if params.get_bool("OsmDbUpdatesCheck"):
-      pass  # a download is already armed/in-flight; let it run
+      pass  # already armed for this loop; let request_refresh fire below
     elif now - _last_download_arm[0] > OSM_DOWNLOAD_RETRY_S:
       _last_download_arm[0] = now
       params.put_bool("OsmDbUpdatesCheck", True)
