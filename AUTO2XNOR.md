@@ -1,35 +1,56 @@
-# AUTO2XNOR.md — Deploying Nudgeless Lane Change + No-Disengage-on-Braking to a comma 3X
+# AUTO2XNOR.md — Nudgeless Lane Change + No-Disengage-on-Braking + Overtake Assist (comma 3X)
 
-> **Deployment** companion for the `auto2xnor` branch. Documents exactly how the two
-> toggles were deployed to the live device, why `params_keys.h` (and `toggles.py`)
-> must be **patched, not overlaid**, and how the deploy is made **connection-loss safe**.
+> **Deployment** companion for the `auto2xnor` branch. Documents the three toggles, why
+> they are **Tesla-only (greyed out on the Ford Lightning)**, why `params_keys.h` /
+> `toggles.py` must be **merged, not overlaid**, and how the deploy is **connection-loss safe**.
 
 **Branch:** `auto2xnor` (openpilot-xnor worktree), off `c0d78143` (xnor prebuilt base).
 **Device:** comma **3X** (`tizi`) @ `comma@192.168.13.154`, distro branch `xnor-dev`.
 
-## What it adds (2 toggles, both default OFF)
+## What it adds (3 toggles, all default OFF, all Tesla-only)
 - **Nudgeless Lane Change** (`NudgelessLaneChange`) — in `desire_helper.py`, hold the
   blinker ~1.5 s above 20 mph with no blindspot → lane change starts without a wheel
   nudge. Nudge path preserved; blindspot still blocks; speed gate unchanged. Re-read ~3 s.
 - **No Disengage on Braking** (`NoDisengageOnBrake`) — in `selfdrived.py`, suppresses the
   brake/regen-braking `pedalPressed` disengage so OP stays engaged through brake presses
   (resumes on release). Gas-pedal disengage unaffected. Re-read live in `params_thread`.
+- **Overtake Assist** (`OvertakeAssist`) — DISPLAY-ONLY prompt (`overtake_assist.py` +
+  `augmented_road_view.py`). When closing on a slower lead on the highway with a clear
+  adjacent-lane blind spot, shows a green arrow + "Signal to overtake". openpilot does NOT
+  steer — the driver flicks the blinker (nudgeless then completes it). Replaced an earlier
+  auto-steer `AutoInitiateLaneChange` (reverted: OP can't command the Raven blinker and
+  can't see fast traffic approaching in the target lane).
+
+**Tesla-only gating:** all three are in `TogglesLayout.TESLA_ONLY_TOGGLES`
+(`NudgelessLaneChange`, `OvertakeAssist`, `NoDisengageOnBrake`). The `_update_toggles` loop
+disables (greys out) and force-OFFs them when `ui_state.CP.brand != "tesla"` — so on the
+**Ford F-150 Lightning** they are visible but disabled. Their descriptions say "Tesla only".
 
 Panda safety untouched — openpilot-side logic only. The brake toggle **reduces a safety
-boundary** (its UI description says so); both default OFF per CLAUDE.md (safety > features).
+boundary** (its UI description says so); all default OFF per CLAUDE.md (safety > features).
 
-## Files changed (4)
+## Files changed (8)
 | File | How it deploys |
 |------|----------------|
-| `selfdrive/controls/lib/desire_helper.py` | **overlay** (pristine on device) |
-| `selfdrive/selfdrived/selfdrived.py` | **overlay** (pristine on device) |
-| `common/params_keys.h` | **PATCH in place** (carries DM + mapd keys — must not clobber) |
-| `selfdrive/ui/layouts/settings/toggles.py` | **PATCH in place** (carries DM + mapd toggles) |
+| `selfdrive/controls/lib/desire_helper.py` | **overlay** (auto2xnor HEAD; Tesla-gated nudgeless) |
+| `selfdrive/modeld/modeld.py` | **overlay** (`DH = DesireHelper(CP)` — CP brand gates nudgeless) |
+| `selfdrive/selfdrived/selfdrived.py` | **overlay** (NoDisengageOnBrake) |
+| `selfdrive/ui/onroad/overtake_assist.py` | **new file** (OvertakeAssistRenderer) |
+| `common/params_keys.h` | **MERGE in place** (carries DM + mapd keys — must not clobber) |
+| `selfdrive/ui/layouts/settings/toggles.py` | **MERGE in place** (carries DM + mapd toggles) |
+| `selfdrive/ui/ui_state.py` | **MERGE in place** (`overtake_assist` read alongside mapd `show_speed_limit`) |
+| `selfdrive/ui/onroad/augmented_road_view.py` | **MERGE in place** (both Overtake + mapd SpeedLimit renderers) |
+
+> **Merge, not overlay:** `params_keys.h`, `toggles.py`, `ui_state.py`, and
+> `augmented_road_view.py` are also edited by `mapd2xnor` (speed-limit) and `dmon2xnor-b`
+> (relaxed DM / update gate). The device runs all three feature sets, so a wholesale overlay
+> of auto2xnor's versions would DELETE the mapd/DM additions. The resolved 3-way merge is
+> recorded on branch **`integration-device`** (`74e90ff8`) — see "Cross-branch integration".
 
 ---
 
 ## Why a build is required
-`common/params_keys.h` registers 2 new keys. `Params.checkKey` validates against the keys
+`common/params_keys.h` registers new keys (`NudgelessLaneChange`, `NoDisengageOnBrake`, `OvertakeAssist`). `Params.checkKey` validates against the keys
 compiled into `params_pyx.so`, so an unregistered key → `UnknownKeyName` at runtime
 (which, via the UI/daemon, can crash-loop the stack — see MAPD2XNOR.md pitfalls). The
 xnor-dev 3X has an on-device build env (`/usr/local/venv/bin/scons` 4.10.0 + Cython + g++),
@@ -126,3 +147,36 @@ speed-limit display (`mapd2xnor`, MAPD2XNOR.md). All kept on **separate branches
 on-device collision is `params_keys.h` + `toggles.py`, handled by per-feature patching here.
 The core-hotplug `set_core_affinity` fix (`55fbcd44`, dmon2xnor-b) is required on this 3X but
 is **not** on auto2xnor.
+
+---
+
+## Cross-branch integration (the on-device merge) + deploy history
+
+`auto2xnor`, `mapd2xnor`, and `dmon2xnor-b` all edit the same 4 shared files
+(`params_keys.h`, `toggles.py`, `ui_state.py`, `augmented_road_view.py`), and the device
+runs all three at once. They are kept on **separate branches**; the on-device files are the
+**3-way merge** of all three, recorded on branch **`integration-device`** (commit `74e90ff8`):
+
+- `params_keys.h` — auto (`NudgelessLaneChange`/`NoDisengageOnBrake`/`OvertakeAssist`) +
+  mapd (`ShowSpeedLimit`/`OsmStateName`=`WA,OR,ID`/`Offroad_OSMUpdateRequired`) +
+  DM (`SensitiveDriverMonitoring`/`AllowSoftwareUpdates`). The stray auto-steer key
+  `AutoInitiateLaneChange` is **removed** (auto2xnor reverted to display-only OvertakeAssist).
+- `toggles.py` — all 6 toggles; auto's three Tesla-gated via `TESLA_ONLY_TOGGLES`.
+- `ui_state.py` — `overtake_assist` read alongside mapd `show_speed_limit`/`show_road_name`.
+- `augmented_road_view.py` — both `OvertakeAssistRenderer` (auto) and `SpeedLimitRenderer` (mapd).
+
+The deploy was connection-loss-safe (stage md5-verified → `setsid nohup` →
+`DONE`/`FAIL` sentinel + log) via `update-auto2xnor-integ.sh`. Backups at
+`/data/dirk/org/auto-integ/`. Verified after a cold reboot: all three feature sets'
+params resolve, 0 `UnknownKeyName`, `shouldRun-but-not: ['updated']` (expected w/ DisableUpdates).
+
+### Ford grey-out (commit `8b029580`)
+All three auto toggles are **Tesla-only**: not supported on the Ford F-150 Lightning, so they
+are disabled (greyed out) and force-OFF on non-Tesla cars by the `is_tesla` loop in
+`_update_toggles`. `NoDisengageOnBrake` was added to `TESLA_ONLY_TOGGLES` in `8b029580`
+(it had been left out); `NudgelessLaneChange` + `OvertakeAssist` were already gated.
+
+> **NOTE — not yet deployed:** the `8b029580` Ford grey-out commit is on the `auto2xnor`
+> branch but has **not** been pushed to the device yet. The live `toggles.py` still greys out
+> only Nudgeless + OvertakeAssist; redeploy `toggles.py` (merge in place, no params rebuild
+> needed — it's a pure-Python UI change) to apply the NoDisengageOnBrake grey-out on Ford.
