@@ -9,6 +9,12 @@ is BluePilot's upstream and is closer to xnor's base, so we redo the panda path 
 Device: `comma@192.168.13.154` (host key changes on reinstall →
 `ssh-keygen -R 192.168.13.154`).
 
+> **TODO (loose end):** the sunnypilot worktree pins `opendbc_repo` at `ac4b8d69`
+> (pre-`mg @35`). The `mg @35` capnp fix is committed in the opendbc repo at
+> `d1c429f5` but NOT yet reflected in the submodule pointer. The device is correct
+> (it has the fix as overlaid files), but to make a clean checkout correct: push
+> opendbc `d1c429f5`, then re-pin + commit the submodule bump in sunnypilot.
+
 ---
 
 ## Why SunnyPilot avoids the two BluePilot disasters
