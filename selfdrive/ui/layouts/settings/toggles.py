@@ -39,11 +39,11 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "This reduces a safety boundary — only enable it if you understand the risk and stay attentive."
   ),
-  "AutoInitiateLaneChange": tr_noop(
-    "Automatically change into the left lane to pass when you are closing on a slower car on the highway. " +
-    "openpilot initiates the lane change itself (no blinker) once the left blind spot is clear. " +
-    "WARNING: openpilot only sees the car's rear blind-spot zone — it CANNOT see a fast car approaching from " +
-    "farther back in the left lane. You are responsible for checking the lane is clear. Tesla only."
+  "OvertakeAssist": tr_noop(
+    "When you are closing on a slower car and there is an open adjacent lane with the blind spot clear, " +
+    "show a green arrow and \"Signal to overtake\". openpilot does NOT change lanes by itself — you start the " +
+    "lane change by flicking the turn signal. The prompt only uses the car's rear blind-spot zone and the lane " +
+    "model; it cannot see fast traffic approaching from farther back. Always check the lane yourself. Tesla only."
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
@@ -53,7 +53,7 @@ DESCRIPTIONS = {
 
 class TogglesLayout(Widget):
   # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
-  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "AutoInitiateLaneChange")
+  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")
 
   def __init__(self):
     super().__init__()
@@ -104,9 +104,9 @@ class TogglesLayout(Widget):
         "disengage_on_accelerator.png",
         False,
       ),
-      "AutoInitiateLaneChange": (
-        lambda: tr("Auto-Initiate Lane Change (Overtake)"),
-        DESCRIPTIONS["AutoInitiateLaneChange"],
+      "OvertakeAssist": (
+        lambda: tr("Overtake Assist"),
+        DESCRIPTIONS["OvertakeAssist"],
         "warning.png",
         False,
       ),

@@ -398,9 +398,7 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      # auto2xnor: pass the model's nearest lead for the auto-overtake trigger (Tesla only)
-      lead_one = modelv2_send.modelV2.leadsV3[0] if len(modelv2_send.modelV2.leadsV3) else None
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, lead_one)
+      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state

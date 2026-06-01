@@ -12,7 +12,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // auto2xnor: sunnypilot-style toggles (default OFF for safety)
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},
-    {"AutoInitiateLaneChange", {PERSISTENT, BOOL, "0"}},
+    {"OvertakeAssist", {PERSISTENT, BOOL, "0"}},
     {"ApiCache_Device", {PERSISTENT, STRING}},
     {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},
