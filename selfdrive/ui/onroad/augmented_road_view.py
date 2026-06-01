@@ -9,6 +9,7 @@ from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
+from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitRenderer  # mapd2xnor
 from openpilot.selfdrive.ui.onroad.overtake_assist import OvertakeAssistRenderer  # auto2xnor
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
@@ -49,6 +50,7 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
+    self.speed_limit_renderer = SpeedLimitRenderer()  # mapd2xnor
     self.overtake_assist_renderer = OvertakeAssistRenderer()  # auto2xnor
 
     # debug
@@ -93,6 +95,7 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
+    self.speed_limit_renderer.render(self._content_rect)  # mapd2xnor
     self.overtake_assist_renderer.render(self._content_rect)  # auto2xnor
 
     # End clipping region

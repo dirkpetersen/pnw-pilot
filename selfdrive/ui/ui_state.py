@@ -55,6 +55,7 @@ class UIState:
         "carControl",
         "liveParameters",
         "rawAudioData",
+        "liveMapDataSP",  # mapd2xnor
       ]
     )
 
@@ -71,6 +72,9 @@ class UIState:
     self.is_metric: bool = self.params.get_bool("IsMetric")
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
+    # mapd2xnor: speed-limit / road-name display toggles (default on for speed limit)
+    self.show_speed_limit: bool = self.params.get_bool("ShowSpeedLimit")
+    self.show_road_name: bool = self.params.get_bool("ShowRoadName")
     self.overtake_assist: bool = self.params.get_bool("OvertakeAssist")  # auto2xnor: overtake prompt
     self.started: bool = False
     self.ignition: bool = False
@@ -142,6 +146,9 @@ class UIState:
 
     self.is_metric = self.params.get_bool("IsMetric")
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
+    # mapd2xnor
+    self.show_speed_limit = self.params.get_bool("ShowSpeedLimit")
+    self.show_road_name = self.params.get_bool("ShowRoadName")
     self.overtake_assist = self.params.get_bool("OvertakeAssist")  # auto2xnor
 
   def _update_status(self) -> None:
