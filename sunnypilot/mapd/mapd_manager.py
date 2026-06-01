@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+
+This file is part of sunnypilot and is licensed under the MIT License.
+See the LICENSE.md file in the root directory for more details.
+
+mapd2xnor: ported from sunnypilot. The pfeiferj mapd binary is bundled (not
+downloaded). Default OSM coverage is the Pacific Northwest (Washington, Oregon,
+Idaho); change via the OsmStateName param or by editing PNW_STATES below.
+"""
+import json
+import platform
+import os
+import glob
+import shutil
+from datetime import datetime
+
+from openpilot.common.params import Params
+from openpilot.common.realtime import Ratekeeper, config_realtime_process
+from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
+from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
+from openpilot.system.hardware.hw import Paths
+from openpilot.sunnypilot.mapd import MAPD_PATH
+from openpilot.sunnypilot.mapd.mapd_installer import VERSION, update_installed_version
+
+# mapd2xnor: default Pacific Northwest coverage
+PNW_STATES = ["Washington", "Oregon", "Idaho"]
+
+params = Params()
+mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else params
+
+
+def get_files_for_cleanup() -> list[str]:
+  paths = [
+    f"{Paths.mapd_root()}/db",
+    f"{Paths.mapd_root()}/v*"
+  ]
+  files_to_remove = []
+  for path in paths:
+    if os.path.exists(path):
+      files = glob.glob(path + '/**', recursive=True)
+      files_to_remove.extend(files)
+  # check for version and mapd files
+  if not os.path.isfile(MAPD_PATH):
+    files_to_remove.append(MAPD_PATH)
+  return files_to_remove
+
+
+def cleanup_old_osm_data(files_to_remove: list[str]) -> None:
+  for file in files_to_remove:
+    # Remove trailing slash if path is file
+    if file.endswith('/') and os.path.isfile(file[:-1]):
+      file = file[:-1]
+    # Try to remove as file or symbolic link first
+    if os.path.islink(file) or os.path.isfile(file):
+      os.remove(file)
+    elif os.path.isdir(file):  # If it's a directory
+      shutil.rmtree(file, ignore_errors=False)
+
+
+def request_refresh_osm_location_data(nations: list[str], states: list[str] | None = None) -> None:
+  params.put("OsmDownloadedDate", str(datetime.now().timestamp()))
+  params.put_bool("OsmDbUpdatesCheck", False)
+
+  osm_download_locations = {
+    "nations": nations,
+    "states": states or []
+  }
+
+  print(f"Downloading maps for {json.dumps(osm_download_locations)}")
+  mem_params.put("OSMDownloadLocations", osm_download_locations)
+
+
+def get_configured_states() -> list[str]:
+  """mapd2xnor: read OsmStateName param (comma-separated) or default to PNW."""
+  raw = params.get("OsmStateName", return_default=True)
+  if not raw:
+    return list(PNW_STATES)
+  states = [s.strip() for s in str(raw).split(",") if s.strip()]
+  return states or list(PNW_STATES)
+
+
+def osm_data_present() -> bool:
+  """True if any OSM .pbf/offline data has already been downloaded."""
+  root = Paths.mapd_root()
+  if not os.path.isdir(root):
+    return False
+  for _root, _dirs, files in os.walk(root):
+    if any(f.endswith(('.pbf', '.tar.gz')) for f in files):
+      return True
+  return False
+
+
+def update_osm_db() -> None:
+  # mapd2xnor: auto-arm the first PNW download if no map data exists yet and the
+  # user hasn't already requested one. Lets the feature work on a fresh deploy
+  # without an OSM settings UI page. Idempotent: only fires until data lands.
+  if not params.get_bool("OsmDbUpdatesCheck") and not osm_data_present():
+    if not params.get_bool("OsmAutoRequested"):
+      params.put_bool("OsmAutoRequested", True)
+      params.put_bool("OsmDbUpdatesCheck", True)
+
+  if params.get_bool("OsmDbUpdatesCheck"):
+    cleanup_old_osm_data(get_files_for_cleanup())
+    states = get_configured_states()
+    # Multiple US states -> drop the country-wide "US" download, keep just the states
+    request_refresh_osm_location_data([], states)
+
+  if not mem_params.get("OSMDownloadBounds"):
+    mem_params.put("OSMDownloadBounds", "")
+
+  if not mem_params.get("LastGPSPosition"):
+    mem_params.put("LastGPSPosition", "{}")
+
+
+def main_thread():
+  update_installed_version(VERSION, params)
+  config_realtime_process([0, 1, 2, 3], 5)
+
+  rk = Ratekeeper(1, print_delay_threshold=None)
+  live_map_sp = OsmMapData()
+
+  # Create folder needed for OSM
+  try:
+    os.mkdir(Paths.mapd_root())
+  except FileExistsError:
+    pass
+  except PermissionError:
+    cloudlog.exception(f"mapd: failed to make {Paths.mapd_root()}")
+
+  while True:
+    show_alert = bool(get_files_for_cleanup()) and params.get_bool("OsmLocal")
+    set_offroad_alert("Offroad_OSMUpdateRequired", show_alert, "This alert will be cleared when new maps are downloaded.")
+
+    update_osm_db()
+    live_map_sp.tick()
+    rk.keep_time()
+
+
+def main():
+  main_thread()
+
+
+if __name__ == "__main__":
+  main()
