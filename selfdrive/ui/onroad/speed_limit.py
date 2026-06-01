@@ -30,6 +30,7 @@ from openpilot.system.ui.widgets import Widget
 WARNING_DURATION = 6.0     # s to keep the red "lower limit" banner up
 AHEAD_ACTIVE_DIST = 150.0  # m: treat a lower "ahead" limit as imminent within this distance
 MIN_VALID_KPH = 1.0        # below this (in m/s-derived kph) the limit is treated as unknown
+OVERSPEED_RATIO = 1.20     # only warn if current speed is >20% above the new lower limit
 
 
 class _Colors:
@@ -50,6 +51,8 @@ class SpeedLimitRenderer(Widget):
     self.speed_limit_ahead_valid = False
     self.speed_limit_ahead_dist = 0.0
     self.road_name = ""
+    self.speed = 0.0                # current vehicle speed, display units
+    self._v_ego_cluster_seen = False
 
     self._shown_limit = 0.0         # last limit we actually displayed (for drop detection)
     self._warn_value = 0.0          # the lower value to show in the warning banner
@@ -68,6 +71,12 @@ class SpeedLimitRenderer(Widget):
     if sm.recv_frame["carState"] < ui_state.started_frame:
       return
 
+    # current vehicle speed in display units (prefer cluster speed once seen)
+    car_state = sm["carState"]
+    self._v_ego_cluster_seen = self._v_ego_cluster_seen or car_state.vEgoCluster != 0.0
+    v_ego = car_state.vEgoCluster if self._v_ego_cluster_seen else car_state.vEgo
+    self.speed = max(0.0, v_ego * self._conv)
+
     if sm.updated["liveMapDataSP"]:
       lmd = sm["liveMapDataSP"]
       conv = self._conv
@@ -81,14 +90,20 @@ class SpeedLimitRenderer(Widget):
       self._maybe_trigger_warning(new_limit)
       self.speed_limit = new_limit
 
+  def _overspeeding(self, limit: float) -> bool:
+    """True if current speed is more than OVERSPEED_RATIO above the given limit."""
+    return limit > MIN_VALID_KPH and self.speed > limit * OVERSPEED_RATIO
+
   def _maybe_trigger_warning(self, new_limit: float) -> None:
-    """Flash a red banner when the effective limit drops to a lower value."""
+    """Flash a red banner when the limit drops to a lower value AND the driver is
+    currently more than 20% above that new lower limit."""
     now = time.monotonic()
 
     # Case 1: the current limit itself just dropped below what we were showing.
     if (self.speed_limit_valid and new_limit > MIN_VALID_KPH
         and self._shown_limit > MIN_VALID_KPH
-        and round(new_limit) < round(self._shown_limit)):
+        and round(new_limit) < round(self._shown_limit)
+        and self._overspeeding(new_limit)):
       self._warn_value = new_limit
       self._warn_until = now + WARNING_DURATION
 
@@ -96,7 +111,8 @@ class SpeedLimitRenderer(Widget):
     elif (self.speed_limit_ahead_valid and self.speed_limit_ahead > MIN_VALID_KPH
           and self.speed_limit_valid and new_limit > MIN_VALID_KPH
           and round(self.speed_limit_ahead) < round(new_limit)
-          and 0 < self.speed_limit_ahead_dist <= AHEAD_ACTIVE_DIST):
+          and 0 < self.speed_limit_ahead_dist <= AHEAD_ACTIVE_DIST
+          and self._overspeeding(self.speed_limit_ahead)):
       # Only (re)arm if not already warning about this same value
       if round(self._warn_value) != round(self.speed_limit_ahead) or now > self._warn_until:
         self._warn_value = self.speed_limit_ahead
