@@ -39,6 +39,12 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "This reduces a safety boundary — only enable it if you understand the risk and stay attentive."
   ),
+  "AutoInitiateLaneChange": tr_noop(
+    "Automatically change into the left lane to pass when you are closing on a slower car on the highway. " +
+    "openpilot initiates the lane change itself (no blinker) once the left blind spot is clear. " +
+    "WARNING: openpilot only sees the car's rear blind-spot zone — it CANNOT see a fast car approaching from " +
+    "farther back in the left lane. You are responsible for checking the lane is clear. Tesla only."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -46,6 +52,9 @@ DESCRIPTIONS = {
 
 
 class TogglesLayout(Widget):
+  # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
+  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "AutoInitiateLaneChange")
+
   def __init__(self):
     super().__init__()
     self._params = Params()
@@ -93,6 +102,12 @@ class TogglesLayout(Widget):
         lambda: tr("No Disengage on Braking"),
         DESCRIPTIONS["NoDisengageOnBrake"],
         "disengage_on_accelerator.png",
+        False,
+      ),
+      "AutoInitiateLaneChange": (
+        lambda: tr("Auto-Initiate Lane Change (Overtake)"),
+        DESCRIPTIONS["AutoInitiateLaneChange"],
+        "warning.png",
         False,
       ),
       "RecordFront": (
@@ -227,6 +242,13 @@ class TogglesLayout(Widget):
     for toggle_def in self._toggle_defs:
       if self._toggle_defs[toggle_def][3] and toggle_def not in self._locked_toggles:
         self._toggles[toggle_def].action_item.set_enabled(not ui_state.engaged)
+
+    # auto2xnor: Tesla-only toggles — grey out on non-Tesla cars (e.g. the Ford Lightning)
+    is_tesla = ui_state.CP is not None and ui_state.CP.brand == "tesla"
+    for param in self.TESLA_ONLY_TOGGLES:
+      self._toggles[param].action_item.set_enabled(is_tesla)
+      if not is_tesla:
+        self._toggles[param].action_item.set_state(False)
 
   def _render(self, rect):
     self._scroller.render(rect)
