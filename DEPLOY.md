@@ -390,3 +390,73 @@ host key — re-set it immediately after any reinstall, before the updater runs.
 PYTHONPATH=/data/openpilot python3 -c "from openpilot.common.params import Params; Params().put_bool('DisableUpdates', True)"
 cat /data/params/d/DisableUpdates   # must print 1
 ```
+
+---
+
+## 16. DM "Process Not Running" + system-wide commIssue/lag — full saga (2026-06-01, on-road)
+
+After everything above worked and the user drove, two problems surfaced **on-road, on engage**.
+Documented here in full because the user is reverting to the xnor prebuilt version; this is the
+state to resume from next time. Device IP during this session was **172.20.10.10** (phone hotspot;
+host key changes — `ssh-keygen -R 172.20.10.10`).
+
+### Problem A — "Process Not Running — dmonitoringd" (RESOLVED)
+**Two layered causes:**
+
+1. **Schema mismatch (the deploy mistake).** The `xnor2sunny`/`dmon2sunny` repo `helpers.py` is from a
+   NEWER openpilot than the **installed release build**. Repo code reads `driver_data.eyesClosedProb` /
+   `eyesVisibleProb`; the device's `DriverStateV2` cereal only has the **OLD per-eye API**
+   (`leftBlinkProb`, `rightBlinkProb`, `leftEyeProb`, `rightEyeProb`, `sunglassesProb`). On the first
+   on-road frame dmonitoringd crashed:
+   `AttributeError: capnp/schema.c++:511: struct has no such member; name = eyesClosedProb`
+   (`helpers.py:329`). This is the **exact same wholesale-replace footgun documented in DMON.md §13** —
+   deploying the repo file overwrote the device's older, schema-matching `helpers.py`.
+   - The device's ORIGINAL helpers.py is preserved at
+     `/data/safe_staging/old_openpilot/selfdrive/monitoring/helpers.py` (uses `self.blink.left =
+     driver_data.leftBlinkProb * (driver_data.leftEyeProb > ...)`, 22319 bytes, md5 `c4e39831...`).
+   - **Fix applied:** restored the device-original `helpers.py` (and `realtime.py`) from `old_openpilot`.
+     The relaxed-DM change is therefore **NOT currently applied on the device** — it must be re-done as a
+     **surgical edit to the device's older-schema helpers.py**, not a copy of the repo file.
+
+2. **Manager stuck state.** Repeated mid-drive `pkill` of dmonitoringd/manager (during debugging)
+   corrupted manager's per-process tracking: `managerState` showed `dmonitoringd shouldBeRunning=True,
+   running=False` with NO crash, NO tombstone, NO exception, and the code ran fine standalone (`main()`
+   / manager's `launcher()` both ran 10s+). Restarting individual processes did NOT recover it.
+   **Only a full reboot cleared it.** After the reboot: `driverMonitoringState` published at ~20Hz,
+   `processNotRunning` gone.
+   - Lesson: do NOT iteratively pkill processes mid-session — it poisons manager state and only a
+     reboot fixes it. Issue reboots **detached** (`setsid bash -c "sleep 2; sudo reboot"`) because an
+     SSH `sudo reboot` was repeatedly cut off by the session drop before executing.
+
+### Problem B — system-wide commIssue / selfdrivedLagging (UNRESOLVED — blocks engagement)
+After A was fixed, openpilot still would not engage. Live while driving (~9 m/s, gear=drive,
+cruiseAvailable=True):
+- Events flicker rapidly: `commIssue`, `selfdrivedLagging`, `locationdTemporaryError`,
+  plus driver-input overrides (`steerOverride`/`gasPressedOverride` = hands on wheel / foot on gas).
+- **ALL services flicker not-alive/slow simultaneously** (carState, modelV2, livePose, radarState,
+  longitudinalPlan, controlsState, driverMonitoringState, …) — a **system-wide periodic stall**, not
+  one bad process.
+- **NOT CPU starvation:** cores were `0-7` (all 8 online), per-core ~40-50%, **43% idle**.
+- RT (SCHED_FIFO) process CPU leaders: **`locationd` ~37% @ prio 5** (highest), then card/ui/selfdrived/
+  modeld. `locationd`/`livePose` were in the flickering set and `locationdTemporaryError` was constant.
+- **Leading hypothesis:** `locationd` (the pose/Kalman filter) is struggling on the **Raven** — likely
+  the legacy Tesla sensor/GPS feed is intermittent or malformed, stalling locationd, which back-pressures
+  the bus and makes selfdrived lag → commIssue → no engage. This is a strong candidate to compare
+  against how **xnor** wires locationd/sensors for the legacy Model S.
+- Could not fully confirm the locationd root cause before the device went out of hotspot range.
+
+### State left on the device
+- `helpers.py` + `realtime.py` = **device originals** (relaxed DM NOT applied; my core-affinity fix
+  in §15 also reverted to stock as a side effect of restoring realtime.py — re-apply if keeping sunnypilot).
+- Raven port (opendbc overlay, panda 0x348 flash, RCM_status DBC, bus-1 carstate, radarUnavailable) all
+  still in place and were driving earlier.
+- User is **reverting to the xnor prebuilt version**, so sunnypilot DM/engage debugging is paused here.
+
+### Where to resume (next session)
+1. Decide fork: continue sunnypilot (this branch) vs the xnor prebuilt. User chose xnor for now.
+2. If returning to sunnypilot: chase **Problem B / locationd** first (it blocks engagement) — compare
+   `selfdrive/locationd/locationd.py` + sensor inputs vs `openpilot-xnor`, check `livePose` rate and
+   `locationdTemporaryError` cause on the Raven (GPS/IMU/sensor feed). The DM relax is secondary and must
+   be a **surgical** edit to the device's old-schema helpers.py (use `leftBlinkProb`/`leftEyeProb`, NOT
+   `eyesClosedProb`).
+3. Re-apply the §15 `realtime.py` core-affinity guard if staying on sunnypilot (it was reverted).
