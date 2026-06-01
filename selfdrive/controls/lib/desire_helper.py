@@ -36,7 +36,7 @@ DESIRES = {
 
 
 class DesireHelper:
-  def __init__(self):
+  def __init__(self, CP=None):
     self.lane_change_state = LaneChangeState.off
     self.lane_change_direction = LaneChangeDirection.none
     self.lane_change_timer = 0.0
@@ -45,9 +45,13 @@ class DesireHelper:
     self.prev_one_blinker = False
     self.desire = log.Desire.none
 
-    # auto2xnor: nudgeless lane change
+    # auto2xnor: nudgeless lane change — Tesla only.
+    # The Ford F-150 Lightning is explicitly excluded (driver asked to keep the
+    # nudge requirement there); nudgeless is enabled only on Tesla brand cars.
     self.params = Params()
-    self.nudgeless_lane_change = self.params.get_bool("NudgelessLaneChange")
+    self.brand = CP.brand if CP is not None else ""
+    self.nudgeless_supported = self.brand == "tesla"
+    self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
 
@@ -61,9 +65,10 @@ class DesireHelper:
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
     # auto2xnor: refresh the nudgeless toggle ~ every 3s so changing it doesn't need a restart
+    # (still gated to Tesla — never effective on the Ford)
     self._param_read_counter += 1
     if self._param_read_counter % 60 == 0:
-      self.nudgeless_lane_change = self.params.get_bool("NudgelessLaneChange")
+      self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off

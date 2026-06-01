@@ -31,7 +31,8 @@ DESCRIPTIONS = {
   "NudgelessLaneChange": tr_noop(
     "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
     "Hold the blinker for about 1.5 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
-    "The lane change is blocked while the blind spot monitor detects a vehicle. Keep your hands on the wheel and check your surroundings."
+    "The lane change is blocked while the blind spot monitor detects a vehicle. Keep your hands on the wheel and check your surroundings. " +
+    "Tesla only — has no effect on the Ford F-150 Lightning (the steering-wheel nudge is still required there)."
   ),
   "NoDisengageOnBrake": tr_noop(
     "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +

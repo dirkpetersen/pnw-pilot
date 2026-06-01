@@ -303,7 +303,7 @@ def main(demo=False):
   long_delay = CP.longitudinalActuatorDelay + LONG_SMOOTH_SECONDS
   prev_action = log.ModelDataV2.Action()
 
-  DH = DesireHelper()
+  DH = DesireHelper(CP)  # auto2xnor: CP brand gates nudgeless lane change (Tesla only)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
