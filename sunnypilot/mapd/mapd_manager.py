@@ -6,8 +6,15 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 mapd2xnor: ported from sunnypilot. The pfeiferj mapd binary is bundled (not
-downloaded). Default OSM coverage is the Pacific Northwest (Washington, Oregon,
-Idaho); change via the OsmStateName param or by editing PNW_STATES below.
+downloaded). Default OSM coverage is the Pacific Northwest (WA, OR, ID); change
+via the OsmStateName param or by editing PNW_STATES below.
+
+IMPORTANT: state values MUST be 2-letter codes (WA/OR/ID), not full names. The
+mapd binary's embedded STATE_BOXES bounding-box table is keyed by 2-letter code;
+full names ("Washington") produce "no bounding box data for state code" and never
+download. (The binary's custom-bounds path, OSMDownloadBounds, is broken in
+v1.12.0 — it nil-panics in DownloadBounds — so the state-code path is the only
+working download route.)
 """
 import json
 import platform
@@ -27,7 +34,7 @@ from openpilot.sunnypilot.mapd import MAPD_PATH
 from openpilot.sunnypilot.mapd.mapd_installer import VERSION, update_installed_version
 
 # mapd2xnor: default Pacific Northwest coverage
-PNW_STATES = ["Washington", "Oregon", "Idaho"]
+PNW_STATES = ["WA", "OR", "ID"]  # mapd2xnor: binary's STATE_BOXES is keyed by 2-letter codes, NOT full names
 
 # mapd2xnor: how often to re-arm the OSM download while the toggle is ON but no map
 # data has landed yet (the binary downloads asynchronously; don't re-trigger every loop).
