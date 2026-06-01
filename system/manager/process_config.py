@@ -114,9 +114,14 @@ procs = [
   PythonProcess("statsd", "system.statsd", always_run),
   PythonProcess("feedbackd", "selfdrive.ui.feedback.feedbackd", only_onroad),
 
-  # mapd2xnor: OSM map daemon (pfeiferj binary) + manager publishing liveMapDataSP
-  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready),
-  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run),
+  # mapd2xnor: OSM map daemon (pfeiferj binary) + manager publishing liveMapDataSP.
+  # restart_if_crash=True so manager relaunches them if they exit — the mapd binary
+  # does a single non-resuming download pass and can exit/die mid-pass (or be killed
+  # during maintenance); without this, manager never respawns it (matching sunnypilot's
+  # default), the download silently stalls, and the speed-limit sign goes blank until a
+  # full stack restart. With it, the download daemon self-heals across crashes/reboots.
+  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, restart_if_crash=True),
+  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, restart_if_crash=True),
 
   # debug procs
   NativeProcess("bridge", "cereal/messaging", ["./bridge"], notcar),

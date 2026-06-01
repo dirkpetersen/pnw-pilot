@@ -195,3 +195,53 @@ Full pristine backups of every modified file are at `/data/dirk/org/mapd2xnor/`.
 - The core-hotplug `set_core_affinity` fix (DMON.md §16, commit `55fbcd44` on
   `dmon2xnor-b`) is **not** on `mapd2xnor`. It's required on this 3X for DM to
   survive engage; if you ever build a single combined deploy branch, include it.
+
+---
+
+## Post-deploy fixes: why the speed-limit sign was blank (and how it was fixed)
+
+After deploy the sign stayed blank ("-"). Two separate bugs, both now fixed on `mapd2xnor`:
+
+### Fix 1 — wrong GPS source (commit `7ed0284c`)
+The bridge (`live_map_data/base_map_data.py`, `osm_map_data.py`) subscribed to
+**`gpsLocationExternal`**, which the comma **3X does not publish** — its internal qcom GPS
+(`qcomgpsd`) publishes **`gpsLocation`** (with a valid fix). So `LastGPSPosition` was never
+written → the mapd binary had no position → `MapSpeedLimit` empty → `liveMapDataSP.speedLimitValid`
+always False → blank sign.
+
+**Fix:** select the GPS stream at runtime via `common.gps.get_gps_location_service(params)` —
+exactly how sunnypilot does it. It returns `gpsLocationExternal` only when `UbloxAvailable`,
+else `gpsLocation`. The 3X has no ublox, so it now reads `gpsLocation`. `base_map_data`
+subscribes to the resolved service and reads `.hasFix`; `osm_map_data` reads
+`latitude`/`longitude`/`bearingDeg` from it and writes `LastGPSPosition`.
+
+Verified: `LastGPSPosition` now populated; binary loaded the local tile and resolved e.g.
+**20 mph on 7th Avenue Northwest** (Seattle, 47.67/-122.36).
+
+### Fix 2 — mapd processes never respawned after exit (commit below)
+The repeated "download stalls" were **not** a download-logic problem — the **mapd binary
+simply wasn't running**. `NativeProcess("mapd", …)` / `PythonProcess("mapd_manager", …)`
+were created without `restart_if_crash=True`, so when the binary exited (it does a single
+non-resuming download pass and can finish/die mid-pass, or get killed during maintenance),
+`manager.ensure_running` did **not** relaunch it (it only restarts crashed processes when
+`restart_if_crash` is set — same default as sunnypilot). The daemon stayed dead until a full
+stack restart, and the sign went blank.
+
+**Fix:**
+- `system/manager/process.py` — `NativeProcess.__init__` now accepts `restart_if_crash`
+  (previously only `PythonProcess` did). The base-class attribute and the
+  `ensure_running` check (`if p.restart_if_crash and not p.proc.is_alive(): p.restart()`)
+  already existed, so this just plumbs the flag through to native processes.
+- `system/manager/process_config.py` — both `mapd` and `mapd_manager` now pass
+  `restart_if_crash=True`, so manager relaunches them on exit and the download daemon
+  self-heals across crashes/reboots.
+
+### mapd download behavior (worth knowing)
+- The binary downloads a state's whole bounding box in **one sequential pass** over a
+  lat/lon grid (`offline/<lat>/<lon>/<tile>`), **no resume** (v1.12.0). If interrupted it
+  must be re-armed (`OSMDownloadLocations`) and restarts the pass from the beginning;
+  already-present tiles are skipped/re-fetched. WA+OR+ID is ~hundreds of MB, so let it run
+  uninterrupted on Wi-Fi. `update_osm_db()` re-arms (throttled) until `OSMDownloadProgress`
+  shows `downloaded_files >= total_files` (commit `65b96fafee`).
+- Speed limit only shows where OSM has a `maxspeed` tag for the road **and** there's a GPS
+  fix; residential streets often have a limit, but some roads are untagged → no sign there.
