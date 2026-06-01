@@ -52,7 +52,13 @@ class SoftwareLayout(Widget):
   def __init__(self):
     super().__init__()
 
-    self._onroad_label = ListItem(lambda: tr("Updates are only downloaded while the car is off."))
+    # dirk: when "Allow software updates" is off, this label explains why the update
+    # controls are hidden; otherwise it shows the normal offroad-only hint.
+    self._onroad_label = ListItem(lambda: (
+      tr("Software updates are disabled. Enable \"Allow software updates\" in Toggles to update.")
+      if not ui_state.params.get_bool("AllowSoftwareUpdates")
+      else tr("Updates are only downloaded while the car is off.")
+    ))
     self._version_item = text_item(lambda: tr("Current Version"), ui_state.params.get("UpdaterCurrentDescription") or "")
     self._download_btn = button_item(lambda: tr("Download"), lambda: tr("CHECK"), callback=self._on_download_update)
 
@@ -87,8 +93,13 @@ class SoftwareLayout(Widget):
     self._scroller.render(rect)
 
   def _update_state(self):
-    # Show/hide onroad warning
-    self._onroad_label.set_visible(ui_state.is_onroad())
+    # dirk: when software updates aren't allowed, hide the update controls entirely so
+    # nothing can fetch/install an OTA that would wipe local changes. The branch picker is
+    # hidden too. Toggle lives in Settings -> Toggles ("Allow software updates").
+    updates_allowed = ui_state.params.get_bool("AllowSoftwareUpdates")
+
+    # Show the label when updates are disabled (explains why) or onroad (normal hint)
+    self._onroad_label.set_visible(not updates_allowed or ui_state.is_onroad())
 
     # Update current version and release notes
     current_desc = ui_state.params.get("UpdaterCurrentDescription") or ""
@@ -97,7 +108,7 @@ class SoftwareLayout(Widget):
     self._version_item.set_description(current_release_notes)
 
     # Update download button visibility and state
-    self._download_btn.set_visible(ui_state.is_offroad())
+    self._download_btn.set_visible(ui_state.is_offroad() and updates_allowed)
 
     updater_state = ui_state.params.get("UpdaterState") or "idle"
     failed_count = ui_state.params.get("UpdateFailedCount") or 0
@@ -137,9 +148,10 @@ class SoftwareLayout(Widget):
     # Update target branch button value
     current_branch = ui_state.params.get("UpdaterTargetBranch") or ""
     self._branch_btn.action_item.set_value(current_branch)
+    self._branch_btn.set_visible(updates_allowed and not ui_state.params.get_bool("IsTestedBranch"))
 
     # Update install button
-    self._install_btn.set_visible(ui_state.is_offroad() and update_available)
+    self._install_btn.set_visible(ui_state.is_offroad() and update_available and updates_allowed)
     if update_available:
       new_desc = ui_state.params.get("UpdaterNewDescription") or ""
       new_release_notes = (ui_state.params.get("UpdaterNewReleaseNotes") or b"").decode("utf-8", "replace")

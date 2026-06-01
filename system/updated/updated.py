@@ -476,7 +476,11 @@ def main() -> None:
         last_fetch = params.get("UpdaterLastFetchTime")
         timed_out = last_fetch is None or (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - last_fetch > datetime.timedelta(days=3))
         user_requested_fetch = wait_helper.user_request == UserRequest.FETCH
-        if params.get_bool("NetworkMetered") and not timed_out and not user_requested_fetch:
+        if not params.get_bool("AllowSoftwareUpdates"):
+          # dirk: don't fetch/finalize updates unless explicitly allowed — installing one
+          # would wipe local customizations on this device. Checking still runs above.
+          cloudlog.info("skipping fetch, software updates not allowed (AllowSoftwareUpdates)")
+        elif params.get_bool("NetworkMetered") and not timed_out and not user_requested_fetch:
           cloudlog.info("skipping fetch, connection metered")
         elif wait_helper.user_request == UserRequest.CHECK:
           cloudlog.info("skipping fetch, only checking")
