@@ -42,7 +42,8 @@ DESCRIPTIONS = {
   "NoDisengageOnBrake": tr_noop(
     "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
     "openpilot will resume controlling speed as soon as you release the brake. " +
-    "This reduces a safety boundary — only enable it if you understand the risk and stay attentive."
+    "This reduces a safety boundary — only enable it if you understand the risk and stay attentive. " +
+    "Tesla only — not supported on the Ford F-150 Lightning."
   ),
   "SensitiveDriverMonitoring": tr_noop(
     "When enabled, driver monitoring uses the strict stock timeout (about 11 seconds before disengaging). " +
@@ -68,7 +69,7 @@ DESCRIPTIONS = {
 
 class TogglesLayout(Widget):
   # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
-  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")
+  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist", "NoDisengageOnBrake")
 
   def __init__(self):
     super().__init__()
