@@ -32,6 +32,15 @@ DESCRIPTIONS = {
     "without a turn signal activated while driving over 31 mph (50 km/h)."
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when sunnypilot is not engaged."),
+  # dirk: "Sensitive Driver Monitoring" is backed by the existing EnableGithubRunner
+  # param (release build can't register a new param key; this CI-only flag has no
+  # driving impact). See DMON.md / helpers.py.
+  "EnableGithubRunner": tr_noop(
+    "When ON, use the standard sunnypilot driver monitoring timeouts (strict). "
+    "When OFF (default), relax the active-monitoring timeouts to 1 hour for attention/eyes "
+    "and 3 hours for cell-phone use. Face-lost (passive) monitoring stays at the stock 30s. "
+    "Requires a restart to take effect."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -75,6 +84,12 @@ class TogglesLayout(Widget):
         DESCRIPTIONS["AlwaysOnDM"],
         "monitoring.png",
         False,
+      ),
+      "EnableGithubRunner": (
+        lambda: tr("Sensitive Driver Monitoring"),
+        DESCRIPTIONS["EnableGithubRunner"],
+        "monitoring.png",
+        True,
       ),
       "RecordFront": (
         lambda: tr("Record and Upload Driver Camera"),

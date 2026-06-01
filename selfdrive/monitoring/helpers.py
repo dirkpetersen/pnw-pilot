@@ -170,6 +170,25 @@ class DriverMonitoring:
     self.params = Params()
     self.too_distracted = self.params.get_bool("DriverTooDistracted")
 
+    # dirk: relaxed driver monitoring (Option A — adaptive decay rate, single counter).
+    # "Sensitive Driver Monitoring" toggle ON -> stock sunnypilot timeouts.
+    # OFF (default) -> attention (pose/blink) decays over 1h, phone over 3h. The alert
+    # thresholds are fractions of the counter so they scale automatically; recovery,
+    # alert ladder, smoothing filter and lockout are all left as stock. Passive
+    # (face-lost) mode is intentionally NOT relaxed — that safety floor stays at 30s.
+    # Read once at init; flip the toggle + restart to change.
+    # NOTE: backed by the existing registered "EnableGithubRunner" param. This is a
+    # release build with no on-device SCons, so a brand-new param key can't be compiled
+    # into params_pyx.so. EnableGithubRunner is a dev/CI-only flag with no relevance on
+    # a car (it would only spawn a GitHub CI runner, which we never want), so it is
+    # repurposed here with zero real-world side effect. The UI toggle labelled
+    # "Sensitive Driver Monitoring" writes this param; its old Developer-settings toggle
+    # is removed to avoid two controls on the same key. See DMON.md.
+    self._sensitive_dm = self.params.get_bool("EnableGithubRunner")
+    self._POSE_DISTRACTED_TIME = 3600.   # 1 hour  (pose / blink / eyes)
+    self._PHONE_DISTRACTED_TIME = 10800.  # 3 hours (cell phone)
+    # End dirk
+
     self._reset_awareness()
     self._set_timers(active_monitoring=True)
     self._reset_events()
@@ -182,10 +201,26 @@ class DriverMonitoring:
   def _reset_events(self):
     self.current_events = Events()
 
+  def _active_distracted_time(self):
+    # dirk: relaxed active-mode total timeout. Stock when the toggle is ON; otherwise
+    # pick the timeout by what's currently triggering — phone gets the longest budget,
+    # and when both phone and pose/blink fire at once the shorter (pose) budget wins.
+    if self._sensitive_dm:
+      return self.settings._DISTRACTED_TIME
+    pose_or_blink = (DistractedType.DISTRACTED_POSE in self.distracted_types or
+                     DistractedType.DISTRACTED_BLINK in self.distracted_types)
+    phone = DistractedType.DISTRACTED_PHONE in self.distracted_types
+    if phone and not pose_or_blink:
+      return self._PHONE_DISTRACTED_TIME
+    return self._POSE_DISTRACTED_TIME
+    # End dirk
+
   def _set_timers(self, active_monitoring):
+    # dirk: active-mode total timeout is dynamic (1h pose / 3h phone) unless toggle on
+    distracted_time = self._active_distracted_time()
     if self.active_monitoring_mode and self.awareness <= self.threshold_prompt:
       if active_monitoring:
-        self.step_change = self.settings._DT_DMON / self.settings._DISTRACTED_TIME
+        self.step_change = self.settings._DT_DMON / distracted_time
       else:
         self.step_change = 0.
       return  # no exploit after orange alert
@@ -198,9 +233,12 @@ class DriverMonitoring:
         self.awareness_passive = self.awareness
         self.awareness = self.awareness_active
 
+      # dirk: keep the stock alert-ladder FRACTIONS (green 0.727, orange 0.545 of the
+      # counter) so the alert shape is unchanged — only the decay rate is stretched, so
+      # the same green->orange->red escalation plays out over 1h/3h instead of 11s.
       self.threshold_pre = self.settings._DISTRACTED_PRE_TIME_TILL_TERMINAL / self.settings._DISTRACTED_TIME
       self.threshold_prompt = self.settings._DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._DISTRACTED_TIME
-      self.step_change = self.settings._DT_DMON / self.settings._DISTRACTED_TIME
+      self.step_change = self.settings._DT_DMON / distracted_time
       self.active_monitoring_mode = True
     else:
       if self.active_monitoring_mode:
@@ -357,8 +395,13 @@ class DriverMonitoring:
         self._reset_awareness()
         return
       # only restore awareness when paying attention and alert is not red
+      # dirk: recover at the stock (fast) rate even when the relaxed slow decay is
+      # active — slow to penalize, normal to recover. Otherwise after a long phone/pose
+      # decay the banner would linger for minutes once you look back at the road.
+      recovery_step = self.step_change if (self.active_monitoring_mode and self._sensitive_dm) or not self.active_monitoring_mode \
+                      else self.settings._DT_DMON / self.settings._DISTRACTED_TIME
       self.awareness = min(self.awareness + ((self.settings._RECOVERY_FACTOR_MAX-self.settings._RECOVERY_FACTOR_MIN)*
-                                             (1.-self.awareness)+self.settings._RECOVERY_FACTOR_MIN)*self.step_change, 1.)
+                                             (1.-self.awareness)+self.settings._RECOVERY_FACTOR_MIN)*recovery_step, 1.)
       if self.awareness == 1.:
         self.awareness_passive = min(self.awareness_passive + self.step_change, 1.)
       # don't display alert banner when awareness is recovering and has cleared orange
