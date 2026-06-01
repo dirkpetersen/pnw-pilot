@@ -7,27 +7,27 @@
 **Branch:** `auto2xnor` (openpilot-xnor worktree), off `c0d78143` (xnor prebuilt base).
 **Device:** comma **3X** (`tizi`) @ `comma@192.168.13.154`, distro branch `xnor-dev`.
 
-## What it adds (3 toggles, all default OFF, all Tesla-only)
-- **Nudgeless Lane Change** (`NudgelessLaneChange`) — in `desire_helper.py`, hold the
-  blinker ~1.5 s above 20 mph with no blindspot → lane change starts without a wheel
+## What it adds (3 toggles, all default OFF)
+- **Nudgeless Lane Change** (`NudgelessLaneChange`) — *Tesla-only* — in `desire_helper.py`,
+  hold the blinker ~1.5 s above 20 mph with no blindspot → lane change starts without a wheel
   nudge. Nudge path preserved; blindspot still blocks; speed gate unchanged. Re-read ~3 s.
-- **No Disengage on Braking** (`NoDisengageOnBrake`) — in `selfdrived.py`, suppresses the
-  brake/regen-braking `pedalPressed` disengage so OP stays engaged through brake presses
-  (resumes on release). Gas-pedal disengage unaffected. Re-read live in `params_thread`.
-- **Overtake Assist** (`OvertakeAssist`) — DISPLAY-ONLY prompt (`overtake_assist.py` +
-  `augmented_road_view.py`). When closing on a slower lead on the highway with a clear
-  adjacent-lane blind spot, shows a green arrow + "Signal to overtake". openpilot does NOT
-  steer — the driver flicks the blinker (nudgeless then completes it). Replaced an earlier
-  auto-steer `AutoInitiateLaneChange` (reverted: OP can't command the Raven blinker and
-  can't see fast traffic approaching in the target lane).
+- **Overtake Assist** (`OvertakeAssist`) — *Tesla-only* — DISPLAY-ONLY prompt
+  (`overtake_assist.py` + `augmented_road_view.py`). When closing on a slower lead on the
+  highway with a clear adjacent-lane blind spot, shows a green arrow + "Signal to overtake".
+  openpilot does NOT steer — the driver flicks the blinker (nudgeless then completes it).
+  Replaced an earlier auto-steer `AutoInitiateLaneChange` (reverted: OP can't command the
+  Raven blinker and can't see fast traffic approaching in the target lane).
+- **No Disengage on Braking** (`NoDisengageOnBrake`) — **UNSUPPORTED / always disabled** — in
+  `selfdrived.py`, would suppress the brake/regen-braking `pedalPressed` disengage. Not
+  supported on any car here (Ford **or** Tesla), so the toggle is always greyed out and forced
+  off; the `selfdrived.py` logic is left in place but inert (param always False).
 
-**Tesla-only gating:** all three are in `TogglesLayout.TESLA_ONLY_TOGGLES`
-(`NudgelessLaneChange`, `OvertakeAssist`, `NoDisengageOnBrake`). The `_update_toggles` loop
-disables (greys out) and force-OFFs them when `ui_state.CP.brand != "tesla"` — so on the
-**Ford F-150 Lightning** they are visible but disabled. Their descriptions say "Tesla only".
+**Per-car gating (in `_update_toggles`):**
+- `TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")` — enabled on Tesla,
+  greyed out + forced off when `ui_state.CP.brand != "tesla"` (e.g. the Ford F-150 Lightning).
+- `UNSUPPORTED_TOGGLES = ("NoDisengageOnBrake",)` — always greyed out + forced off, every car.
 
-Panda safety untouched — openpilot-side logic only. The brake toggle **reduces a safety
-boundary** (its UI description says so); all default OFF per CLAUDE.md (safety > features).
+Panda safety untouched — openpilot-side logic only; all default OFF per CLAUDE.md (safety > features).
 
 ## Files changed (8)
 | File | How it deploys |
@@ -170,13 +170,16 @@ The deploy was connection-loss-safe (stage md5-verified → `setsid nohup` →
 `/data/dirk/org/auto-integ/`. Verified after a cold reboot: all three feature sets'
 params resolve, 0 `UnknownKeyName`, `shouldRun-but-not: ['updated']` (expected w/ DisableUpdates).
 
-### Ford grey-out (commit `8b029580`)
-All three auto toggles are **Tesla-only**: not supported on the Ford F-150 Lightning, so they
-are disabled (greyed out) and force-OFF on non-Tesla cars by the `is_tesla` loop in
-`_update_toggles`. `NoDisengageOnBrake` was added to `TESLA_ONLY_TOGGLES` in `8b029580`
-(it had been left out); `NudgelessLaneChange` + `OvertakeAssist` were already gated.
+### Grey-out history
+- `8b029580` — added `NoDisengageOnBrake` to `TESLA_ONLY_TOGGLES` (greyed on Ford, the other
+  two were already gated). **Deployed to device.**
+- `6de1b4b8` — moved `NoDisengageOnBrake` to a new `UNSUPPORTED_TOGGLES` set: it is not
+  supported on **any** car (Ford **or** Tesla), so it is now **always** greyed out + forced
+  off via its own loop in `_update_toggles`. `NudgelessLaneChange` + `OvertakeAssist` remain
+  Tesla-only (`TESLA_ONLY_TOGGLES`). The `selfdrived.py` brake-suppression logic is left in
+  place but inert (the param is forced False).
 
-> **NOTE — not yet deployed:** the `8b029580` Ford grey-out commit is on the `auto2xnor`
-> branch but has **not** been pushed to the device yet. The live `toggles.py` still greys out
-> only Nudgeless + OvertakeAssist; redeploy `toggles.py` (merge in place, no params rebuild
-> needed — it's a pure-Python UI change) to apply the NoDisengageOnBrake grey-out on Ford.
+> **NOTE — `6de1b4b8` not yet deployed:** it's on the `auto2xnor` branch but the live device
+> `toggles.py` still has `NoDisengageOnBrake` in `TESLA_ONLY_TOGGLES` (enabled on Tesla).
+> Redeploy `toggles.py` (merge in place, no params rebuild — pure-Python UI change) to make
+> NoDisengageOnBrake always-disabled on the device.
