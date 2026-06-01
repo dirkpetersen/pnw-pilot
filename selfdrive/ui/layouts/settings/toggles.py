@@ -28,6 +28,16 @@ DESCRIPTIONS = {
     "without a turn signal activated while driving over 31 mph (50 km/h)."
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
+  "NudgelessLaneChange": tr_noop(
+    "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
+    "Hold the blinker for about 1.5 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
+    "The lane change is blocked while the blind spot monitor detects a vehicle. Keep your hands on the wheel and check your surroundings."
+  ),
+  "NoDisengageOnBrake": tr_noop(
+    "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
+    "openpilot will resume controlling speed as soon as you release the brake. " +
+    "This reduces a safety boundary — only enable it if you understand the risk and stay attentive."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -70,6 +80,18 @@ class TogglesLayout(Widget):
         lambda: tr("Always-On Driver Monitoring"),
         DESCRIPTIONS["AlwaysOnDM"],
         "monitoring.png",
+        False,
+      ),
+      "NudgelessLaneChange": (
+        lambda: tr("Nudgeless Lane Change"),
+        DESCRIPTIONS["NudgelessLaneChange"],
+        "warning.png",
+        False,
+      ),
+      "NoDisengageOnBrake": (
+        lambda: tr("No Disengage on Braking"),
+        DESCRIPTIONS["NoDisengageOnBrake"],
+        "disengage_on_accelerator.png",
         False,
       ),
       "RecordFront": (
