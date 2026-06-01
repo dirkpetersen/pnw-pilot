@@ -77,7 +77,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
     {"OsmDownloadedDate", {PERSISTENT, STRING}},
     {"OsmLocationName", {PERSISTENT, STRING}},
-    {"OsmStateName", {PERSISTENT, STRING, "Washington,Oregon,Idaho"}},
+    {"OsmStateName", {PERSISTENT, STRING, "WA,OR,ID"}},  // mapd2xnor: 2-letter codes (binary STATE_BOXES key), NOT full names
     {"OsmLocal", {PERSISTENT, BOOL}},
     {"OsmAutoRequested", {PERSISTENT, BOOL}},
     {"OSMDownloadLocations", {PERSISTENT, JSON}},
