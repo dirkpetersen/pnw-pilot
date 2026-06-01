@@ -35,9 +35,7 @@ class DRIVER_MONITOR_SETTINGS:
     self._EYE_THRESHOLD = 0.65
     self._SG_THRESHOLD = 0.9
     self._BLINK_THRESHOLD = 0.865
-    # BluePilot: phone threshold raised 0.5 -> 0.6 to reduce false positives
-    self._PHONE_THRESH = 0.6
-    # End BluePilot
+    self._PHONE_THRESH = 0.5
 
     self._POSE_PITCH_THRESHOLD = 0.3133
     self._POSE_PITCH_THRESHOLD_SLACK = 0.3237
@@ -77,20 +75,8 @@ class DRIVER_MONITOR_SETTINGS:
     self._RECOVERY_FACTOR_MAX = 5.  # relative to minus step change
     self._RECOVERY_FACTOR_MIN = 1.25  # relative to minus step change
 
-    # BluePilot: terminal alert lockout raised 3 -> 10 (cumulative duration unchanged at 30s)
-    self._MAX_TERMINAL_ALERTS = 10  # not allowed to engage after this many terminal alerts
+    self._MAX_TERMINAL_ALERTS = 3  # not allowed to engage after 3 terminal alerts
     self._MAX_TERMINAL_DURATION = int(30 / self._DT_DMON)  # not allowed to engage after 30s of terminal alerts
-    # End BluePilot
-
-    # BluePilot: dual-counter relaxed DM — pose 5 min, phone 15 min, snap-back recovery
-    self._POSE_DISTRACTED_TIME = 300.  # pose/blink total timeout (s)
-    self._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL = 60.       # green at 60s before terminal
-    self._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL = 30.    # orange at 30s before terminal
-    self._PHONE_DISTRACTED_TIME = 900.  # phone total timeout (s)
-    self._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL = 120.     # green at 120s before terminal
-    self._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL = 60.   # orange at 60s before terminal
-    self._RECOVERY_DEBOUNCE_FRAMES = int(2.0 / self._DT_DMON)  # 2s of non-distraction → snap to 1.0
-    # End BluePilot
 
 class DistractedType:
 
@@ -187,18 +173,15 @@ class DriverMonitoring:
     self.params = Params()
     self.too_distracted = self.params.get_bool("DriverTooDistracted")
 
-    # BluePilot: dual-counter state + pre-computed thresholds (5 min pose / 15 min phone)
-    self.awareness_pose = 1.
-    self.awareness_phone = 1.
-    self._pose_clear_frames = 0
-    self._phone_clear_frames = 0
-    self._pose_step = self.settings._DT_DMON / self.settings._POSE_DISTRACTED_TIME
-    self._phone_step = self.settings._DT_DMON / self.settings._PHONE_DISTRACTED_TIME
-    self._pose_threshold_pre    = self.settings._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL    / self.settings._POSE_DISTRACTED_TIME
-    self._pose_threshold_prompt = self.settings._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._POSE_DISTRACTED_TIME
-    self._phone_threshold_pre    = self.settings._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL    / self.settings._PHONE_DISTRACTED_TIME
-    self._phone_threshold_prompt = self.settings._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._PHONE_DISTRACTED_TIME
-    # End BluePilot
+    # dirk: relaxed DM (Option A — single counter, adaptive decay rate).
+    #   Sensitive Driver Monitoring OFF (default) -> relaxed: stretch the active-mode
+    #   timeout to 1h for pose/eye/blink distraction, 3h for cell-phone-only.
+    #   Sensitive Driver Monitoring ON            -> stock strict 11s behavior.
+    # Passive (no-face wheel-touch) mode is never relaxed — it stays the 30s safety floor.
+    self._sensitive_dm = self.params.get_bool("SensitiveDriverMonitoring")
+    self._POSE_DISTRACTED_TIME = 3600.   # 1h  — pose/eye/blink (or pose+phone)
+    self._PHONE_DISTRACTED_TIME = 10800. # 3h  — cell-phone only
+    # End dirk
 
     self._reset_awareness()
     self._set_timers(active_monitoring=True)
@@ -208,20 +191,32 @@ class DriverMonitoring:
     self.awareness = 1.
     self.awareness_active = 1.
     self.awareness_passive = 1.
-    # BluePilot: reset dual counters
-    self.awareness_pose = 1.
-    self.awareness_phone = 1.
-    self._pose_clear_frames = 0
-    self._phone_clear_frames = 0
-    # End BluePilot
 
   def _reset_events(self):
     self.current_events = Events()
 
+  # dirk: relaxed DM (Option A). Active-mode total timeout, selected by what is
+  # currently triggering the distraction:
+  #   - Sensitive DM ON  -> stock 11s (strict)
+  #   - phone-only       -> 3h
+  #   - pose/blink, phone+pose, or none -> 1h (the shorter "pose wins" safety floor)
+  # The alert-ladder thresholds stay the stock fractions (see _set_timers) so the
+  # green->orange->red escalation shape is identical, just stretched over 1h/3h.
+  def _active_distracted_time(self):
+    if self._sensitive_dm:
+      return self.settings._DISTRACTED_TIME
+    phone = DistractedType.DISTRACTED_PHONE in self.distracted_types
+    pose_or_blink = (DistractedType.DISTRACTED_POSE in self.distracted_types
+                     or DistractedType.DISTRACTED_BLINK in self.distracted_types)
+    if phone and not pose_or_blink:
+      return self._PHONE_DISTRACTED_TIME
+    return self._POSE_DISTRACTED_TIME
+  # End dirk
+
   def _set_timers(self, active_monitoring):
     if self.active_monitoring_mode and self.awareness <= self.threshold_prompt:
       if active_monitoring:
-        self.step_change = self.settings._DT_DMON / self.settings._DISTRACTED_TIME
+        self.step_change = self.settings._DT_DMON / self._active_distracted_time()
       else:
         self.step_change = 0.
       return  # no exploit after orange alert
@@ -236,7 +231,7 @@ class DriverMonitoring:
 
       self.threshold_pre = self.settings._DISTRACTED_PRE_TIME_TILL_TERMINAL / self.settings._DISTRACTED_TIME
       self.threshold_prompt = self.settings._DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._DISTRACTED_TIME
-      self.step_change = self.settings._DT_DMON / self.settings._DISTRACTED_TIME
+      self.step_change = self.settings._DT_DMON / self._active_distracted_time()  # dirk: relaxed decay rate
       self.active_monitoring_mode = True
     else:
       if self.active_monitoring_mode:
@@ -377,97 +372,24 @@ class DriverMonitoring:
       self._reset_awareness()
       return
 
-    awareness_prev = self.awareness
-
-    # BluePilot: dual-counter active-mode logic ─────────────────────────────────
-    #   pose+blink: 5 min total timeout, snap-back to 1.0 after 2 s clear
-    #   phone:     15 min total timeout, snap-back to 1.0 after 2 s clear
-    # Active mode = model can see driver. Passive mode (face lost, model uncertain)
-    # falls through to the unchanged single-counter wheel-touch logic below.
-    if self.active_monitoring_mode:
-      if driver_engaged:
-        self._reset_awareness()
-        return
-
-      pose_distracted_this_frame = (
-        (DistractedType.DISTRACTED_POSE in self.distracted_types
-         or DistractedType.DISTRACTED_BLINK in self.distracted_types)
-        and self.face_detected and self.pose.low_std
-      )
-      phone_distracted_this_frame = (
-        DistractedType.DISTRACTED_PHONE in self.distracted_types
-        and self.face_detected and self.pose.low_std
-      )
-
-      pose_reaching_pre  = self.awareness_pose  - self._pose_step  <= self._pose_threshold_pre
-      phone_reaching_pre = self.awareness_phone - self._phone_step <= self._phone_threshold_pre
-      pose_standstill_exempt  = standstill and pose_reaching_pre
-      phone_standstill_exempt = standstill and phone_reaching_pre
-      pose_always_on_red_exempt  = always_on_valid and not op_engaged and (self.awareness_pose  - self._pose_step  <= 0)
-      phone_always_on_red_exempt = always_on_valid and not op_engaged and (self.awareness_phone - self._phone_step <= 0)
-
-      # POSE counter: decay if distracted, snap-back to 1.0 after debounced clear
-      if pose_distracted_this_frame:
-        if not (pose_standstill_exempt or pose_always_on_red_exempt):
-          self.awareness_pose = max(self.awareness_pose - self._pose_step, -0.1)
-        self._pose_clear_frames = 0
-      else:
-        self._pose_clear_frames += 1
-        if self._pose_clear_frames >= self.settings._RECOVERY_DEBOUNCE_FRAMES:
-          self.awareness_pose = 1.
-
-      # PHONE counter: decay if distracted, snap-back to 1.0 after debounced clear
-      if phone_distracted_this_frame:
-        if not (phone_standstill_exempt or phone_always_on_red_exempt):
-          self.awareness_phone = max(self.awareness_phone - self._phone_step, -0.1)
-        self._phone_clear_frames = 0
-      else:
-        self._phone_clear_frames += 1
-        if self._phone_clear_frames >= self.settings._RECOVERY_DEBOUNCE_FRAMES:
-          self.awareness_phone = 1.
-
-      # Combined awareness for UI/state compatibility
-      self.awareness = min(self.awareness_pose, self.awareness_phone)
-
-      # Classify each counter, emit the more-severe alert
-      def _level(awareness, t_pre, t_prompt):
-        if awareness <= 0:      return 3
-        if awareness <= t_prompt: return 2
-        if awareness <= t_pre:    return 1
-        return 0
-      pose_lvl  = _level(self.awareness_pose,  self._pose_threshold_pre,  self._pose_threshold_prompt)
-      phone_lvl = _level(self.awareness_phone, self._phone_threshold_pre, self._phone_threshold_prompt)
-      alert_lvl = max(pose_lvl, phone_lvl)
-
-      if alert_lvl == 3:
-        self.terminal_time += 1
-        if awareness_prev > 0.:
-          self.terminal_alert_cnt += 1
-
-      alert = None
-      if alert_lvl == 3:   alert = EventName.driverDistracted
-      elif alert_lvl == 2: alert = EventName.promptDriverDistracted
-      elif alert_lvl == 1: alert = EventName.preDriverDistracted
-      if alert is not None:
-        self.current_events.add(alert)
-
-      if self.dcam_uncertain_cnt > self.settings._DCAM_UNCERTAIN_ALERT_COUNT and not self.dcam_uncertain_alerted:
-        set_offroad_alert("Offroad_DriverMonitoringUncertain", True)
-        self.dcam_uncertain_alerted = True
-      return
-    # End BluePilot ─────────────────────────────────────────────────────────────
-
     driver_attentive = self.driver_distraction_filter.x < 0.37
+    awareness_prev = self.awareness
 
     if (driver_attentive and self.face_detected and self.pose.low_std and self.awareness > 0):
       if driver_engaged:
         self._reset_awareness()
         return
+      # dirk: recover at the stock-fast rate even in relaxed mode (slow to penalize,
+      # normal to recover) so the banner doesn't linger for minutes once eyes are back on road.
+      recovery_step = self.step_change
+      if self.active_monitoring_mode and not self._sensitive_dm:
+        recovery_step = self.settings._DT_DMON / self.settings._DISTRACTED_TIME
+      # End dirk
       # only restore awareness when paying attention and alert is not red
       self.awareness = min(self.awareness + ((self.settings._RECOVERY_FACTOR_MAX-self.settings._RECOVERY_FACTOR_MIN)*
-                                             (1.-self.awareness)+self.settings._RECOVERY_FACTOR_MIN)*self.step_change, 1.)
+                                             (1.-self.awareness)+self.settings._RECOVERY_FACTOR_MIN)*recovery_step, 1.)
       if self.awareness == 1.:
-        self.awareness_passive = min(self.awareness_passive + self.step_change, 1.)
+        self.awareness_passive = min(self.awareness_passive + recovery_step, 1.)
       # don't display alert banner when awareness is recovering and has cleared orange
       if self.awareness > self.threshold_prompt:
         return

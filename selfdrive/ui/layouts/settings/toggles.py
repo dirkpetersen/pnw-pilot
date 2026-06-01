@@ -58,8 +58,18 @@ DESCRIPTIONS = {
     "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
     "parked with Wi-Fi until the download completes (the sign shows \"-\" until then). Requires a GPS fix to display a limit."
   ),
+  "SensitiveDriverMonitoring": tr_noop(
+    "When enabled, driver monitoring uses the strict stock timeout (about 11 seconds before disengaging). " +
+    "When disabled (default), monitoring is relaxed: roughly a 1 hour timeout for looking away or closed eyes, " +
+    "and a 3 hour timeout for cell-phone use. The no-face safety timeout is unchanged."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
+  "AllowSoftwareUpdates": tr_noop(
+    "Allow openpilot to download and install software updates. " +
+    "Disabled by default so that updates do not overwrite local customizations on this device. " +
+    "Enable only when you intend to update."
+  ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
 }
 
@@ -143,6 +153,12 @@ class TogglesLayout(Widget):
         "speed_limit.png",
         False,
       ),
+      "SensitiveDriverMonitoring": (
+        lambda: tr("Sensitive Driver Monitoring"),
+        DESCRIPTIONS["SensitiveDriverMonitoring"],
+        "monitoring.png",
+        True,
+      ),
       "RecordFront": (
         lambda: tr("Record and Upload Driver Camera"),
         DESCRIPTIONS["RecordFront"],
@@ -159,6 +175,12 @@ class TogglesLayout(Widget):
         lambda: tr("Use Metric System"),
         DESCRIPTIONS["IsMetric"],
         "metric.png",
+        False,
+      ),
+      "AllowSoftwareUpdates": (
+        lambda: tr("Allow software updates"),
+        DESCRIPTIONS["AllowSoftwareUpdates"],
+        "warning.png",
         False,
       ),
     }
