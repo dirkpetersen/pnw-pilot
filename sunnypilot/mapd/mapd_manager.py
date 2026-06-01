@@ -14,6 +14,7 @@ import platform
 import os
 import glob
 import shutil
+import time
 from datetime import datetime
 
 from openpilot.common.params import Params
@@ -27,6 +28,11 @@ from openpilot.sunnypilot.mapd.mapd_installer import VERSION, update_installed_v
 
 # mapd2xnor: default Pacific Northwest coverage
 PNW_STATES = ["Washington", "Oregon", "Idaho"]
+
+# mapd2xnor: how often to re-arm the OSM download while the toggle is ON but no map
+# data has landed yet (the binary downloads asynchronously; don't re-trigger every loop).
+OSM_DOWNLOAD_RETRY_S = 180.0
+_last_download_arm = [-1e9]  # monotonic ts of last arm (init far in past -> arm immediately)
 
 params = Params()
 mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else params
@@ -94,12 +100,23 @@ def osm_data_present() -> bool:
 
 
 def update_osm_db() -> None:
-  # mapd2xnor: auto-arm the first PNW download if no map data exists yet and the
-  # user hasn't already requested one. Lets the feature work on a fresh deploy
-  # without an OSM settings UI page. Idempotent: only fires until data lands.
-  if not params.get_bool("OsmDbUpdatesCheck") and not osm_data_present():
-    if not params.get_bool("OsmAutoRequested"):
-      params.put_bool("OsmAutoRequested", True)
+  # mapd2xnor: the OSM map download is gated on the "Speed limit display/warning (MAPD)"
+  # toggle (ShowSpeedLimit). When the toggle is ON and no map data is present yet, KEEP
+  # arming the download every loop until data actually lands — the previous one-shot
+  # (guarded by OsmAutoRequested) misfired and could never retry. ShowSpeedLimit OFF =
+  # never download (the feature is disabled). Re-read live so toggling takes effect.
+  if not params.get_bool("ShowSpeedLimit"):
+    return
+
+  # retry-until-lands (throttled): while the toggle is ON and no map data is present,
+  # re-arm the download every OSM_DOWNLOAD_RETRY_S so a failed/missed first attempt
+  # recovers on its own — instead of the old one-shot that got stuck on OsmAutoRequested.
+  if not osm_data_present():
+    now = time.monotonic()
+    if params.get_bool("OsmDbUpdatesCheck"):
+      pass  # a download is already armed/in-flight; let it run
+    elif now - _last_download_arm[0] > OSM_DOWNLOAD_RETRY_S:
+      _last_download_arm[0] = now
       params.put_bool("OsmDbUpdatesCheck", True)
 
   if params.get_bool("OsmDbUpdatesCheck"):

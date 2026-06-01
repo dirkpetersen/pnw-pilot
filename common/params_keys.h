@@ -84,7 +84,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OSMDownloadBounds", {PERSISTENT, STRING}},
     {"MapTargetVelocities", {PERSISTENT, JSON}},
     {"NextMapHazard", {PERSISTENT, JSON}},
-    {"ShowSpeedLimit", {PERSISTENT, BOOL, "1"}},
+    {"ShowSpeedLimit", {PERSISTENT, BOOL, "0"}},  // mapd2xnor: default OFF — "Speed limit display/warning (MAPD)" toggle gates display + map download
     {"ShowRoadName", {PERSISTENT, BOOL, "1"}},
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},

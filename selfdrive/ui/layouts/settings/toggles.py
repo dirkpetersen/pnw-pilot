@@ -28,6 +28,11 @@ DESCRIPTIONS = {
     "without a turn signal activated while driving over 31 mph (50 km/h)."
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
+  "ShowSpeedLimit": tr_noop(
+    "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
+    "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
+    "parked with Wi-Fi until the download completes (the sign shows \"-\" until then). Requires a GPS fix to display a limit."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -70,6 +75,12 @@ class TogglesLayout(Widget):
         lambda: tr("Always-On Driver Monitoring"),
         DESCRIPTIONS["AlwaysOnDM"],
         "monitoring.png",
+        False,
+      ),
+      "ShowSpeedLimit": (
+        lambda: tr("Speed limit display/warning (MAPD)"),
+        DESCRIPTIONS["ShowSpeedLimit"],
+        "speed_limit.png",
         False,
       ),
       "RecordFront": (
