@@ -4,7 +4,8 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-mapd2xnor: location read adapted to xnor's gpsLocationExternal stream.
+mapd2xnor: location read adapted to the device GPS stream (gpsLocation on the comma 3X
+qcom GPS, or gpsLocationExternal with a ublox) via common.gps.get_gps_location_service.
 """
 import json
 import platform
@@ -20,9 +21,10 @@ class OsmMapData(BaseMapData):
     self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
 
   def update_location(self) -> None:
-    # mapd2xnor: xnor GPS source is gpsLocationExternal (lat/lon/bearingDeg/hasFix),
+    # mapd2xnor: read the runtime-selected GPS stream (gpsLocation on the 3X qcom GPS,
+    # or gpsLocationExternal if a ublox is present) — both carry lat/lon/bearingDeg/hasFix,
     # replacing sunnypilot's liveLocationKalman positionGeodetic/calibratedOrientationNED.
-    location = self.sm['gpsLocationExternal']
+    location = self.sm[self.gps_location_service]
     self.localizer_valid = bool(location.hasFix)
 
     if self.localizer_valid:
