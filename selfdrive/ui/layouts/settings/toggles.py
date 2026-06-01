@@ -78,7 +78,7 @@ class TogglesLayout(Widget):
         False,
       ),
       "ShowSpeedLimit": (
-        lambda: tr("Speed limit display/warning (MAPD)"),
+        lambda: tr("Speed limit display/warning (MAPD/PNW)"),
         DESCRIPTIONS["ShowSpeedLimit"],
         "speed_limit.png",
         False,
