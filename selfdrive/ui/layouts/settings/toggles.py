@@ -37,8 +37,7 @@ DESCRIPTIONS = {
   "NoDisengageOnBrake": tr_noop(
     "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
     "openpilot will resume controlling speed as soon as you release the brake. " +
-    "This reduces a safety boundary — only enable it if you understand the risk and stay attentive. " +
-    "Tesla only — not supported on the Ford F-150 Lightning."
+    "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
   ),
   "OvertakeAssist": tr_noop(
     "When you are closing on a slower car and there is an open adjacent lane with the blind spot clear, " +
@@ -54,7 +53,9 @@ DESCRIPTIONS = {
 
 class TogglesLayout(Widget):
   # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
-  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist", "NoDisengageOnBrake")
+  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")
+  # auto2xnor: not supported on any car here — always greyed out + forced off
+  UNSUPPORTED_TOGGLES = ("NoDisengageOnBrake",)
 
   def __init__(self):
     super().__init__()
@@ -250,6 +251,11 @@ class TogglesLayout(Widget):
       self._toggles[param].action_item.set_enabled(is_tesla)
       if not is_tesla:
         self._toggles[param].action_item.set_state(False)
+
+    # auto2xnor: unsupported toggles — always greyed out + forced off (no car supports them)
+    for param in self.UNSUPPORTED_TOGGLES:
+      self._toggles[param].action_item.set_enabled(False)
+      self._toggles[param].action_item.set_state(False)
 
   def _render(self, rect):
     self._scroller.render(rect)
