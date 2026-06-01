@@ -245,3 +245,39 @@ stack restart, and the sign went blank.
   shows `downloaded_files >= total_files` (commit `65b96fafee`).
 - Speed limit only shows where OSM has a `maxspeed` tag for the road **and** there's a GPS
   fix; residential streets often have a limit, but some roads are untagged → no sign there.
+
+---
+
+## The "Speed limit display/warning (MAPD)" toggle (commit `2cacf4f1`)
+
+The feature is gated by one toggle in Settings → Toggles, **default OFF**, backed by the
+`ShowSpeedLimit` param (default flipped `"1"` → `"0"`):
+- **ON**  → renders the sign/warning **and** arms the OSM map download.
+- **OFF** → feature disabled, no rendering, no download.
+
+`update_osm_db()` only downloads when `ShowSpeedLimit` is on, and re-arms (throttled) while
+on + incomplete (see "download never completing", commit `65b96fafee`). The UI already gates
+rendering on `ui_state.show_speed_limit` (← `ShowSpeedLimit`), read live. Turning the toggle
+on is therefore the single action that both shows the sign and (re)triggers the map fetch.
+
+## ⚠️ State values MUST be 2-letter codes (commits `db231a2e`, `4a29acce`)
+
+The mapd binary's embedded `STATE_BOXES` bounding-box table is keyed by **2-letter codes**
+(`WA`, `OR`, `ID`) — **NOT** full names. Passing full names ("Washington") logs
+`no bounding box data for state code: Washington` and **downloads nothing** (silent failure).
+
+Fix applied on the branch:
+- `mapd_manager.py`: `PNW_STATES = ["WA", "OR", "ID"]`
+- `params_keys.h`: `OsmStateName` default = `"WA,OR,ID"`
+
+To change regions, set `OsmStateName` to a comma-list of 2-letter codes. (The binary's
+custom-bounds path, `OSMDownloadBounds` as a JSON box, is **broken in v1.12.0** — it nil-panics
+in `DownloadBounds` — so the state-code list is the only working download route.)
+
+## End-to-end verified (this device)
+
+Parked at 47.673, -122.365 (Seattle), `ShowSpeedLimit=1`, GPS fix present:
+`liveMapDataSP.speedLimitValid=True`, **20 mph on "7th Avenue Northwest"**. Survives a cold
+reboot (mapd + mapd_manager relaunch via `restart_if_crash=True`). Full chain working:
+qcom `gpsLocation` → bridge writes `LastGPSPosition` → mapd binary loads the local tile →
+`MapSpeedLimit` → `liveMapDataSP` → UI sign.
