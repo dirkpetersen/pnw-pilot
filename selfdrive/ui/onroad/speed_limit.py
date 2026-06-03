@@ -28,6 +28,7 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
 WARNING_DURATION = 6.0     # s to keep the red "lower limit" banner up
+WARNING_BLINK_PERIOD = 0.7 # s for one on+off blink cycle of the banner (~1.4 Hz)
 AHEAD_ACTIVE_DIST = 150.0  # m: treat a lower "ahead" limit as imminent within this distance
 MIN_VALID_KPH = 1.0        # below this (in m/s-derived kph) the limit is treated as unknown
 OVERSPEED_RATIO = 1.20     # only warn if current speed is >20% above the new lower limit
@@ -172,19 +173,26 @@ class SpeedLimitRenderer(Widget):
 
   # ---- big red lower-limit warning --------------------------------------
   def _draw_warning(self, rect):
+    # Blink: the banner stays armed for WARNING_DURATION, so gate the whole draw
+    # on a square wave to flash it on/off (~1.4 Hz). Skipping the draw on the
+    # "off" half leaves the camera view visible underneath, producing the blink.
+    if (time.monotonic() % WARNING_BLINK_PERIOD) >= WARNING_BLINK_PERIOD / 2:
+      return
+
     units = "km/h" if ui_state.is_metric else "mph"
     new_val = str(round(self._warn_value))
 
-    banner_w = 720
-    banner_h = 260
+    # 2x the original size (was 720x260). Fits the 2160-wide tici/tizi screen.
+    banner_w = 1440
+    banner_h = 520
     bx = rect.x + (rect.width - banner_w) / 2
     by = rect.y + UI_CONFIG.header_height + 60
     banner = rl.Rectangle(bx, by, banner_w, banner_h)
 
     rl.draw_rectangle_rounded(banner, 0.12, 10, _Colors.RED_BG)
-    rl.draw_rectangle_rounded_lines_ex(banner, 0.12, 10, 6, _Colors.WHITE)
+    rl.draw_rectangle_rounded_lines_ex(banner, 0.12, 10, 12, _Colors.WHITE)
 
     cx = bx + banner_w / 2
-    self._text_centered(self.font_demi, "REDUCED SPEED LIMIT", 54, cx, by + 55, _Colors.WHITE)
-    self._text_centered(self.font_bold, new_val, 130, cx, by + 150, _Colors.WHITE)
-    self._text_centered(self.font_norm, units, 44, cx, by + 222, _Colors.WHITE)
+    self._text_centered(self.font_demi, "REDUCED SPEED LIMIT", 108, cx, by + 110, _Colors.WHITE)
+    self._text_centered(self.font_bold, new_val, 260, cx, by + 300, _Colors.WHITE)
+    self._text_centered(self.font_norm, units, 88, cx, by + 444, _Colors.WHITE)
