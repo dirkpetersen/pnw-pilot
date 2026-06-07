@@ -4,7 +4,7 @@
 > they are **Tesla-only (greyed out on the Ford Lightning)**, why `params_keys.h` /
 > `toggles.py` must be **merged, not overlaid**, and how the deploy is **connection-loss safe**.
 
-**Branch:** `auto2xnor` (openpilot-xnor worktree), off `c0d78143` (xnor prebuilt base).
+**Branch:** `auto2xnor` (xnor/openpilot worktree), off `c0d78143` (xnor prebuilt base).
 **Device:** comma **3X** (`tizi`) @ `comma@192.168.13.154`, distro branch `xnor-dev`.
 
 ## What it adds (3 toggles, all default OFF)
