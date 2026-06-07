@@ -55,7 +55,7 @@ ignition case must be **added** to that hook (step 3 below). The forward declara
 
 - **opendbc Raven port:** `/home/dp/gh/comma/opendbc` @ `ac4b8d69` (branch `xnor2sunny`),
   pinned by the sunnypilot worktree at commit `9ed2a1705b`. 15 files (full list below).
-- **Authoritative ignition source:** `~/gh/comma/panda-xnor` @ `origin/master-xnor`,
+- **Authoritative ignition source:** `~/gh/comma/xnor/panda` @ `origin/master-xnor`,
   `board/drivers/can_common.h` (xnor puts 0x348 in `can_common.h`, same architecture
   as sunnypilot — NOT in `ignition.h`).
 - **Validation:** our `tesla_legacy.h` is **byte-identical** to xnor's `master-xnor`
@@ -455,7 +455,7 @@ cruiseAvailable=True):
 ### Where to resume (next session)
 1. Decide fork: continue sunnypilot (this branch) vs the xnor prebuilt. User chose xnor for now.
 2. If returning to sunnypilot: chase **Problem B / locationd** first (it blocks engagement) — compare
-   `selfdrive/locationd/locationd.py` + sensor inputs vs `openpilot-xnor`, check `livePose` rate and
+   `selfdrive/locationd/locationd.py` + sensor inputs vs `xnor/openpilot`, check `livePose` rate and
    `locationdTemporaryError` cause on the Raven (GPS/IMU/sensor feed). The DM relax is secondary and must
    be a **surgical** edit to the device's old-schema helpers.py (use `leftBlinkProb`/`leftEyeProb`, NOT
    `eyesClosedProb`).
