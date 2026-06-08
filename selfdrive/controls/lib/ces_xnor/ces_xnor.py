@@ -16,12 +16,20 @@ SAFETY: this module is PURE DECISION LOGIC. It does not command the car. It must
 effective-experimental computation (selfdrived) only after review + on-road verification. It never
 touches panda safety. The decision core (`decide_active`) takes primitives and is unit-tested.
 """
+import json
+import os
 import time
 
+from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
+
+# Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
+# boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
+# One JSON line per CES mode transition, with GPS so we can map where each adoption happened.
+CES_EVENT_LOG = "/data/dirk/ces_events.jsonl"
 
 
 def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
@@ -85,6 +93,18 @@ class Condition:
     self.active = False
 
 
+def _accelerate_zone(s) -> bool:
+  """PURE: True when we're slow but should be ACCELERATING into open road, so Experimental's timid
+  e2e acceleration would hurt — keep Chill instead. Covers the two cases:
+    - highway on-ramp merge (open road ahead, set speed = highway >> ramp speed)
+    - stop&go where the lead has pulled away leaving a big gap (catch back up at Chill briskness)
+  Requires open road ahead AND a set speed meaningfully above current speed. Only gates `lowSpeed`."""
+  open_ahead = (not s["has_lead"]) or (s["lead_drel"] > C.GAP_OPEN_M
+                                       and s["lead_vlead"] >= s["v_ego"] - C.LEAD_PULLAWAY_MARGIN)
+  want_faster = s["v_set"] > 0.0 and (s["v_set"] - s["v_ego"]) > C.ACCEL_ZONE_DV
+  return open_ahead and want_faster
+
+
 def decide_active(s) -> tuple[bool, str]:
   """PURE decision core (no state, no filtering): given a signals dict-like `s`, return
   (any_condition_active, status). Used by both the live controller (post-filter) and the unit tests.
@@ -116,9 +136,15 @@ def decide_active(s) -> tuple[bool, str]:
   if t["stops"] and s["model_should_stop"] and not s["has_lead"]:
     return True, "stop"
 
-  # 3) low speed (city / complex / construction) — lead-aware threshold, NO highway gate
+  # 3) low speed (city / complex / construction) — lead-aware threshold. TWO exceptions, both
+  #    learned from the drive log (only ever REMOVE Experimental, so safe):
+  #    (a) highway gate: skip on a road whose OSM speed limit is high — slow-but-following on a
+  #        highway is normal Chill cruising, not a complex zone.
+  #    (b) accelerate-zone: skip when we should be accelerating into open road (on-ramp merge /
+  #        lead pulled away) — Experimental's timid e2e acceleration is bad there.
   thr = C.CES_SPEED_LEAD if s["has_lead"] else C.CES_SPEED
-  if t["low_speed"] and 1.0 <= v < thr:
+  on_highway = s["spd_lim"] >= C.LOWSPEED_HWY_GATE
+  if t["low_speed"] and 1.0 <= v < thr and not on_highway and not _accelerate_zone(s):
     return True, "lowSpeed"
 
   # 4) slow / stopped lead — closing on a slower/stopped lead -> let e2e do the smooth decel
@@ -173,6 +199,14 @@ def decision_telemetry(s) -> dict:
     "mapV": round(float(s["map_target_v"]), 1),
     "mapDist": round(float(md), 0) if md != float('inf') else 0.0,
     "vEgo": round(float(s["v_ego"]), 1),
+    # accelerate-zone + the signals that drive it (also logged per event for later tuning)
+    "accelZone": _accelerate_zone(s),
+    "hwyGate": s.get("spd_lim", 0.0) >= C.LOWSPEED_HWY_GATE,   # lowSpeed suppressed: on a highway
+    "vSet": round(float(s["v_set"]), 1),
+    "dRel": round(float(s["lead_drel"]), 0),
+    "vLead": round(float(s["lead_vlead"]), 1),
+    "aEgo": round(float(s.get("a_ego", 0.0)), 2),
+    "gas": bool(s.get("gas", False)),
   }
 
 
@@ -207,17 +241,18 @@ class ConditionalExperimentalSwitching:
     self._dwell += DT_MDL
 
     if not self._is_experimental:
-      # enter Experimental as soon as the debounced condition is active
-      if cond_active:
+      # enter Experimental once the debounced condition is active AND we've been in Chill at least
+      # the re-entry cooldown (de-flap: stops the instant snap-back that caused the stop&go sawtooth)
+      if cond_active and self._dwell >= C.CHILL_MIN_DWELL_S:
         self._is_experimental = True
         self._status = status
         self._dwell = 0.0
     else:
-      # stay Experimental; return to Chill only when condition cleared (sustained via filter)
-      # AND min-dwell elapsed
+      # stay Experimental; return to Chill only when the condition cleared (sustained via filter)
+      # AND we've held Experimental at least EXP_MIN_DWELL_S
       if status != "chill":
         self._status = status      # keep showing the active reason
-      if not cond_active and self._dwell >= C.MIN_DWELL_S:
+      if not cond_active and self._dwell >= C.EXP_MIN_DWELL_S:
         self._is_experimental = False
         self._status = "chill"
         self._dwell = 0.0
@@ -242,10 +277,11 @@ def _toggles_from_params(params) -> dict:
           "low_speed": gb("CESLowSpeed"), "lead": gb("CESLead")}
 
 
-def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, map_target_dist: float) -> dict:
+def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, map_target_dist: float,
+                  spd_lim: float = 0.0) -> dict:
   """Build the decision primitives from STOCK messages (carState, radarState.leadOne, modelV2)
-  plus the map-curve result (map_target_v/dist, from pfeiferj MapTargetVelocities). Defensive:
-  missing/odd data falls back to 'nothing happening' (worst case = stay Chill)."""
+  plus the map-curve result (map_target_v/dist) and the OSM speed limit (spd_lim, m/s, for the
+  lowSpeed highway gate). Defensive: missing/odd data falls back to 'nothing happening' (stay Chill)."""
   v_ego = float(car_state.vEgo)
 
   has_lead = bool(getattr(lead, 'status', False))
@@ -262,12 +298,20 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
   except Exception:
     model_should_stop = False
 
+  # set speed (openpilot's v_cruise, km/h on carState.vCruise) -> m/s; 255 is the unset sentinel.
+  v_set_kph = float(getattr(car_state, 'vCruise', 0.0))
+  v_set = v_set_kph * CV.KPH_TO_MS if 0.0 < v_set_kph < C.V_SET_MAX_KPH else 0.0
+
   return {
     "v_ego": v_ego, "has_lead": has_lead, "lead_vlead": lead_vlead, "lead_drel": lead_drel,
     "blinker": bool(car_state.leftBlinker or car_state.rightBlinker),
     "map_target_v": map_target_v, "map_target_dist": map_target_dist,   # map half (MapTargetVelocities)
     "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,            # vision fallback
     "model_should_stop": model_should_stop, "toggles": toggles,
+    "v_set": v_set,                                                     # accelerate-zone (set-speed gap)
+    "spd_lim": float(spd_lim),                                         # OSM speed limit (lowSpeed highway gate)
+    "a_ego": float(getattr(car_state, 'aEgo', 0.0)),                   # logged for verification
+    "gas": bool(getattr(car_state, 'gasPressed', False)),             # logged for verification
   }
 
 
@@ -291,11 +335,19 @@ class CESController:
     self._button = C.BTN_CES
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
-    self._cur_lat = self._cur_lon = None
+    self._cur_lat = self._cur_lon = self._cur_bearing = None
+    self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
     self._last_mode = "off"         # last logged mode: off / chill / experimental
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
+    self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
+    self._event_log_ok = False      # persistent "each adoption" trail (CES_EVENT_LOG)
+    try:
+      os.makedirs(os.path.dirname(CES_EVENT_LOG), exist_ok=True)
+      self._event_log_ok = True
+    except Exception:
+      self._event_log_ok = False
     # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
@@ -315,22 +367,35 @@ class CESController:
     self._frame += 1
 
   def _read_map(self):
-    """Refresh the map-curve inputs from the pfeiferj mem params (defensive — any failure => no
-    map curve, vision fallback still works)."""
-    if self.mem_params is None or not self._toggles.get("curves", True):
-      self._map_targets = []; return
-    try:
-      self._map_targets = self.mem_params.get("MapTargetVelocities", return_default=True) or []
-    except Exception:
+    """Refresh map-curve inputs + GPS + OSM speed limit from the pfeiferj mem params (defensive — any
+    failure => no map curve, vision fallback still works). GPS + speed limit are read regardless of
+    the curves toggle because the event log wants them at all times."""
+    if self.mem_params is None:
       self._map_targets = []
+      return
+    # map curve targets — only when the curve condition is enabled
+    if self._toggles.get("curves", True):
+      try:
+        self._map_targets = self.mem_params.get("MapTargetVelocities", return_default=True) or []
+      except Exception:
+        self._map_targets = []
+    else:
+      self._map_targets = []
+    # GPS (lat/lon/bearing) — always (map-curve distance + logging)
     try:
-      import json
       pos = self.mem_params.get("LastGPSPosition", return_default=True)
       if isinstance(pos, (bytes, str)):
         pos = json.loads(pos)
       self._cur_lat = float(pos["latitude"]); self._cur_lon = float(pos["longitude"])
+      self._cur_bearing = float(pos.get("bearing", 0.0))
     except Exception:
-      self._cur_lat = self._cur_lon = None
+      self._cur_lat = self._cur_lon = self._cur_bearing = None
+    # OSM speed limit (m/s; 0 = none) — for the coarse highway guess in the log
+    try:
+      sl = self.mem_params.get("MapSpeedLimit", return_default=True)
+      self._speed_limit = float(sl) if sl not in (None, "", b"") else 0.0
+    except Exception:
+      self._speed_limit = 0.0
 
   def enabled(self) -> bool:
     return self._enabled
@@ -357,7 +422,7 @@ class CESController:
       model = sm['modelV2']
       v_ego = float(car_state.vEgo)
       mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
-      sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd)
+      sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd, self._speed_limit)
     except Exception:
       sig = None
 
@@ -388,13 +453,23 @@ class CESController:
     tele["mapPts"] = len(self._map_targets)                       # MapTargetVelocities points cached
     tele["gps"] = self._cur_lat is not None and self._cur_lon is not None  # LastGPSPosition fix present
 
-    # transition logging — one cloudlog line per chill<->experimental change (this is the
-    # "did CES actually do something" trail in the device logs).
+    # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
     if mode != self._last_mode:
-      cloudlog.info("CES %s->%s button=%d reason=%s curve=%d%%(%s) vEgo=%.1f mapV=%.1f mapDist=%.0f",
-                    self._last_mode, mode, self._button, tele["reason"],
-                    tele["curvePct"], tele["curveSrc"], tele["vEgo"], tele["mapV"], tele["mapDist"])
+      cloudlog.info("CES %s->%s button=%d reason=%s curve=%d%%(%s) vEgo=%.1f vSet=%.1f az=%s mapV=%.1f",
+                    self._last_mode, mode, self._button, tele.get("reason"),
+                    tele.get("curvePct", 0), tele.get("curveSrc", ""), tele.get("vEgo", 0.0),
+                    tele.get("vSet", 0.0), tele.get("accelZone"), tele.get("mapV", 0.0))
+      rec = self._event_record("adopt", tele)
+      rec["from"], rec["to"] = self._last_mode, mode
+      self._append_event(rec)
       self._last_mode = mode
+    else:
+      # (b) heartbeat ("tick") — ~1 Hz breadcrumb so the WHOLE drive's GPS track + state is captured
+      # (lets us place every adoption on the route and apply the highway / 300 ft buffer in analysis).
+      now2 = time.monotonic()
+      if now2 - self._tick_last >= C.TICK_S:
+        self._tick_last = now2
+        self._append_event(self._event_record("tick", tele))
 
     # ~5 Hz publish to /dev/shm/params (put a dict -> JSON; nonblocking so the safety loop never waits)
     if self.mem_params is None:
@@ -405,5 +480,35 @@ class CESController:
     self._tele_last = now
     try:
       self.mem_params.put_nonblocking("CESStatus", tele)
+    except Exception:
+      pass
+
+  def _event_record(self, kind: str, tele: dict) -> dict:
+    """Build one rich, flat record for the persistent CES_EVENT_LOG. `kind` is "adopt" (a CES mode
+    transition) or "tick" (a ~1 Hz breadcrumb). Includes GPS (lat/lon/bearing), OSM speed limit, a
+    coarse highway guess, the accelerate-zone decision + its inputs (vSet/dRel/vLead/aEgo/gas), and
+    the curve/map diagnostics — everything needed to verify behavior against the route later."""
+    vego = float(tele.get("vEgo") or 0.0)
+    hwy = (self._speed_limit >= C.HWY_SPEED_LIMIT) or (vego >= C.HWY_VEGO)  # coarse; authoritative = GPS+OSM+300ft in analysis
+    return {
+      "t": round(time.time(), 1),  # noqa: TID251 -- wall clock, for route/time correlation
+      "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
+      "vEgo": tele.get("vEgo"), "vSet": tele.get("vSet"), "aEgo": tele.get("aEgo"), "gas": tele.get("gas"),
+      "accelZone": tele.get("accelZone"),
+      "curvePct": tele.get("curvePct"), "curveSrc": tele.get("curveSrc"),
+      "mapV": tele.get("mapV"), "mapDist": tele.get("mapDist"), "mapPts": tele.get("mapPts"),
+      "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
+      "gps": tele.get("gps"), "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
+      "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
+    }
+
+  def _append_event(self, rec: dict) -> None:
+    """Append one JSON line to the persistent CES_EVENT_LOG (append-only, outside the overlay so it
+    survives reboot + swaglog rotation). Best-effort; never breaks control."""
+    if not self._event_log_ok:
+      return
+    try:
+      with open(CES_EVENT_LOG, "a") as f:
+        f.write(json.dumps(rec) + "\n")
     except Exception:
       pass

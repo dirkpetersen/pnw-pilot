@@ -7,7 +7,7 @@ Run:  pytest selfdrive/controls/lib/ces/tests/test_ces.py
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
 from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import (
-  decide_active, vision_curve_lat_accel, curve_closeness, decision_telemetry,
+  decide_active, vision_curve_lat_accel, curve_closeness, decision_telemetry, _accelerate_zone,
 )
 
 
@@ -20,7 +20,7 @@ def base(**kw):
     "v_ego": 30.0, "has_lead": False, "lead_vlead": 0.0, "lead_drel": 0.0, "blinker": False,
     "map_target_v": 0.0, "map_target_dist": float('inf'),
     "curve_lat_accel_vision": 0.0, "time_to_curve": 10.0,
-    "model_should_stop": False, "toggles": ALL_ON,
+    "model_should_stop": False, "v_set": 0.0, "spd_lim": 0.0, "toggles": ALL_ON,
   }
   s.update(kw)
   return s
@@ -124,16 +124,38 @@ def test_highway_cruise_no_lead_chill():
 
 # ---- lead-aware thresholds (the high-speed-lead fix) -----------------------
 def test_high_speed_following_lead_stays_chill():
-  # 60 mph following a matched-speed lead, above CES_SPEED_LEAD (55) -> Chill (ACC closes gap)
+  # 60 mph following a matched-speed lead, above CES_SPEED_LEAD (45) -> Chill (ACC closes gap)
   s = base(v_ego=60 * CV.MPH_TO_MS, has_lead=True, lead_vlead=60 * CV.MPH_TO_MS)
   assert not decide_active(s)[0]
 
 
 def test_low_speed_following_lead_trips():
-  # 45 mph following a lead, below CES_SPEED_LEAD (55) -> Experimental
-  s = base(v_ego=45 * CV.MPH_TO_MS, has_lead=True, lead_vlead=45 * CV.MPH_TO_MS)
+  # 35 mph following a lead, below CES_SPEED_LEAD (45) -> Experimental (dense city traffic)
+  s = base(v_ego=35 * CV.MPH_TO_MS, has_lead=True, lead_vlead=35 * CV.MPH_TO_MS)
   active, status = decide_active(s)
   assert active and status == "lowSpeed"
+
+
+def test_highway_following_lead_at_50mph_stays_chill():
+  # the drive-log false-positive: 50 mph behind traffic, now ABOVE CES_SPEED_LEAD (45) -> Chill
+  s = base(v_ego=50 * CV.MPH_TO_MS, has_lead=True, lead_vlead=50 * CV.MPH_TO_MS)
+  assert not decide_active(s)[0]
+
+
+def test_lowspeed_suppressed_on_highway_by_spdlim_gate():
+  # 35 mph behind a lead on a 60 mph road (OSM spd_lim high) -> highway gate -> Chill, not lowSpeed
+  s = base(v_ego=35 * CV.MPH_TO_MS, has_lead=True, lead_vlead=35 * CV.MPH_TO_MS,
+           spd_lim=60 * CV.MPH_TO_MS)
+  assert not decide_active(s)[0]
+  # same situation on a surface street (low spd_lim) still trips
+  s2 = base(v_ego=35 * CV.MPH_TO_MS, has_lead=True, lead_vlead=35 * CV.MPH_TO_MS, spd_lim=30 * CV.MPH_TO_MS)
+  assert decide_active(s2) == (True, "lowSpeed")
+
+
+def test_slowlead_not_gated_on_highway():
+  # closing on a much slower lead on a highway (spd_lim high) MUST still trip slowLead (valid e2e case)
+  s = base(v_ego=65 * CV.MPH_TO_MS, has_lead=True, lead_vlead=45 * CV.MPH_TO_MS, spd_lim=65 * CV.MPH_TO_MS)
+  assert decide_active(s) == (True, "slowLead")
 
 
 def test_closing_on_slow_lead_trips():
@@ -239,6 +261,64 @@ def test_curve_closeness_ignored_when_curves_toggle_off():
            time_to_curve=2.0, toggles={"curves": False, "stops": True, "low_speed": True, "lead": True})
   pct, src = curve_closeness(s)
   assert pct == 0.0 and src == ""
+
+
+# ---- accelerate-zone: suppress lowSpeed-Experimental when we should be speeding up ----
+def test_onramp_no_lead_high_set_speed_stays_chill():
+  # 29 mph on an open on-ramp with cruise set to 65 mph -> accelerate-zone -> NOT lowSpeed
+  s = base(v_ego=29 * CV.MPH_TO_MS, has_lead=False, v_set=65 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is True
+  assert decide_active(s) == (False, "chill")
+
+
+def test_stopgo_lead_pulling_away_big_gap_stays_chill():
+  # crawling at 9 mph, lead 60 m ahead and FASTER (pulling away), set 36 mph -> catch up at Chill
+  s = base(v_ego=4.0, has_lead=True, lead_drel=60.0, lead_vlead=10.0, v_set=36 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is True
+  assert decide_active(s) == (False, "chill")
+
+
+def test_genuine_city_slow_with_near_lead_still_experimental():
+  # slow behind a CLOSE lead (20 m) -> not open road -> lowSpeed still fires
+  s = base(v_ego=8.0, has_lead=True, lead_drel=20.0, lead_vlead=8.0, v_set=40 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "lowSpeed")
+
+
+def test_slow_with_no_set_speed_gap_still_experimental():
+  # deliberately cruising slow on open road, set speed barely above -> NOT accelerate-zone
+  s = base(v_ego=8.0, has_lead=False, v_set=9.0)
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "lowSpeed")
+
+
+def test_accelerate_zone_does_not_override_a_curve():
+  # even accelerating into open road, a real curve still wins (curve checked before lowSpeed)
+  s = base(v_ego=20.0, has_lead=False, v_set=65 * CV.MPH_TO_MS,
+           curve_lat_accel_vision=C.CURVE_LAT_ACCEL_ENTER * 1.5, time_to_curve=2.0)
+  assert decide_active(s) == (True, "curve")
+
+
+# ---- de-flap: entry cooldown + exit dwell (state machine) ------------------
+def test_deflap_entry_cooldown_and_exit_dwell():
+  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import ConditionalExperimentalSwitching
+  sm = ConditionalExperimentalSwitching()
+  active = base(v_ego=20 * CV.MPH_TO_MS, has_lead=False)   # lowSpeed condition active
+  clear = base(v_ego=60 * CV.MPH_TO_MS, has_lead=False)    # nothing -> chill
+
+  # one cycle of an active condition must NOT instantly enter Experimental (cooldown + debounce)
+  sm.update_decision(active)
+  assert sm.mode() == "chill"
+  # after enough time (>CHILL_MIN_DWELL_S + filter) it does enter
+  for _ in range(200):
+    sm.update_decision(active)
+  assert sm.mode() == "experimental"
+  # condition clears, but it must HOLD Experimental through EXP_MIN_DWELL_S (no instant snap-out)
+  sm.update_decision(clear)
+  assert sm.mode() == "experimental"
+  for _ in range(400):
+    sm.update_decision(clear)
+  assert sm.mode() == "chill"
 
 
 def test_decision_telemetry_shape_and_consistency():

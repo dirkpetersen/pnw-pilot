@@ -95,6 +95,12 @@ class CesStatusRenderer(Widget):
     if is_exp and reason and reason not in ("chill", ""):
       out.append((f"why {reason}", _C.WHITE, self.font))
 
+    # accelerate-zone / highway-gate: held in Chill (lowSpeed suppressed) — show why
+    if st.get("accelZone"):
+      out.append(("accel-zone (open)", _C.GREEN, self.font))
+    if st.get("hwyGate"):
+      out.append(("hwy-gate (no lowSpd)", _C.GREEN, self.font))
+
     pct = max(0, min(100, int(st.get("curvePct", 0))))
     src = st.get("curveSrc", "") or "--"
     pct_col = _C.GREEN if pct < 60 else (_C.ORANGE if pct < 100 else _C.RED)
