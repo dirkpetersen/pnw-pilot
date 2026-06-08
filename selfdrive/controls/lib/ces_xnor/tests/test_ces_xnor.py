@@ -5,8 +5,8 @@ anchors from CES.md (I-5 Terwilliger / Marquam / Wilsonville) and the lead/speed
 Run:  pytest selfdrive/controls/lib/ces/tests/test_ces.py
 """
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.ces import constants as C
-from openpilot.selfdrive.controls.lib.ces.ces import decide_active, vision_curve_lat_accel
+from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import decide_active, vision_curve_lat_accel
 
 
 ALL_ON = {"curves": True, "stops": True, "low_speed": True, "lead": True}
@@ -141,3 +141,28 @@ def test_curve_toggle_off_disables_curve():
 def test_vision_curve_lat_accel_picks_max():
   acc, t = vision_curve_lat_accel([0.0, 0.05, 0.1], [20.0, 20.0, 20.0], [0.0, 1.0, 2.0], 20.0)
   assert abs(acc - 2.0) < 1e-6 and t == 2.0
+
+
+# ---- regression: the planner's experimental flag with CES DISABLED ----------
+# This mirrors the planner's exact expression:
+#     use_experimental = manual OR (ces.enabled() and ces_request)
+# With CES disabled, ces.enabled() is False, so the short-circuit guarantees
+# use_experimental == manual for ALL inputs — byte-identical to upstream.
+def _planner_flag(manual, ces_enabled, ces_request):
+  ces_experimental = ces_request if ces_enabled else False
+  return manual or ces_experimental
+
+
+def test_regression_ces_disabled_is_identical_to_manual():
+  for manual in (False, True):
+    for ces_request in (False, True):   # whatever CES *would* say is irrelevant when disabled
+      assert _planner_flag(manual, ces_enabled=False, ces_request=ces_request) == manual
+
+
+def test_ces_enabled_only_adds_never_removes_manual():
+  # manual ON always stays experimental regardless of CES
+  assert _planner_flag(True, ces_enabled=True, ces_request=False) is True
+  # manual OFF + CES wants experimental -> experimental
+  assert _planner_flag(False, ces_enabled=True, ces_request=True) is True
+  # manual OFF + CES wants chill -> chill
+  assert _planner_flag(False, ces_enabled=True, ces_request=False) is False

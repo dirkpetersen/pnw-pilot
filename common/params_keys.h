@@ -13,6 +13,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},
     {"OvertakeAssist", {PERSISTENT, BOOL, "0"}},
+    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF (Tesla-gated)
+    {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
+    {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
+    {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor
+    {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
     {"ApiCache_Device", {PERSISTENT, STRING}},
     {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},

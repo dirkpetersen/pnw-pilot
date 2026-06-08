@@ -18,7 +18,7 @@ touches panda safety. The decision core (`decide_active`) takes primitives and i
 """
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.controls.lib.ces import constants as C
+from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
 
 
 def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
@@ -137,3 +137,94 @@ class ConditionalExperimentalSwitching:
         self._status = "chill"
         self._dwell = 0.0
     return self.mode()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — live wiring helpers. Behavior-neutral: the planner only calls
+# experimental_request() when enabled() is True (param OFF by default + Tesla-
+# gated), so with CES off the planner's experimental flag is IDENTICAL to today.
+# ---------------------------------------------------------------------------
+
+def _toggles_from_params(params) -> dict:
+  """Per-condition enables; default ON (the master switch is the real gate)."""
+  def gb(k):
+    try:
+      return params.get_bool(k)
+    except Exception:
+      return True
+  return {"curves": gb("CESCurves"), "stops": gb("CESStops"),
+          "low_speed": gb("CESLowSpeed"), "lead": gb("CESLead")}
+
+
+def _signals_from_sm(sm, toggles: dict) -> dict:
+  """Extract the decision primitives from STOCK messages only (carState, radarState,
+  modelV2). Defensive: any missing/odd data falls back to a 'nothing happening' value so
+  the worst case is 'stay Chill'. NOTE: map-half (liveMapDataSP curvature) is NOT on this
+  branch — curve_lat_accel_map is fed 0.0, so only the vision fallback fires for now."""
+  cs = sm['carState']
+  v_ego = float(cs.vEgo)
+
+  lead = sm['radarState'].leadOne
+  has_lead = bool(getattr(lead, 'status', False))
+  lead_vlead = float(getattr(lead, 'vLead', 0.0)) if has_lead else 0.0
+  lead_drel = float(getattr(lead, 'dRel', 0.0)) if has_lead else 0.0
+
+  md = sm['modelV2']
+  try:
+    orz = list(md.orientationRate.z); vx = list(md.velocity.x); tb = list(md.orientationRate.t)
+    vis_acc, ttc = vision_curve_lat_accel(orz, vx, tb, v_ego)
+  except Exception:
+    vis_acc, ttc = 0.0, 10.0
+  try:
+    model_should_stop = bool(md.action.shouldStop)
+  except Exception:
+    model_should_stop = False
+
+  return {
+    "v_ego": v_ego, "has_lead": has_lead, "lead_vlead": lead_vlead, "lead_drel": lead_drel,
+    "blinker": bool(cs.leftBlinker or cs.rightBlinker),
+    "curve_lat_accel_map": 0.0, "dist_to_curve": 0.0,   # map-half pending (separate branch)
+    "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,
+    "model_should_stop": model_should_stop, "toggles": toggles,
+  }
+
+
+class CESController:
+  """Thin live wrapper used by the planner. Owns the state machine + ~1 Hz param refresh.
+  enabled() is the single gate — when it's False the planner must NOT call this (so behavior
+  is byte-identical to upstream)."""
+  def __init__(self, CP, params=None):
+    from openpilot.common.params import Params
+    self.CP = CP
+    self.params = params or Params()
+    self._sm = ConditionalExperimentalSwitching()
+    self._enabled = False
+    self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
+    self._frame = 0
+    self._is_tesla = (getattr(CP, 'brand', '') == 'tesla') and bool(CP.openpilotLongitudinalControl)
+
+  def _read_params(self):
+    # refresh ~1 Hz (planner runs at 1/DT_MDL Hz)
+    if self._frame % max(1, int(1.0 / DT_MDL)) == 0:
+      try:
+        self._enabled = self._is_tesla and self.params.get_bool("ConditionalExperimentalSwitching")
+      except Exception:
+        self._enabled = False
+      if self._enabled:
+        self._toggles = _toggles_from_params(self.params)
+    self._frame += 1
+
+  def enabled(self) -> bool:
+    return self._enabled
+
+  def status(self) -> str:
+    return self._sm.status()
+
+  def experimental_request(self, sm) -> bool:
+    """Returns True if CES wants Experimental this cycle. Only meaningful when enabled().
+    Reads params + advances the state machine. Safe to call; returns False if disabled."""
+    self._read_params()
+    if not self._enabled:
+      self._sm.reset()
+      return False
+    return self._sm.update_decision(_signals_from_sm(sm, self._toggles)) == "experimental"
