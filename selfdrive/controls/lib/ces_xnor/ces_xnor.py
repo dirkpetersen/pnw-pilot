@@ -384,6 +384,9 @@ class CESController:
     tele["mode"] = mode
     tele["button"] = int(self._button)
     tele["enabled"] = True
+    # mapd diagnostics so the overlay can always show what mapd is up to (curve half is map-driven):
+    tele["mapPts"] = len(self._map_targets)                       # MapTargetVelocities points cached
+    tele["gps"] = self._cur_lat is not None and self._cur_lon is not None  # LastGPSPosition fix present
 
     # transition logging — one cloudlog line per chill<->experimental change (this is the
     # "did CES actually do something" trail in the device logs).

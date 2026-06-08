@@ -30,10 +30,10 @@ class ExpButton(Widget):
     self._hold_end_time: float | None = None
 
     self._white_color: rl.Color = rl.Color(255, 255, 255, 255)
-    self._orange_color: rl.Color = rl.Color(255, 149, 0, 255)  # ces2xnor: full Experimental
     self._black_bg: rl.Color = rl.Color(0, 0, 0, 166)
     self._txt_wheel: rl.Texture = gui_app.texture('icons/chffr_wheel.png', icon_size, icon_size)
-    self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)
+    self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)        # baked ORANGE
+    self._txt_exp_white: rl.Texture = gui_app.texture('icons/experimental_white.png', icon_size, icon_size)  # ces2xnor
     self._rect = rl.Rectangle(0, 0, button_size, button_size)
 
   def set_rect(self, rect: rl.Rectangle) -> None:
@@ -70,26 +70,27 @@ class ExpButton(Widget):
     center_x = int(self._rect.x + self._rect.width // 2)
     center_y = int(self._rect.y + self._rect.height // 2)
 
-    # When CES is on, the 3-state button fully owns the icon (per spec):
-    #   CES auto  -> WHITE experimental   (default: "CES is driving the choice")
-    #   forced Exp -> ORANGE experimental (you forced full Experimental)
-    #   forced Chill -> WHITE steering wheel
+    # The icon COLOR comes from the PNG itself, not the tint: experimental.png is baked orange,
+    # experimental_white.png is white, chffr_wheel.png is white. So we always tint white (identity
+    # for the colored icon) and only vary alpha. The old bug tinted the colored png white -> no-op,
+    # so CES-auto always looked orange. When CES is on the 3-state button fully owns the icon:
+    #   CES auto    -> white experimental   (experimental_white.png)
+    #   forced Exp  -> orange experimental  (experimental.png)
+    #   forced Chill-> white steering wheel
     if self._ces_master:
       if self._ces_button == _BTN_CHILL:
-        show_exp, is_orange = False, False
+        texture = self._txt_wheel
       elif self._ces_button == _BTN_EXP:
-        show_exp, is_orange = True, True
+        texture = self._txt_exp
       else:  # _BTN_CES
-        show_exp, is_orange = True, False
+        texture = self._txt_exp_white
     else:
-      # stock 2-state path (CES off): unchanged — experimental shows orange like before.
-      show_exp = self._held_or_actual_mode() or self._manual_exp
-      is_orange = show_exp and self._manual_exp
+      # stock 2-state path (CES off): wheel <-> (orange) experimental, unchanged.
+      texture = self._txt_exp if (self._held_or_actual_mode() or self._manual_exp) else self._txt_wheel
 
-    color = self._orange_color if is_orange else self._white_color
+    color = self._white_color
     color.a = 180 if self.is_pressed or not self._engageable else 255
 
-    texture = self._txt_exp if show_exp else self._txt_wheel
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
     rl.draw_texture_ex(texture, rl.Vector2(center_x - texture.width / 2, center_y - texture.height / 2), 0.0, 1.0, color)
 
