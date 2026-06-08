@@ -45,6 +45,13 @@ DESCRIPTIONS = {
     "lane change by flicking the turn signal. The prompt only uses the car's rear blind-spot zone and the lane " +
     "model; it cannot see fast traffic approaching from farther back. Always check the lane yourself. Tesla only."
   ),
+  "ConditionalExperimentalSwitching": tr_noop(
+    "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
+    "switch to Experimental Mode only for tight curves, low-speed/city driving, stop lights, and when closing " +
+    "on a slower lead — then return to Chill. With this on, the top-right button cycles CES / Chill / Experimental " +
+    "(orange = forced Experimental). Affects speed/braking only, not steering, and only when openpilot controls " +
+    "longitudinal. NOT a cone/obstacle detector — stay attentive, especially in construction zones."
+  ),
   "ShowSpeedLimit": tr_noop(
     "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
     "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
@@ -58,7 +65,7 @@ DESCRIPTIONS = {
 
 class TogglesLayout(Widget):
   # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
-  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")
+  TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")  # ces2xnor: CES is NOT here — available on all cars
   # auto2xnor: not supported on any car here — always greyed out + forced off
   UNSUPPORTED_TOGGLES = ("NoDisengageOnBrake",)
 
@@ -115,6 +122,12 @@ class TogglesLayout(Widget):
         lambda: tr("Overtake Assist"),
         DESCRIPTIONS["OvertakeAssist"],
         "warning.png",
+        False,
+      ),
+      "ConditionalExperimentalSwitching": (
+        lambda: tr("Conditional Experimental Switching (CES)"),
+        DESCRIPTIONS["ConditionalExperimentalSwitching"],
+        "speed_limit.png",
         False,
       ),
       "ShowSpeedLimit": (

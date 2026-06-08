@@ -35,6 +35,37 @@ def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
   return best_acc, max(best_t, 1.0)
 
 
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+  """Great-circle distance in metres (pure)."""
+  import math
+  r = 6371000.0
+  p1, p2 = math.radians(lat1), math.radians(lat2)
+  dp = math.radians(lat2 - lat1); dl = math.radians(lon2 - lon1)
+  a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+  return 2 * r * math.asin(min(1.0, a ** 0.5))
+
+
+def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> tuple[float, float]:
+  """From pfeiferj's MapTargetVelocities (list of {latitude, longitude, velocity}) + current
+  position, return (min_target_velocity, distance) of the most-binding upcoming curve within the
+  lookahead distance (v_ego * lookahead_s). Returns (0.0, inf) if none / no data. Pure & testable."""
+  if not target_velocities or cur_lat is None or cur_lon is None:
+    return 0.0, float('inf')
+  horizon = max(v_ego, 1.0) * lookahead_s
+  best_v, best_d = 0.0, float('inf')
+  for p in target_velocities:
+    try:
+      d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
+      tv = float(p["velocity"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if 0.0 < d <= horizon:
+      # most-binding = lowest target speed ahead within the horizon
+      if best_v == 0.0 or tv < best_v:
+        best_v, best_d = tv, d
+  return best_v, best_d
+
+
 class Condition:
   """A debounced boolean signal: raw bool -> filtered -> compared to THRESHOLD."""
   def __init__(self):
@@ -57,7 +88,7 @@ def decide_active(s) -> tuple[bool, str]:
 
   Expected keys (all SI, primitives):
     v_ego, has_lead, lead_vlead, lead_drel, blinker,
-    curve_lat_accel_map, dist_to_curve, curve_lat_accel_vision, time_to_curve,
+    map_target_v, map_target_dist, curve_lat_accel_vision, time_to_curve,
     model_should_stop,
     toggles: curves/stops/low_speed/lead (bool enables)
   """
@@ -66,8 +97,12 @@ def decide_active(s) -> tuple[bool, str]:
 
   # 1) curve — map (primary, ~10 s) OR vision (fallback, ~3.5 s)
   if t["curves"] and v > C.CRUISING_SPEED:
-    map_curve = (abs(s["curve_lat_accel_map"]) > C.CURVE_LAT_ACCEL_ENTER
-                 and 0.0 < s["dist_to_curve"] / max(v, 1.0) < C.CURVE_MAP_LOOKAHEAD_S)
+    # MAP: pfeiferj MapTargetVelocities gives a safe curve speed ahead. Trip when an upcoming
+    # target speed within the lookahead is meaningfully (>MIN_SLOWDOWN) below current speed.
+    map_curve = (s["map_target_v"] > 0.0
+                 and (v - s["map_target_v"]) > C.CURVE_MAP_MIN_SLOWDOWN
+                 and 0.0 < s["map_target_dist"] / max(v, 1.0) < C.CURVE_MAP_LOOKAHEAD_S)
+    # VISION fallback: predicted lateral accel over the (short) model horizon.
     vision_curve = (abs(s["curve_lat_accel_vision"]) > C.CURVE_LAT_ACCEL_ENTER
                     and s["time_to_curve"] < C.CURVE_VISION_LOOKAHEAD_S
                     and not s["blinker"])
@@ -157,11 +192,10 @@ def _toggles_from_params(params) -> dict:
           "low_speed": gb("CESLowSpeed"), "lead": gb("CESLead")}
 
 
-def _signals_from(car_state, lead, model, toggles: dict) -> dict:
-  """Build the decision primitives from STOCK messages (carState, radarState.leadOne,
-  modelV2). Defensive: missing/odd data falls back to 'nothing happening' (worst case =
-  stay Chill). NOTE: map-half curvature isn't wired yet, so curve_lat_accel_map=0.0 and
-  only the vision fallback fires (the mapd2xnor dependency is merged; map-half is next)."""
+def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, map_target_dist: float) -> dict:
+  """Build the decision primitives from STOCK messages (carState, radarState.leadOne, modelV2)
+  plus the map-curve result (map_target_v/dist, from pfeiferj MapTargetVelocities). Defensive:
+  missing/odd data falls back to 'nothing happening' (worst case = stay Chill)."""
   v_ego = float(car_state.vEgo)
 
   has_lead = bool(getattr(lead, 'status', False))
@@ -181,31 +215,41 @@ def _signals_from(car_state, lead, model, toggles: dict) -> dict:
   return {
     "v_ego": v_ego, "has_lead": has_lead, "lead_vlead": lead_vlead, "lead_drel": lead_drel,
     "blinker": bool(car_state.leftBlinker or car_state.rightBlinker),
-    "curve_lat_accel_map": 0.0, "dist_to_curve": 0.0,   # map-half pending
-    "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,
+    "map_target_v": map_target_v, "map_target_dist": map_target_dist,   # map half (MapTargetVelocities)
+    "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,            # vision fallback
     "model_should_stop": model_should_stop, "toggles": toggles,
   }
 
 
 class CESController:
-  """Live wrapper used by selfdrived. Owns the state machine + ~1 Hz param refresh + the
-  3-state button (CESButtonState: 0=CES, 1=forced Chill, 2=forced Experimental). When CES
-  is disabled/non-Tesla, experimental_request() returns False → behavior-neutral."""
+  """Live wrapper used by selfdrived. Owns the state machine + ~1 Hz param refresh + the 3-state
+  button (CESButtonState: 0=CES, 1=forced Chill, 2=forced Experimental) + the map-curve read.
+  Gated on openpilotLongitudinalControl (NOT brand — available on every car, like the stock
+  Experimental toggle). experimental_request() returns False when disabled → behavior-neutral."""
   def __init__(self, CP, params=None):
+    import platform
     from openpilot.common.params import Params
     self.CP = CP
     self.params = params or Params()
+    # pfeiferj mapd writes MapTargetVelocities/LastGPSPosition to the in-memory param store
+    try:
+      self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
+    except Exception:
+      self.mem_params = None
     self._sm = ConditionalExperimentalSwitching()
     self._enabled = False
     self._button = C.BTN_CES
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
+    self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
+    self._cur_lat = self._cur_lon = None
     self._frame = 0
-    self._is_tesla = (getattr(CP, 'brand', '') == 'tesla') and bool(CP.openpilotLongitudinalControl)
+    # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
+    self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
   def _read_params(self):
     if self._frame % max(1, int(1.0 / DT_MDL)) == 0:   # ~1 Hz
       try:
-        self._enabled = self._is_tesla and self.params.get_bool("ConditionalExperimentalSwitching")
+        self._enabled = self._long_ok and self.params.get_bool("ConditionalExperimentalSwitching")
       except Exception:
         self._enabled = False
       if self._enabled:
@@ -214,7 +258,26 @@ class CESController:
           self._button = int(self.params.get("CESButtonState", return_default=True) or 0)
         except Exception:
           self._button = C.BTN_CES
+        self._read_map()
     self._frame += 1
+
+  def _read_map(self):
+    """Refresh the map-curve inputs from the pfeiferj mem params (defensive — any failure => no
+    map curve, vision fallback still works)."""
+    if self.mem_params is None or not self._toggles.get("curves", True):
+      self._map_targets = []; return
+    try:
+      self._map_targets = self.mem_params.get("MapTargetVelocities", return_default=True) or []
+    except Exception:
+      self._map_targets = []
+    try:
+      import json
+      pos = self.mem_params.get("LastGPSPosition", return_default=True)
+      if isinstance(pos, (bytes, str)):
+        pos = json.loads(pos)
+      self._cur_lat = float(pos["latitude"]); self._cur_lon = float(pos["longitude"])
+    except Exception:
+      self._cur_lat = self._cur_lon = None
 
   def enabled(self) -> bool:
     return self._enabled
@@ -224,8 +287,7 @@ class CESController:
 
   def experimental_request(self, car_state, sm) -> bool:
     """True if CES wants Experimental this cycle. Reads params; advances the state machine.
-    Safe to call always — returns False whenever CES is disabled/non-Tesla (behavior-neutral).
-    `car_state` is the carState struct; `sm` provides radarState + modelV2."""
+    Safe to call always — returns False whenever CES is disabled (behavior-neutral)."""
     self._read_params()
     if not self._enabled:
       self._sm.reset()
@@ -241,4 +303,7 @@ class CESController:
       model = sm['modelV2']
     except Exception:
       return False
-    return self._sm.update_decision(_signals_from(car_state, lead, model, self._toggles)) == "experimental"
+    v_ego = float(car_state.vEgo)
+    mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
+    sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd)
+    return self._sm.update_decision(sig) == "experimental"

@@ -16,7 +16,7 @@ def base(**kw):
   """A 'cruising, nothing happening' signal set; override fields per test."""
   s = {
     "v_ego": 30.0, "has_lead": False, "lead_vlead": 0.0, "lead_drel": 0.0, "blinker": False,
-    "curve_lat_accel_map": 0.0, "dist_to_curve": 0.0,
+    "map_target_v": 0.0, "map_target_dist": float('inf'),
     "curve_lat_accel_vision": 0.0, "time_to_curve": 10.0,
     "model_should_stop": False, "toggles": ALL_ON,
   }
@@ -28,52 +28,83 @@ def lat_accel(radius_m, mph):
   return (mph * CV.MPH_TO_MS) ** 2 / radius_m
 
 
-# ---- curve anchors (map half) ----------------------------------------------
+# ---- curve anchors via the VISION half (lat-accel threshold = 1.9 m/s^2) ----
+# These pin CURVE_LAT_ACCEL_ENTER against the real I-5 curves (within the vision horizon).
 def test_terwilliger_trips_at_50():
-  # R~250 m @ 50 mph -> ~2.0 m/s^2, ~200 m ahead -> within 10 s
-  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(250, 50), dist_to_curve=180.0)
+  # R~250 m @ 50 mph -> ~2.0 m/s^2 > 1.9 -> trip
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(250, 50), time_to_curve=2.0)
   active, status = decide_active(s)
   assert active and status == "curve"
 
 
 def test_wilsonville_easy_at_70_stays_chill():
-  # R~550 m @ 70 mph -> ~1.78 m/s^2 < 1.9 enter -> must NOT trip
-  s = base(v_ego=70 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(550, 70), dist_to_curve=250.0)
-  active, _ = decide_active(s)
-  assert not active
+  # R~550 m @ 70 mph -> ~1.78 m/s^2 < 1.9 -> NOT trip
+  s = base(v_ego=70 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(550, 70), time_to_curve=2.0)
+  assert not decide_active(s)[0]
 
 
 def test_wilsonville_hard_at_90_trips():
-  # R~550 m @ 90 mph -> ~2.94 m/s^2 > 1.9 -> trips
-  s = base(v_ego=90 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(550, 90), dist_to_curve=320.0)
+  # R~550 m @ 90 mph -> ~2.94 m/s^2 > 1.9 -> trip
+  s = base(v_ego=90 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(550, 90), time_to_curve=2.0)
   active, status = decide_active(s)
   assert active and status == "curve"
 
 
 def test_s_marquam_gentle_at_50_chill_but_70_trips():
   # R~335 m: 50 mph ~1.36 (chill), 70 mph ~2.66 (trip)
-  s50 = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(335, 50), dist_to_curve=200.0)
-  assert not decide_active(s50)[0]
-  s70 = base(v_ego=70 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(335, 70), dist_to_curve=300.0)
-  assert decide_active(s70)[0]
+  assert not decide_active(base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(335, 50), time_to_curve=2.0))[0]
+  assert decide_active(base(v_ego=70 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(335, 70), time_to_curve=2.0))[0]
 
 
-def test_curve_beyond_lookahead_does_not_trip():
-  # tight curve but 400 m ahead at 30 m/s -> 13 s > 10 s lookahead -> no map trip
-  s = base(v_ego=30.0, curve_lat_accel_map=3.0, dist_to_curve=400.0)
+def test_vision_curve_beyond_horizon_does_not_trip():
+  # tight curve but time_to_curve 5 s > 3.5 s vision horizon -> no vision trip
+  s = base(v_ego=25.0, curve_lat_accel_vision=3.0, time_to_curve=5.0)
   assert not decide_active(s)[0]
-
-
-def test_vision_fallback_trips_when_map_misses():
-  s = base(v_ego=22.0, curve_lat_accel_map=0.0, dist_to_curve=0.0,
-           curve_lat_accel_vision=2.5, time_to_curve=3.0)
-  active, status = decide_active(s)
-  assert active and status == "curve"
 
 
 def test_vision_curve_ignored_with_blinker():
   s = base(v_ego=22.0, curve_lat_accel_vision=2.5, time_to_curve=3.0, blinker=True)
   assert not decide_active(s)[0]
+
+
+# ---- curve via the MAP half (MapTargetVelocities target-speed) -------------
+def test_map_curve_trips_on_big_slowdown():
+  # 60 mph (26.8), upcoming target 40 mph (17.9) -> slowdown ~9 m/s > 3, 200 m / 26.8 = 7.5 s < 10
+  s = base(v_ego=60 * CV.MPH_TO_MS, map_target_v=40 * CV.MPH_TO_MS, map_target_dist=200.0)
+  active, status = decide_active(s)
+  assert active and status == "curve"
+
+
+def test_map_curve_small_slowdown_stays_chill():
+  # only ~1.5 m/s slowdown (< MIN_SLOWDOWN 3) -> not a real curve
+  s = base(v_ego=27.0, map_target_v=25.5, map_target_dist=150.0)
+  assert not decide_active(s)[0]
+
+
+def test_map_curve_beyond_lookahead_stays_chill():
+  # big slowdown but 400 m ahead at 27 m/s -> 14.8 s > 10 s -> too far yet
+  s = base(v_ego=27.0, map_target_v=12.0, map_target_dist=400.0)
+  assert not decide_active(s)[0]
+
+
+def test_map_and_vision_both_quiet_is_chill():
+  assert not decide_active(base(v_ego=27.0))[0]
+
+
+# ---- upcoming_curve helper (MapTargetVelocities parsing + distance) --------
+def test_upcoming_curve_picks_binding_point_within_horizon():
+  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve
+  # ~111 m north (0.001 deg lat) target 15; ~5.5 km north target 5 (beyond horizon)
+  tv = [{"latitude": 45.001, "longitude": -122.0, "velocity": 15.0},
+        {"latitude": 45.05, "longitude": -122.0, "velocity": 5.0}]
+  mtv, mtd = upcoming_curve(tv, 45.0, -122.0, v_ego=20.0, lookahead_s=10.0)  # horizon 200 m
+  assert abs(mtv - 15.0) < 1e-6 and 100 < mtd < 125
+
+
+def test_upcoming_curve_empty_returns_none():
+  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve
+  mtv, mtd = upcoming_curve([], 45.0, -122.0, 20.0, 10.0)
+  assert mtv == 0.0 and mtd == float('inf')
 
 
 # ---- low speed / city ------------------------------------------------------
@@ -132,7 +163,9 @@ def test_stop_ignored_when_following_lead():
 
 # ---- toggles ---------------------------------------------------------------
 def test_curve_toggle_off_disables_curve():
-  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_map=lat_accel(250, 50), dist_to_curve=180.0,
+  # both map + vision curve present, but curves toggle off -> no curve trip
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(250, 50), time_to_curve=2.0,
+           map_target_v=40 * CV.MPH_TO_MS, map_target_dist=200.0,
            toggles={"curves": False, "stops": True, "low_speed": True, "lead": True})
   assert not decide_active(s)[0]
 

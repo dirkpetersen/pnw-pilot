@@ -19,6 +19,10 @@ CURVE_LAT_ACCEL_EXIT  = 1.3   # hysteresis: curve considered "done" below this
 CURVE_MAP_LOOKAHEAD_S    = 10.0  # map primary (smooth early trigger)
 CURVE_VISION_LOOKAHEAD_S = 3.5   # vision fallback (capped by model confidence)
 CRUISING_SPEED = 5.0          # m/s; below this, curve detection is meaningless
+# map half: pfeiferj mapd publishes MapTargetVelocities (per-point curve safe-speeds). Trip the map
+# curve when an upcoming target speed within the lookahead is this much BELOW current speed (a real
+# curve, not GPS noise). Target-speed based — the binary already did curvature->safe-speed physics.
+CURVE_MAP_MIN_SLOWDOWN = 3.0  # m/s
 
 # --- lead -------------------------------------------------------------------
 SLOW_LEAD_DV   = 5.0          # m/s: lead this much slower than us -> closing -> Experimental
