@@ -34,7 +34,15 @@ struct CustomReserved6 @0xf98d843bfd7004a3 {
 struct CustomReserved7 @0xb86e6369214c01c8 {
 }
 
-struct CustomReserved8 @0xf416ec09499d9d19 {
+# mapd2xnor: OSM map data published by mapd_manager (from pfeiferj mapd binary).
+# Renamed from CustomReserved8; identifier preserved per cereal fork convention.
+struct LiveMapDataSP @0xf416ec09499d9d19 {
+  speedLimitValid @0 :Bool;
+  speedLimit @1 :Float32;          # m/s
+  speedLimitAheadValid @2 :Bool;
+  speedLimitAhead @3 :Float32;     # m/s
+  speedLimitAheadDistance @4 :Float32;  # meters
+  roadName @5 :Text;
 }
 
 struct CustomReserved9 @0xa1680744031fdb2d {

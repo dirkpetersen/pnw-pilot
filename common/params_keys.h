@@ -78,6 +78,23 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LanguageSetting", {PERSISTENT, STRING, "en"}},
     {"LastAthenaPingTime", {CLEAR_ON_MANAGER_START, INT}},
     {"LastGPSPosition", {PERSISTENT, STRING}},
+    // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits)
+    {"MapdVersion", {PERSISTENT, STRING}},
+    {"MapSpeedLimit", {PERSISTENT, STRING}},
+    {"NextMapSpeedLimit", {PERSISTENT, JSON}},
+    {"RoadName", {PERSISTENT, STRING}},
+    {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
+    {"OsmDownloadedDate", {PERSISTENT, STRING}},
+    {"OsmLocationName", {PERSISTENT, STRING}},
+    {"OsmStateName", {PERSISTENT, STRING, "WA,OR,ID"}},  // mapd2xnor: 2-letter codes (binary STATE_BOXES key), NOT full names
+    {"OsmLocal", {PERSISTENT, BOOL}},
+    {"OsmAutoRequested", {PERSISTENT, BOOL}},
+    {"OSMDownloadLocations", {PERSISTENT, JSON}},
+    {"OSMDownloadBounds", {PERSISTENT, STRING}},
+    {"MapTargetVelocities", {PERSISTENT, JSON}},
+    {"NextMapHazard", {PERSISTENT, JSON}},
+    {"ShowSpeedLimit", {PERSISTENT, BOOL, "0"}},  // mapd2xnor: default OFF — "Speed limit display/warning (MAPD)" toggle gates display + map download
+    {"ShowRoadName", {PERSISTENT, BOOL, "1"}},
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"LastAgnosPowerMonitorShutdown", {CLEAR_ON_MANAGER_START, STRING}},
@@ -108,6 +125,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_UnregisteredHardware", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_UpdateFailed", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_DriverMonitoringUncertain", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"OnroadCycleRequested", {CLEAR_ON_MANAGER_START, BOOL}},
     {"OpenpilotEnabledToggle", {PERSISTENT, BOOL, "1"}},
     {"PandaHeartbeatLost", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},

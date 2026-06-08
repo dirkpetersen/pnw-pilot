@@ -5,7 +5,9 @@ import platform
 from cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
+from openpilot.system.hardware.hw import Paths
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.sunnypilot.mapd import MAPD_PATH
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -48,6 +50,10 @@ def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
+
+# mapd2xnor: launch the bundled mapd binary only when it is present on disk
+def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return os.path.exists(MAPD_PATH)
 
 def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started
@@ -107,6 +113,15 @@ procs = [
   PythonProcess("uploader", "system.loggerd.uploader", always_run),
   PythonProcess("statsd", "system.statsd", always_run),
   PythonProcess("feedbackd", "selfdrive.ui.feedback.feedbackd", only_onroad),
+
+  # mapd2xnor: OSM map daemon (pfeiferj binary) + manager publishing liveMapDataSP.
+  # restart_if_crash=True so manager relaunches them if they exit — the mapd binary
+  # does a single non-resuming download pass and can exit/die mid-pass (or be killed
+  # during maintenance); without this, manager never respawns it (matching sunnypilot's
+  # default), the download silently stalls, and the speed-limit sign goes blank until a
+  # full stack restart. With it, the download daemon self-heals across crashes/reboots.
+  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, restart_if_crash=True),
+  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, restart_if_crash=True),
 
   # debug procs
   NativeProcess("bridge", "cereal/messaging", ["./bridge"], notcar),
