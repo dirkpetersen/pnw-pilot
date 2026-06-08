@@ -31,7 +31,7 @@ WARNING_DURATION = 6.0     # s to keep the red "lower limit" banner up
 WARNING_BLINK_PERIOD = 0.7 # s for one on+off blink cycle of the banner (~1.4 Hz)
 AHEAD_ACTIVE_DIST = 150.0  # m: treat a lower "ahead" limit as imminent within this distance
 MIN_VALID_KPH = 1.0        # below this (in m/s-derived kph) the limit is treated as unknown
-OVERSPEED_RATIO = 1.20     # only warn if current speed is >20% above the new lower limit
+OVERSPEED_RATIO = 1.30     # only warn if current speed is >30% above the new lower limit
 
 
 class _Colors:
@@ -133,7 +133,11 @@ class SpeedLimitRenderer(Widget):
 
     self._draw_sign(sign_rect)
 
-    if time.monotonic() < self._warn_until:
+    # Show the warning only while BOTH hold: the 6 s window is still open AND we are
+    # still actually >OVERSPEED_RATIO over the warned limit. The second check cancels
+    # the blink the instant the driver slows back down, so the banner doesn't keep
+    # flashing for the rest of the window after you've already obeyed it.
+    if time.monotonic() < self._warn_until and self._overspeeding(self._warn_value):
       self._draw_warning(rect)
 
   # ---- normal sign -------------------------------------------------------
