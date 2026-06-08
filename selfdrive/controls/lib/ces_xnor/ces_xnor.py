@@ -16,8 +16,11 @@ SAFETY: this module is PURE DECISION LOGIC. It does not command the car. It must
 effective-experimental computation (selfdrived) only after review + on-road verification. It never
 touches panda safety. The decision core (`decide_active`) takes primitives and is unit-tested.
 """
+import time
+
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
 
 
@@ -124,6 +127,53 @@ def decide_active(s) -> tuple[bool, str]:
       return True, "slowLead"
 
   return False, "chill"
+
+
+def _clamp01(x: float) -> float:
+  return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
+
+
+def curve_closeness(s) -> tuple[float, str]:
+  """PURE, display-only: 'how close are we to tripping Experimental for a curve', 0.0..1.0, plus
+  which half drives it ('map' / 'vision' / ''). 1.0 == at/over the entry threshold (switch imminent).
+  Mirrors the curve branch of `decide_active` but as a continuous ratio for the on-screen feedback —
+  it does NOT make the decision. 0.80 ~= "very close", 0.99 ~= "about to switch", >=1.0 == tripping."""
+  t = s["toggles"]
+  v = s["v_ego"]
+  if not t["curves"] or v <= C.CRUISING_SPEED:
+    return 0.0, ""
+  # MAP half: how far the upcoming safe curve speed sits below us vs the slowdown that trips it,
+  # but only while that curve is within the lookahead time.
+  map_close = 0.0
+  mv, md = s["map_target_v"], s["map_target_dist"]
+  if mv > 0.0 and 0.0 < md / max(v, 1.0) < C.CURVE_MAP_LOOKAHEAD_S:
+    map_close = _clamp01((v - mv) / C.CURVE_MAP_MIN_SLOWDOWN)
+  # VISION half: predicted lateral accel vs the entry threshold, within the (short) vision horizon.
+  vis_close = 0.0
+  if s["time_to_curve"] < C.CURVE_VISION_LOOKAHEAD_S and not s["blinker"]:
+    vis_close = _clamp01(abs(s["curve_lat_accel_vision"]) / C.CURVE_LAT_ACCEL_ENTER)
+  if map_close >= vis_close:
+    return map_close, ("map" if map_close > 0.0 else "")
+  return vis_close, "vision"
+
+
+def decision_telemetry(s) -> dict:
+  """PURE, display-only: a compact snapshot for the on-screen CES overlay. Reports the binding
+  reason, the curve 'closeness' as a 0..100 %, and the upcoming map-curve preview (target speed +
+  distance). Built from the SAME signals dict `decide_active` consumes, so the overlay can never
+  disagree with the live decision."""
+  raw_active, reason = decide_active(s)
+  cpct, csrc = curve_closeness(s)
+  md = s["map_target_dist"]
+  return {
+    "rawActive": bool(raw_active),
+    "reason": reason,
+    "curvePct": int(round(cpct * 100)),
+    "curveSrc": csrc,
+    "mapV": round(float(s["map_target_v"]), 1),
+    "mapDist": round(float(md), 0) if md != float('inf') else 0.0,
+    "vEgo": round(float(s["v_ego"]), 1),
+  }
 
 
 class ConditionalExperimentalSwitching:
@@ -243,6 +293,9 @@ class CESController:
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
     self._cur_lat = self._cur_lon = None
     self._frame = 0
+    # telemetry / logging (display + diagnostics only — never gates control)
+    self._last_mode = "off"         # last logged mode: off / chill / experimental
+    self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
@@ -290,20 +343,64 @@ class CESController:
     Safe to call always — returns False whenever CES is disabled (behavior-neutral)."""
     self._read_params()
     if not self._enabled:
+      if self._last_mode != "off":
+        cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
+        self._last_mode = "off"
       self._sm.reset()
       return False
-    if self._button == C.BTN_CHILL:     # forced Chill
-      self._sm.reset()
-      return False
-    if self._button == C.BTN_EXP:       # forced full Experimental
-      return True
-    # BTN_CES: condition ladder decides
+
+    # Build the decision signals every cycle while enabled — even in the forced button modes —
+    # so the on-screen overlay always reflects what CES sees (curve %, upcoming curve preview).
+    sig = None
     try:
       lead = sm['radarState'].leadOne
       model = sm['modelV2']
+      v_ego = float(car_state.vEgo)
+      mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
+      sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd)
     except Exception:
-      return False
-    v_ego = float(car_state.vEgo)
-    mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
-    sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd)
-    return self._sm.update_decision(sig) == "experimental"
+      sig = None
+
+    if self._button == C.BTN_CHILL:        # forced Chill
+      self._sm.reset()
+      want = False
+    elif self._button == C.BTN_EXP:        # forced full Experimental
+      want = True
+    elif sig is not None:                  # BTN_CES: condition ladder decides
+      want = self._sm.update_decision(sig) == "experimental"
+    else:
+      want = False
+
+    self._publish_status(sig, want)
+    return want
+
+  def _publish_status(self, sig, want: bool) -> None:
+    """Log mode transitions and publish a throttled CESStatus snapshot to the in-memory param store
+    for the on-screen overlay. Display/diagnostics only — never affects the returned decision."""
+    mode = "experimental" if want else "chill"
+    tele = decision_telemetry(sig) if sig is not None else {
+      "reason": "noData", "curvePct": 0, "curveSrc": "", "mapV": 0.0, "mapDist": 0.0, "vEgo": 0.0,
+    }
+    tele["mode"] = mode
+    tele["button"] = int(self._button)
+    tele["enabled"] = True
+
+    # transition logging — one cloudlog line per chill<->experimental change (this is the
+    # "did CES actually do something" trail in the device logs).
+    if mode != self._last_mode:
+      cloudlog.info("CES %s->%s button=%d reason=%s curve=%d%%(%s) vEgo=%.1f mapV=%.1f mapDist=%.0f",
+                    self._last_mode, mode, self._button, tele["reason"],
+                    tele["curvePct"], tele["curveSrc"], tele["vEgo"], tele["mapV"], tele["mapDist"])
+      self._last_mode = mode
+
+    # ~5 Hz publish to /dev/shm/params (put a dict -> JSON; nonblocking so the safety loop never waits)
+    if self.mem_params is None:
+      return
+    now = time.monotonic()
+    if now - self._tele_last < 0.2:
+      return
+    self._tele_last = now
+    try:
+      self.mem_params.put_nonblocking("CESStatus", tele)
+    except Exception:
+      pass

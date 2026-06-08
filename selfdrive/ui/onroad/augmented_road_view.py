@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.overtake_assist import OvertakeAssistRenderer  # auto2xnor
 from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitRenderer  # mapd2xnor
+from openpilot.selfdrive.ui.onroad.ces_status import CesStatusRenderer  # ces2xnor
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -52,6 +53,7 @@ class AugmentedRoadView(CameraView):
     self.driver_state_renderer = DriverStateRenderer()
     self.overtake_assist_renderer = OvertakeAssistRenderer()  # auto2xnor
     self.speed_limit_renderer = SpeedLimitRenderer()  # mapd2xnor
+    self.ces_status_renderer = CesStatusRenderer()  # ces2xnor
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -97,6 +99,7 @@ class AugmentedRoadView(CameraView):
     # Use self._content_rect for positioning within camera bounds
     self.overtake_assist_renderer.render(self._content_rect)  # auto2xnor
     self.speed_limit_renderer.render(self._content_rect)  # mapd2xnor
+    self.ces_status_renderer.render(self._content_rect)  # ces2xnor
 
     # End clipping region
     rl.end_scissor_mode()

@@ -7,6 +7,9 @@ from openpilot.system.ui.widgets import Widget
 
 # ces2xnor button states
 _BTN_CES, _BTN_CHILL, _BTN_EXP = 0, 1, 2
+# tap cycle order (per spec): CES auto (white exp) -> forced Experimental (orange exp)
+#   -> forced Chill (white wheel) -> back to CES auto
+_CES_CYCLE = (_BTN_CES, _BTN_EXP, _BTN_CHILL)
 
 
 class ExpButton(Widget):
@@ -43,14 +46,19 @@ class ExpButton(Widget):
     # ces2xnor
     self._ces_master = self._params.get_bool("ConditionalExperimentalSwitching")
     self._manual_exp = self._params.get_bool("ExperimentalMode")
-    self._ces_button = (self._params.get("CESButtonState", return_default=True) or _BTN_CES) if self._ces_master else _BTN_CES
+    # CESButtonState is an INT-typed param -> get() already returns an int (0=CES,1=Chill,2=Exp).
+    self._ces_button = int(self._params.get("CESButtonState", return_default=True) or _BTN_CES) if self._ces_master else _BTN_CES
 
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     if self._ces_master:
-      # ces2xnor: 3-state cycle  CES -> Chill -> Experimental -> CES  (no confirm gate)
-      nxt = ((self._params.get("CESButtonState", return_default=True) or _BTN_CES) + 1) % 3
-      self._params.put("CESButtonState", str(nxt))
+      # ces2xnor: 3-state cycle  CES -> Experimental -> Chill -> CES  (no confirm gate)
+      cur = int(self._params.get("CESButtonState", return_default=True) or _BTN_CES)
+      idx = _CES_CYCLE.index(cur) if cur in _CES_CYCLE else 0
+      nxt = _CES_CYCLE[(idx + 1) % len(_CES_CYCLE)]
+      # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
+      # cast, so put(str) raised TypeError and the tap silently did nothing (button never moved).
+      self._params.put("CESButtonState", nxt)
     elif self._is_toggle_allowed():
       # stock 2-state toggle
       new_mode = not self._experimental_mode
@@ -62,15 +70,23 @@ class ExpButton(Widget):
     center_x = int(self._rect.x + self._rect.width // 2)
     center_y = int(self._rect.y + self._rect.height // 2)
 
-    # full Experimental = manual settings toggle OR CES button forced to Experimental.
-    full_exp = self._manual_exp or (self._ces_master and self._ces_button == _BTN_EXP)
-    if self._ces_master and self._ces_button == _BTN_CHILL:
-      show_exp = False                                   # forced Chill -> wheel
+    # When CES is on, the 3-state button fully owns the icon (per spec):
+    #   CES auto  -> WHITE experimental   (default: "CES is driving the choice")
+    #   forced Exp -> ORANGE experimental (you forced full Experimental)
+    #   forced Chill -> WHITE steering wheel
+    if self._ces_master:
+      if self._ces_button == _BTN_CHILL:
+        show_exp, is_orange = False, False
+      elif self._ces_button == _BTN_EXP:
+        show_exp, is_orange = True, True
+      else:  # _BTN_CES
+        show_exp, is_orange = True, False
     else:
-      show_exp = self._held_or_actual_mode() or full_exp
+      # stock 2-state path (CES off): unchanged — experimental shows orange like before.
+      show_exp = self._held_or_actual_mode() or self._manual_exp
+      is_orange = show_exp and self._manual_exp
 
-    # color: ORANGE = full Experimental; WHITE = CES-auto experimental or chill
-    color = self._orange_color if (show_exp and full_exp) else self._white_color
+    color = self._orange_color if is_orange else self._white_color
     color.a = 180 if self.is_pressed or not self._engageable else 255
 
     texture = self._txt_exp if show_exp else self._txt_wheel

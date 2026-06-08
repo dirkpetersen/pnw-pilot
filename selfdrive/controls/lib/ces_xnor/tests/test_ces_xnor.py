@@ -6,7 +6,9 @@ Run:  pytest selfdrive/controls/lib/ces/tests/test_ces.py
 """
 from openpilot.common.constants import CV
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import decide_active, vision_curve_lat_accel
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import (
+  decide_active, vision_curve_lat_accel, curve_closeness, decision_telemetry,
+)
 
 
 ALL_ON = {"curves": True, "stops": True, "low_speed": True, "lead": True}
@@ -199,3 +201,51 @@ def test_ces_enabled_only_adds_never_removes_manual():
   assert _planner_flag(False, ces_enabled=True, ces_request=True) is True
   # manual OFF + CES wants chill -> chill
   assert _planner_flag(False, ces_enabled=True, ces_request=False) is False
+
+
+# ---- telemetry / overlay closeness (display-only; must track the decision) ----
+def test_curve_closeness_zero_when_cruising_straight():
+  pct, src = curve_closeness(base())
+  assert pct == 0.0 and src == ""
+
+
+def test_curve_closeness_ramps_with_vision_lat_accel():
+  # half the entry threshold -> ~50% closeness; the source is the vision half
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=C.CURVE_LAT_ACCEL_ENTER * 0.5, time_to_curve=2.0)
+  pct, src = curve_closeness(s)
+  assert src == "vision"
+  assert 0.45 < pct < 0.55
+
+
+def test_curve_closeness_caps_at_one_when_tripping():
+  # well over threshold -> clamped to 1.0, and decide_active agrees it's a curve
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=C.CURVE_LAT_ACCEL_ENTER * 3.0, time_to_curve=2.0)
+  pct, _ = curve_closeness(s)
+  assert pct == 1.0
+  assert decide_active(s) == (True, "curve")
+
+
+def test_curve_closeness_map_half():
+  # upcoming map target speed is MIN_SLOWDOWN below us, within lookahead -> ~100%, source 'map'
+  v = 30.0
+  s = base(v_ego=v, map_target_v=v - C.CURVE_MAP_MIN_SLOWDOWN, map_target_dist=v * 2.0)
+  pct, src = curve_closeness(s)
+  assert src == "map"
+  assert pct == 1.0
+
+
+def test_curve_closeness_ignored_when_curves_toggle_off():
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=C.CURVE_LAT_ACCEL_ENTER * 2,
+           time_to_curve=2.0, toggles={"curves": False, "stops": True, "low_speed": True, "lead": True})
+  pct, src = curve_closeness(s)
+  assert pct == 0.0 and src == ""
+
+
+def test_decision_telemetry_shape_and_consistency():
+  s = base(v_ego=50 * CV.MPH_TO_MS, curve_lat_accel_vision=lat_accel(250, 50), time_to_curve=2.0)
+  t = decision_telemetry(s)
+  assert t["reason"] == "curve" and t["rawActive"] is True
+  assert isinstance(t["curvePct"], int) and t["curvePct"] >= 100
+  assert t["curveSrc"] == "vision"
+  # mapDist must be a finite number (never inf) so it JSON-serializes cleanly for the overlay
+  assert t["mapDist"] == 0.0
