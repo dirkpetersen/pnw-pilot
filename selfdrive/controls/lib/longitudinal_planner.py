@@ -14,7 +14,6 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import CESController  # ces2xnor
 
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -59,10 +58,6 @@ class LongitudinalPlanner:
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
-
-    # ces2xnor: Conditional Experimental Switching (default OFF, Tesla-gated). Inert when
-    # disabled — the experimental branch in update() stays byte-identical to upstream.
-    self.ces_xnor = CESController(CP)
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -157,14 +152,7 @@ class LongitudinalPlanner:
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
-    # ces2xnor: CES may ADD experimental when enabled; it never removes the manual flag.
-    # experimental_request() refreshes the param itself and returns False whenever CES is
-    # disabled (default) or non-Tesla — so `use_experimental` is then byte-identical to
-    # sm['selfdriveState'].experimentalMode (upstream behavior).
-    ces_experimental = self.ces_xnor.experimental_request(sm)
-    use_experimental = sm['selfdriveState'].experimentalMode or ces_experimental
-
-    if use_experimental:
+    if sm['selfdriveState'].experimentalMode:
       output_a_target = min(output_a_target_e2e, output_a_target_mpc)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
       if output_a_target < output_a_target_mpc:

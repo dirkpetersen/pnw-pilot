@@ -18,6 +18,7 @@ from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import CESController  # ces2xnor
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -118,6 +119,8 @@ class SelfdriveD:
     self.logged_comm_issue = None
     self.not_running_prev = None
     self.experimental_mode = False
+    self.manual_experimental_mode = False     # ces2xnor: the ExperimentalMode-param baseline
+    self.ces_xnor = CESController(self.CP)     # ces2xnor: default OFF, Tesla-gated
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.state_machine = StateMachine()
@@ -503,6 +506,11 @@ class SelfdriveD:
       self.enabled, self.active = self.state_machine.update(self.events)
     self.update_alerts(CS)
 
+    # ces2xnor: effective experimental = manual ExperimentalMode OR CES's per-cycle decision.
+    # experimental_request() returns False whenever CES is disabled/non-Tesla, so this is
+    # byte-identical to the manual baseline until CES is turned on (Tesla, default OFF).
+    self.experimental_mode = self.manual_experimental_mode or self.ces_xnor.experimental_request(CS, self.sm)
+
     self.publish_selfdriveState(CS)
 
     self.CS_prev = CS
@@ -513,7 +521,7 @@ class SelfdriveD:
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.no_disengage_on_brake = self.params.get_bool("NoDisengageOnBrake")  # auto2xnor
-      self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      self.manual_experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl  # ces2xnor
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 
