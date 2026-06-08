@@ -43,13 +43,13 @@ class ExpButton(Widget):
     # ces2xnor
     self._ces_master = self._params.get_bool("ConditionalExperimentalSwitching")
     self._manual_exp = self._params.get_bool("ExperimentalMode")
-    self._ces_button = (self._params.get_int("CESButtonState") or _BTN_CES) if self._ces_master else _BTN_CES
+    self._ces_button = (self._params.get("CESButtonState", return_default=True) or _BTN_CES) if self._ces_master else _BTN_CES
 
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     if self._ces_master:
       # ces2xnor: 3-state cycle  CES -> Chill -> Experimental -> CES  (no confirm gate)
-      nxt = ((self._params.get_int("CESButtonState") or _BTN_CES) + 1) % 3
+      nxt = ((self._params.get("CESButtonState", return_default=True) or _BTN_CES) + 1) % 3
       self._params.put("CESButtonState", str(nxt))
     elif self._is_toggle_allowed():
       # stock 2-state toggle
