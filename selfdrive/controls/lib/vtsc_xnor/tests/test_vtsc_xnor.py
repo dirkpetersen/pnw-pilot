@@ -4,7 +4,7 @@ the car held 70 mph through a ~415 m-radius curve (2.6 m/s^2 lateral) and did NO
 driver intervened. VTSC must instead command a slowdown to a safe speed (~57 mph at A_LAT_TARGET=1.5)
 and START braking ~100 m before the apex, not at it.
 """
-from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import v_safe, curve_speed_target
+from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import v_safe, curve_speed_target, apply_limits
 
 MPH = 0.44704
 def mph(v):
@@ -77,6 +77,31 @@ def test_binding_curve_is_the_sharpest_nearest():
   assert mph(cap) < 70
   # equals what the Terwilliger point alone would give (it's the binding one)
   assert abs(cap - curve_speed_target([TERW_KAPPA], [80.0], v_cruise=V70)) < 1e-6
+
+
+# ---- rate limiter (apply_limits) -------------------------------------------
+def test_apply_limits_none_starts_at_cruise():
+  # no prior state + no curve (target == cruise) -> stays at cruise
+  assert apply_limits(None, 31.3, 31.3, dt=0.05) == 31.3
+  # no prior state + a curve target -> begins from cruise and steps down by one decel step
+  assert abs(apply_limits(None, 20.0, 31.3, dt=0.05, a_decel_max=3.0) - (31.3 - 0.15)) < 1e-6
+
+
+def test_apply_limits_bounds_decel_rate():
+  # target far below current; one 50 ms step may drop by at most A_DECEL_MAX(3.0)*dt = 0.15 m/s
+  out = apply_limits(31.3, 20.0, 31.3, dt=0.05, a_decel_max=3.0)
+  assert abs(out - (31.3 - 0.15)) < 1e-6
+
+
+def test_apply_limits_never_above_cruise():
+  out = apply_limits(31.0, 35.0, 31.3, dt=0.05)   # target above cruise -> clamp to cruise
+  assert out <= 31.3
+
+
+def test_apply_limits_eases_back_up():
+  # curve cleared (target=cruise): cap rises gently, not instantly
+  out = apply_limits(20.0, 31.3, 31.3, dt=0.05, a_relax=1.5)
+  assert 20.0 < out < 20.0 + 1.5 * 0.05 + 1e-6
 
 
 def test_decel_envelope_matches_calibration():

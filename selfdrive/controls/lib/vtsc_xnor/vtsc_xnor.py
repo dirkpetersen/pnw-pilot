@@ -46,6 +46,21 @@ def curve_speed_target(curvatures, distances, v_cruise: float,
   return min(float(v_cruise), max(cap, v_min))    # floor it, and never above cruise
 
 
+def apply_limits(prev_applied, target, v_cruise, dt,
+                 a_decel_max=C.A_DECEL_MAX, a_relax=1.5):
+  """PURE: rate-limit the applied cap from `prev_applied` toward `target` (both m/s). Bounds how fast
+  the cap may DROP (commanded decel <= a_decel_max) and how fast it EASES back up when the curve
+  clears (a_relax). Returns the new applied cap, never above v_cruise. `prev_applied=None` -> start at
+  v_cruise. This is the safety rate-limiter on top of the (already smooth) decel-envelope cap."""
+  if prev_applied is None:
+    prev_applied = v_cruise
+  if target < prev_applied:
+    applied = max(target, prev_applied - a_decel_max * dt)     # braking: bounded decel
+  else:
+    applied = min(target, v_cruise, prev_applied + a_relax * dt)   # clearing: ease back gently
+  return min(v_cruise, applied)
+
+
 def curvatures_from_model(model):
   """Extract (curvatures, distances) from modelV2's predicted path, over the FULL horizon up to
   LOOKAHEAD_MAX_S (NOT CES's 3.5 s gate — that short gate was the 'too late' bug at Terwilliger).

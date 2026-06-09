@@ -20,6 +20,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
     {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
+    {"VisionTurnSpeedControl", {PERSISTENT, BOOL, "0"}},  // vtsc: curve speed control, default OFF
     {"ApiCache_Device", {PERSISTENT, STRING}},
     {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},

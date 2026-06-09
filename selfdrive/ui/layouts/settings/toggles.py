@@ -52,6 +52,12 @@ DESCRIPTIONS = {
     "(orange = forced Experimental). Affects speed/braking only, not steering, and only when openpilot controls " +
     "longitudinal. NOT a cone/obstacle detector — stay attentive, especially in construction zones."
   ),
+  "VisionTurnSpeedControl": tr_noop(
+    "Vision Turn Speed Control (VTSC): automatically slow down for upcoming curves, using the driving " +
+    "model's predicted path to pick a safe curve speed and begin braking early. Speed/braking only, not " +
+    "steering, and only when openpilot controls longitudinal. It only ever REDUCES speed. NOT a substitute " +
+    "for attention — keep your hands on the wheel and be ready to brake, especially on unfamiliar roads."
+  ),
   "ShowSpeedLimit": tr_noop(
     "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
     "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
@@ -127,6 +133,12 @@ class TogglesLayout(Widget):
       "ConditionalExperimentalSwitching": (
         lambda: tr("Conditional Experimental Switching (CES)"),
         DESCRIPTIONS["ConditionalExperimentalSwitching"],
+        "speed_limit.png",
+        False,
+      ),
+      "VisionTurnSpeedControl": (
+        lambda: tr("Vision Turn Speed Control (VTSC)"),
+        DESCRIPTIONS["VisionTurnSpeedControl"],
         "speed_limit.png",
         False,
       ),
