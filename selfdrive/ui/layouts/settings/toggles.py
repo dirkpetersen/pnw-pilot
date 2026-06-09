@@ -49,14 +49,9 @@ DESCRIPTIONS = {
     "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
     "switch to Experimental Mode only for tight curves, low-speed/city driving, stop lights, and when closing " +
     "on a slower lead — then return to Chill. With this on, the top-right button cycles CES / Chill / Experimental " +
-    "(orange = forced Experimental). Affects speed/braking only, not steering, and only when openpilot controls " +
-    "longitudinal. NOT a cone/obstacle detector — stay attentive, especially in construction zones."
-  ),
-  "VisionTurnSpeedControl": tr_noop(
-    "Vision Turn Speed Control (VTSC): automatically slow down for upcoming curves, using the driving " +
-    "model's predicted path to pick a safe curve speed and begin braking early. Speed/braking only, not " +
-    "steering, and only when openpilot controls longitudinal. It only ever REDUCES speed. NOT a substitute " +
-    "for attention — keep your hands on the wheel and be ready to brake, especially on unfamiliar roads."
+    "(orange = forced Experimental). It also slows smoothly for upcoming curves (Vision Turn Speed Control). " +
+    "Affects speed/braking only, not steering, and only when openpilot controls longitudinal. NOT a cone/obstacle " +
+    "detector and not a substitute for attention — stay ready to brake, especially in construction zones and on curves."
   ),
   "ShowSpeedLimit": tr_noop(
     "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
@@ -133,12 +128,6 @@ class TogglesLayout(Widget):
       "ConditionalExperimentalSwitching": (
         lambda: tr("Conditional Experimental Switching (CES)"),
         DESCRIPTIONS["ConditionalExperimentalSwitching"],
-        "speed_limit.png",
-        False,
-      ),
-      "VisionTurnSpeedControl": (
-        lambda: tr("Vision Turn Speed Control (VTSC)"),
-        DESCRIPTIONS["VisionTurnSpeedControl"],
         "speed_limit.png",
         False,
       ),

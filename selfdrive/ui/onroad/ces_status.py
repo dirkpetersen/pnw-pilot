@@ -55,6 +55,7 @@ class CesStatusRenderer(Widget):
     self._last_poll = 0.0
     self._enabled = False
     self._st: dict = {}
+    self._vtsc: dict = {}
     self.font = gui_app.font(FontWeight.MEDIUM)
     self.font_bold = gui_app.font(FontWeight.BOLD)
 
@@ -70,12 +71,18 @@ class CesStatusRenderer(Widget):
     self._enabled = ui_state.params.get_bool("ConditionalExperimentalSwitching")
     if not self._enabled or self._mem is None:
       self._st = {}
+      self._vtsc = {}
       return
     try:
       st = self._mem.get("CESStatus", return_default=True)
       self._st = st if isinstance(st, dict) else {}
     except Exception:
       self._st = {}
+    try:
+      vt = self._mem.get("VTSCStatus", return_default=True)   # vtsc: rides the CES toggle
+      self._vtsc = vt if isinstance(vt, dict) else {}
+    except Exception:
+      self._vtsc = {}
 
   # ---- build the lines -----------------------------------------------------
   def _lines(self) -> list[tuple]:
@@ -90,6 +97,14 @@ class CesStatusRenderer(Widget):
 
     is_exp = st.get("mode") == "experimental"
     out.append((">> EXPERIMENTAL" if is_exp else ">> CHILL", _C.ORANGE if is_exp else _C.GREY, self.font_bold))
+
+    # VTSC (curve speed control) — rides the CES toggle; show when slowing for a curve
+    vt = self._vtsc
+    if vt.get("enabled"):
+      if vt.get("engaged"):
+        out.append((f"VTSC slowing {round(vt.get('cap', 0.0) * conv)}", _C.ORANGE, self.font_bold))
+      else:
+        out.append(("VTSC ready", _C.GREY, self.font))
 
     reason = st.get("reason", "")
     if is_exp and reason and reason not in ("chill", ""):
