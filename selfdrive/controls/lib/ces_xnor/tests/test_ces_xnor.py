@@ -305,19 +305,20 @@ def test_deflap_entry_cooldown_and_exit_dwell():
   sm = ConditionalExperimentalSwitching()
   active = base(v_ego=20 * CV.MPH_TO_MS, has_lead=False)   # lowSpeed condition active
   clear = base(v_ego=60 * CV.MPH_TO_MS, has_lead=False)    # nothing -> chill
+  DT = 0.05   # inject the loop period so cycle counts map to real seconds
 
   # one cycle of an active condition must NOT instantly enter Experimental (cooldown + debounce)
-  sm.update_decision(active)
+  sm.update_decision(active, DT)
   assert sm.mode() == "chill"
   # after enough time (>CHILL_MIN_DWELL_S + filter) it does enter
-  for _ in range(200):
-    sm.update_decision(active)
+  for _ in range(200):   # 10 s
+    sm.update_decision(active, DT)
   assert sm.mode() == "experimental"
   # condition clears, but it must HOLD Experimental through EXP_MIN_DWELL_S (no instant snap-out)
-  sm.update_decision(clear)
+  sm.update_decision(clear, DT)
   assert sm.mode() == "experimental"
-  for _ in range(400):
-    sm.update_decision(clear)
+  for _ in range(400):   # 20 s > EXP_MIN_DWELL_S
+    sm.update_decision(clear, DT)
   assert sm.mode() == "chill"
 
 

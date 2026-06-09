@@ -22,7 +22,7 @@ import time
 
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.common.realtime import DT_MDL
+from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
 
@@ -78,12 +78,17 @@ def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> t
 
 
 class Condition:
-  """A debounced boolean signal: raw bool -> filtered -> compared to THRESHOLD."""
+  """A debounced boolean signal: raw bool -> filtered -> compared to THRESHOLD. The filter is driven
+  by the MEASURED loop dt (selfdrived runs at 100 Hz / DT_CTRL, not the model rate) so FILTER_TAU is a
+  real time constant — using a fixed DT_MDL here made the debounce run 5x too fast (instant flapping)."""
   def __init__(self):
-    self.f = FirstOrderFilter(0.0, C.FILTER_TAU, DT_MDL)
+    self.f = FirstOrderFilter(0.0, C.FILTER_TAU, DT_CTRL)
     self.active = False
 
-  def update(self, raw: bool) -> bool:
+  def update(self, raw: bool, dt: float = DT_CTRL) -> bool:
+    if dt != self.f.dt:
+      self.f.dt = dt
+      self.f.update_alpha(C.FILTER_TAU)
     self.f.update(1.0 if raw else 0.0)
     self.active = self.f.x >= C.THRESHOLD
     return self.active
@@ -233,12 +238,13 @@ class ConditionalExperimentalSwitching:
   def status(self) -> str:
     return self._status
 
-  def update_decision(self, signals: dict) -> str:
+  def update_decision(self, signals: dict, dt: float = DT_CTRL) -> str:
     """Advance the state machine one cycle from an extracted `signals` dict (see decide_active).
-    Separated from `update(sm)` so it is unit-testable without cereal messages."""
+    `dt` is the MEASURED loop period (selfdrived runs at 100 Hz) so the dwell/debounce are real
+    seconds. Separated from `update(sm)` so it is unit-testable without cereal messages."""
     raw_active, status = decide_active(signals)
-    cond_active = self._cond.update(raw_active)   # debounced
-    self._dwell += DT_MDL
+    cond_active = self._cond.update(raw_active, dt)   # debounced (real-time)
+    self._dwell += dt
 
     if not self._is_experimental:
       # enter Experimental once the debounced condition is active AND we've been in Chill at least
@@ -342,6 +348,7 @@ class CESController:
     self._last_mode = "off"         # last logged mode: off / chill / experimental
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
+    self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
     self._event_log_ok = False      # persistent "each adoption" trail (CES_EVENT_LOG)
     try:
       os.makedirs(os.path.dirname(CES_EVENT_LOG), exist_ok=True)
@@ -352,7 +359,7 @@ class CESController:
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
   def _read_params(self):
-    if self._frame % max(1, int(1.0 / DT_MDL)) == 0:   # ~1 Hz
+    if self._frame % max(1, int(1.0 / DT_CTRL)) == 0:   # ~1 Hz (selfdrived steps at 100 Hz / DT_CTRL)
       try:
         self._enabled = self._long_ok and self.params.get_bool("ConditionalExperimentalSwitching")
       except Exception:
@@ -426,13 +433,19 @@ class CESController:
     except Exception:
       sig = None
 
+    # measured loop period — selfdrived steps at ~100 Hz; never assume a fixed DT (was the 5x bug)
+    now_t = time.monotonic()
+    dt = (now_t - self._last_decide_t) if self._last_decide_t is not None else DT_CTRL
+    self._last_decide_t = now_t
+    dt = min(max(dt, 1e-3), 0.5)           # clamp first call / scheduling hiccups
+
     if self._button == C.BTN_CHILL:        # forced Chill
       self._sm.reset()
       want = False
     elif self._button == C.BTN_EXP:        # forced full Experimental
       want = True
     elif sig is not None:                  # BTN_CES: condition ladder decides
-      want = self._sm.update_decision(sig) == "experimental"
+      want = self._sm.update_decision(sig, dt) == "experimental"
     else:
       want = False
 
