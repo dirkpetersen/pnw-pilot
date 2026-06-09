@@ -40,11 +40,12 @@ def test_terwilliger_apex_commands_slowdown():
 
 
 def test_brakes_before_the_curve_not_at_it():
-  # the cap must be below cruise while the curve is still ~80 m ahead (early braking),
-  # and ramp DOWN as you approach
-  cap_far = curve_speed_target([TERW_KAPPA], [150.0], v_cruise=V70)   # far: little/no cap yet
-  cap_near = curve_speed_target([TERW_KAPPA], [80.0], v_cruise=V70)   # near: braking
-  cap_apex = curve_speed_target([TERW_KAPPA], [0.0], v_cruise=V70)
+  # the cap must be below cruise while the curve is still ahead (early braking) and ramp DOWN as you
+  # approach. Uses explicit firmer params so the distances are unambiguous (mechanism, not the default).
+  kw = dict(v_cruise=V70, a_lat=1.5, a_decel=1.5)
+  cap_far = curve_speed_target([TERW_KAPPA], [150.0], **kw)   # far: little/no cap yet
+  cap_near = curve_speed_target([TERW_KAPPA], [80.0], **kw)   # near: braking
+  cap_apex = curve_speed_target([TERW_KAPPA], [0.0], **kw)
   assert cap_near < V70                 # already braking before the curve
   assert cap_near < cap_far             # ramps down as distance shrinks
   assert cap_near > cap_apex            # but not yet at the apex target
@@ -71,12 +72,12 @@ def test_v_min_floor():
 
 def test_binding_curve_is_the_sharpest_nearest():
   # with several points the cap is set by the most-binding curve, not a gentle far one
-  curvs = [1 / 2000, TERW_KAPPA, 1 / 3000]
-  dists = [40.0, 80.0, 120.0]
+  curvs = [TERW_KAPPA, 1 / 2000, 1 / 3000]
+  dists = [40.0, 60.0, 100.0]
   cap = curve_speed_target(curvs, dists, v_cruise=V70)
   assert mph(cap) < 70
-  # equals what the Terwilliger point alone would give (it's the binding one)
-  assert abs(cap - curve_speed_target([TERW_KAPPA], [80.0], v_cruise=V70)) < 1e-6
+  # equals what the Terwilliger point alone (the binding one, at 40 m) would give
+  assert abs(cap - curve_speed_target([TERW_KAPPA], [40.0], v_cruise=V70)) < 1e-6
 
 
 # ---- rate limiter (apply_limits) -------------------------------------------
@@ -108,5 +109,20 @@ def test_decel_envelope_matches_calibration():
   # to slow 70 -> ~57 mph (apex) at a_decel=1.5, braking should engage ~100-115 m out
   vc = V70
   d_engage = next(d for d in range(160, 0, -1)
-                  if curve_speed_target([TERW_KAPPA], [float(d)], v_cruise=vc) < vc)
+                  if curve_speed_target([TERW_KAPPA], [float(d)], v_cruise=vc, a_lat=1.5, a_decel=1.5) < vc)
   assert 95 < d_engage < 125
+
+
+def test_default_is_a_gentle_slight_trim():
+  # the SHIPPED defaults must be smooth/slight (user: only a slight adjustment, don't brake hard):
+  # at Terwilliger the apex target should be a modest trim (~60-65 mph), not a firm ~57
+  cap = curve_speed_target([TERW_KAPPA], [0.0], v_cruise=V70)   # default A_LAT_TARGET
+  assert 60 <= mph(cap) <= 65
+
+
+def test_default_decel_ceiling_never_slams():
+  # the rate limiter at the default ceiling must keep one step tiny (no hard braking)
+  from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
+  step = apply_limits(V70, 10.0, V70, dt=0.05)          # huge target drop
+  assert (V70 - step) <= C.A_DECEL_MAX * 0.05 + 1e-9     # bounded by the ceiling
+  assert C.A_DECEL_MAX <= 1.5                            # ceiling itself is gentle (<=0.15 g)
