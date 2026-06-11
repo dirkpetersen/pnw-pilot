@@ -41,6 +41,10 @@ PNW_STATES = ["WA", "OR", "ID"]  # mapd2xnor: binary's STATE_BOXES is keyed by 2
 OSM_DOWNLOAD_RETRY_S = 180.0
 _last_download_arm = [-1e9]  # monotonic ts of last arm (init far in past -> arm immediately)
 _was_in_flight = [False]     # previous-loop download_in_flight() (pass-end edge detection)
+_marker_fails = [0]          # consecutive loops the marker looked invalid (hysteresis)
+MARKER_FAIL_LOOPS = 30       # require ~30 s of consistent invalidity before re-downloading: a single
+                             #   transient read failure (/data/media I/O hiccup) must NOT trigger a
+                             #   ~450 MB re-download (suspected cause of the 13:31 rogue pass)
 
 # mapd2xnor: PERSISTENT completion marker. The binary's OSMDownloadProgress and the pending
 # OSMDownloadLocations request both live in /dev/shm (tmpfs) and are WIPED ON EVERY REBOOT,
@@ -220,7 +224,7 @@ def update_osm_db() -> None:
   # on disk (>= 90% of the marker count guards against a wiped/garbage-collected store).
   marker = _read_marker()
   if marker is not None:
-    if sorted(states) != marker.get("states") :
+    if sorted(states) != marker.get("states"):
       cloudlog.info(f"mapd: states changed {marker.get('states')} -> {sorted(states)}; re-download")
       _clear_marker()
       marker = None
@@ -228,9 +232,24 @@ def update_osm_db() -> None:
       cloudlog.info("mapd: offline tiles missing vs marker; re-download")
       _clear_marker()
       marker = None
+  # hysteresis: a single bad loop (transient /data/media read hiccup) must not trigger a
+  # ~450 MB re-download — require sustained invalidity before the arm path may run.
+  _marker_fails[0] = 0 if marker is not None else _marker_fails[0] + 1
   if marker is not None:
-    _was_in_flight[0] = in_flight
-    return  # complete and intact -> NEVER re-arm (no more re-downloads on reboot)
+    # Complete and intact -> NEVER re-arm. Also DISARM any stale download state left by
+    # older code or a previous boot: a persistent OsmDbUpdatesCheck=1 or a pending
+    # OSMDownloadLocations request would make the binary re-download regardless of what
+    # this manager does, so actively clear both (the binary tolerates the param vanishing).
+    if params.get_bool("OsmDbUpdatesCheck"):
+      params.put_bool("OsmDbUpdatesCheck", False)
+    if in_flight:
+      cloudlog.info("mapd: marker valid but download request pending — clearing stale request")
+      try:
+        os.remove("/dev/shm/params/d/OSMDownloadLocations")
+      except OSError:
+        pass
+    _was_in_flight[0] = False
+    return  # no more re-downloads on reboot
 
   # --- pass-end edge: binary just cleared OSMDownloadLocations -------------------------
   # Completion signal: either the in-flight request ended with full progress, or (same
@@ -244,6 +263,9 @@ def update_osm_db() -> None:
   _was_in_flight[0] = in_flight
 
   # --- retry-until-complete (throttled) ------------------------------------------------
+  if _marker_fails[0] < MARKER_FAIL_LOOPS and _marker_fails[0] > 0:
+    return  # marker invalid but not yet *consistently* — wait out the hysteresis window
+
   if not in_flight:
     now = time.monotonic()
     if params.get_bool("OsmDbUpdatesCheck"):
