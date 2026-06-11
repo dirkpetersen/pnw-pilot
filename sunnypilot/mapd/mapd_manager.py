@@ -40,6 +40,15 @@ PNW_STATES = ["WA", "OR", "ID"]  # mapd2xnor: binary's STATE_BOXES is keyed by 2
 # data has landed yet (the binary downloads asynchronously; don't re-trigger every loop).
 OSM_DOWNLOAD_RETRY_S = 180.0
 _last_download_arm = [-1e9]  # monotonic ts of last arm (init far in past -> arm immediately)
+_was_in_flight = [False]     # previous-loop download_in_flight() (pass-end edge detection)
+
+# mapd2xnor: PERSISTENT completion marker. The binary's OSMDownloadProgress and the pending
+# OSMDownloadLocations request both live in /dev/shm (tmpfs) and are WIPED ON EVERY REBOOT,
+# so after a reboot the manager couldn't tell the download ever finished and re-armed a full
+# multi-hundred-MB re-download of data already on disk — on every single reboot. The marker
+# lives next to the tiles on /data/media (reboot-safe) and records the tile count + states,
+# so "complete" survives reboots and is re-validated against what's actually on disk.
+MARKER_FILE = ".osm_download_complete.json"
 
 params = Params()
 mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else params
@@ -106,6 +115,47 @@ def osm_data_present() -> bool:
   return False
 
 
+def _count_offline_tiles() -> int:
+  """Number of extracted tile files under <mapd_root>/offline (the binary's final store)."""
+  root = os.path.join(Paths.mapd_root(), "offline")
+  n = 0
+  for _r, _d, files in os.walk(root):
+    n += len(files)
+  return n
+
+
+def _marker_path() -> str:
+  return os.path.join(Paths.mapd_root(), MARKER_FILE)
+
+
+def _read_marker() -> dict | None:
+  try:
+    with open(_marker_path()) as f:
+      m = json.load(f)
+    return m if isinstance(m, dict) else None
+  except (FileNotFoundError, ValueError, OSError):
+    return None
+
+
+def _write_marker(states: list[str], tiles: int) -> None:
+  try:
+    with open(_marker_path(), "w") as f:
+      json.dump({"states": sorted(states), "tiles": tiles, "mapd_version": VERSION,
+                 "completed_at": datetime.now().isoformat(timespec="seconds")}, f)
+    cloudlog.info(f"mapd: wrote completion marker ({tiles} tiles, {states})")
+  except OSError:
+    cloudlog.exception("mapd: failed to write completion marker")
+
+
+def _clear_marker() -> None:
+  try:
+    os.remove(_marker_path())
+  except FileNotFoundError:
+    pass
+  except OSError:
+    cloudlog.exception("mapd: failed to clear completion marker")
+
+
 def _read_mem_param_file(key: str) -> bytes | None:
   """mapd2xnor: read a /dev/shm params value straight off disk.
 
@@ -155,15 +205,46 @@ def update_osm_db() -> None:
   # toggle (ShowSpeedLimit). When the toggle is ON and the download is not yet complete,
   # (re)arm it — throttled — until OSMDownloadProgress shows all tiles fetched. The
   # binary does a single non-resuming pass and clears OSMDownloadLocations when done, so
-  # an interrupted download (boot/restart mid-pass) must be re-armed to finish. The old
-  # check ('any .pbf file present') froze partial downloads. ShowSpeedLimit OFF = never
-  # download. Re-read live so toggling takes effect.
+  # an interrupted download (boot/restart mid-pass) must be re-armed to finish.
+  # ShowSpeedLimit OFF = never download. Re-read live so toggling takes effect.
   if not params.get_bool("ShowSpeedLimit"):
     return
 
-  # retry-until-complete (throttled): re-arm every OSM_DOWNLOAD_RETRY_S while the toggle
-  # is ON and the download is neither complete nor currently in flight.
-  if not osm_download_complete() and not download_in_flight():
+  states = get_configured_states()
+  in_flight = download_in_flight()
+
+  # --- persistent completion (the reboot re-download fix) -----------------------------
+  # OSMDownloadProgress lives in /dev/shm and is wiped every reboot, so it alone cannot
+  # prove completion across boots. A marker file next to the tiles records a finished
+  # pass; trust it as long as the wanted states haven't changed and the tiles are still
+  # on disk (>= 90% of the marker count guards against a wiped/garbage-collected store).
+  marker = _read_marker()
+  if marker is not None:
+    if sorted(states) != marker.get("states") :
+      cloudlog.info(f"mapd: states changed {marker.get('states')} -> {sorted(states)}; re-download")
+      _clear_marker()
+      marker = None
+    elif _count_offline_tiles() < int(marker.get("tiles", 0)) * 0.9:
+      cloudlog.info("mapd: offline tiles missing vs marker; re-download")
+      _clear_marker()
+      marker = None
+  if marker is not None:
+    _was_in_flight[0] = in_flight
+    return  # complete and intact -> NEVER re-arm (no more re-downloads on reboot)
+
+  # --- pass-end edge: binary just cleared OSMDownloadLocations -------------------------
+  # Completion signal: either the in-flight request ended with full progress, or (same
+  # boot) the progress param itself shows done. Write the marker so it sticks.
+  if osm_download_complete() or (_was_in_flight[0] and not in_flight and osm_data_present()):
+    tiles = _count_offline_tiles()
+    if tiles > 0:
+      _write_marker(states, tiles)
+      _was_in_flight[0] = in_flight
+      return
+  _was_in_flight[0] = in_flight
+
+  # --- retry-until-complete (throttled) ------------------------------------------------
+  if not in_flight:
     now = time.monotonic()
     if params.get_bool("OsmDbUpdatesCheck"):
       pass  # already armed for this loop; let request_refresh fire below
@@ -173,7 +254,6 @@ def update_osm_db() -> None:
 
   if params.get_bool("OsmDbUpdatesCheck"):
     cleanup_old_osm_data(get_files_for_cleanup())
-    states = get_configured_states()
     # Multiple US states -> drop the country-wide "US" download, keep just the states
     request_refresh_osm_location_data([], states)
 
