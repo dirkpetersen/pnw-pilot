@@ -8,11 +8,30 @@ mapd2xnor: location read adapted to the device GPS stream (gpsLocation on the co
 qcom GPS, or gpsLocationExternal with a ublox) via common.gps.get_gps_location_service.
 """
 import json
+import os
 import platform
 
 from openpilot.common.params import Params
 from openpilot.sunnypilot.mapd.live_map_data.base_map_data import BaseMapData
 from openpilot.sunnypilot.navd.helpers import Coordinate
+
+_SHM_D = "/dev/shm/params/d"
+
+
+def _read_shm(key: str) -> str | None:
+  """mapd2xnor: read a mapd-binary-written /dev/shm param straight off disk, fresh every call.
+
+  The binary writes MapSpeedLimit/RoadName/... with its own Go param writer. A long-lived
+  Python Params("/dev/shm/params") handle constructed before/across a binary (re)start goes
+  BLIND — it kept returning nothing while the files plainly held values, so liveMapDataSP
+  published speedLimit=0/valid=False forever and the UI showed no limit (observed after boot
+  and after any mapd restart). A plain path-based open each tick (1 Hz, tmpfs — free) cannot
+  go stale. Same pattern mapd_manager uses for OSMDownloadProgress."""
+  try:
+    with open(os.path.join(_SHM_D, key)) as f:
+      return f.read()
+  except OSError:
+    return None
 
 
 class OsmMapData(BaseMapData):
@@ -45,13 +64,21 @@ class OsmMapData(BaseMapData):
     self.mem_params.put("LastGPSPosition", json.dumps(params))
 
   def get_current_speed_limit(self) -> float:
-    return float(self.mem_params.get("MapSpeedLimit") or 0.0)
+    try:
+      return float(_read_shm("MapSpeedLimit") or 0.0)
+    except ValueError:
+      return 0.0
 
   def get_current_road_name(self) -> str:
-    return str(self.mem_params.get("RoadName") or "")
+    return str(_read_shm("RoadName") or "")
 
   def get_next_speed_limit_and_distance(self) -> tuple[float, float]:
-    next_speed_limit_section = self.mem_params.get("NextMapSpeedLimit") or {}
+    try:
+      next_speed_limit_section = json.loads(_read_shm("NextMapSpeedLimit") or "{}")
+    except ValueError:
+      next_speed_limit_section = {}
+    if not isinstance(next_speed_limit_section, dict):
+      next_speed_limit_section = {}
     next_speed_limit = next_speed_limit_section.get('speedlimit', 0.0)
     next_speed_limit_latitude = next_speed_limit_section.get('latitude')
     next_speed_limit_longitude = next_speed_limit_section.get('longitude')
