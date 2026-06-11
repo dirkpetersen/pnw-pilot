@@ -270,11 +270,16 @@ class TogglesLayout(Widget):
       if self._toggle_defs[toggle_def][3] and toggle_def not in self._locked_toggles:
         self._toggles[toggle_def].action_item.set_enabled(not ui_state.engaged)
 
-    # auto2xnor: Tesla-only toggles — grey out on non-Tesla cars (e.g. the Ford Lightning)
-    is_tesla = ui_state.CP is not None and ui_state.CP.brand == "tesla"
+    # auto2xnor: per-toggle car support — grey out + force off where unsupported.
+    # NudgelessLaneChange: Tesla + Ford F-150 Lightning. OvertakeAssist: Tesla only.
+    cp = ui_state.CP
+    is_tesla = cp is not None and cp.brand == "tesla"
+    is_f150_lightning = cp is not None and cp.carFingerprint == "FORD_F_150_LIGHTNING_MK1"
+    toggle_supported = {"NudgelessLaneChange": is_tesla or is_f150_lightning}
     for param in self.TESLA_ONLY_TOGGLES:
-      self._toggles[param].action_item.set_enabled(is_tesla)
-      if not is_tesla:
+      supported = toggle_supported.get(param, is_tesla)
+      self._toggles[param].action_item.set_enabled(supported)
+      if not supported:
         self._toggles[param].action_item.set_state(False)
 
     # auto2xnor: unsupported toggles — always greyed out + forced off (no car supports them)
