@@ -45,12 +45,14 @@ class DesireHelper:
     self.prev_one_blinker = False
     self.desire = log.Desire.none
 
-    # auto2xnor: nudgeless lane change — Tesla only.
-    # The Ford F-150 Lightning is explicitly excluded (driver asked to keep the
-    # nudge requirement there); nudgeless is enabled only on Tesla brand cars.
+    # auto2xnor: nudgeless lane change — Tesla, plus the Ford F-150 Lightning.
+    # Gated to specific platforms, NOT whole brands: every Tesla, and the F-150
+    # Lightning specifically (CAR.FORD_F_150_LIGHTNING_MK1). Other Ford models
+    # (and all other brands) keep the steering-wheel nudge requirement.
     self.params = Params()
     self.brand = CP.brand if CP is not None else ""
-    self.nudgeless_supported = self.brand == "tesla"
+    self.car_fingerprint = CP.carFingerprint if CP is not None else ""
+    self.nudgeless_supported = self.brand == "tesla" or self.car_fingerprint == "FORD_F_150_LIGHTNING_MK1"
     self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
@@ -65,7 +67,7 @@ class DesireHelper:
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
     # auto2xnor: refresh the nudgeless toggle ~ every 3s so changing it doesn't need a restart
-    # (still gated to Tesla — never effective on the Ford)
+    # (still gated by nudgeless_supported — Tesla + F-150 Lightning only)
     self._param_read_counter += 1
     if self._param_read_counter % 60 == 0:
       self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
