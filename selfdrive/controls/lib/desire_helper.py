@@ -11,7 +11,7 @@ LANE_CHANGE_TIME_MAX = 10.
 
 # auto2xnor: nudgeless lane change — hold the blinker this long (no blindspot) to
 # auto-start the lane change without a steering-wheel nudge.
-AUTO_LANE_CHANGE_DELAY = 1.5  # seconds
+AUTO_LANE_CHANGE_DELAY = 0.75  # seconds (driver feedback: 1.5 felt too slow to commit the change)
 
 DESIRES = {
   LaneChangeDirection.none: {
