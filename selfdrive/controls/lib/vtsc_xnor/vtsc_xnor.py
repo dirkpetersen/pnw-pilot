@@ -25,16 +25,23 @@ def v_safe(curvature: float, a_lat: float = C.A_LAT_TARGET) -> float:
 
 def curve_speed_target(curvatures, distances, v_cruise: float,
                        a_lat: float = C.A_LAT_TARGET, a_decel: float = C.A_DECEL,
-                       v_min: float = C.V_MIN) -> float:
+                       v_min: float = C.V_MIN, min_dist: float = 0.0) -> float:
   """PURE VTSC core. Given per-point predicted-path curvature `curvatures[i]` (1/m) at look-ahead
   distance `distances[i]` (m), return the cruise-speed CAP (m/s) that both:
     (a) holds lateral accel <= a_lat through each curve      -> v_safe(curvature), and
     (b) is reachable from NOW by decel-limited braking       -> envelope sqrt(v_safe^2 + 2*a_decel*d),
-  so braking begins ~early (≈110 m out at the defaults) instead of AT the curve.
+  so braking begins ~early instead of AT the curve.
+
+  `min_dist`: points closer than this are COMMITTED (the car is about to be there — braking now can't
+  change the speed there) and are skipped. This is the apex-release: brake entrance->apex only; once
+  the apex slides inside min_dist the cap relaxes to what the remaining path needs, so the car
+  accelerates out of the curve. min_dist=0 keeps the old bind-everything behavior.
 
   Returns v_cruise when nothing binds; otherwise min(v_cruise, max(cap, v_min)). NEVER raises speed."""
   cap = float(v_cruise)
   for k, d in zip(curvatures, distances, strict=False):
+    if d < min_dist:
+      continue                                    # committed point (at/behind the apex) -> never brake for it
     vs = v_safe(k, a_lat)
     if vs == float('inf'):
       continue
@@ -47,7 +54,7 @@ def curve_speed_target(curvatures, distances, v_cruise: float,
 
 
 def apply_limits(prev_applied, target, v_cruise, dt,
-                 a_decel_max=C.A_DECEL_MAX, a_relax=1.5):
+                 a_decel_max=C.A_DECEL_MAX, a_relax=C.A_RELAX):
   """PURE: rate-limit the applied cap from `prev_applied` toward `target` (both m/s). Bounds how fast
   the cap may DROP (commanded decel <= a_decel_max) and how fast it EASES back up when the curve
   clears (a_relax). Returns the new applied cap, never above v_cruise. `prev_applied=None` -> start at
@@ -83,11 +90,14 @@ def curvatures_from_model(model):
   return curvs, dists
 
 
-def vtsc_from_model(model, v_cruise: float, a_lat: float = C.A_LAT_TARGET,
+def vtsc_from_model(model, v_cruise: float, v_ego: float = 0.0, a_lat: float = C.A_LAT_TARGET,
                     a_decel: float = C.A_DECEL, v_min: float = C.V_MIN) -> float:
   """Convenience: curvatures_from_model() -> curve_speed_target(). Returns the cap (m/s), v_cruise
-  when no curve or on bad data."""
+  when no curve or on bad data. `v_ego` sets the apex-commit window (v_ego * APEX_COMMIT_S): path
+  points the car reaches within that time no longer bind, so the cap releases at the apex and the
+  car accelerates out of the curve."""
   curvs, dists = curvatures_from_model(model)
   if not curvs:
     return float(v_cruise)
-  return curve_speed_target(curvs, dists, v_cruise, a_lat, a_decel, v_min)
+  min_dist = max(v_ego, 0.0) * C.APEX_COMMIT_S
+  return curve_speed_target(curvs, dists, v_cruise, a_lat, a_decel, v_min, min_dist=min_dist)

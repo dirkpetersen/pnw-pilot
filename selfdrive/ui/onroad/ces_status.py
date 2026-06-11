@@ -161,6 +161,10 @@ class CesStatusRenderer(Widget):
       return
     if not self._st or not self._st.get("enabled"):
       return
+    # show the debug overlay ONLY in CES-auto button mode — hide it when the driver forced
+    # Chill (1) or Experimental (2) via the top-right button (driver feedback, drive #4)
+    if int(self._st.get("button", 0)) != 0:
+      return
     lines = self._lines()
     if not lines:
       return

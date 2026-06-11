@@ -114,10 +114,47 @@ def test_decel_envelope_matches_calibration():
 
 
 def test_default_apex_target_terwilliger():
-  # default A_LAT_TARGET targets ~57 mph at the Terwilliger apex (the chosen target);
-  # smoothness comes from the gentle decel + ceiling, NOT from under-slowing
+  # default A_LAT_TARGET targets ~62 mph at the Terwilliger apex — a slight ~8 mph trim
+  # (driver feedback after drive #4: 57 was too aggressive, only a slight adjustment is wanted)
   cap = curve_speed_target([TERW_KAPPA], [0.0], v_cruise=V70)
-  assert 54 <= mph(cap) <= 59
+  assert 60 <= mph(cap) <= 65
+
+
+def test_gentler_curves_allow_higher_speeds():
+  # v_safe scales with sqrt(R): gentler-than-Terwilliger curves get proportionally higher caps,
+  # and beyond ~R550 the 70 mph cruise doesn't bind at all
+  v_terw = curve_speed_target([1 / 415], [0.0], v_cruise=V70)
+  v_gentle = curve_speed_target([1 / 550], [0.0], v_cruise=V70)
+  v_sweeping = curve_speed_target([1 / 700], [0.0], v_cruise=V70)
+  assert v_terw < v_gentle <= V70
+  assert v_sweeping == V70                      # sweeping curve at 70 -> no cap at all
+
+
+# ---- apex release (brake entrance->apex, accelerate out) --------------------
+def test_apex_release_committed_points_dont_bind():
+  # the apex point inside min_dist is committed -> no cap from it; a curve still AHEAD binds
+  assert curve_speed_target([TERW_KAPPA], [3.0], v_cruise=V70, min_dist=8.0) == V70   # at the apex -> release
+  assert curve_speed_target([TERW_KAPPA], [40.0], v_cruise=V70, min_dist=8.0) < V70   # still ahead -> brake
+
+
+def test_apex_release_cap_rises_as_apex_passes():
+  # same curve: cap while approaching < cap once the apex zone has slid inside the commit window
+  approaching = curve_speed_target([TERW_KAPPA, TERW_KAPPA], [10.0, 30.0], v_cruise=V70, min_dist=8.0)
+  passing = curve_speed_target([TERW_KAPPA, TERW_KAPPA], [2.0, 6.0], v_cruise=V70, min_dist=8.0)
+  assert approaching < V70                      # entrance: braking
+  assert passing == V70                         # apex under the car: released -> MPC accelerates out
+
+
+def test_apex_release_second_curve_still_binds():
+  # passing curve #1's apex must NOT release a second curve further ahead
+  cap = curve_speed_target([TERW_KAPPA, 1 / 300], [2.0, 90.0], v_cruise=V70, min_dist=8.0)
+  assert cap < V70                              # the R300 curve 90 m out still caps
+  assert abs(cap - curve_speed_target([1 / 300], [90.0], v_cruise=V70)) < 1e-6
+
+
+def test_min_dist_zero_keeps_old_behavior():
+  apex = curve_speed_target([TERW_KAPPA], [0.0], v_cruise=V70, min_dist=0.0)
+  assert apex < V70                             # min_dist=0 -> apex point still binds (old behavior)
 
 
 def test_default_decel_ceiling_never_slams():

@@ -70,7 +70,7 @@ class VTSCController:
     except Exception:
       return v_cruise
 
-    raw = vtsc_from_model(model, v_cruise)                 # decel-limited cap, <= v_cruise
+    raw = vtsc_from_model(model, v_cruise, v_ego)          # decel-limited cap, <= v_cruise; apex-release via v_ego
     # debounce: require the curve sustained CURVE_MIN_POINTS cycles before committing (no phantom braking)
     self._below = self._below + 1 if raw < v_cruise - 0.1 else 0
     target = raw if self._below >= C.CURVE_MIN_POINTS else v_cruise
