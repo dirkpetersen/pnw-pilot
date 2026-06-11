@@ -32,6 +32,10 @@ WARNING_BLINK_PERIOD = 0.7 # s for one on+off blink cycle of the banner (~1.4 Hz
 AHEAD_ACTIVE_DIST = 150.0  # m: treat a lower "ahead" limit as imminent within this distance
 MIN_VALID_KPH = 1.0        # below this (in m/s-derived kph) the limit is treated as unknown
 OVERSPEED_RATIO = 1.30     # only warn if current speed is >30% above the new lower limit
+STALE_AFTER_S = 10.0       # s: if the limit was UNKNOWN longer than this (mapd coverage gap, GPS
+                           #   loss, stalled stream), the remembered limit is stale — re-acquiring
+                           #   a limit is a fresh fix, NOT a "drop", so no warning. Short flickers
+                           #   at a genuine road transition (< this) still warn normally.
 
 
 class _Colors:
@@ -56,6 +60,7 @@ class SpeedLimitRenderer(Widget):
     self._v_ego_cluster_seen = False
 
     self._shown_limit = 0.0         # last limit we actually displayed (for drop detection)
+    self._shown_limit_t = 0.0       # monotonic stamp of the last VALID limit (staleness gate)
     self._warn_value = 0.0          # the lower value to show in the warning banner
     self._warn_until = 0.0          # monotonic deadline for the warning banner
 
@@ -100,15 +105,24 @@ class SpeedLimitRenderer(Widget):
     currently more than 20% above that new lower limit."""
     now = time.monotonic()
 
+    # Staleness gate: if the limit has been UNKNOWN for a while (mapd coverage gap,
+    # GPS loss), the remembered _shown_limit says nothing about the road we are on
+    # NOW — re-acquiring a limit after such a gap is a fresh fix, not a "drop from
+    # higher to lower", so it must not warn. Only a recent valid limit can be the
+    # baseline for drop detection.
+    baseline_fresh = (self._shown_limit > MIN_VALID_KPH
+                      and (now - self._shown_limit_t) <= STALE_AFTER_S)
+
     # Case 1: the current limit itself just dropped below what we were showing.
     if (self.speed_limit_valid and new_limit > MIN_VALID_KPH
-        and self._shown_limit > MIN_VALID_KPH
+        and baseline_fresh
         and round(new_limit) < round(self._shown_limit)
         and self._overspeeding(new_limit)):
       self._warn_value = new_limit
       self._warn_until = now + WARNING_DURATION
 
-    # Case 2: a lower "ahead" limit is imminent (within range).
+    # Case 2: a lower "ahead" limit is imminent (within range). Both limits here are
+    # CURRENT mapd data (not a remembered baseline), so no staleness gate is needed.
     elif (self.speed_limit_ahead_valid and self.speed_limit_ahead > MIN_VALID_KPH
           and self.speed_limit_valid and new_limit > MIN_VALID_KPH
           and round(self.speed_limit_ahead) < round(new_limit)
@@ -121,6 +135,7 @@ class SpeedLimitRenderer(Widget):
 
     if self.speed_limit_valid and new_limit > MIN_VALID_KPH:
       self._shown_limit = new_limit
+      self._shown_limit_t = now
 
   def _render(self, rect: rl.Rectangle):
     if not ui_state.show_speed_limit:
