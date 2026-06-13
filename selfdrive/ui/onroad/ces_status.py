@@ -29,9 +29,9 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
 _REFRESH_S = 0.2     # poll the mem param at ~5 Hz (matches the publisher)
-_FS = 32             # tiny font
-_LINE_H = 40
-_PAD = 14
+_FS = 64             # 2x size (driver feedback: the CES-mode overlay was too small)
+_LINE_H = 80         # 2x line height to match
+_PAD = 24
 _MARGIN = 40         # gap from the screen's right / bottom edges
 _REAL_CURVE_MS = 40.0  # a map target speed below this (~90 mph) counts as a real curve to preview
 
