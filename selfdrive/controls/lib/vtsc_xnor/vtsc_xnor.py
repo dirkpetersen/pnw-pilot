@@ -68,6 +68,28 @@ def apply_limits(prev_applied, target, v_cruise, dt,
   return min(v_cruise, applied)
 
 
+def sharpest_ahead(curvatures, distances):
+  """Return (max_curvature 1/m, distance_m_at_that_point) over the predicted points — i.e. the APEX
+  (the tightest part of the upcoming path). (0.0, -1.0) if the path is straight. Pure."""
+  best_k, best_d = 0.0, -1.0
+  for k, d in zip(curvatures, distances, strict=False):
+    if k > best_k:
+      best_k, best_d = k, d
+  return best_k, best_d
+
+
+def brake_cap_for_apex(v_curve_safe: float, apex_dist: float, v_ego: float,
+                       a_decel: float = C.A_DECEL, finish_s: float = C.APEX_FINISH_S) -> float:
+  """Speed cap (m/s) such that decel-limited braking reaches `v_curve_safe` `finish_s` seconds BEFORE
+  the apex (so slowing is DONE before the apex and we can accelerate out). As apex_dist shrinks the
+  cap falls toward v_curve_safe; the controller's rate-limiter brakes harder near the end if needed.
+  Pure. `v_curve_safe`=inf (straight) -> inf."""
+  if v_curve_safe == float('inf'):
+    return float('inf')
+  d_finish = max(apex_dist - max(v_ego, 0.0) * finish_s, 0.0)
+  return math.sqrt(v_curve_safe * v_curve_safe + 2.0 * a_decel * d_finish)
+
+
 def curvatures_from_model(model):
   """Extract (curvatures, distances) from modelV2's predicted path, over the FULL horizon up to
   LOOKAHEAD_MAX_S (NOT CES's 3.5 s gate — that short gate was the 'too late' bug at Terwilliger).
@@ -90,14 +112,12 @@ def curvatures_from_model(model):
   return curvs, dists
 
 
-def vtsc_from_model(model, v_cruise: float, v_ego: float = 0.0, a_lat: float = C.A_LAT_TARGET,
-                    a_decel: float = C.A_DECEL, v_min: float = C.V_MIN) -> float:
-  """Convenience: curvatures_from_model() -> curve_speed_target(). Returns the cap (m/s), v_cruise
-  when no curve or on bad data. `v_ego` sets the apex-commit window (v_ego * APEX_COMMIT_S): path
-  points the car reaches within that time no longer bind, so the cap releases at the apex and the
-  car accelerates out of the curve."""
+def model_curve_state(model, v_cruise: float, a_lat: float = C.A_LAT_TARGET):
+  """Read the model's predicted path and return the curve picture the apex state machine needs:
+    (apex_curvature 1/m, apex_dist m, v_curve_safe m/s) where v_curve_safe = sqrt(a_lat/apex_curvature).
+  Apex = the sharpest upcoming point. Straight road / bad data -> (0.0, -1.0, inf). Pure-ish."""
   curvs, dists = curvatures_from_model(model)
   if not curvs:
-    return float(v_cruise)
-  min_dist = max(v_ego, 0.0) * C.APEX_COMMIT_S
-  return curve_speed_target(curvs, dists, v_cruise, a_lat, a_decel, v_min, min_dist=min_dist)
+    return 0.0, -1.0, float('inf')
+  k_apex, d_apex = sharpest_ahead(curvs, dists)
+  return k_apex, d_apex, v_safe(k_apex, a_lat)

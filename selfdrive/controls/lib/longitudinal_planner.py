@@ -196,3 +196,20 @@ class LongitudinalPlanner:
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
     pm.send('longitudinalPlan', plan_send)
+
+    # vtsc: log the curve-speed-control decision so drives are analyzable (recorded in qlog/rlog)
+    vtsc_send = messaging.new_message('vtscState')
+    vtsc_send.valid = plan_send.valid
+    vs = vtsc_send.vtscState
+    m = self.vtsc.msg
+    vs.enabled = m["enabled"]
+    vs.active = m["active"]
+    vs.state = m["state"]
+    vs.vCruise = m["vCruise"]
+    vs.vTarget = m["vTarget"]
+    vs.vEgo = m["vEgo"]
+    vs.apexDist = m["apexDist"]
+    vs.apexCurvature = m["apexCurvature"]
+    vs.vCurveSafe = m["vCurveSafe"]
+    vs.timeToApex = m["timeToApex"]
+    pm.send('vtscState', vtsc_send)

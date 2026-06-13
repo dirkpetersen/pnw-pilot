@@ -17,17 +17,29 @@ A_DECEL      = 1.2    # m/s^2 decel the envelope plans for -> how gently speed b
                       #   easing off the gas; for the ~8 mph trim it starts braking ~80 m before the apex.
 
 # --- safety bounds -----------------------------------------------------------
-A_DECEL_MAX     = 1.5   # m/s^2 HARD ceiling on commanded decel (rate-limit) — it can never brake harder
-                        #   than ~0.15 g, so a late/sudden curve still won't slam. Smoothness guarantee.
-APEX_COMMIT_S   = 0.3   # s; path points closer than v_ego*this are "committed" (the car is about to be
-                        #   there — speed can't change meaningfully first) and are EXCLUDED from the cap.
-                        #   Effect: brake entrance->apex only. As the apex slides under the car its points
-                        #   drop out, the cap relaxes to what the REMAINING path needs, and the car
-                        #   accelerates out of the curve instead of dragging apex speed through the exit.
-                        #   A long constant arc or a second curve ahead still binds (their points are far).
-A_RELAX         = 1.5   # m/s^2 rate the applied cap eases back UP (apex passed / curve cleared) -> smooth
-                        #   acceleration out, never a jump
+# Drive #4 feedback reshaped the goal: the absolute priority is to FINISH slowing BEFORE the apex so we
+# can ACCELERATE at the apex. Pre-apex braking may be firmer/earlier if needed (driver doesn't mind), so
+# the decel ceiling is raised. The apex behavior is handled by the BRAKE->HOLD->RELEASE state machine.
+A_DECEL_MAX     = 2.5   # m/s^2 HARD ceiling on commanded decel (rate-limit) — raised from 1.5 so VTSC CAN
+                        #   brake firmly enough (~0.25 g) to reach curve speed BEFORE the apex. Still bounded
+                        #   so it can never slam.
+A_RELAX         = 1.5   # m/s^2 rate the applied cap eases back UP (apex reached / curve cleared) -> smooth
+                        #   acceleration out to cruise, never a jump
+
+# --- apex state machine (drive #4) -------------------------------------------
+# Zones by TIME-TO-APEX (apexDist / vEgo), so they scale with speed:
+#   tta >  HOLD_TTA_S      -> BRAKE   (apex clearly ahead: reduce, finishing before the apex)
+#   APEX_TTA_S < tta <= HOLD_TTA_S -> HOLD  (close/uncertain: maintain, NEVER reduce further)
+#   tta <= APEX_TTA_S  (or curve straightens) -> RELEASE (at apex: accelerate back to cruise)
+HOLD_TTA_S      = 1.2   # s; stop reducing once within this time of the apex (so braking completes earlier)
+APEX_TTA_S      = 0.4   # s; "at the apex" -> release the cap and accelerate out
+APEX_FINISH_S   = 1.2   # s; aim to reach curve-safe speed this long BEFORE the apex (firmer if needed)
+CONFIDENCE_CUT  = 0.5   # m/s (~1.1 mph) immediate cap cut the instant a binding curve is detected, so the
+                        #   driver immediately feels VTSC engage (per drive #4). Then braking continues.
+CLEAR_CYCLES    = 5     # cycles with no curve before RELEASE -> IDLE (debounce the exit so we don't re-brake
+                        #   on the curve we just left)
+
 V_MIN           = 6.7   # m/s (~15 mph) floor — never command a curve speed below this
 MIN_CURVATURE   = 1e-4  # 1/m; at or below this the path is "straight" (ignored)
 LOOKAHEAD_MAX_S = 8.0   # s; only trust the model's predicted path out to here
-CURVE_MIN_POINTS = 3    # debounce (Phase-2 wrapper): require the curve sustained over >= this many points
+CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this many cycles before braking

@@ -104,6 +104,8 @@ _services: dict[str, tuple] = {
   "customReservedRawData2": (True, 0.),
   # mapd2xnor: OSM map data (speed limits + road name) @ 1 Hz
   "liveMapDataSP": (True, 1., 1),
+  # vtsc/ces2xnor: curve-speed-control decision telemetry @ 20 Hz (plannerd), qlog ~4 Hz
+  "vtscState": (True, 20., 5),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

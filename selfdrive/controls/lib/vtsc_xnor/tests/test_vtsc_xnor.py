@@ -4,7 +4,9 @@ the car held 70 mph through a ~415 m-radius curve (2.6 m/s^2 lateral) and did NO
 driver intervened. VTSC must instead command a slowdown to a safe speed (~57 mph at A_LAT_TARGET=1.5)
 and START braking ~100 m before the apex, not at it.
 """
-from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import v_safe, curve_speed_target, apply_limits
+from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import (
+  v_safe, curve_speed_target, apply_limits, sharpest_ahead, brake_cap_for_apex)
+from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
 
 MPH = 0.44704
 def mph(v):
@@ -157,9 +159,115 @@ def test_min_dist_zero_keeps_old_behavior():
   assert apex < V70                             # min_dist=0 -> apex point still binds (old behavior)
 
 
-def test_default_decel_ceiling_never_slams():
-  # the rate limiter at the default ceiling must keep one step tiny (no hard braking)
-  from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
+# ---- controller apex state machine (drive #4: confidence cut, finish-before-apex, accelerate out) ----
+import time
+import types
+
+
+def _fake_model(apex_k, apex_d, v_ego):
+  vx = max(v_ego, 1.0)
+  return types.SimpleNamespace(
+    orientationRate=types.SimpleNamespace(z=[0.0, apex_k * vx, 0.0],
+                                          t=[0.0, apex_d / vx, (apex_d + 30.0) / vx]),
+    velocity=types.SimpleNamespace(x=[vx, vx, vx]),
+    position=types.SimpleNamespace(x=[0.0, apex_d, apex_d + 30.0]))
+
+
+def _make_ctrl():
+  from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_controller import VTSCController
+  cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
+  c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: True))
+  c.mem_params = None              # no overlay publish in the test
+  return c
+
+
+def _step(c, apex_d, apex_k=TERW_KAPPA, v_cruise=V70, v_ego=28.0):
+  c._last_t = time.monotonic() - 0.05   # force dt ~ 50 ms (deterministic rate-limit step)
+  c.cap({'modelV2': _fake_model(apex_k, apex_d, v_ego)}, v_cruise, v_ego)
+  return c.msg["vTarget"]
+
+
+def test_state_machine_confidence_cut_then_brake_hold_release():
+  c = _make_ctrl()
+  # 1) approach (apex far) -> after debounce, BRAKE with an immediate >=1mph cut
+  for _ in range(5):
+    _step(c, apex_d=200.0)
+  assert c._state == "brake"
+  cut = c.msg["vTarget"]
+  assert cut <= V70 - C.CONFIDENCE_CUT + 1e-3            # instant confidence cut (>=~1 mph)
+
+  # 2) keep braking with the apex closer -> slows further (below the mere cut)
+  for _ in range(40):
+    _step(c, apex_d=60.0)
+  braked = c.msg["vTarget"]
+  assert braked < cut - 0.2                              # actually reduced speed for the curve
+
+  # 3) HOLD zone (close/uncertain) -> must NOT reduce further
+  hold_start = braked
+  for _ in range(20):
+    v = _step(c, apex_d=25.0)
+    assert v >= hold_start - 1e-3                         # never reduces in hold
+  assert c._state == "hold"
+
+  # 4) at the apex -> RELEASE: accelerate back toward cruise, never reduce
+  rel = [_step(c, apex_d=8.0) for _ in range(20)]
+  assert c._state == "release"
+  assert rel[-1] > rel[0] + 0.1                           # accelerating out
+  for a, b in zip(rel, rel[1:], strict=False):
+    assert b >= a - 1e-6                                  # monotonic non-decrease past the apex
+
+  # 5) road clears -> back to idle at full cruise
+  for _ in range(C.CLEAR_CYCLES + 60):
+    _step(c, apex_d=-1.0, apex_k=0.0)
+  assert c._state == "idle"
+  assert abs(c.msg["vTarget"] - V70) < 1e-6
+
+
+def test_state_machine_disabled_is_neutral():
+  from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_controller import VTSCController
+  cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
+  c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: False))  # CES off
+  c.mem_params = None
+  c._last_t = time.monotonic() - 0.05
+  out = c.cap({'modelV2': _fake_model(TERW_KAPPA, 50.0, 28.0)}, V70, 28.0)
+  assert out == V70 and not c.msg["enabled"]              # disabled -> byte-identical passthrough
+
+
+def test_decel_ceiling_bounded_but_firm_enough():
+  # the rate limiter bounds one step to A_DECEL_MAX*dt (no slam), but the ceiling is now firm enough
+  # (drive #4: brake harder if needed to finish before the apex) — yet still well below an emergency stop
   step = apply_limits(V70, 10.0, V70, dt=0.05)          # huge target drop
   assert (V70 - step) <= C.A_DECEL_MAX * 0.05 + 1e-9     # bounded by the ceiling
-  assert C.A_DECEL_MAX <= 1.5                            # ceiling itself is gentle (<=0.15 g)
+  assert 1.5 <= C.A_DECEL_MAX <= 3.0                     # firm enough to finish before apex, not a slam
+
+
+# ---- sharpest_ahead (apex finder) ------------------------------------------
+def test_sharpest_ahead_picks_max_curvature():
+  k, d = sharpest_ahead([1/2000, TERW_KAPPA, 1/3000], [40.0, 80.0, 120.0])
+  assert abs(k - TERW_KAPPA) < 1e-9 and d == 80.0       # the apex = the sharpest point
+
+
+def test_sharpest_ahead_straight_is_none():
+  k, d = sharpest_ahead([0.0, 0.0], [10.0, 40.0])
+  assert k == 0.0 and d == -1.0
+
+
+# ---- brake_cap_for_apex (finish before the apex) ---------------------------
+def test_brake_cap_falls_to_curve_speed_at_finish_point():
+  vcs = v_safe(TERW_KAPPA)                               # default a_lat
+  far = brake_cap_for_apex(vcs, apex_dist=200.0, v_ego=28.0)
+  near = brake_cap_for_apex(vcs, apex_dist=40.0, v_ego=28.0)
+  at = brake_cap_for_apex(vcs, apex_dist=0.0, v_ego=28.0)
+  assert far > near > at                                 # cap falls as the apex approaches
+  assert abs(at - vcs) < 1e-6                            # at/after the finish point -> exactly curve speed
+
+
+def test_brake_cap_finishes_before_apex():
+  # at apex_dist == v_ego*APEX_FINISH_S the target is already curve speed (slowing done before apex)
+  vcs = v_safe(TERW_KAPPA)
+  d_finish = 28.0 * C.APEX_FINISH_S
+  assert abs(brake_cap_for_apex(vcs, apex_dist=d_finish, v_ego=28.0) - vcs) < 1e-6
+
+
+def test_brake_cap_straight_unlimited():
+  assert brake_cap_for_apex(float('inf'), 100.0, 28.0) == float('inf')
