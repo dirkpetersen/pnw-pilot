@@ -287,6 +287,13 @@ class TogglesLayout(Widget):
       self._toggles[param].action_item.set_enabled(False)
       self._toggles[param].action_item.set_state(False)
 
+    # ces2xnor: CES (and VTSC, which rides it) require openpilot longitudinal control — they only
+    # engage when openpilot drives the gas/brake. Grey out + disable the toggle when long control is
+    # off (e.g. F-150 Lightning on stock ACC). We do NOT clear the param, so the setting persists for
+    # cars that DO control longitudinal (Tesla) when the same device is swapped between cars.
+    ces_long_ok = cp is not None and cp.openpilotLongitudinalControl
+    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+
   def _render(self, rect):
     self._scroller.render(rect)
 
