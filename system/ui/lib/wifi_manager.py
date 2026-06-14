@@ -597,7 +597,11 @@ class WifiManager:
         'autoconnect': ('b', False),
       },
       '802-11-wireless': {
-        'band': ('s', 'bg'),
+        # xnor: 5GHz AP (was 'bg'/2.4GHz). 2.4GHz desensed the LTE modem (Band 4 @ 2.1GHz) -> the
+        # cellular dropped ('modem-no-carrier') whenever the hotspot was on, so tethering shared no
+        # internet. 5GHz (ch36, UNII-1, non-DFS) is ~3GHz away from the modem -> no coexistence drop.
+        'band': ('s', 'a'),
+        'channel': ('u', 36),
         'mode': ('s', 'ap'),
         'ssid': ('ay', self._tethering_ssid.encode("utf-8")),
       },
