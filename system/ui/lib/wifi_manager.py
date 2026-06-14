@@ -597,14 +597,12 @@ class WifiManager:
         'autoconnect': ('b', False),
       },
       '802-11-wireless': {
-        # xnor: 5GHz AP (ch36) to avoid desensing the LTE modem (Band 4 @ 2.1GHz) — 2.4GHz hotspot
-        # dropped the cellular ('modem-no-carrier'). The WCN3990 DOES support 5GHz AP (verified:
-        # SoftAP came up on freq 5180); the earlier failure was purely regulatory — the driver INI
-        # ships gCountrycode=CN and the regdom defaults to world ('00'), which puts no-IR on 5GHz so
-        # the AP can't beacon. launch_env.sh sets country US at boot (the INI is read-only), which
-        # clears no-IR on UNII-1 (ch36) and lets the 5GHz AP broadcast.
-        'band': ('s', 'a'),
-        'channel': ('u', 36),
+        # xnor: 2.4GHz AP (known to SUSTAIN). 5GHz (band 'a' ch36) was tried to dodge the LTE-modem
+        # desense — it COMES UP (verified freq 5180) but does not reliably STAY up (the AP tears down
+        # a few seconds after start, likely a regulatory/beacon re-check on this driver), so the
+        # hotspot toggle flips back off after ~5s. Back to 2.4GHz, which holds. The cellular-desense
+        # tradeoff only matters at weak signal; real fix there is signal/antenna.
+        'band': ('s', 'bg'),
         'mode': ('s', 'ap'),
         'ssid': ('ay', self._tethering_ssid.encode("utf-8")),
       },
