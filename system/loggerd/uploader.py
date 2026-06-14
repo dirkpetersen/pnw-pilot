@@ -257,6 +257,15 @@ def main(exit_event: threading.Event | None = None) -> None:
         time.sleep(60 if offroad else 5)
       continue
 
+    # xnor: HOME-WIFI-ONLY uploads — never spend cellular data. Stock openpilot's "metered"
+    # handling only throttles qcamera + recent crash/boot logs, but still uploads qlog/rlog
+    # over LTE. We hard-skip any metered connection (cellular is configured metered via
+    # GsmMetered=1), so uploads happen ONLY on unmetered WiFi. Set GsmMetered=0 to re-allow.
+    if sm['deviceState'].networkMetered and not force_wifi:
+      if allow_sleep:
+        time.sleep(60 if offroad else 5)
+      continue
+
     success = uploader.step(sm['deviceState'].networkType.raw, sm['deviceState'].networkMetered)
     if success is None:
       backoff = 60 if offroad else 5
