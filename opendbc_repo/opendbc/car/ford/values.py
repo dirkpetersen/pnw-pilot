@@ -56,6 +56,10 @@ class FordFlags(IntFlag):
 class RADAR:
   DELPHI_ESR = 'ford_fusion_2018_adas'
   DELPHI_MRR = 'FORD_CADS'
+  # light2xnor (Tier 2): the CAN FD F-150 Lightning has no separate Delphi radar — its lead/FCW
+  # object comes from the camera's Steer_Assist_Data (0x3d7). Mapping Bus.radar to this synthesizes
+  # a single radar track so radarUnavailable=False and openpilot longitudinal can be enabled.
+  STEER_ASSIST_DATA = 'ford_lincoln_base_pt'
 
 
 class Footnote(Enum):
@@ -104,6 +108,7 @@ class FordPlatformConfig(PlatformConfig):
 class FordCANFDPlatformConfig(FordPlatformConfig):
   dbc_dict: DbcDict = field(default_factory=lambda: {
     Bus.pt: 'ford_lincoln_base_pt',
+    Bus.radar: RADAR.STEER_ASSIST_DATA,  # light2xnor: camera lead-object as radar -> long available
   })
 
   def init(self):

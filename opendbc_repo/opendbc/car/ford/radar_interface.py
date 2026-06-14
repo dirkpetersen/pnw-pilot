@@ -1,3 +1,4 @@
+import collections
 import numpy as np
 from typing import cast
 from collections import defaultdict
@@ -19,6 +20,8 @@ DELPHI_MRR_RADAR_MSG_COUNT = 64
 DELPHI_MRR_RADAR_RANGE_COVERAGE = {0: 42, 1: 164, 2: 45, 3: 175}  # scan index to detection range (m)
 DELPHI_MRR_MIN_LONG_RANGE_DIST = 30  # meters
 DELPHI_MRR_CLUSTER_THRESHOLD = 5  # meters, lateral distance and relative velocity are weighted
+
+STEER_ASSIST_DATA_MSGS = 0x3d7  # light2xnor: camera Steer_Assist_Data (lead/FCW object)
 
 
 @dataclass
@@ -89,6 +92,12 @@ def _create_delphi_mrr_radar_can_parser(CP) -> CANParser:
   return CANParser(RADAR.DELPHI_MRR, messages, CanBus(CP).radar)
 
 
+def _create_steer_assist_data(CP) -> CANParser:
+  # light2xnor: the Lightning's lead object is on the camera bus, not a radar bus
+  messages = [("Steer_Assist_Data", 20)]
+  return CANParser(RADAR.STEER_ASSIST_DATA, messages, CanBus(CP).camera)
+
+
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP):
     super().__init__(CP)
@@ -102,6 +111,7 @@ class RadarInterface(RadarInterfaceBase):
     self.scan_index_invalid_cnt = 0
     self.radar_unavailable_cnt = 0
     self.prev_headerScanIndex = 0
+    self.vRelCol = {}  # light2xnor: per-track vRel smoothing for the camera lead object
     if CP.radarUnavailable:
       self.rcp = None
     elif self.radar == RADAR.DELPHI_ESR:
@@ -111,6 +121,9 @@ class RadarInterface(RadarInterfaceBase):
     elif self.radar == RADAR.DELPHI_MRR:
       self.rcp = _create_delphi_mrr_radar_can_parser(CP)
       self.trigger_msg = DELPHI_MRR_RADAR_HEADER_ADDR
+    elif self.radar == RADAR.STEER_ASSIST_DATA:
+      self.rcp = _create_steer_assist_data(CP)
+      self.trigger_msg = STEER_ASSIST_DATA_MSGS
     else:
       raise ValueError(f"Unsupported radar: {self.radar}")
 
@@ -135,9 +148,57 @@ class RadarInterface(RadarInterfaceBase):
       _update = self._update_delphi_mrr(ret)
       if not _update:
         return None
+    elif self.radar == RADAR.STEER_ASSIST_DATA:
+      _update = self._update_steer_assist_data()
+      if not _update:
+        return None
 
     ret.points = list(self.pts.values())
     return ret
+
+  def _update_steer_assist_data(self):
+    # light2xnor: synthesize a single radar track (id 0) from the camera's lead/FCW object.
+    msg = self.rcp.vl["Steer_Assist_Data"]
+    dRel = msg['CmbbObjDistLong_L_Actl']
+    confidence = msg['CmbbObjConfdnc_D_Stat']
+    new_track = False
+
+    if confidence > 0:
+      if 0 not in self.pts:
+        self.pts[0] = structs.RadarData.RadarPoint()
+        self.pts[0].trackId = self.track_id
+        self.vRelCol[0] = collections.deque(maxlen=20)
+        self.track_id += 1
+        new_track = True
+
+      yRel = msg['CmbbObjDistLat_L_Actl']
+      vRel = msg['CmbbObjRelLong_V_Actl']
+      yvRel = msg['CmbbObjRelLat_V_Actl']
+      if not new_track:
+        dDiff = dRel - self.pts[0].dRel
+        if abs(vRel) < 1.0e-2:
+          self.vRelCol[0].append(dDiff)
+          vRel = sum(self.vRelCol[0])
+        elif len(self.vRelCol[0]) > 0:
+          self.vRelCol[0].clear()
+
+        if abs(self.pts[0].vRel - vRel) > 2 or abs(self.pts[0].dRel - dRel) > 5:
+          self.pts[0].trackId = self.track_id
+          if len(self.vRelCol[0]) > 0:
+            self.vRelCol[0].clear()
+          self.track_id += 1
+
+      self.pts[0].dRel = dRel    # longitudinal distance from front of car
+      self.pts[0].yRel = yRel    # lateral, left positive
+      self.pts[0].vRel = vRel
+      self.pts[0].aRel = float('nan')
+      self.pts[0].yvRel = yvRel
+      self.pts[0].measured = True
+    else:
+      if 0 in self.pts:
+        del self.pts[0]
+        del self.vRelCol[0]
+    return True
 
   def _update_delphi_esr(self):
     for ii in sorted(self.updated_messages):

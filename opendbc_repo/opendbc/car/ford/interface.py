@@ -33,7 +33,7 @@ class CarInterface(CarInterfaceBase):
 
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
     ret.steerControlType = structs.CarParams.SteerControlType.angle
-    ret.steerActuatorDelay = 0.2
+    ret.steerActuatorDelay = 0.22  # light2xnor (Tier 2): bluepilot Lightning tuning (was 0.2) — tighter tracking
     ret.steerLimitTimer = 1.0
     ret.steerAtStandstill = True
 
@@ -51,8 +51,12 @@ class CarInterface(CarInterfaceBase):
       cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
     ret.safetyConfigs = cfgs
 
-    ret.alphaLongitudinalAvailable = ret.radarUnavailable
-    if alpha_long or not ret.radarUnavailable:
+    # light2xnor (Tier 2): radar is now available on the CAN FD Lightning (camera lead object), which
+    # would normally AUTO-enable openpilot longitudinal. But Ford long is UNVALIDATED on the F-150, so
+    # keep it OPT-IN (off by default) behind the experimental-long toggle — the driver explicitly
+    # enables + validates it. radar/lead data is published regardless for the UI and stock-ACC awareness.
+    ret.alphaLongitudinalAvailable = True
+    if alpha_long:
       ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.LONG_CONTROL.value
       ret.openpilotLongitudinalControl = True
 
