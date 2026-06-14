@@ -597,11 +597,12 @@ class WifiManager:
         'autoconnect': ('b', False),
       },
       '802-11-wireless': {
-        # xnor: 5GHz AP (was 'bg'/2.4GHz). 2.4GHz desensed the LTE modem (Band 4 @ 2.1GHz) -> the
-        # cellular dropped ('modem-no-carrier') whenever the hotspot was on, so tethering shared no
-        # internet. 5GHz (ch36, UNII-1, non-DFS) is ~3GHz away from the modem -> no coexistence drop.
-        'band': ('s', 'a'),
-        'channel': ('u', 36),
+        # xnor: 2.4GHz AP. NOTE: 5GHz AP (band 'a') was tried to avoid desensing the LTE modem
+        # (Band 4 @ 2.1GHz), but the WCN3990's AP firmware on this device does NOT bring up a 5GHz
+        # AP (5GHZ capability is client-only) — the hotspot wouldn't enable. Reverted to 'bg'. The
+        # tethering/cellular coexistence drop only bites at WEAK cellular signal; the real fix there
+        # is stronger signal / an external LTE antenna, not the WiFi band.
+        'band': ('s', 'bg'),
         'mode': ('s', 'ap'),
         'ssid': ('ay', self._tethering_ssid.encode("utf-8")),
       },
