@@ -846,9 +846,12 @@ class WifiManager:
     def worker():
       if active:
         self._set_others_autoconnect(False)  # free the radio so the AP isn't reclaimed by a client
-        self.activate_connection(self._tethering_ssid, block=True)
-        time.sleep(3)  # let NM finish bringing up the AP/shared address before we NAT its subnet
+        # install forwarding + NAT BEFORE bringing the AP up so the very first client packet is already
+        # routed out LTE. If NAT lands late, a client that connects in the gap runs its connectivity
+        # probe against no-NAT, latches "connected, no internet", and won't re-check for a while.
+        # (The masquerade matches the AP subnet by address, so it's valid to install before the iface.)
         self._set_tethering_nat(True)        # forward + masquerade out LTE so clients get internet
+        self.activate_connection(self._tethering_ssid, block=True)
       else:
         self._deactivate_connection(self._tethering_ssid)
         self._set_tethering_nat(False)       # tear down forwarding + NAT
