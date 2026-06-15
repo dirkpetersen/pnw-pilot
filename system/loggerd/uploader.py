@@ -23,11 +23,33 @@ NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
 
+# connect2xnor: pass-2 ("firehose") files. These are the LARGE files that stock
+# openpilot only uploads when the backend issues an Athena upload request. The
+# user's self-hosted backend issues no such request, so we proactively upload
+# them ourselves -- but ONLY over real external WiFi (see PASS2_NETWORK_TYPES).
+FIREHOSE_FILES = {"rlog", "rlog.zst", "fcamera.hevc", "ecamera.hevc"}
+
+# connect2xnor: only real external WiFi clients qualify for pass-2. The comma's
+# own hotspot is never-default, so NM's PrimaryConnection stays LTE while
+# hotspotting -> networkType reports `cell`, never `wifi`. So wifi cleanly means
+# "not hotspot, not LTE". This is THE gate for proactive large-file uploads.
+PASS2_NETWORK_TYPES = {int(NetworkType.wifi)}
+
+# connect2xnor: param the UI reads to light the "Firehose Mode" indicator. Set
+# only while a pass-2 (video/rlog) transfer is actually in flight.
+FIREHOSE_ACTIVE_PARAM = "FirehoseActive"
+
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
                    # bugs, including ones that can cause massive log sizes
   "qcam": 5*1e6,
 }
+
+
+def pass2_allowed(network_type: int) -> bool:
+  # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on
+  # real external WiFi (NetworkType.wifi). Never on LTE, never on the hotspot.
+  return network_type in PASS2_NETWORK_TYPES
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -87,7 +109,19 @@ class Uploader:
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
 
-  def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
+    # connect2xnor: clear the firehose indicator on startup so a stale param
+    # from a crash doesn't leave the UI showing "uploading" forever.
+    self._set_firehose_active(False)
+
+  def _set_firehose_active(self, active: bool) -> None:
+    # connect2xnor: drives the repurposed "Firehose Mode" UI indicator. ON only
+    # while a pass-2 transfer is actually in flight.
+    try:
+      self.params.put_bool(FIREHOSE_ACTIVE_PARAM, active)
+    except Exception:
+      cloudlog.exception("failed to set firehose active param")
+
+  def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
 
@@ -115,6 +149,17 @@ class Uploader:
         if is_uploaded:
           continue
 
+        # connect2xnor: split the two passes. Pass 1 (default) handles the small
+        # files stock openpilot uploads proactively; pass 2 handles ONLY the
+        # large firehose files (rlog/fcamera/ecamera). Each pass ignores the
+        # other's files so they never interleave.
+        if pass2:
+          if name not in FIREHOSE_FILES:
+            continue
+        else:
+          if name in FIREHOSE_FILES:
+            continue
+
         # limit uploading on metered connections
         if metered:
           dt = datetime.timedelta(hours=12)
@@ -137,6 +182,14 @@ class Uploader:
       if name in self.immediate_priority:
         return name, key, fn
 
+    return None
+
+  def next_pass2_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
+    # connect2xnor: oldest un-uploaded large file (listdir_by_creation already
+    # sorts oldest-first), so video/logs leave the device before the deleter
+    # reaches them.
+    for name, key, fn in self.list_upload_files(metered, pass2=True):
+      return name, key, fn
     return None
 
   def do_upload(self, key: str, fn: str):
@@ -212,8 +265,10 @@ class Uploader:
     return success
 
 
-  def step(self, network_type: int, metered: bool) -> bool | None:
-    d = self.next_file_to_upload(metered)
+  def step(self, network_type: int, metered: bool, pass2: bool = False) -> bool | None:
+    # connect2xnor: pass2 picks the next large firehose file; pass1 (default) is
+    # unchanged stock behavior.
+    d = self.next_pass2_file_to_upload(metered) if pass2 else self.next_file_to_upload(metered)
     if d is None:
       return None
 
@@ -223,7 +278,14 @@ class Uploader:
     if key.endswith(('qlog', 'rlog')) or (key.startswith('boot/') and not key.endswith('.zst')):
       key += ".zst"
 
-    return self.upload(name, key, fn, network_type, metered)
+    # connect2xnor: light the firehose indicator only while the large transfer runs.
+    if pass2:
+      self._set_firehose_active(True)
+    try:
+      return self.upload(name, key, fn, network_type, metered)
+    finally:
+      if pass2:
+        self._set_firehose_active(False)
 
 
 def main(exit_event: threading.Event | None = None) -> None:
@@ -266,7 +328,18 @@ def main(exit_event: threading.Event | None = None) -> None:
         time.sleep(60 if offroad else 5)
       continue
 
-    success = uploader.step(sm['deviceState'].networkType.raw, sm['deviceState'].networkMetered)
+    # connect2xnor: honor force_wifi (test/debug) for the raw value too.
+    network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
+    metered = sm['deviceState'].networkMetered
+    success = uploader.step(network_type_raw, metered)
+
+    # connect2xnor: PASS 2. Only after pass 1 has nothing left to do
+    # (success is None) do we proactively upload the large firehose files, and
+    # only on real external WiFi. networkType==wifi is never true on the
+    # hotspot or LTE, so this can't burn cellular data.
+    if success is None and pass2_allowed(network_type_raw):
+      success = uploader.step(network_type_raw, metered, pass2=True)
+
     if success is None:
       backoff = 60 if offroad else 5
     elif success:

@@ -129,8 +129,16 @@ class Sidebar(Widget):
       self._temp_status.update(tr_noop("TEMP"), tr_noop("HIGH"), Colors.DANGER)
 
   def _update_connection_status(self, device_state):
+    # connect2xnor: the CONNECT indicator reads ONLINE only on real external
+    # WiFi (networkType == wifi). The comma's own hotspot is never-default, so
+    # NM keeps LTE as the PrimaryConnection while hotspotting -> networkType is
+    # `cell`, not `wifi`. So this is OFFLINE on the hotspot and on LTE, and only
+    # ONLINE on a genuine external WiFi client connection. We still require a
+    # recent Athena ping so it reflects real backend reachability, not just a
+    # WiFi association.
+    on_wifi = device_state.networkType == NetworkType.wifi
     last_ping = device_state.lastAthenaPingTime
-    if last_ping == 0:
+    if not on_wifi or last_ping == 0:
       self._connect_status.update(tr_noop("CONNECT"), tr_noop("OFFLINE"), Colors.WARNING)
     elif time.monotonic_ns() - last_ping < 80_000_000_000:  # 80 seconds in nanoseconds
       self._connect_status.update(tr_noop("CONNECT"), tr_noop("ONLINE"), Colors.GOOD)

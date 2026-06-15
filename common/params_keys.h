@@ -22,6 +22,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
     {"VTSCStatus", {CLEAR_ON_MANAGER_START, JSON}},  // vtsc: live status (plannerd -> UI overlay). Gated on the CES toggle.
+    {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2xnor: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"ApiCache_Device", {PERSISTENT, STRING}},
     {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},
