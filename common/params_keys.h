@@ -9,6 +9,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AccessToken", {CLEAR_ON_MANAGER_START | DONT_LOG, STRING}},
     {"AdbEnabled", {PERSISTENT, BOOL}},
     {"AlwaysOnDM", {PERSISTENT, BOOL}},
+    {"AllowSoftwareUpdates", {PERSISTENT, BOOL}},  // dmon2xnor: gate OTA updates so they don't wipe local changes
+    {"SensitiveDriverMonitoring", {PERSISTENT, BOOL}},  // dmon2xnor: ON = stock strict 11s DM; OFF (default) = relaxed 1h/3h. REQUIRED or dmonitoringd crashes (UnknownKeyName) -> blocks engagement
     // auto2xnor: sunnypilot-style toggles (default OFF for safety)
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},

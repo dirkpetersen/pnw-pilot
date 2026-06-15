@@ -178,7 +178,7 @@ class TogglesLayout(Widget):
     # full gentle profile on any car (VTSC soft decel + slow recovery, curves handed to VTSC); Standard
     # = today's default tune. Available on ALL cars (greyed only when openpilot long control is off).
     self._ces_mode_setting = multiple_button_item(
-      lambda: tr("Conditional Experimental Switching (CES)"),
+      lambda: tr("CES Mode"),  # short title so the 3 buttons fit; full name explained in the description
       lambda: tr(DESCRIPTIONS["ConditionalExperimentalSwitching"]),
       buttons=[lambda: tr("Off"), lambda: tr("Light"), lambda: tr("Standard")],
       button_width=255,
