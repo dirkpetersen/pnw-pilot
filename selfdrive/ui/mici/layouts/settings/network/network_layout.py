@@ -46,6 +46,24 @@ class NetworkLayoutMici(NavScroller):
     self._tethering_password_btn = BigButton("tethering password", "", txt_tethering)
     self._tethering_password_btn.set_click_callback(tethering_password_clicked)
 
+    # network2xnor: priority WiFi over tethering. Blank disables; network_arbiterd switches the radio
+    # to this SSID when it is in range (and saved) while tethering is on.
+    def priority_wifi_callback(ssid: str):
+      ssid = ssid.strip()
+      if ssid == "":
+        ui_state.params.remove("TetheringPriorityWifi")
+      else:
+        ui_state.params.put("TetheringPriorityWifi", ssid)
+
+    def priority_wifi_clicked():
+      current = ui_state.params.get("TetheringPriorityWifi") or ""
+      dlg = BigInputDialog("priority wifi over tethering...", current, minimum_length=0,
+                           confirm_callback=priority_wifi_callback)
+      gui_app.push_widget(dlg)
+
+    self._priority_wifi_btn = BigButton("priority wifi over tethering", "edit", txt_tethering)
+    self._priority_wifi_btn.set_click_callback(priority_wifi_clicked)
+
     # ******** Network Metered ********
     def network_metered_callback(value: str):
       self._network_metered_btn.set_enabled(False)
@@ -81,6 +99,7 @@ class NetworkLayoutMici(NavScroller):
       self._network_metered_btn,
       self._tethering_toggle_btn,
       self._tethering_password_btn,
+      self._priority_wifi_btn,
       # /* Advanced settings
       self._roaming_btn,
       self._apn_btn,
