@@ -338,13 +338,12 @@ class CESController:
       self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
     except Exception:
       self.mem_params = None
-    # per-car gentle profile (heavy trucks): longer dwell + VTSC owns curves (no curve->Experimental).
-    fp = str(getattr(CP, 'carFingerprint', '') or '')
-    self._gentle = fp in C.GENTLE_FINGERPRINTS
-    if self._gentle:
-      self._sm = ConditionalExperimentalSwitching(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
-    else:
-      self._sm = ConditionalExperimentalSwitching()
+    # light-ces-gentle: the gentle profile is now USER-SELECTED via CESMode (1=Light), NOT gated on
+    # carFingerprint. Light = longer dwell + VTSC owns curves (no curve->Experimental) on ANY car;
+    # Standard = default tune. _read_params() rebuilds the state machine if the mode changes at runtime.
+    self._mode = C.CES_MODE_OFF
+    self._gentle = False
+    self._sm = ConditionalExperimentalSwitching()
     self._enabled = False
     self._button = C.BTN_CES
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
@@ -366,12 +365,28 @@ class CESController:
     # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
+  def _set_mode(self, mode: int):
+    """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
+    when the gentle flag actually flips, so we don't reset the dwell every ~1 Hz read."""
+    gentle = C.ces_is_gentle(mode)
+    if mode != self._mode or gentle != self._gentle:
+      if gentle != self._gentle:
+        if gentle:
+          self._sm = ConditionalExperimentalSwitching(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
+        else:
+          self._sm = ConditionalExperimentalSwitching()
+      self._mode = mode
+      self._gentle = gentle
+
   def _read_params(self):
     if self._frame % max(1, int(1.0 / DT_CTRL)) == 0:   # ~1 Hz (selfdrived steps at 100 Hz / DT_CTRL)
       try:
-        self._enabled = self._long_ok and self.params.get_bool("ConditionalExperimentalSwitching")
+        mode = C.read_ces_mode(self.params)
       except Exception:
-        self._enabled = False
+        mode = C.CES_MODE_OFF
+      self._set_mode(mode)
+      # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
+      self._enabled = self._long_ok and C.ces_enabled(self._mode)
       if self._enabled:
         self._toggles = _toggles_from_params(self.params)
         try:

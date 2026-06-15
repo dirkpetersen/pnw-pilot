@@ -60,5 +60,7 @@ CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this man
 DEFAULT_PROFILE = dict(A_LAT_TARGET=A_LAT_TARGET, A_DECEL=A_DECEL, A_DECEL_MAX=A_DECEL_MAX, A_RELAX=A_RELAX)
 GENTLE_PROFILE  = dict(A_LAT_TARGET=2.0, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)
 
-# car fingerprints that use the gentle profile (heavy / long-unvalidated: smoothness over firmness)
-GENTLE_FINGERPRINTS = ("FORD_F_150_LIGHTNING_MK1",)
+# light-ces-gentle: which profile is used is now USER-SELECTED via CESMode (1=Light->GENTLE,
+# 2=Standard->DEFAULT) in vtsc_controller.py, on ANY car — NOT gated on this fingerprint list.
+# Kept only as a historical note of which car originally motivated the gentle tune (no longer read).
+GENTLE_FINGERPRINTS = ("FORD_F_150_LIGHTNING_MK1",)  # unused — superseded by CESMode (see LIGHT_CES.md)

@@ -64,11 +64,23 @@ DESCRIPTIONS = {
 }
 
 
+def ces_group_enabled(cp) -> bool:
+  """PURE, testable: the WHOLE CES group (the CESMode selector + any CES list item) is enabled iff
+  openpilot controls longitudinal. Symmetric by construction — the same bool both disables on
+  long-off and re-enables on long-on, so nothing can be left greyed out. `cp` is the CarParams (or
+  None before a car is seen)."""
+  return cp is not None and bool(getattr(cp, "openpilotLongitudinalControl", False))
+
+
 class TogglesLayout(Widget):
   # auto2xnor: greyed out on non-Tesla cars (the Ford Lightning), enabled on Tesla
   TESLA_ONLY_TOGGLES = ("NudgelessLaneChange", "OvertakeAssist")  # ces2xnor: CES is NOT here — available on all cars
   # auto2xnor: not supported on any car here — always greyed out + forced off
   UNSUPPORTED_TOGGLES = ("NoDisengageOnBrake",)
+  # light-ces-gentle: the whole CES group, gated together on openpilotLongitudinalControl. Only widgets
+  # present in this layout are gated (CESMode is the selector; the CES* sub-options are params, not list
+  # items here). Listed by key so the grey-out enable/disable stays SYMMETRIC for any future CES item.
+  CES_GROUP = ("CESMode", "CESCurves", "CESStops", "CESLowSpeed", "CESLead")
 
   def __init__(self):
     super().__init__()
@@ -125,12 +137,6 @@ class TogglesLayout(Widget):
         "warning.png",
         False,
       ),
-      "ConditionalExperimentalSwitching": (
-        lambda: tr("Conditional Experimental Switching (CES)"),
-        DESCRIPTIONS["ConditionalExperimentalSwitching"],
-        "speed_limit.png",
-        False,
-      ),
       "ShowSpeedLimit": (
         lambda: tr("Speed limit display/warning (MAPD/PNW)"),
         DESCRIPTIONS["ShowSpeedLimit"],
@@ -167,6 +173,20 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # light-ces-gentle: CES is now a 3-way selector (Off / Light / Standard) styled like the Driving
+    # Personality selector, backed by the INT param CESMode (0/1/2). Off = behavior-neutral; Light =
+    # full gentle profile on any car (VTSC soft decel + slow recovery, curves handed to VTSC); Standard
+    # = today's default tune. Available on ALL cars (greyed only when openpilot long control is off).
+    self._ces_mode_setting = multiple_button_item(
+      lambda: tr("Conditional Experimental Switching (CES)"),
+      lambda: tr(DESCRIPTIONS["ConditionalExperimentalSwitching"]),
+      buttons=[lambda: tr("Off"), lambda: tr("Light"), lambda: tr("Standard")],
+      button_width=255,
+      callback=self._set_ces_mode,
+      selected_index=self._params.get("CESMode", return_default=True),
+      icon="speed_limit.png"
+    )
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -195,6 +215,10 @@ class TogglesLayout(Widget):
         self._locked_toggles.add(param)
 
       self._toggles[param] = toggle
+
+      # light-ces-gentle: CES 3-way selector goes directly below the Experimental Mode toggle
+      if param == "ExperimentalMode":
+        self._toggles["CESMode"] = self._ces_mode_setting
 
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
@@ -287,12 +311,24 @@ class TogglesLayout(Widget):
       self._toggles[param].action_item.set_enabled(False)
       self._toggles[param].action_item.set_state(False)
 
-    # ces2xnor: CES (and VTSC, which rides it) require openpilot longitudinal control — they only
-    # engage when openpilot drives the gas/brake. Grey out + disable the toggle when long control is
-    # off (e.g. F-150 Lightning on stock ACC). We do NOT clear the param, so the setting persists for
-    # cars that DO control longitudinal (Tesla) when the same device is swapped between cars.
-    ces_long_ok = cp is not None and cp.openpilotLongitudinalControl
-    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+    # ces2xnor / light-ces-gentle: CES (and VTSC, which rides it) require openpilot longitudinal
+    # control — they only engage when openpilot drives the gas/brake. Grey out + disable the WHOLE CES
+    # group when long control is off (e.g. F-150 Lightning on stock ACC), and re-enable ALL of it when
+    # long control is on. Symmetric: anything disabled on long-off MUST re-enable on long-on. We do NOT
+    # clear any param, so the settings persist for cars that DO control longitudinal (Tesla) when the
+    # same device is swapped between cars.
+    #
+    # BUG FIXED (light-ces-gentle): previously only the CES master toggle was re-enabled via the
+    # ces_long_ok line; the new CESMode selector (and conceptually the CES* sub-options) were not part
+    # of a single coherent block, so re-enabling on long-on was asymmetric. Now one block toggles the
+    # entire CES_GROUP together. (CESCurves/CESStops/CESLowSpeed/CESLead are params, not list items in
+    # this layout, so the only CES UI widget to gate today is the CESMode selector — but the group is
+    # listed explicitly so any future CES list item is gated symmetrically by construction.)
+    ces_long_ok = ces_group_enabled(cp)
+    for param in self.CES_GROUP:
+      item = self._toggles.get(param)
+      if item is not None:
+        item.action_item.set_enabled(ces_long_ok)
 
   def _render(self, rect):
     self._scroller.render(rect)
@@ -332,3 +368,9 @@ class TogglesLayout(Widget):
 
   def _set_longitudinal_personality(self, button_index: int):
     self._params.put("LongitudinalPersonality", button_index)
+
+  def _set_ces_mode(self, button_index: int):
+    # light-ces-gentle: CESMode is the source of truth (0=Off,1=Light,2=Standard). Keep the legacy
+    # bool ConditionalExperimentalSwitching mirrored (== CESMode>0) so any back-compat reader agrees.
+    self._params.put("CESMode", button_index)
+    self._params.put_bool("ConditionalExperimentalSwitching", button_index > 0)
