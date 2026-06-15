@@ -13,6 +13,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},
     {"OvertakeAssist", {PERSISTENT, BOOL, "0"}},
+    {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2xnor: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"ApiCache_Device", {PERSISTENT, STRING}},
     {"ApiCache_FirehoseStats", {PERSISTENT, JSON}},
     {"AssistNowToken", {PERSISTENT, STRING}},

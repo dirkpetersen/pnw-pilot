@@ -3,9 +3,11 @@ import threading
 import time
 import pyray as rl
 
+from cereal import log
 from openpilot.common.api import api_get
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.system.loggerd.uploader import FIREHOSE_ACTIVE_PARAM
 from openpilot.selfdrive.ui.lib.api_helpers import get_token
 from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
@@ -15,6 +17,8 @@ from openpilot.system.ui.lib.scroll_panel2 import GuiScrollPanel2
 from openpilot.system.ui.lib.multilang import tr, trn, tr_noop
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.scroller import NavRawScrollPanel
+
+NetworkType = log.DeviceState.NetworkType
 
 TITLE = tr_noop("Firehose Mode")
 DESCRIPTION = tr_noop(
@@ -189,13 +193,20 @@ class FirehoseLayoutBase(Widget):
     return y
 
   def _get_status(self) -> tuple[str, rl.Color]:
+    # connect2xnor: repurposed Firehose Mode indicator. In this fork "Firehose"
+    # means the proactive pass-2 (full rlog + video) uploader. It is UPLOADING
+    # only while a large transfer is actually in flight (FirehoseActive param,
+    # set by system/loggerd/uploader.py). Pass-2 runs only on real external
+    # WiFi, so READY shows whenever we're on WiFi but idle between transfers.
     network_type = ui_state.sm["deviceState"].networkType
-    network_metered = ui_state.sm["deviceState"].networkMetered
+    on_wifi = network_type == NetworkType.wifi
 
-    if not network_metered and network_type != 0:  # Not metered and connected
-      return tr("ACTIVE"), self.GREEN
+    if self._params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      return tr("UPLOADING"), self.GREEN
+    elif on_wifi:
+      return tr("READY"), self.GREEN
     else:
-      return tr("INACTIVE: connect to an unmetered network"), self.RED
+      return tr("INACTIVE: connect to Wi-Fi"), self.RED
 
   def _fetch_firehose_stats(self):
     try:
