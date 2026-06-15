@@ -31,9 +31,16 @@ from openpilot.system.networkd.network_arbiter import (
   decide,
   priority_connection_id,
 )
+from openpilot.system.networkd.lte_guard import decide_lte_guard
 
 POLL_INTERVAL_S = 20.0
 NMCLI_TIMEOUT_S = 15.0
+
+LTE_CONNECTION_ID = "lte"
+# the carrier/modem PDN throttle string NM logs when a speed test (or any rapid PDN churn) gets the
+# IMEI flagged. NM then hammers retries ~1/s, which keeps the carrier timer from ever aging out, so
+# LTE never recovers. The guard parks (autoconnect off + down) on this so the carrier timer ages out.
+PDN_THROTTLE_TOKEN = "pdn-ipv4-call-throttled"
 
 
 def _nmcli(args: list[str]) -> str | None:
@@ -112,9 +119,50 @@ def _apply(action: str, priority_ssid: str) -> None:
     cloudlog.error(f"network_arbiterd: unknown action {action!r}")
 
 
+def _lte_has_ip() -> bool:
+  """True if wwan0 has an IPv4 address (LTE data is up). `ip -4 -o addr show wwan0`."""
+  try:
+    proc = subprocess.run(["ip", "-4", "-o", "addr", "show", "wwan0"],
+                          capture_output=True, text=True, timeout=NMCLI_TIMEOUT_S, check=False)
+  except (OSError, subprocess.TimeoutExpired):
+    return False
+  return proc.returncode == 0 and "inet " in proc.stdout
+
+
+def _lte_throttled_recently() -> bool:
+  """True if NM logged the PDN throttle in the last minute (still hammering / freshly tripped).
+  `journalctl -u NetworkManager --since -60s`."""
+  try:
+    proc = subprocess.run(
+      ["sudo", "journalctl", "-u", "NetworkManager", "--no-pager", "--since", "-60s"],
+      capture_output=True, text=True, timeout=NMCLI_TIMEOUT_S, check=False)
+  except (OSError, subprocess.TimeoutExpired):
+    return False
+  return proc.returncode == 0 and PDN_THROTTLE_TOKEN in proc.stdout
+
+
+def _park_lte() -> None:
+  """Stop NM hammering the modem: autoconnect off + down. Lets the carrier PDN timer age out."""
+  cloudlog.warning("network_arbiterd: LTE PDN-throttled -> parking lte (autoconnect off) to let carrier timer clear")
+  _nmcli(["con", "modify", LTE_CONNECTION_ID, "connection.autoconnect", "no"])
+  _nmcli(["con", "down", LTE_CONNECTION_ID])
+
+
+def _unpark_lte() -> None:
+  """Backoff elapsed: re-enable autoconnect + one clean bring-up attempt."""
+  cloudlog.info("network_arbiterd: LTE backoff elapsed -> re-enabling autoconnect + single bring-up")
+  _nmcli(["con", "modify", LTE_CONNECTION_ID, "connection.autoconnect", "yes"])
+  _nmcli(["con", "up", LTE_CONNECTION_ID])
+
+
 def main() -> NoReturn:
   params = Params()
   cloudlog.info("network_arbiterd: started")
+
+  # LTE throttle-guard state (carried across loop iterations)
+  lte_parked = False
+  lte_parked_until = 0.0
+  lte_throttle_count = 0
 
   while True:
     try:
@@ -132,6 +180,23 @@ def main() -> NoReturn:
     except Exception:
       # never let a transient error kill the supervisor
       cloudlog.exception("network_arbiterd: unhandled error in loop")
+
+    # LTE PDN-throttle backoff guard (independent of the wifi arbitration above)
+    try:
+      lte_action, lte_parked, lte_parked_until, lte_throttle_count = decide_lte_guard(
+        now=time.monotonic(),
+        throttled=_lte_throttled_recently() if not lte_parked else False,  # don't probe while parked
+        lte_has_ip=_lte_has_ip() if not lte_parked else False,
+        parked=lte_parked,
+        parked_until=lte_parked_until,
+        throttle_count=lte_throttle_count,
+      )
+      if lte_action == "park":
+        _park_lte()
+      elif lte_action == "unpark":
+        _unpark_lte()
+    except Exception:
+      cloudlog.exception("network_arbiterd: unhandled error in lte guard")
 
     time.sleep(POLL_INTERVAL_S)
 
