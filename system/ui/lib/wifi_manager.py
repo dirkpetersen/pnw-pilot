@@ -843,6 +843,14 @@ class WifiManager:
           cloudlog.warning(f"tethering NAT rule failed: {chain} {rest}")
 
   def set_tethering_active(self, active: bool):
+    # network2xnor: persist the user's intent so the hotspot survives reboot and so the
+    # arbitration supervisor (network_arbiter) knows whether tethering should be running.
+    if Params is not None:
+      try:
+        Params().put_bool("TetheringEnabled", active)
+      except Exception:
+        cloudlog.exception("Failed to persist TetheringEnabled")
+
     def worker():
       if active:
         self._set_others_autoconnect(False)  # free the radio so the AP isn't reclaimed by a client
