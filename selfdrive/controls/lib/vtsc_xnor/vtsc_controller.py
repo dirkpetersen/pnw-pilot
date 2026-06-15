@@ -40,6 +40,10 @@ class VTSCController:
     except Exception:
       self.mem_params = None
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
+    # per-car tune: heavy trucks (Lightning) use the GENTLE profile (softer decel + slow recovery so a
+    # series of curves doesn't sawtooth). Tesla/everything else keeps the DEFAULT tune (byte-identical).
+    fp = str(getattr(CP, 'carFingerprint', '') or '')
+    self.tune = dict(C.GENTLE_PROFILE) if fp in C.GENTLE_FINGERPRINTS else dict(C.DEFAULT_PROFILE)
     self._enabled = False
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
@@ -90,7 +94,7 @@ class VTSCController:
     except Exception:
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
-    k_apex, d_apex, v_curve = model_curve_state(model, v_cruise)
+    k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     has_curve = d_apex >= 0.0 and v_curve < v_cruise - 0.1
     tta = (d_apex / max(v_ego, 1.0)) if has_curve else float('inf')
 
@@ -111,7 +115,7 @@ class VTSCController:
       elif tta <= C.HOLD_TTA_S:
         self._state = "hold"
       else:
-        cap = brake_cap_for_apex(v_curve, d_apex, v_ego)
+        cap = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL'])
         # never above cruise-CONFIDENCE_CUT (keep the engage cut), floored at V_MIN
         target = max(min(cap, v_cruise - C.CONFIDENCE_CUT), C.V_MIN)
 
@@ -134,7 +138,7 @@ class VTSCController:
         self._below = 0
 
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
-    self._applied = apply_limits(self._applied, target, v_cruise, dt)
+    self._applied = apply_limits(self._applied, target, v_cruise, dt, self.tune['A_DECEL_MAX'], self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
 
     engaged = capped < v_cruise - 0.5

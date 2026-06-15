@@ -43,3 +43,22 @@ V_MIN           = 6.7   # m/s (~15 mph) floor — never command a curve speed be
 MIN_CURVATURE   = 1e-4  # 1/m; at or below this the path is "straight" (ignored)
 LOOKAHEAD_MAX_S = 8.0   # s; only trust the model's predicted path out to here
 CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this many cycles before braking
+
+# --- per-car profiles --------------------------------------------------------
+# The above constants are the DEFAULT (Tesla) tune. The F-150 Lightning is a heavy (2948 kg) truck; on
+# the first CES+VTSC drive (route e5f4ecc928) the default tune SAWTOOTHED on a winding highway: VTSC
+# released all the way to cruise at each apex then re-braked for the very next curve, so speed bounced
+# 72<->81 mph repeatedly and passengers were unsettled (driver disengaged). The GENTLE profile fixes the
+# sawtooth and softens the truck:
+#   - never brake harder than ~0.15 g for a vision curve (A_DECEL_MAX 2.5 -> 1.5)
+#   - recover speed SLOWLY after a curve (A_RELAX 1.5 -> 0.6, ~1.3 mph/s) so a follow-on curve in a
+#     SERIES catches a still-reduced speed instead of a re-accelerated one -> the truck settles at a
+#     sustained gentle speed through the winding section rather than bouncing
+#   - bleed speed off more gently approaching the curve (A_DECEL 1.2 -> 1.0)
+#   - a hair less slowdown so trims feel light (A_LAT_TARGET 1.9 -> 2.0)
+# Only ever makes VTSC GENTLER (still decel-limited, still floored, still <= v_cruise) — safe.
+DEFAULT_PROFILE = dict(A_LAT_TARGET=A_LAT_TARGET, A_DECEL=A_DECEL, A_DECEL_MAX=A_DECEL_MAX, A_RELAX=A_RELAX)
+GENTLE_PROFILE  = dict(A_LAT_TARGET=2.0, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)
+
+# car fingerprints that use the gentle profile (heavy / long-unvalidated: smoothness over firmness)
+GENTLE_FINGERPRINTS = ("FORD_F_150_LIGHTNING_MK1",)

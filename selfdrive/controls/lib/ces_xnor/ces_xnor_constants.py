@@ -52,6 +52,17 @@ THRESHOLD        = 0.63      # filter level ~= "true for ~1 s"
 EXP_MIN_DWELL_S  = 8.0       # s min time in Experimental before it may return to Chill (was MIN_DWELL_S=4)
 CHILL_MIN_DWELL_S = 5.0      # s min time in Chill before it may re-enter Experimental (re-entry cooldown)
 
+# --- gentle profile (heavy trucks, e.g. F-150 Lightning) --------------------
+# Drive e5f4ecc928: on a winding highway the CURVE condition flipped chill<->experimental ~5x/min, and
+# experimental's e2e curve braking felt jerky on the 2948 kg truck ("too aggressive at curve entrance").
+# The gentle profile (a) hands curve speed control ENTIRELY to VTSC — which brakes smoothly and is
+# decel-limited — by NOT tripping Experimental for curves (curves suppressed in the CES decision), and
+# (b) lengthens the dwell so the remaining triggers (stops / slow leads) can't flip-flop. Experimental
+# is then reserved for where e2e genuinely helps on a truck: stop lights and closing on a slow lead.
+GENTLE_FINGERPRINTS      = ("FORD_F_150_LIGHTNING_MK1",)
+GENTLE_EXP_MIN_DWELL_S   = 12.0  # hold Experimental longer before dropping back to Chill
+GENTLE_CHILL_MIN_DWELL_S = 8.0   # longer re-entry cooldown
+
 # --- button override states (CESButtonState mem param) ----------------------
 BTN_CES  = 0   # CES decides (default)
 BTN_CHILL = 1  # forced Chill

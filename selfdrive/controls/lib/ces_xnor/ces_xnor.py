@@ -219,12 +219,14 @@ class ConditionalExperimentalSwitching:
   """Live controller. Owns the per-condition filters + the mode state machine (min-dwell + sustained
   clear). `mode()` returns 'experimental'/'chill'; `update(sm, toggles)` is called each cycle."""
 
-  def __init__(self):
+  def __init__(self, exp_min_dwell: float = C.EXP_MIN_DWELL_S, chill_min_dwell: float = C.CHILL_MIN_DWELL_S):
     # one debounce filter per condition (entry) + one for the all-clear (exit)
     self._cond = Condition()        # "any condition active" (debounced)
     self._is_experimental = False
     self._dwell = 0.0               # s in current mode
     self._status = "chill"
+    self._exp_min = exp_min_dwell   # min dwell in Experimental (gentle profile lengthens this)
+    self._chill_min = chill_min_dwell  # min dwell in Chill / re-entry cooldown
 
   def reset(self):
     self._cond.reset()
@@ -249,7 +251,7 @@ class ConditionalExperimentalSwitching:
     if not self._is_experimental:
       # enter Experimental once the debounced condition is active AND we've been in Chill at least
       # the re-entry cooldown (de-flap: stops the instant snap-back that caused the stop&go sawtooth)
-      if cond_active and self._dwell >= C.CHILL_MIN_DWELL_S:
+      if cond_active and self._dwell >= self._chill_min:
         self._is_experimental = True
         self._status = status
         self._dwell = 0.0
@@ -258,7 +260,7 @@ class ConditionalExperimentalSwitching:
       # AND we've held Experimental at least EXP_MIN_DWELL_S
       if status != "chill":
         self._status = status      # keep showing the active reason
-      if not cond_active and self._dwell >= C.EXP_MIN_DWELL_S:
+      if not cond_active and self._dwell >= self._exp_min:
         self._is_experimental = False
         self._status = "chill"
         self._dwell = 0.0
@@ -336,7 +338,13 @@ class CESController:
       self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
     except Exception:
       self.mem_params = None
-    self._sm = ConditionalExperimentalSwitching()
+    # per-car gentle profile (heavy trucks): longer dwell + VTSC owns curves (no curve->Experimental).
+    fp = str(getattr(CP, 'carFingerprint', '') or '')
+    self._gentle = fp in C.GENTLE_FINGERPRINTS
+    if self._gentle:
+      self._sm = ConditionalExperimentalSwitching(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
+    else:
+      self._sm = ConditionalExperimentalSwitching()
     self._enabled = False
     self._button = C.BTN_CES
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
@@ -429,7 +437,10 @@ class CESController:
       model = sm['modelV2']
       v_ego = float(car_state.vEgo)
       mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
-      sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd, self._speed_limit)
+      # gentle profile: VTSC handles curve speed (smooth, decel-limited), so CES does NOT trip
+      # Experimental for curves on the truck — removes the chill<->experimental planner-mode flapping.
+      toggles = {**self._toggles, "curves": False} if self._gentle else self._toggles
+      sig = _signals_from(car_state, lead, model, toggles, mtv, mtd, self._speed_limit)
     except Exception:
       sig = None
 
