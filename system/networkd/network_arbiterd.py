@@ -32,6 +32,7 @@ from openpilot.system.networkd.network_arbiter import (
   priority_connection_id,
 )
 from openpilot.system.networkd.lte_guard import decide_lte_guard
+from openpilot.system.networkd.gsm_profile import GsmProfile, enforce_gsm_profiles
 
 POLL_INTERVAL_S = 20.0
 NMCLI_TIMEOUT_S = 15.0
@@ -155,9 +156,54 @@ def _unpark_lte() -> None:
   _nmcli(["con", "up", LTE_CONNECTION_ID])
 
 
+def _read_gsm_profiles() -> list[GsmProfile]:
+  """Snapshot all gsm connection profiles for the enforcer. Returns [] on any nmcli failure."""
+  out = _nmcli(["-t", "-f", "NAME,TYPE", "con", "show"])
+  if out is None:
+    return []
+  profiles: list[GsmProfile] = []
+  for raw in out.splitlines():
+    parts = raw.split(":")
+    if len(parts) < 2 or parts[1] != "gsm":
+      continue
+    name = parts[0]
+    # read the individual fields for this profile (one nmcli per profile — there are only 1-2)
+    def field(key: str) -> str:
+      r = _nmcli(["-t", "-g", key, "con", "show", name])
+      return (r or "").strip()
+    profiles.append(GsmProfile(
+      name=name,
+      sim_id=field("gsm.sim-id"),
+      autoconnect=field("connection.autoconnect"),
+      priority=field("connection.autoconnect-priority"),
+      apn=field("gsm.apn"),
+    ))
+  return profiles
+
+
+def _enforce_gsm_profiles() -> None:
+  """Self-heal the gsm profiles so LTE auto-activates on WiFi-drop and a SIM-pinned (eSIM) leftover
+  can't win the autoconnect race and fail to `lo`. Idempotent: applies only the wrong settings.
+  Durable replacement for the manual nmcli fix (NM profiles live outside the /data/openpilot overlay,
+  so a reflash/factory-reset could otherwise reintroduce the broken state)."""
+  profiles = _read_gsm_profiles()
+  if not profiles:
+    return
+  actions = enforce_gsm_profiles(profiles)
+  for name, mods in actions:
+    cloudlog.warning(f"network_arbiterd: correcting gsm profile '{name}': {mods}")
+    _nmcli(["con", "modify", name, *mods])
+
+
 def main() -> NoReturn:
   params = Params()
   cloudlog.info("network_arbiterd: started")
+
+  # self-heal the gsm profiles once at startup (durable fix for the SIM-pinned-eSIM-blocks-LTE bug)
+  try:
+    _enforce_gsm_profiles()
+  except Exception:
+    cloudlog.exception("network_arbiterd: gsm profile enforcement failed at startup")
 
   # LTE throttle-guard state (carried across loop iterations)
   lte_parked = False
@@ -165,6 +211,14 @@ def main() -> NoReturn:
   lte_throttle_count = 0
 
   while True:
+    # periodically re-assert gsm profiles (idempotent — no-op when already correct), but NOT while the
+    # throttle guard has intentionally parked lte (autoconnect off), so the two don't fight.
+    if not lte_parked:
+      try:
+        _enforce_gsm_profiles()
+      except Exception:
+        cloudlog.exception("network_arbiterd: gsm profile enforcement failed")
+
     try:
       tethering_enabled = params.get_bool("TetheringEnabled")
       priority_ssid = params.get("TetheringPriorityWifi") or ""
