@@ -32,6 +32,7 @@ except Exception:
   Params = None
 
 TETHERING_IP_ADDRESS = "192.168.43.1"
+TETHERING_SUBNET = "192.168.43.0/24"  # xnor: AP client subnet, masqueraded out the LTE uplink
 DEFAULT_TETHERING_PASSWORD = "swagswagcomma"
 SIGNAL_QUEUE_SIZE = 10
 SCAN_PERIOD_SECONDS = 5
@@ -797,17 +798,72 @@ class WifiManager:
   def set_ipv4_forward(self, enabled: bool):
     self._ipv4_forward = enabled
 
+  def _set_others_autoconnect(self, enabled: bool):
+    # xnor: the comma has a SINGLE wifi radio, so an AP (hotspot) and a client connection cannot
+    # coexist. If any saved network has autoconnect ON and is in range, NM reclaims wlan0 as a client
+    # the instant the hotspot comes up — tearing the AP back down (the toggle flips off after ~5s).
+    # While tethering is active, suppress autoconnect on every OTHER saved wifi connection so nothing
+    # steals the radio; restore it when tethering stops so home wifi auto-reconnects on its own.
+    for ssid, conn_path in list(self._connections.items()):
+      if ssid == self._tethering_ssid:
+        continue
+      settings = self._get_connection_settings(conn_path)
+      if len(settings) == 0 or 'connection' not in settings:
+        continue
+      if settings['connection'].get('autoconnect', ('b', True))[1] == enabled:
+        continue  # already in the desired state
+      settings['connection']['autoconnect'] = ('b', enabled)
+      conn_addr = DBusAddress(conn_path, bus_name=NM, interface=NM_CONNECTION_IFACE)
+      reply = self._router_main.send_and_get_reply(new_method_call(conn_addr, 'Update', 'a{sa{sv}}', (settings,)))
+      if reply.header.message_type == MessageType.error:
+        cloudlog.warning(f'Failed to set autoconnect={enabled} for {ssid}: {reply}')
+
+  def _set_tethering_nat(self, enabled: bool):
+    # xnor: share the LTE uplink with tethered clients. Stock openpilot leaves NAT to NM's `shared`
+    # mode and DISABLES ip_forward unless prime is NONE/LITE — but on this device NM adds NO masquerade
+    # (verified: legacy nat table empty) and PrimeType is -1 (unregistered fork), so clients got an IP
+    # but no internet. We own the SIM, so set up forwarding + NAT explicitly. NOTE: AGNOS uses
+    # iptables-LEGACY — the default nft `iptables` binary lacks the MASQUERADE kernel module here.
+    subprocess.run(["sudo", "sysctl", "-w", f"net.ipv4.ip_forward={1 if enabled else 0}"], check=False)
+    rules = [
+      ["-t", "nat", "POSTROUTING", "-s", TETHERING_SUBNET, "!", "-d", TETHERING_SUBNET, "-j", "MASQUERADE"],
+      ["FORWARD", "-s", TETHERING_SUBNET, "-j", "ACCEPT"],
+      ["FORWARD", "-d", TETHERING_SUBNET, "-j", "ACCEPT"],
+    ]
+    for rule in rules:
+      pre = rule[:2] if rule[0] == "-t" else []
+      chain = rule[2] if rule[0] == "-t" else rule[0]
+      rest = rule[3:] if rule[0] == "-t" else rule[1:]
+      base = ["sudo", "iptables-legacy", *pre]
+      # delete first (idempotent — never stack duplicate rules across toggles), then (re)insert
+      subprocess.run([*base, "-D", chain, *rest], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      if enabled:
+        reply = subprocess.run([*base, "-I", chain, *rest], check=False)
+        if reply.returncode != 0:
+          cloudlog.warning(f"tethering NAT rule failed: {chain} {rest}")
+
   def set_tethering_active(self, active: bool):
+    # network2xnor: persist the user's intent so the hotspot survives reboot and so the
+    # arbitration supervisor (network_arbiter) knows whether tethering should be running.
+    if Params is not None:
+      try:
+        Params().put_bool("TetheringEnabled", active)
+      except Exception:
+        cloudlog.exception("Failed to persist TetheringEnabled")
+
     def worker():
       if active:
+        self._set_others_autoconnect(False)  # free the radio so the AP isn't reclaimed by a client
+        # install forwarding + NAT BEFORE bringing the AP up so the very first client packet is already
+        # routed out LTE. If NAT lands late, a client that connects in the gap runs its connectivity
+        # probe against no-NAT, latches "connected, no internet", and won't re-check for a while.
+        # (The masquerade matches the AP subnet by address, so it's valid to install before the iface.)
+        self._set_tethering_nat(True)        # forward + masquerade out LTE so clients get internet
         self.activate_connection(self._tethering_ssid, block=True)
-
-        if not self._ipv4_forward:
-          time.sleep(5)
-          cloudlog.warning("net.ipv4.ip_forward = 0")
-          subprocess.run(["sudo", "sysctl", "net.ipv4.ip_forward=0"], check=False)
       else:
         self._deactivate_connection(self._tethering_ssid)
+        self._set_tethering_nat(False)       # tear down forwarding + NAT
+        self._set_others_autoconnect(True)   # let home wifi auto-reconnect again
 
     threading.Thread(target=worker, daemon=True).start()
 

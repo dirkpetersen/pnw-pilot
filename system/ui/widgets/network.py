@@ -120,6 +120,13 @@ class AdvancedNetworkSettings(Widget):
     self._tethering_password_action = ButtonAction(lambda: tr("EDIT"))
     tethering_password_btn = ListItem(lambda: tr("Tethering Password"), action_item=self._tethering_password_action, callback=self._edit_tethering_password)
 
+    # network2xnor: priority WiFi over tethering. When tethering is enabled and this SSID comes into
+    # range (and is a saved network), network_arbiterd switches the radio to it; blank disables it.
+    self._priority_wifi_action = ButtonAction(lambda: tr("EDIT"))
+    priority_wifi_btn = ListItem(lambda: tr("Priority WiFi over tethering"),
+                                 description=lambda: tr("When tethering, automatically switch to this WiFi network when it is in range"),
+                                 action_item=self._priority_wifi_action, callback=self._edit_priority_wifi)
+
     # Roaming toggle
     roaming_enabled = self._params.get_bool("GsmRoaming")
     self._roaming_action = ToggleAction(initial_state=roaming_enabled)
@@ -144,6 +151,7 @@ class AdvancedNetworkSettings(Widget):
     items: list[Widget] = [
       tethering_btn,
       tethering_password_btn,
+      priority_wifi_btn,
       text_item(lambda: tr("IP Address"), lambda: self._wifi_manager.ipv4_address),
       self._roaming_btn,
       self._apn_btn,
@@ -162,6 +170,7 @@ class AdvancedNetworkSettings(Widget):
     self._tethering_action.set_enabled(True)
     self._tethering_action.set_state(self._wifi_manager.is_tethering_active())
     self._tethering_password_action.set_enabled(True)
+    self._priority_wifi_action.set_enabled(True)
 
     if self._wifi_manager.is_tethering_active() or self._wifi_manager.ipv4_address == "":
       self._wifi_metered_action.set_enabled(False)
@@ -257,6 +266,25 @@ class AdvancedNetworkSettings(Widget):
     self._keyboard.set_title(tr("Enter new tethering password"), "")
     self._keyboard.set_text(self._wifi_manager.tethering_password)
     self._keyboard.set_callback(update_password)
+    gui_app.push_widget(self._keyboard)
+
+  def _edit_priority_wifi(self):
+    def update_priority_wifi(result: DialogResult):
+      if result != DialogResult.CONFIRM:
+        return
+
+      ssid = self._keyboard.text.strip()
+      if ssid == "":
+        self._params.remove("TetheringPriorityWifi")
+      else:
+        self._params.put("TetheringPriorityWifi", ssid)
+      self._priority_wifi_action.set_enabled(False)
+
+    current = self._params.get("TetheringPriorityWifi") or ""
+    self._keyboard.reset(min_text_size=0)
+    self._keyboard.set_title(tr("Priority WiFi over tethering"), tr("leave blank to disable"))
+    self._keyboard.set_text(current)
+    self._keyboard.set_callback(update_priority_wifi)
     gui_app.push_widget(self._keyboard)
 
   def _update_state(self):

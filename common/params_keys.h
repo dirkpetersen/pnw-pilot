@@ -65,6 +65,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"GsmApn", {PERSISTENT, STRING}},
     {"GsmMetered", {PERSISTENT, BOOL, "1"}},
     {"GsmRoaming", {PERSISTENT, BOOL}},
+    // network2xnor: perpetual tethering + priority-wifi arbitration (default OFF / blank)
+    {"TetheringEnabled", {PERSISTENT, BOOL, "0"}},
+    {"TetheringPriorityWifi", {PERSISTENT, STRING, ""}},
     {"HardwareSerial", {PERSISTENT, STRING}},
     {"HasAcceptedTerms", {PERSISTENT, STRING, "0"}},
     {"InstallDate", {PERSISTENT, TIME}},
