@@ -127,6 +127,14 @@ class AdvancedNetworkSettings(Widget):
                                  description=lambda: tr("When tethering, automatically switch to this WiFi network when it is in range"),
                                  action_item=self._priority_wifi_action, callback=self._edit_priority_wifi)
 
+    # network2xnor: capture the current GPS as "home" for the Priority WiFi geofence, so the device
+    # only scans for the Priority WiFi when near home (a scan competes with the hotspot on the single
+    # radio). Best pressed outdoors with a GPS fix; also auto-learned whenever connected to it.
+    self._set_home_action = ButtonAction(lambda: tr("SET"))
+    set_home_btn = ListItem(lambda: tr("Set Home Location"),
+                            description=lambda: tr("Save the current GPS as 'home' for Priority WiFi, so it only scans for it when nearby. Press outdoors."),
+                            action_item=self._set_home_action, callback=self._set_home_location)
+
     # Roaming toggle
     roaming_enabled = self._params.get_bool("GsmRoaming")
     self._roaming_action = ToggleAction(initial_state=roaming_enabled)
@@ -152,6 +160,7 @@ class AdvancedNetworkSettings(Widget):
       tethering_btn,
       tethering_password_btn,
       priority_wifi_btn,
+      set_home_btn,
       text_item(lambda: tr("IP Address"), lambda: self._wifi_manager.ipv4_address),
       self._roaming_btn,
       self._apn_btn,
@@ -171,6 +180,7 @@ class AdvancedNetworkSettings(Widget):
     self._tethering_action.set_state(self._wifi_manager.is_tethering_active())
     self._tethering_password_action.set_enabled(True)
     self._priority_wifi_action.set_enabled(True)
+    self._set_home_action.set_enabled(True)
 
     if self._wifi_manager.is_tethering_active() or self._wifi_manager.ipv4_address == "":
       self._wifi_metered_action.set_enabled(False)
@@ -286,6 +296,35 @@ class AdvancedNetworkSettings(Widget):
     self._keyboard.set_text(current)
     self._keyboard.set_callback(update_priority_wifi)
     gui_app.push_widget(self._keyboard)
+
+  def _set_home_location(self):
+    # network2xnor: save the device's current GPS as the Priority-WiFi "home" geofence center. mapd
+    # writes LastGPSPosition to the in-memory store, locationd to the persistent one — try both.
+    import json
+    try:
+      mem_params = Params("/dev/shm/params")
+    except Exception:
+      mem_params = None
+    lat = lon = None
+    for store in (mem_params, self._params):
+      if store is None:
+        continue
+      try:
+        raw = store.get("LastGPSPosition")
+        if not raw:
+          continue
+        d = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+        lat, lon = float(d["latitude"]), float(d["longitude"])
+        break
+      except Exception:
+        continue
+    if lat is None or lon is None:
+      msg = tr("No GPS fix yet. Park outside with a clear view of the sky and try again.")
+    else:
+      self._params.put("TetheringHomeLocation", json.dumps([round(lat, 6), round(lon, 6)]))
+      msg = tr("Home location saved") + f": {lat:.5f}, {lon:.5f}"
+    self._set_home_action.set_enabled(False)
+    gui_app.push_widget(ConfirmDialog(msg, tr("OK")))
 
   def _update_state(self):
     self._wifi_manager.process_callbacks()
