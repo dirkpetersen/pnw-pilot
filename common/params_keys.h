@@ -71,6 +71,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // network2xnor: perpetual tethering + priority-wifi arbitration (default OFF / blank)
     {"TetheringEnabled", {PERSISTENT, BOOL, "0"}},
     {"TetheringPriorityWifi", {PERSISTENT, STRING, ""}},
+    {"TetheringHomeLocation", {PERSISTENT, STRING}},  // network2xnor: GPS [lat,lon] of the priority WiFi (auto-learned) -> geo-gate scanning
     {"HardwareSerial", {PERSISTENT, STRING}},
     {"HasAcceptedTerms", {PERSISTENT, STRING, "0"}},
     {"InstallDate", {PERSISTENT, TIME}},
