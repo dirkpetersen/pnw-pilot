@@ -143,3 +143,46 @@ Then restart: `sudo systemctl restart comma` (or reboot).
   with the pure logic kept in `network_arbiter.py` as specified.
 - Registered with `enabled=TICI` (not unconditional `always_run`) so it doesn't try to shell out to
   `nmcli` on a PC/CI host; it is still `always_run` (on+offroad) on the device.
+
+---
+
+## 2026-06-16 additions (live debugging on the 3X — DEPLOYED + reboot-verified)
+
+A long on-device session reshaped this branch. New pieces:
+
+### 1. Arbiter installs the hotspot NAT (`_set_hotspot_nat`)
+The UI toggle (`wifi_manager.set_tethering_active`) installed `ip_forward` + an iptables-LEGACY
+masquerade of the AP subnet (`192.168.43.0/24`) out the LTE uplink — but the **arbiter** raises the
+hotspot on boot / after a WiFi-drop, paths the UI toggle never runs. Without NAT, clients got an IP but
+**no internet ("nothing happens")**. `_apply()` now installs NAT on `up_hotspot` and tears it down on
+`up_priority`/`down_hotspot`. Uses `iptables-legacy` (the nft binary lacks the MASQUERADE module on
+AGNOS). **Test data with TCP — ICMP is carrier-blocked, so ping always shows 100% loss.**
+
+### 2. GPS geo-gated scanning (`geo_gate.py` + `TetheringHomeLocation` + "Set Home Location" button)
+A WiFi scan forces the single radio off-channel (competes with the hotspot). So while tethering we only
+scan for the priority SSID when **near home**: pure `near_home()` (haversine, 250 m geofence) gates the
+scan in `network_arbiterd`. Home is **auto-learned** (GPS captured whenever connected to the priority
+WiFi) and/or set via the new **"Set Home Location"** button under "Priority WiFi over tethering"
+(`network.py`, captures current GPS — press outdoors). Fail-open: unknown home/GPS → scan as before.
+
+### 3. LTE PDN-throttle guard is now MODEM-level (`mmcli`, not nmcli)
+An Ookla/burst speed test trips `pdn-ipv4-call-throttled`; NM's ~1/s retry perpetuates it. The guard
+(`lte_guard.decide_lte_guard`, exponential backoff 30s→2m→5m→10m) now parks LTE via
+`mmcli -m <idx> --disable` (RF off → carrier timer ages out) and unparks via `--enable` — **NOT**
+`nmcli con modify`, see #4.
+
+### 4. gsm-profile enforcer REMOVED (it crashed NetworkManager)
+The earlier `gsm_profile.py` enforcer ran `nmcli con modify lte/esim ...` every loop. On this AGNOS the
+gsm profiles are **netplan-managed**, and `nmcli con modify` on them trips NM's keyfile-writer
+assertion → **NetworkManager ABRT crash-loop** → hardwared's network read goes blank (blank signal
+bars). Removed entirely. **Rule: never `nmcli con modify` a gsm profile; `con up/down` is fine.**
+
+### LTE config persistence (the right way)
+LTE config (blank APN for carrier auto-negotiation, autoconnect) persists in **`/data/etc/netplan/`**
+(bind-mounted over `/etc/netplan` on boot by `fs_setup.sh`) + the `GsmApn` param. Editing `/etc/netplan`
+directly reverts on reboot. The phantom `esim` profile (SIM-pinned to an absent eSIM, was winning the
+autoconnect race and failing to `lo`) was deleted; `lte` is the sole gsm profile.
+
+### Still OPEN (separate issue)
+Signal bars blank for ~8 s **at hotspot activation** — hardwared's cached NM/modem read disrupted at
+AP-up; the geo-gate does not touch it. Connectivity itself is unaffected.
