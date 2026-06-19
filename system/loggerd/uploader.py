@@ -331,14 +331,23 @@ def main(exit_event: threading.Event | None = None) -> None:
     # connect2xnor: honor force_wifi (test/debug) for the raw value too.
     network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
     metered = sm['deviceState'].networkMetered
-    success = uploader.step(network_type_raw, metered)
+    # PASS 1 — small files (qlog/qcamera), always first: they're the keep-safe artifact.
+    p1 = uploader.step(network_type_raw, metered)
 
-    # connect2xnor: PASS 2. Only after pass 1 has nothing left to do
-    # (success is None) do we proactively upload the large firehose files, and
-    # only on real external WiFi. networkType==wifi is never true on the
-    # hotspot or LTE, so this can't burn cellular data.
-    if success is None and pass2_allowed(network_type_raw):
-      success = uploader.step(network_type_raw, metered, pass2=True)
+    # upload2xnor: PASS 2 (large HD: rlog/fcamera/ecamera) is INTERLEAVED with pass 1 on real
+    # WiFi, instead of only running once pass 1 is fully drained. Rationale: being on real
+    # (home) WiFi already means we're parked at home — networkType==wifi is never true on the
+    # hotspot or LTE, so this can't burn cellular. So onroad/offroad must NOT gate HD upload:
+    # a parked-but-ignition-on car still recording a stationary route used to keep pass 1
+    # perpetually busy and starve the HD backlog forever. Now each loop does one pass-1 file AND
+    # one pass-2 file, so HD drains while at home regardless of ignition/onroad state.
+    p2 = uploader.step(network_type_raw, metered, pass2=True) if pass2_allowed(network_type_raw) else None
+
+    # progress: None only if BOTH passes had nothing to upload; uploaded if either moved a file.
+    if p1 is None and p2 is None:
+      success = None
+    else:
+      success = bool(p1) or bool(p2)
 
     if success is None:
       backoff = 60 if offroad else 5
