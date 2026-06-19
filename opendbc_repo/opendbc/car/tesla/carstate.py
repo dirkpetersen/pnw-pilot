@@ -241,6 +241,21 @@ class CarState(CarStateBase):
     else:
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
 
+    # Blindspot (bsm2xnor) — Tesla's own rear blind-spot warning (computed by the Autopilot computer
+    # from the rear repeater cameras + ultrasonics), broadcast as AutopilotStatus (0x399). 2-bit
+    # fields: 0=NO_WARNING, 1=WARNING_LEVEL_1, 2=WARNING_LEVEL_2, 3=SNA. Treat only an actual warning
+    # (1/2) as occupied; SNA/0 -> clear, so behaviour degrades to baseline if the car isn't emitting
+    # BSM while openpilot drives. Feeds the existing DesireHelper lane-change gate (manual + nudgeless).
+    # PENDING on-car CAN confirmation that 0x399 rides the chassis bus on the Raven and carries live
+    # values while openpilot is engaged — see verify-raven-bsm.py. KeyError-guarded so a legacy variant
+    # whose DBC lacks AutopilotStatus can never crash carstate (blindspot just stays False).
+    try:
+      bsm = cp_chassis.vl["AutopilotStatus"]
+      ret.leftBlindspot = bsm["DAS_blindSpotRearLeft"] in (1, 2)
+      ret.rightBlindspot = bsm["DAS_blindSpotRearRight"] in (1, 2)
+    except KeyError:
+      pass
+
     # AEB
     ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
 
