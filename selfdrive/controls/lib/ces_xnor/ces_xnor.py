@@ -352,6 +352,7 @@ class CESController:
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
+    self.msg = self._disabled_msg()  # latest CesState snapshot (selfdrived publishes it → qlog/rlog)
     self._last_mode = "off"         # last logged mode: off / chill / experimental
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
@@ -442,6 +443,7 @@ class CESController:
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
         self._last_mode = "off"
       self._sm.reset()
+      self.msg = self._disabled_msg()
       return False
 
     # Build the decision signals every cycle while enabled — even in the forced button modes —
@@ -491,6 +493,10 @@ class CESController:
     # mapd diagnostics so the overlay can always show what mapd is up to (curve half is map-driven):
     tele["mapPts"] = len(self._map_targets)                       # MapTargetVelocities points cached
     tele["gps"] = self._cur_lat is not None and self._cur_lon is not None  # LastGPSPosition fix present
+
+    # cesState snapshot for selfdrived to publish into qlog/rlog (set BEFORE the throttled returns
+    # below so it always reflects the latest cycle, independent of the /dev/shm publish cadence).
+    self.msg = self._build_msg(tele, mode)
 
     # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
     if mode != self._last_mode:
@@ -551,3 +557,42 @@ class CESController:
         f.write(json.dumps(rec) + "\n")
     except Exception:
       pass
+
+  @staticmethod
+  def _disabled_msg() -> dict:
+    """CesState snapshot when CES is off / no openpilot longitudinal — every field at its zero so the
+    log unambiguously shows 'CES not running' (mode='off', enabled=False)."""
+    return {
+      "enabled": False, "mode": "off", "button": 0, "reason": "", "rawActive": False,
+      "curvePct": 0, "curveSrc": "", "mapV": 0.0, "mapDist": 0.0, "mapPts": 0, "gpsValid": False,
+      "vEgo": 0.0, "vSet": 0.0, "aEgo": 0.0, "gas": False, "accelZone": False, "hwyGate": False,
+      "dRel": 0.0, "vLead": 0.0, "spdLimit": 0.0, "latitude": 0.0, "longitude": 0.0,
+    }
+
+  def _build_msg(self, tele: dict, mode: str) -> dict:
+    """Flatten the per-cycle decision telemetry into the CesState fields. Robust with .get defaults
+    so the noData fallback tele (sig is None) still produces a valid, fully-populated snapshot."""
+    return {
+      "enabled": True,
+      "mode": mode,
+      "button": int(self._button),
+      "reason": str(tele.get("reason", "")),
+      "rawActive": bool(tele.get("rawActive", False)),
+      "curvePct": int(tele.get("curvePct", 0) or 0),
+      "curveSrc": str(tele.get("curveSrc", "")),
+      "mapV": float(tele.get("mapV", 0.0) or 0.0),
+      "mapDist": float(tele.get("mapDist", 0.0) or 0.0),
+      "mapPts": int(len(self._map_targets)),
+      "gpsValid": self._cur_lat is not None and self._cur_lon is not None,
+      "vEgo": float(tele.get("vEgo", 0.0) or 0.0),
+      "vSet": float(tele.get("vSet", 0.0) or 0.0),
+      "aEgo": float(tele.get("aEgo", 0.0) or 0.0),
+      "gas": bool(tele.get("gas", False)),
+      "accelZone": bool(tele.get("accelZone", False)),
+      "hwyGate": bool(tele.get("hwyGate", False)),
+      "dRel": float(tele.get("dRel", 0.0) or 0.0),
+      "vLead": float(tele.get("vLead", 0.0) or 0.0),
+      "spdLimit": float(self._speed_limit),
+      "latitude": float(self._cur_lat) if self._cur_lat is not None else 0.0,
+      "longitude": float(self._cur_lon) if self._cur_lon is not None else 0.0,
+    }

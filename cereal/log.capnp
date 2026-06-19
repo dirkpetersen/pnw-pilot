@@ -2643,7 +2643,7 @@ struct Event {
     customReserved7 @114 :Custom.CustomReserved7;
     liveMapDataSP @115 :Custom.LiveMapDataSP;  # mapd2xnor (was customReserved8)
     vtscState @116 :Custom.VtscState;  # vtsc/ces2xnor (was customReserved9)
-    customReserved10 @136 :Custom.CustomReserved10;
+    cesState @136 :Custom.CesState;  # ces2xnor (was customReserved10)
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;

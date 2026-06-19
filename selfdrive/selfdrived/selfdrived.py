@@ -65,7 +65,7 @@ class SelfdriveD:
     self.excessive_actuation = self.params.get("Offroad_ExcessiveActuation") is not None
 
     # Setup sockets
-    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents'])
+    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents', 'cesState'])  # ces2xnor: log CES decisions
 
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
@@ -498,6 +498,38 @@ class SelfdriveD:
       ce_send.onroadEvents = self.events.to_msg()
       self.pm.send('onroadEvents', ce_send)
     self.events_prev = self.events.names.copy()
+
+    # ces2xnor: log the CES decision telemetry @ ~20 Hz (qlog ~4 Hz after decimation) so a past
+    # drive shows exactly what CES decided and why — the old CESStatus was RAM-only (never logged).
+    # Always published (even when CES is off, mode="off") so the log records the on/off state too.
+    if self.sm.frame % 5 == 0:
+      m = self.ces_xnor.msg
+      ces_send = messaging.new_message('cesState')
+      ces_send.valid = True
+      cs = ces_send.cesState
+      cs.enabled = m["enabled"]
+      cs.mode = m["mode"]
+      cs.button = m["button"]
+      cs.reason = m["reason"]
+      cs.rawActive = m["rawActive"]
+      cs.curvePct = m["curvePct"]
+      cs.curveSrc = m["curveSrc"]
+      cs.mapV = m["mapV"]
+      cs.mapDist = m["mapDist"]
+      cs.mapPts = m["mapPts"]
+      cs.gpsValid = m["gpsValid"]
+      cs.vEgo = m["vEgo"]
+      cs.vSet = m["vSet"]
+      cs.aEgo = m["aEgo"]
+      cs.gas = m["gas"]
+      cs.accelZone = m["accelZone"]
+      cs.hwyGate = m["hwyGate"]
+      cs.dRel = m["dRel"]
+      cs.vLead = m["vLead"]
+      cs.spdLimit = m["spdLimit"]
+      cs.latitude = m["latitude"]
+      cs.longitude = m["longitude"]
+      self.pm.send('cesState', ces_send)
 
   def step(self):
     CS = self.data_sample()

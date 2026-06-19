@@ -61,7 +61,33 @@ struct VtscState @0xa1680744031fdb2d {
   timeToApex @9 :Float32;    # s, apexDist / vEgo (-1 if none)
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# ces (ces2xnor): Conditional Experimental Switching decision telemetry, logged each selfdrived
+# cycle so past drives are analyzable (the old /dev/shm CESStatus JSON + ces_events.jsonl were
+# never in qlog/rlog — you couldn't tell from a drive log what CES was deciding or why).
+# Renamed from CustomReserved10; identifier preserved per cereal fork convention.
+struct CesState @0xcb9fd56c7057593a {
+  enabled @0 :Bool;          # CES master toggle on AND openpilotLongitudinalControl
+  mode @1 :Text;             # "off" | "chill" | "experimental" (effective decision this cycle)
+  button @2 :UInt8;          # 3-state override: 0=CES, 1=forced Chill, 2=forced Experimental
+  reason @3 :Text;           # binding condition: chill/curve/stop/lowSpeed/slowLead/noData
+  rawActive @4 :Bool;        # decide_active() raw result (pre-debounce / pre-dwell)
+  curvePct @5 :UInt8;        # 0..100, closeness to tripping a curve switch (display)
+  curveSrc @6 :Text;         # which half drives curvePct: "map" | "vision" | ""
+  mapV @7 :Float32;          # m/s, upcoming map-curve target speed (0 = none)
+  mapDist @8 :Float32;       # m, distance to that curve (0 = none)
+  mapPts @9 :UInt16;         # MapTargetVelocities points cached from mapd
+  gpsValid @10 :Bool;        # LastGPSPosition fix present this cycle
+  vEgo @11 :Float32;         # m/s, vehicle speed
+  vSet @12 :Float32;         # m/s, set-cruise speed (0 = unset)
+  aEgo @13 :Float32;         # m/s^2, longitudinal accel
+  gas @14 :Bool;             # gas pedal pressed
+  accelZone @15 :Bool;       # lowSpeed suppressed: accelerating into open road (on-ramp / lead gap)
+  hwyGate @16 :Bool;         # lowSpeed suppressed: on a highway per OSM speed limit
+  dRel @17 :Float32;         # m, lead distance (0 = no lead)
+  vLead @18 :Float32;        # m/s, lead speed (0 = no lead)
+  spdLimit @19 :Float32;     # m/s, OSM speed limit (0 = none)
+  latitude @20 :Float64;     # deg, for placing each decision on the route (0 = no fix)
+  longitude @21 :Float64;    # deg (0 = no fix)
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

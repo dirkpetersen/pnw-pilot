@@ -106,6 +106,8 @@ _services: dict[str, tuple] = {
   "liveMapDataSP": (True, 1., 1),
   # vtsc/ces2xnor: curve-speed-control decision telemetry @ 20 Hz (plannerd), qlog ~4 Hz
   "vtscState": (True, 20., 5),
+  # ces2xnor: Conditional Experimental Switching decision telemetry @ 20 Hz (selfdrived), qlog ~4 Hz
+  "cesState": (True, 20., 5),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}
