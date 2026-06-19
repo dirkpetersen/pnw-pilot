@@ -1,57 +1,69 @@
-# UPLOAD2XNOR — upload on home WiFi regardless of onroad/offroad
+# UPLOAD2XNOR — upload ONLY on home-WiFi geolocation, immediately, HD included
 
-**Branch:** `upload2xnor` (off `integration2xnor`) · **Status:** code done, validated; deploy = restart
-the uploader process (no reboot).
+**Branch:** `upload2xnor` (off `integration2xnor`) · **Status:** implemented, **Gemini-reviewed & fixed**,
+validated; **NOT deployed yet** — deploy when the device is next parked at home (one clean deploy +
+verify). Deploy = restart the uploader process (no reboot, no build).
 
-## Problem
+## Requirement (user)
 
-The connect2xnor uploader is two-pass: pass 1 = small `qlog`/`qcamera`, pass 2 = large HD
-`rlog`/`fcamera`/`ecamera`. Pass 2 only ran **once pass 1 was fully drained**
-(`if success is None and pass2_allowed(...)`). A car that is **parked but still "awake"** (ignition
-on — EVs stay awake a while after parking, or a driver sitting in it) is treated as **onroad**
-(onroad/offroad is decided by the ignition signal, not motion — `hardwared.py:230`), so it keeps
-recording a stationary route. That route continuously produces fresh pass-1 files, so pass 1 never
-empties and **pass 2 (the HD backlog) starves indefinitely** — even while sitting on home WiFi.
+> Uploading must **START as soon as** the device is on **home WiFi (home geo-location)**, and must
+> **NEVER run** anywhere else — not cellular, not the comma hotspot, not away-from-home WiFi. This is
+> the *only* criterion; onroad/offroad must not matter.
 
-This is why the June 18 drive's HD stuck at ~131/270: each time the device was awake on WiFi it was
-also "onroad," so pass 1 kept winning.
+## Why this is safe by construction
 
-## Principle (per the user)
+You can only be associated to **home WiFi while parked at home** — drive away and you drop to cellular
+(metered → skipped) or the hotspot (`networkType` reports `cell`, never `wifi`). So "on real WiFi at
+the home geofence" is an exact proxy for "parked at home, safe to upload everything," and ignition /
+onroad state is irrelevant.
 
-**On-road / off-road must NOT gate uploading. Being on home WiFi is the only criterion.** This is
-safe *because* of where home WiFi is: you can only be associated to home WiFi while parked at home —
-drive away and you drop to cellular, which the uploader already skips (`networkMetered` → skip;
-`pass2_allowed` = `networkType == wifi` only, never hotspot/LTE). So "on real WiFi" already means
-"parked at home, safe to upload everything," and the ignition state is irrelevant.
+## The change (`system/loggerd/uploader.py`)
 
-## Change
+1. **HOME-WIFI-GEOLOCATION GATE** — uploading (both passes) runs only when
+   `on real WiFi AND near_home()`, reusing the existing network2xnor home feature:
+   - `TetheringHomeLocation` (auto-learned home GPS, `params_keys.h`)
+   - `near_home()` — 250 m geofence in `system/networkd/geo_gate.py`
+   - GPS read from `LastGPSPosition` (mapd's in-memory store, locationd's persistent one).
+   Fails **OPEN** only when home is unlearned or GPS is missing (being on home WiFi already implies
+   home), so it never fails to upload *at* home; only a confident "far from a KNOWN home" suppresses
+   it. Polls every **15 s** when gated out, so it starts promptly on arrival. `FORCEWIFI` bypasses.
+2. **Interleaved PASS 1 + PASS 2** — each loop uploads one small file (qlog/qcamera) AND one large HD
+   file (rlog/fcamera/ecamera), so HD never starves while a parked-but-ignition-on car keeps
+   producing pass-1 work. (HD backend speed is ~0.5 MB/s → ~150 s per file; that's the real throughput
+   limit, not this gate.)
 
-`system/loggerd/uploader.py` main loop: pass 2 is now **interleaved** with pass 1 on real WiFi
-instead of waiting for pass 1 to empty:
+Gate behavior (unit-tested): home-WiFi at home → upload; home-WiFi 5 km away → no; cellular at home →
+no; other WiFi away from home → no; home-WiFi no-GPS → upload (fail-open); FORCEWIFI → upload.
 
-```python
-p1 = uploader.step(network_type_raw, metered)                                   # pass 1 (priority)
-p2 = uploader.step(network_type_raw, metered, pass2=True) if pass2_allowed(network_type_raw) else None
-success = None if (p1 is None and p2 is None) else (bool(p1) or bool(p2))
-```
+## Crash-safety (Gemini-reviewed)
 
-Each loop now moves **one small file AND one HD file** when on WiFi, so HD drains while parked at
-home regardless of ignition/onroad. Pass 1 still goes first each iteration (the small keep-safe
-files stay current). WiFi-gated, so it never touches cellular. Backoff/idle logic unchanged (idles
-only when *both* passes have nothing left).
+The uploader is a manager-supervised process — an unhandled exception crash-loops it and stops ALL
+uploads. Gemini review (gemini-2.5-pro) flagged two issues; both fixed and re-confirmed safe:
 
-## Safety / scope
+- **`clear_locks()`**: now early-returns `if not os.path.isdir(root)` (was an unguarded
+  `os.listdir` → `FileNotFoundError` if `realdata` is missing on a fresh/late-mounted FS).
+- **Geofence call**: wrapped in `try/except` that **fails open** (`at_home = True`) on any exception,
+  so a corrupted/out-of-range GPS value (which could make `haversine_m`'s `sqrt` raise `ValueError`)
+  can never crash the loop. `_read_home`/`_read_gps` already catch all parse errors internally.
 
-- WiFi-only (unmetered) — never burns cellular.
-- Not safety-critical: the uploader only moves files; it does not touch control or logging.
-- Pass 1 retains priority within each iteration (small files first).
-- No new params, no schema/build changes — pure Python, loaded at runtime.
+Gemini final verdict: *"Both issues fully resolved; the code is highly robust, crash-safe, and ready
+for deployment."* No regressions.
 
-## Deploy
+## Known minor / deferred (Gemini suggestions, not blocking)
 
-`uploader.py` is pure Python. Deploy = md5-guarded file copy + clear pyc + **restart just the
-uploader process** (`pkill -f system.loggerd.uploader`; manager respawns it with the new code) — no
-reboot, no interruption to driving/logging. Rollback = restore the backup + restart the process.
+- Param reads (`IsOffroad`, home, GPS) happen each loop iteration. Cheap, and the loop blocks ~150 s
+  per HD file anyway, so negligible — left minimal on purpose (less code = less crash surface). Could
+  cache home coords + read `IsOffroad` only when idle later.
+- Hardening `geo_gate.haversine_m` with `sqrt(max(0.0, a))` would protect *all* callers
+  (incl. `network_arbiterd`); deferred to avoid touching shared network2xnor code (the try/except
+  wrapper already protects this uploader).
+
+## Deploy (when parked at home)
+
+Pure Python, no build. md5-guarded copy of `uploader.py` + clear pyc + restart the uploader process
+(`pkill -f system.loggerd.uploader`; manager respawns). Verify once: on home WiFi it uploads (pass 1 +
+HD); confirm it does NOT upload when away. Rollback = restore `/data/dirk/org/upload2xnor/...`.
 
 ## Files
-- `system/loggerd/uploader.py` — the interleave change (only functional change)
+- `system/loggerd/uploader.py` — gate + interleave + crash-safety (only functional change)
+- depends on `system/networkd/geo_gate.py` (`near_home`) + `TetheringHomeLocation` (unchanged)

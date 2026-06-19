@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import platform
 import random
 import requests
 import threading
@@ -18,6 +19,7 @@ from openpilot.common.realtime import set_core_affinity
 from openpilot.system.hardware.hw import Paths
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
 from openpilot.common.swaglog import cloudlog
+from openpilot.system.networkd.geo_gate import near_home  # upload2xnor: home-location geofence
 
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
@@ -50,6 +52,37 @@ def pass2_allowed(network_type: int) -> bool:
   # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on
   # real external WiFi (NetworkType.wifi). Never on LTE, never on the hotspot.
   return network_type in PASS2_NETWORK_TYPES
+
+
+def _read_home(params: Params) -> tuple[float, float] | None:
+  """upload2xnor: saved home location (TetheringHomeLocation JSON [lat, lon]) or None. Auto-learned
+  by network_arbiterd when connected to the priority/home WiFi."""
+  try:
+    raw = params.get("TetheringHomeLocation")
+    if not raw:
+      return None
+    d = json.loads(raw)
+    return float(d[0]), float(d[1])
+  except Exception:
+    return None
+
+
+def _read_gps(mem_params: "Params | None", params: Params) -> tuple[float, float] | None:
+  """upload2xnor: current (lat, lon) from LastGPSPosition (mapd writes the in-memory store, locationd
+  the persistent one), or None."""
+  for store in (mem_params, params):
+    if store is None:
+      continue
+    try:
+      raw = store.get("LastGPSPosition")
+      if not raw:
+        continue
+      d = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+      return float(d["latitude"]), float(d["longitude"])
+    except Exception:
+      continue
+  return None
+
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -85,6 +118,8 @@ def listdir_by_creation(d: str) -> list[str]:
     return []
 
 def clear_locks(root: str) -> None:
+  if not os.path.isdir(root):   # upload2xnor/crash-safety: realdata may not exist yet (fresh install / delayed mount)
+    return
   for logdir in os.listdir(root):
     path = os.path.join(root, logdir)
     try:
@@ -309,28 +344,38 @@ def main(exit_event: threading.Event | None = None) -> None:
   sm = messaging.SubMaster(['deviceState'])
   uploader = Uploader(dongle_id, Paths.log_root())
 
+  # upload2xnor: in-memory param store holds LastGPSPosition (written by mapd) for the home geofence.
+  try:
+    mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else params
+  except Exception:
+    mem_params = None
+
   backoff = 0.1
   while not exit_event.is_set():
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
-    if network_type == NetworkType.none:
+    metered = (sm['deviceState'].networkMetered and not force_wifi)
+
+    # upload2xnor: HOME-WIFI-GEOLOCATION GATE — the single criterion for uploading. Upload (BOTH
+    # passes) only when on real WiFi AND physically at the learned home location
+    # (TetheringHomeLocation, within near_home()'s 250 m geofence). So uploading starts as soon as we
+    # reach home WiFi and NEVER runs anywhere else: not on cellular, not on the hotspot (networkType
+    # is `cell` there), not on away-from-home WiFi. Onroad/offroad is irrelevant by design.
+    # near_home() fails OPEN only when home is unlearned OR GPS is missing — and being on home WiFi
+    # already implies being home — so we never fail to upload at home; only a confident "far from a
+    # KNOWN home" suppresses it. force_wifi (FORCEWIFI test env) bypasses both checks.
+    on_wifi = (network_type == NetworkType.wifi) or force_wifi
+    try:
+      at_home = force_wifi or near_home(_read_home(params), _read_gps(mem_params, params))
+    except Exception:
+      at_home = True  # crash-safety: never let a geofence/GPS math error stop home uploads or crash the loop (fail-open)
+    if metered or not on_wifi or not at_home:
       if allow_sleep:
-        time.sleep(60 if offroad else 5)
+        time.sleep(15)  # poll promptly so uploading starts right when we arrive on home WiFi
       continue
 
-    # xnor: HOME-WIFI-ONLY uploads — never spend cellular data. Stock openpilot's "metered"
-    # handling only throttles qcamera + recent crash/boot logs, but still uploads qlog/rlog
-    # over LTE. We hard-skip any metered connection (cellular is configured metered via
-    # GsmMetered=1), so uploads happen ONLY on unmetered WiFi. Set GsmMetered=0 to re-allow.
-    if sm['deviceState'].networkMetered and not force_wifi:
-      if allow_sleep:
-        time.sleep(60 if offroad else 5)
-      continue
-
-    # connect2xnor: honor force_wifi (test/debug) for the raw value too.
     network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
-    metered = sm['deviceState'].networkMetered
     # PASS 1 — small files (qlog/qcamera), always first: they're the keep-safe artifact.
     p1 = uploader.step(network_type_raw, metered)
 
