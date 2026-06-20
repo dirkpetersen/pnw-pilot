@@ -1,3 +1,52 @@
+# PNW — openpilot for the Pacific Northwest
+
+**This is `pnw-pilot`, a production openpilot distribution for the I-5 corridor between Seattle, WA and
+Corvallis, OR.** It is *not* stock openpilot, and it is *not* the xnor fork either — read this section
+before assuming upstream behavior. The standard openpilot README follows below.
+
+### Lineage — a fork of a fork
+
+```
+commaai/openpilot          upstream openpilot
+  └─ xnor-tech/openpilot   adds full legacy Tesla HW1/HW2/HW3 (Raven) support
+       └─ dirkpetersen/pnw-pilot   ← YOU ARE HERE (Pacific Northwest distribution)
+```
+
+### How PNW differs from upstream openpilot
+
+- **Two-car distribution.** Built and tuned for exactly two vehicles — a **2021 Tesla Model S (Raven,
+  HW3)** (the primary car) and a **2025 Ford F-150 Lightning**. One comma 3X is physically moved
+  between them; car-specific code is fingerprint-gated so it's inert on the other car.
+- **Maps default to the Pacific Northwest.** OSM coverage defaults to **Washington, Oregon, Idaho**,
+  and the first map download **auto-arms** on a fresh deploy (no settings page needed). Upstream ships
+  no preloaded region. *(British Columbia is **optional / planned**, not in the default yet.)*
+- **Corridor-calibrated driving.** Longitudinal/curve behavior (VTSC + CES) is tuned against a real
+  **I-5 Terwilliger curve (Portland)** drive log — not generic defaults.
+- **Integrated feature set**, layered on the xnor base and shipped as one coherent build (relaxed
+  driver monitoring, OSM speed-limit display, nudgeless lane change, network/tethering and drive-upload
+  fixes, conditional experimental switching). All custom toggles default **OFF** and never touch panda
+  safety.
+
+### How PNW differs from the xnor fork
+
+- xnor's purpose is **legacy Tesla Raven support**; PNW **inherits that** and adds the PNW-specific
+  layer above (Ford Lightning support, PNW maps, corridor tuning, the integrated feature set, and a
+  device-deploy/distribution workflow).
+- PNW is its own GitHub fork trio — `dirkpetersen/{pnw-pilot, pnw-opendbc, pnw-panda}` — forked from
+  `xnor-tech/{openpilot, opendbc, panda}`.
+
+### How PNW differs from a feature branch
+
+- A feature branch (e.g. `network2xnor`, `ces2xnor`, `mapd2xnor`) is **one effort in isolation**. PNW
+  ships the **union of them, integrated and validated together** — the deployed branch is
+  `integration2xnor`. Treat individual feature branches as ingredients; PNW is the meal.
+
+> Development, cross-fork porting, and the device-deploy toolchain live in the parent workbench at
+> `~/gh/comma` (see `~/gh/comma/pnw/CLAUDE.md` for the scope split and `~/gh/comma/CLAUDE.md` for the
+> full map). This repo is the *shippable distribution*; the parent is the *global development view*.
+
+---
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>
