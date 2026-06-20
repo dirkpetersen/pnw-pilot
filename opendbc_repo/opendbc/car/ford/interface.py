@@ -60,9 +60,17 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= FordSafetyFlags.CANFD.value
 
       # TRON (SecOC) platforms are not supported
-      # LateralMotionControl2, ACCDATA are 16 bytes on these platforms
-      if len(fingerprint[CAN.camera]):
-        if fingerprint[CAN.camera].get(0x3d6) != 8 or fingerprint[CAN.camera].get(0x186) != 8:
+      # LateralMotionControl2 (0x3d6) and ACCDATA (0x186) are 16 bytes on those platforms, 8 otherwise.
+      # fordsecoc2xnor: flag SecOC ONLY when a message is actually PRESENT but not 8 bytes (the genuine
+      # 16-byte TRON signature). The original `.get(addr) != 8` also fired when a message was simply
+      # ABSENT (None != 8) — which happens when the ADAS camera (IPMA) hasn't broadcast it yet inside
+      # the short (~1 s) fingerprint window, e.g. right after a boot. That produced a flaky false
+      # SecOC lockout (dashcamOnly) on a perfectly supported truck. Absent != SecOC; only present-and-
+      # not-8 is SecOC, so genuine TRON cars are still caught (they broadcast these at 16 bytes).
+      cam = fingerprint[CAN.camera]
+      if cam:
+        secoc = (0x3d6 in cam and cam[0x3d6] != 8) or (0x186 in cam and cam[0x186] != 8)
+        if secoc:
           carlog.error('dashcamOnly: SecOC is unsupported')
           ret.dashcamOnly = True
     else:
