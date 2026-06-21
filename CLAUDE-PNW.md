@@ -71,3 +71,10 @@ openpilot distribution for the **Seattle ↔ Corvallis I-5 corridor**, forked fr
 don't push branches to the car. The deploy toolchain (`patch-*.py`, `update-*.sh`, `upload.sh`,
 `COMMA_IP`, persistence guards) and the device source-of-truth live at the root workbench
 `~/gh/comma/` (`DEVICE-STATE.md`). This repo holds *what* ships; the root holds *how* it lands.
+
+## External documentation
+
+- **xnor wiki** — <https://wiki.xnor.shop/docs/> (the xnor-tech base: Tesla Raven install, supported
+  cars/hardware, the `xnor` / `xnor-c3` / `tesla-unity` versions).
+- **openpilot docs** — <https://docs.comma.ai/> (upstream openpilot architecture, car port layer,
+  tools, safety).
