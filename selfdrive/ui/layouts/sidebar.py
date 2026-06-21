@@ -148,8 +148,24 @@ class Sidebar(Widget):
   def _update_panda_status(self):
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
       self._panda_status.update(tr_noop("NO"), tr_noop("PANDA"), Colors.DANGER)
-    else:
-      self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
+      return
+    # fingerprint2xnor: when OFFROAD (truck off), surface the last-known car (from
+    # CarParamsPersistent, already deserialized as ui_state.CP) instead of a generic "ONLINE",
+    # so a parked shared device shows it recognizes the Ford / Tesla rather than looking like a
+    # bare dashcam. DISPLAY-ONLY: never touches fingerprinting or control — `card` is only_onroad
+    # and re-fingerprints authoritatively when the car powers on, so a stale cache (e.g. just
+    # moved from the other car) can at worst show the wrong brand for a moment, never mis-control.
+    # Hard-guarded: the UI must never crash (restart_if_crash loops), so any failure falls through
+    # to the stock "ONLINE".
+    try:
+      cp = ui_state.CP
+      if (not ui_state.started and cp is not None and cp.brand and cp.brand != "mock"
+          and not cp.dashcamOnly):
+        self._panda_status.update(tr_noop("VEHICLE"), cp.brand.upper(), Colors.GOOD)
+        return
+    except Exception:
+      pass
+    self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
     if rl.check_collision_point_rec(mouse_pos, SETTINGS_BTN):
