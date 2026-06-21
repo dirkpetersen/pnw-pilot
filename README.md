@@ -73,7 +73,7 @@ commaai/openpilot          upstream
   <a href="https://comma.ai/shop">Try it on a comma four</a>
 </h3>
 
-Quick start: `bash <(curl -fsSL openpilot.comma.ai)`
+Quick start: during the comma device setup, enter the custom software URL `installer.comma.ai/xnor-tech/xnor`
 
 [![openpilot tests](https://github.com/commaai/openpilot/actions/workflows/tests.yaml/badge.svg)](https://github.com/commaai/openpilot/actions/workflows/tests.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -96,7 +96,7 @@ Using openpilot in a car
 
 To use openpilot in a car, you need four things:
 1. **Supported Device:** a comma four, available at [comma.ai/shop/comma-four](https://www.comma.ai/shop/comma-four).
-2. **Software:** The setup procedure for the comma four allows users to enter a URL for custom software. Use the URL `openpilot.comma.ai` to install the release version.
+2. **Software:** The setup procedure for the comma 3X allows users to enter a URL for custom software. Use the URL `installer.comma.ai/xnor-tech/xnor` to install the recommended precompiled version.
 3. **Supported Car:** Ensure that you have one of [the 300+ supported cars](docs/CARS.md).
 4. **Car Harness:** You will also need a [car harness](https://comma.ai/shop/car-harness) to connect your comma four to your car.
 
