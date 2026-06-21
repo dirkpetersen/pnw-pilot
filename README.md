@@ -23,6 +23,8 @@ commaai/openpilot          upstream
 - **Vehicles:** shaped entirely around two cars — a **2021 Tesla Model S Long Range Plus** (Raven
   class, HW3; the primary I-5 car) and a **2025 Ford F-150 Lightning**. Car-specific code is
   fingerprint-gated, so it stays inert on the other car.
+- **Development:** all code is written by **Claude Code** and validated by the **Gemini MCP server**
+  running inside Claude Code.
 
 ### Enhancements over upstream / xnor
 
