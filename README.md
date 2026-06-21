@@ -25,6 +25,8 @@ commaai/openpilot          upstream
   fingerprint-gated, so it stays inert on the other car.
 - **Development:** all code is written by **Claude Code** and validated by the **Gemini MCP server**
   running inside Claude Code.
+- **Hardware:** only the **comma 3X** is tested. The **comma four is completely untested and will
+  likely not work.**
 
 ### Enhancements over upstream / xnor
 
