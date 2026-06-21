@@ -1,7 +1,11 @@
 # PNW Pilot — openpilot for the Pacific Northwest
 
-**PNW Pilot** is a production distribution of openpilot tuned for one job: driving the
-**I-5 corridor between Seattle, WA and Corvallis, OR**.
+**PNW Pilot** is a fork of openpilot tuned for one job: driving in the PNW, especially the 
+**I-5 corridor between Seattle, WA and central Oregon**.
+
+
+<div align="center"> <img width="512" height="432" alt="image" src="https://github.com/user-attachments/assets/5dca7817-02cc-431b-83e3-d7fec3733ada" /> </div>
+
 
 ```
 commaai/openpilot          upstream
