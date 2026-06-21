@@ -1,7 +1,7 @@
 # PNW Pilot — openpilot for the Pacific Northwest
 
 **PNW Pilot** is a fork of openpilot tuned for one job: driving in the PNW, especially the 
-**I-5 corridor between Seattle, WA and central Oregon**.
+**I-5 corridor between Seattle, WA and central-western Oregon**.
 
 
 <div align="center"> <img width="512" height="432" alt="image" src="https://github.com/user-attachments/assets/5dca7817-02cc-431b-83e3-d7fec3733ada" /> </div>
@@ -18,8 +18,8 @@ commaai/openpilot          upstream
 - **Region:** map data ships for **Washington, Oregon, and Idaho** by default — the first map
   download auto-arms on a fresh device, no settings page required. (British Columbia is optional
   and can be added to the state list.)
-- **Drives:** predominantly **Seattle ↔ Corvallis** on I-5; curve and longitudinal behavior is
-  calibrated against real drive logs from that corridor.
+- **Drives:** predominantly **Seattle ↔ Corvallis** (central-western Oregon) on I-5; curve and
+  longitudinal behavior is calibrated against real drive logs from that corridor.
 - **Vehicles:** shaped entirely around two cars — a **2021 Tesla Model S Long Range Plus** (Raven
   class, HW3; the primary I-5 car) and a **2025 Ford F-150 Lightning**. Car-specific code is
   fingerprint-gated, so it stays inert on the other car.
