@@ -105,6 +105,19 @@ We have detailed instructions for [how to install the harness and device in a ca
 
 ### Available Versions
 
+#### PNW (this distribution)
+
+The two PNW install branches for the comma device setup screen. Both resolve through the
+`dirkpetersen/openpilot` → `dirkpetersen/pnw-pilot` redirect.
+
+| Version | Device | Car | Installation URL |
+|---------|--------|-----|------------------|
+| `pnwprod` | comma 3X | Tesla Model S (Raven, HW3), Ford F-150 Lightning 2025 | https://installer.comma.ai/dirkpetersen/pnwprod |
+| `pnwtest` | comma 3X | Tesla Model S (Raven, HW3), Ford F-150 Lightning 2025 | https://installer.comma.ai/dirkpetersen/pnwtest |
+
+`pnwprod` is the stable production build; `pnwtest` is the test/staging build validated before
+promotion to `pnwprod`.
+
 #### Precompiled (recommended)
 
 These branches come precompiled and install significantly faster — no on-device build step required.

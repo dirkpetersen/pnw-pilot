@@ -18,6 +18,13 @@ openpilot distribution for the **Seattle ↔ Corvallis I-5 corridor**, forked fr
 | `master` | **Pristine stock / xnor mirror** — kept clean (no PNW changes). Updated from `xnor-tech/openpilot`; we then decide what to merge into `main`. Do **not** sync `master` up to `main`. |
 | `pnw-submodules` | Submodule wiring: repoints `opendbc`/`panda` to `../pnw-opendbc.git` / `../pnw-panda.git`. Carries the PNW distribution overview at the top of its README. |
 | `testing` | Full snapshot of **everything currently LIVE on the comma 3X** — `integration2xnor` + bsm + fingerprint + 2025 Ford fingerprint + SecOC fix + relaxed driver monitoring. See `TESTING.md`. Excludes undeployed `light2xnor` Tier-2 and `upload2xnor`. |
+| **`pnwprod`** | **Production install branch for the comma.ai installer.** Install URL: `installer.comma.ai/dirkpetersen/pnwprod`. The stable PNW build users flash. |
+| **`pnwtest`** | **Test/staging install branch for the comma.ai installer.** Install URL: `installer.comma.ai/dirkpetersen/pnwtest`. Pre-production validation before promoting to `pnwprod`. |
+
+> **comma.ai installer branches:** the device setup screen takes
+> `installer.comma.ai/dirkpetersen/<branch>`, which clones `dirkpetersen/openpilot` (GitHub-redirects
+> to `dirkpetersen/pnw-pilot`) at `<branch>`. The two installer-facing branches are **`pnwprod`**
+> (production) and **`pnwtest`** (test/staging).
 
 ## Integration branches (feature aggregation)
 
