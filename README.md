@@ -49,6 +49,23 @@ commaai/openpilot          upstream
 - **Smarter drive upload** — two-pass upload (small files automatically, video on real WiFi) with a
   deleter that preserves anything not yet uploaded.
 
+### Installing PNW Pilot
+
+PNW Pilot installs the same way as any custom openpilot fork — by entering its installer URL on the
+comma device's setup screen. **Only the comma 3X is tested.**
+
+1. On the comma 3X, do a factory reset / start the **Setup** flow (Settings → Device → Reset, or a
+   fresh device boot).
+2. Connect the device to Wi-Fi.
+3. When asked for the software to install, choose **Custom Software** and enter one of:
+   - **Production (stable):** `installer.comma.ai/dirkpetersen/pnwprod`
+   - **Test / staging:** `installer.comma.ai/dirkpetersen/pnwtest`
+4. Confirm; the device downloads and installs PNW Pilot, then reboots into it.
+
+These URLs resolve through GitHub's `dirkpetersen/openpilot` → `dirkpetersen/pnw-pilot` redirect, so
+the comma installer (which clones `<user>/openpilot`) finds the PNW fork automatically. Use
+`pnwtest` to validate a build, then `pnwprod` for the stable install.
+
 ---
 
 <div align="center" style="text-align: center;">
