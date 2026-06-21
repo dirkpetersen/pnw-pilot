@@ -1,3 +1,48 @@
+# PNW Pilot — openpilot for the Pacific Northwest
+
+**PNW Pilot** is a production distribution of openpilot tuned for one job: driving the
+**I-5 corridor between Seattle, WA and Corvallis, OR**.
+
+```
+commaai/openpilot          upstream
+  └─ xnor-tech/openpilot   adds full legacy Tesla HW1/HW2/HW3 (Raven) support
+       └─ dirkpetersen/pnw-pilot   ← this distribution (Pacific Northwest)
+```
+
+### Focus
+
+- **Region:** map data ships for **Washington, Oregon, and Idaho** by default — the first map
+  download auto-arms on a fresh device, no settings page required. (British Columbia is optional
+  and can be added to the state list.)
+- **Drives:** predominantly **Seattle ↔ Corvallis** on I-5; curve and longitudinal behavior is
+  calibrated against real drive logs from that corridor.
+- **Vehicles:** shaped entirely around two cars — a **2021 Tesla Model S Long Range Plus** (Raven
+  class, HW3; the primary I-5 car) and a **2025 Ford F-150 Lightning**. Car-specific code is
+  fingerprint-gated, so it stays inert on the other car.
+
+### Enhancements over upstream / xnor
+
+- **Tesla Model S Raven (HW1/HW2/HW3) support** — inherited from the xnor base; the reason PNW
+  forks xnor rather than commaai directly.
+- **Ford F-150 Lightning (2025)** — fingerprint and SecOC support for the Flash truck.
+- **Vision Turn Speed Control (VTSC)** — actively caps cruise speed through curves from the model's
+  predicted path curvature, smooth by construction (gentle decel envelope, only ever reduces speed).
+  Tuned to the I-5 Terwilliger curve.
+- **Conditional Experimental Switching (CES)** — chill by default, automatically switches to
+  Experimental mode for curves, low-speed, stop-lights, and slow leads; with a per-car gentle
+  profile and an Off / Light / Standard selector.
+- **OSM speed-limit display** — shows the current posted limit and warns on lower limits, sourced
+  from the bundled PNW map data.
+- **Nudgeless lane change + no-disengage-on-brake** — hands-light lane changes and braking that
+  doesn't kick you out of engagement.
+- **Blind-spot monitoring** and a **last-known-car indicator** on the offroad screen.
+- **Networking** — tethering/hotspot NAT fix, perpetual tethering, priority-WiFi switching,
+  GPS-gated WiFi scanning with a Set Home Location button, and an LTE throttle guard.
+- **Smarter drive upload** — two-pass upload (small files automatically, video on real WiFi) with a
+  deleter that preserves anything not yet uploaded.
+
+---
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>
