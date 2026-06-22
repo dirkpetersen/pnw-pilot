@@ -136,6 +136,20 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # Resilience (mapd2pnw): drop any toggle whose param isn't registered in params_keys.h before
+    # building the toggles. get_bool() on an unregistered key raises UnknownKeyName; if that escapes
+    # here it crashes TogglesLayout init -> the UI crash-loops -> the SDE/DRM display driver panics
+    # -> the device warm-reboots. A params/UI version mismatch should hide the toggle, not brick the
+    # device. (This exact mismatch happened deploying a branch's params_keys.h that lacked CES keys.)
+    _valid_defs = {}
+    for _param, _spec in self._toggle_defs.items():
+      try:
+        self._params.get_bool(_param)
+        _valid_defs[_param] = _spec
+      except UnknownKeyName:
+        print(f"toggles: param {_param!r} not registered in params_keys.h, hiding toggle (params/UI mismatch)")
+    self._toggle_defs = _valid_defs
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -203,10 +217,11 @@ class TogglesLayout(Widget):
     # Experimental Mode toggle; CES + the longitudinal personality only apply when openpilot controls
     # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
     ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
-    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    if not ces_long_ok:
-      self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
+    if "ConditionalExperimentalSwitching" in self._toggles:  # guarded: toggle is hidden if its param is unregistered
+      self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+      if not ces_long_ok:
+        self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
