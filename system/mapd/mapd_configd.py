@@ -16,7 +16,9 @@ from cereal import log
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
-PNW_DOWNLOAD = "us_states.WA,us_states.OR,us_states.ID"
+# Download-menu paths are period-delimited keys from mapd's download_menu.json. The US states
+# table is "us_state" (SINGULAR), e.g. "us_state.WA". Comma-join multiple areas.
+PNW_DOWNLOAD = "us_state.WA,us_state.OR,us_state.ID"
 NetworkType = log.DeviceState.NetworkType
 
 
