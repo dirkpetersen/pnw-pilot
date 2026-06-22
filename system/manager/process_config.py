@@ -5,9 +5,7 @@ import platform
 from cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
-from openpilot.system.hardware.hw import Paths
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
-from openpilot.sunnypilot.mapd import MAPD_PATH
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -50,10 +48,6 @@ def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not ublox_available()
-
-# mapd2xnor: launch the bundled mapd binary only when it is present on disk
-def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return os.path.exists(MAPD_PATH)
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
@@ -113,14 +107,10 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("modem", "system.hardware.tici.modem", always_run, enabled=TICI),
-  # mapd2pnw: the sunnypilot-derived mapd runtime (this NativeProcess + the mapd_manager
-  # Python bridge publishing liveMapDataSP) is DISABLED — it's a half-port being retired
-  # in favor of the official pfeiferj mapd v2.0.6 integration (self-contained binary that
-  # publishes mapdOut). The binary itself is now downloaded at launch by
-  # system/mapd/installer.py (see manager_init); the official process wiring lands with
-  # the full integration. Left here (disabled) as the migration anchor.
-  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, enabled=False),
-  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, enabled=False),
+  # mapd2pnw: the official pfeiferj mapd v2.0.6 binary is downloaded at launch by
+  # system/mapd/installer.py (see manager_init). Its process wiring (a NativeProcess
+  # running ./selfdrive/mapd, publishing mapdOut) lands with the full integration; the
+  # old sunnypilot mapd runtime that used to live here has been removed.
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),
