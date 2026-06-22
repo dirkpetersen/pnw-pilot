@@ -188,14 +188,6 @@ class TogglesLayout(Widget):
   def _update_toggles(self):
     ui_state.update_params()
 
-    # ces2xnor: CES replaces the Experimental Mode toggle. CES (and the longitudinal personality)
-    # only apply when openpilot controls longitudinal — grey out otherwise (symmetric enable/disable).
-    ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
-    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
-    self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    if not ces_long_ok:
-      self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
-
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
     for param in self._toggle_defs:
@@ -205,6 +197,16 @@ class TogglesLayout(Widget):
     for toggle_def in self._toggle_defs:
       if self._toggle_defs[toggle_def][3] and toggle_def not in self._locked_toggles:
         self._toggles[toggle_def].action_item.set_enabled(not ui_state.engaged)
+
+    # 3pnwtest: apply the per-feature overrides AFTER the generic refresh/engaged loops so they win
+    # (Gemini-reviewed: otherwise the refresh loop clobbers a forced state). ces2xnor: CES replaces the
+    # Experimental Mode toggle; CES + the longitudinal personality only apply when openpilot controls
+    # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
+    ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
+    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+    self._long_personality_setting.action_item.set_enabled(ces_long_ok)
+    if not ces_long_ok:
+      self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
