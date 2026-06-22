@@ -29,13 +29,14 @@ def main():
   pm = messaging.PubMaster(['mapdIn'])
   sm = messaging.SubMaster(['deviceState', 'mapdExtendedOut'])
 
-  done = params.get_bool("MapdPnwMapsRequested")
-  if done:
-    cloudlog.info("mapd_configd: PNW maps already requested; idle")
+  if params.get_bool("MapdPnwMapsRequested"):
+    cloudlog.info("mapd_configd: PNW maps already requested; idle (re-checks the param each loop)")
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s on deviceState/mapdExtendedOut); no extra sleep
-    if done:
+    # Re-read the guard each loop (not once at startup) so re-arming the download — resetting
+    # MapdPnwMapsRequested to 0 — takes effect without restarting this daemon.
+    if params.get_bool("MapdPnwMapsRequested"):
       continue
 
     if not sm.alive['mapdExtendedOut']:
@@ -45,8 +46,7 @@ def main():
     # one-shot is complete. (Checking right after send() would read pre-send state and re-spam.)
     prog = sm['mapdExtendedOut'].downloadProgress
     if prog.active or prog.totalFiles > 0:
-      params.put_bool("MapdPnwMapsRequested", True)
-      done = True
+      params.put_bool("MapdPnwMapsRequested", True)  # one-shot guard; re-read at the top of the loop
       cloudlog.warning("mapd_configd: PNW download started; one-shot guard set")
       continue
 
