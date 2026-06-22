@@ -12,6 +12,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
+from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_controller import VTSCController  # vtsc
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -52,6 +53,7 @@ class LongitudinalPlanner:
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
+    self.vtsc = VTSCController(CP)   # vtsc: curve speed control, default OFF (behavior-neutral)
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -93,6 +95,14 @@ class LongitudinalPlanner:
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
+
+    # vtsc: lower the cruise target for an upcoming curve (default OFF -> returns v_cruise unchanged).
+    # SAFETY (Gemini-reviewed): enforce in the WIRING that VTSC can only ever REDUCE v_cruise and can
+    # never inject NaN/negative — don't trust the core's contract. A bad cap could otherwise make the
+    # car accelerate (cap > set speed) or brake violently / crash the MPC (negative / NaN).
+    cap_v = self.vtsc.cap(sm, v_cruise, v_ego)
+    if cap_v is not None and not math.isnan(cap_v):
+      v_cruise = max(0.0, min(v_cruise, float(cap_v)))
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
@@ -190,3 +200,22 @@ class LongitudinalPlanner:
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
     pm.send('longitudinalPlan', plan_send)
+
+    # vtsc: log the curve-speed-control decision so drives are analyzable (recorded in qlog/rlog)
+    # SAFETY (Gemini-reviewed): defensive .get() — a missing key here would KeyError and crash
+    # plannerd. msg may be partially populated at startup or when VTSC is OFF.
+    vtsc_send = messaging.new_message('vtscState')
+    vtsc_send.valid = plan_send.valid
+    vs = vtsc_send.vtscState
+    m = self.vtsc.msg
+    vs.enabled = bool(m.get("enabled", False))
+    vs.active = bool(m.get("active", False))
+    vs.state = str(m.get("state", "idle"))
+    vs.vCruise = float(m.get("vCruise", 0.0))
+    vs.vTarget = float(m.get("vTarget", 0.0))
+    vs.vEgo = float(m.get("vEgo", 0.0))
+    vs.apexDist = float(m.get("apexDist", -1.0))
+    vs.apexCurvature = float(m.get("apexCurvature", 0.0))
+    vs.vCurveSafe = float(m.get("vCurveSafe", 0.0))
+    vs.timeToApex = float(m.get("timeToApex", -1.0))
+    pm.send('vtscState', vtsc_send)

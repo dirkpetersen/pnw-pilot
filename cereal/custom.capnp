@@ -45,7 +45,19 @@ struct LiveMapDataSP @0xf416ec09499d9d19 {
   roadName @5 :Text;
 }
 
-struct CustomReserved9 @0xa1680744031fdb2d {
+# vtsc (ces2xnor): Vision Turn Speed Control decision, logged for drive analysis.
+# Reuses the CustomReserved9 wire ID (@0xa1680744031fdb2d) — same slot, renamed.
+struct VtscState @0xa1680744031fdb2d {
+  enabled @0 :Bool;          # CES master toggle on + openpilotLongitudinalControl
+  active @1 :Bool;           # currently capping below cruise (slowing for a curve)
+  state @2 :Text;            # state machine: "idle" | "brake" | "hold" | "release"
+  vCruise @3 :Float32;       # m/s, the set-cruise target VTSC may cap
+  vTarget @4 :Float32;       # m/s, the applied cap (== vCruise when not slowing)
+  vEgo @5 :Float32;          # m/s, vehicle speed
+  apexDist @6 :Float32;      # m to the sharpest upcoming curve point (-1 if none)
+  apexCurvature @7 :Float32; # 1/m at that point (0 if straight)
+  vCurveSafe @8 :Float32;    # m/s, sqrt(A_LAT_TARGET / curvature) target through the curve
+  timeToApex @9 :Float32;    # s, apexDist / vEgo (-1 if none)
 }
 
 struct CustomReserved10 @0xcb9fd56c7057593a {

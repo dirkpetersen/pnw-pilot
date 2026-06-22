@@ -2570,7 +2570,7 @@ struct Event {
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;
     liveMapDataSP @115 :Custom.LiveMapDataSP;  # mapd2pnw: renamed from CustomReserved8 (same @115 wire slot)
-    customReserved9 @116 :Custom.CustomReserved9;
+    vtscState @116 :Custom.VtscState;  # ces2pnw: renamed from CustomReserved9 (same @116 wire slot)
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
