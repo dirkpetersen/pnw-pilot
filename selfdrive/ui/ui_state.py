@@ -58,7 +58,7 @@ class UIState:
         "liveParameters",
         "testJoystick",
         "rawAudioData",
-        "liveMapDataSP",  # mapd2xnor: OSM speed limits + road name for the on-road display/warning
+        "mapdOut",  # mapd2pnw: official mapd OSM speed limits + road name for the on-road display/warning
       ]
     )
 

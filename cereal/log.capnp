@@ -2578,9 +2578,9 @@ struct Event {
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
     customReserved16 @142 :Custom.CustomReserved16;
-    customReserved17 @143 :Custom.CustomReserved17;
-    customReserved18 @144 :Custom.CustomReserved18;
-    customReserved19 @145 :Custom.CustomReserved19;
+    mapdExtendedOut @143 :Custom.MapdExtendedOut;  # mapd2pnw: official mapd (renamed from CustomReserved17, same @143 slot)
+    mapdIn @144 :Custom.MapdIn;                     # mapd2pnw: official mapd (renamed from CustomReserved18, same @144 slot)
+    mapdOut @145 :Custom.MapdOut;                   # mapd2pnw: official mapd (renamed from CustomReserved19, same @145 slot)
 
     # *********** legacy + deprecated ***********
     model @9 :Deprecated.ModelData; # TODO: rename modelV2 and mark this as deprecated
