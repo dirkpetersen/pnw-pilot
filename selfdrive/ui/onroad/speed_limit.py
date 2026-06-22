@@ -1,10 +1,9 @@
 """
 mapd2xnor: speed-limit display + lower-limit warning.
 
-Self-contained raylib widget that reads `liveMapDataSP` (published by
-mapd_manager from the pfeiferj mapd binary) DIRECTLY — it does NOT depend on the
-sunnypilot longitudinalPlanSP / speed-limit resolver / assist control layer
-(xnor is pure commaai and has none of that).
+Self-contained raylib widget that reads `mapdOut` (published by the official pfeiferj
+mapd v2.0.6 binary) DIRECTLY — it does NOT depend on the sunnypilot longitudinalPlanSP /
+speed-limit resolver / assist control layer (xnor is pure commaai and has none of that).
 
 Behavior (per user spec):
   - Normal: show the current OSM speed limit as a sign (Vienna if metric,
@@ -15,7 +14,7 @@ Behavior (per user spec):
     limit for a few seconds.
 
 Adapted from sunnypilot's selfdrive/ui/sunnypilot/onroad/speed_limit.py, trimmed
-to the liveMapDataSP-only data path.
+to the mapdOut-only data path.
 """
 import time
 import pyray as rl
@@ -83,15 +82,17 @@ class SpeedLimitRenderer(Widget):
     v_ego = car_state.vEgoCluster if self._v_ego_cluster_seen else car_state.vEgo
     self.speed = max(0.0, v_ego * self._conv)
 
-    if sm.updated["liveMapDataSP"]:
-      lmd = sm["liveMapDataSP"]
+    # mapd2pnw: read the official mapd output (mapdOut). speedLimit/nextSpeedLimit are 0 when
+    # unknown, so validity is just "> 0" (the renderer already gates on MIN_VALID_KPH too).
+    if sm.updated["mapdOut"]:
+      mo = sm["mapdOut"]
       conv = self._conv
-      new_limit = lmd.speedLimit * conv
-      self.speed_limit_valid = bool(lmd.speedLimitValid)
-      self.speed_limit_ahead_valid = bool(lmd.speedLimitAheadValid)
-      self.speed_limit_ahead = lmd.speedLimitAhead * conv
-      self.speed_limit_ahead_dist = lmd.speedLimitAheadDistance
-      self.road_name = lmd.roadName
+      new_limit = mo.speedLimit * conv
+      self.speed_limit_valid = mo.speedLimit > 0.0
+      self.speed_limit_ahead_valid = mo.nextSpeedLimit > 0.0
+      self.speed_limit_ahead = mo.nextSpeedLimit * conv
+      self.speed_limit_ahead_dist = mo.nextSpeedLimitDistance
+      self.road_name = mo.roadName
 
       self._maybe_trigger_warning(new_limit)
       self.speed_limit = new_limit

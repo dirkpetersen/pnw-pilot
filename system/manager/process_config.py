@@ -6,6 +6,7 @@ from cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.system.mapd.installer import MAPD_BINARY
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -48,6 +49,12 @@ def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not ublox_available()
+
+# mapd2pnw: run the official mapd binary whenever it's installed. It's downloaded at launch by
+# system/mapd/installer.py, so gate on existence — manager must not try to exec ./mapd before the
+# background download finishes. Runs on AND offroad (mapd downloads maps when parked on Wi-Fi).
+def mapd_running(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return os.path.exists(MAPD_BINARY)
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
@@ -108,10 +115,11 @@ procs = [
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("modem", "system.hardware.tici.modem", always_run, enabled=TICI),
   PythonProcess("network_arbiterd", "system.networkd.network_arbiterd", always_run, enabled=TICI),  # network2pnw
-  # mapd2pnw: the official pfeiferj mapd v2.0.6 binary is downloaded at launch by
-  # system/mapd/installer.py (see manager_init). Its process wiring (a NativeProcess
-  # running ./selfdrive/mapd, publishing mapdOut) lands with the full integration; the
-  # old sunnypilot mapd runtime that used to live here has been removed.
+  # mapd2pnw: official pfeiferj mapd v2.0.6 — self-contained binary downloaded at launch by
+  # system/mapd/installer.py. Publishes mapdOut/mapdExtendedOut, subscribes mapdIn. Gated on the
+  # binary existing (see mapd_running) so manager never execs it before the download completes.
+  NativeProcess("mapd", "selfdrive", ["./mapd"], mapd_running),
+  PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),

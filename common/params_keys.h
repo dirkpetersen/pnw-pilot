@@ -74,6 +74,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LanguageSetting", {PERSISTENT, STRING, "en"}},
     {"LastAthenaPingTime", {CLEAR_ON_MANAGER_START, INT}},
     {"LastGPSPosition", {PERSISTENT, STRING}},
+    // mapd2pnw: settings store for the official pfeiferj mapd v2.0.6 binary (JSON; the binary
+    // reads/writes this directly and reloads it on a mapdIn reloadSettings message).
+    {"MapdSettings", {PERSISTENT, JSON}},
+    // mapd2pnw: one-shot guard so the PNW map auto-download (WA/OR/ID) is requested only once.
+    {"MapdPnwMapsRequested", {PERSISTENT, BOOL}},
     // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, JSON}},

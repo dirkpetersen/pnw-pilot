@@ -93,8 +93,15 @@ _services: dict[str, tuple] = {
   "livestreamRoadEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "livestreamDriverEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "customReservedRawData0": (True, 0.),
-  "liveMapDataSP": (True, 1., 1),   # mapd2pnw: OSM map data (speed limits + road name) @ 1 Hz
+  "liveMapDataSP": (True, 1., 1),   # mapd2xnor: legacy sunnypilot mapd output (no publisher; kept for wire compat)
   "vtscState": (True, 20., 5),      # ces2pnw: VTSC curve speed control decision, logged @ 20 Hz
+  # mapd2pnw: official pfeiferj mapd v2.0.6 services. Queue size MUST be MEDIUM (2MB) to match the
+  # binary's settings/const.go (QUEUE_SIZE_MEDIUM). mapdOut @ 20 Hz (primary driving output),
+  # mapdExtendedOut @ 1 Hz (download progress + path; not logged, per mapd outputs.md), mapdIn is
+  # openpilot -> mapd settings/triggers (event-driven).
+  "mapdOut": (True, 20., 20, QueueSize.MEDIUM),
+  "mapdExtendedOut": (False, 1., None, QueueSize.MEDIUM),
+  "mapdIn": (True, 0., None, QueueSize.MEDIUM),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

@@ -19,7 +19,8 @@ def main():
   ldw = LaneDepartureWarning()
   longitudinal_planner = LongitudinalPlanner(CP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance', 'vtscState'])  # vtsc: + vtscState
-  sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState'],
+  sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState',
+                            'mapdOut'],  # mapd2pnw: official mapd suggested speed (speed-limit + curve control)
                            poll='modelV2')
 
   while True:

@@ -22,6 +22,10 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
+# mapd2pnw: reject a mapd suggested speed below this (m/s, ~4.5 mph) as garbage/glitch — mapd only
+# emits suggestedSpeed > 0 when confident, but this floors out near-zero noise from capping cruise.
+MIN_MAPD_SUGGESTED_SPEED = 2.0
+
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
@@ -134,6 +138,17 @@ class LongitudinalPlanner:
       clipped_accel_coast = max(accel_coast, accel_clip[0])
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
+
+    # mapd2pnw: cap cruise to the official pfeiferj mapd suggested speed (speed-limit + map/vision
+    # curve control). Inert by default — suggestedSpeed is 0 unless the user enables a mapd control
+    # in MapdSettings (all default OFF). Only ever REDUCES v_cruise, only when openpilot controls
+    # longitudinal. Guards: alive (NOT just valid — a crashed mapd leaves a stale 'valid' last message)
+    # and a low floor to reject near-zero garbage. The MPC bounds the resulting decel rate, and this
+    # composes with VTSC (both only lower the speed → the minimum wins).
+    if self.CP.openpilotLongitudinalControl and sm.alive['mapdOut'] and sm.valid['mapdOut']:
+      mapd_suggested = sm['mapdOut'].suggestedSpeed
+      if MIN_MAPD_SUGGESTED_SPEED < mapd_suggested < v_cruise:
+        v_cruise = mapd_suggested
 
     if force_slow_decel:
       v_cruise = 0.0
