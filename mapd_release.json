@@ -1,0 +1,11 @@
+{
+  "_comment": "PNW mapd binary release pin. The ~20 MB pfeiferj `mapd` binary is intentionally NOT vendored in git (keeps clones and device updates small). system/mapd/installer.py downloads it at launch to `install_path` and verifies `sha256`. To upgrade mapd: change version + url + sha256 + size here (get the sha with `sha256sum mapd`), nothing else.",
+  "name": "mapd",
+  "repo": "pfeiferj/mapd",
+  "version": "v2.0.6",
+  "url": "https://github.com/pfeiferj/mapd/releases/download/v2.0.6/mapd",
+  "sha256": "42748e070bc55ee2a7acc747ba38c1311190268c0f31cacaa82535db00205969",
+  "size": 21341584,
+  "arch": "aarch64",
+  "install_path": "selfdrive/mapd"
+}

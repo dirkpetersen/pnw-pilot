@@ -88,3 +88,6 @@ build/
 .context/
 PLAN.md
 TASK.md
+
+# mapd2pnw: mapd binary is downloaded at launch (system/mapd/installer.py), never committed
+/selfdrive/mapd
