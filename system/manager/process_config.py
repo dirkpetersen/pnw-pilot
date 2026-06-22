@@ -114,11 +114,14 @@ procs = [
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("modem", "system.hardware.tici.modem", always_run, enabled=TICI),
   PythonProcess("network_arbiterd", "system.networkd.network_arbiterd", always_run, enabled=TICI),  # network2pnw
-  # mapd2pnw: OSM map daemon (pfeiferj binary) + manager publishing liveMapDataSP.
-  # restart_if_crash=True so manager relaunches them if they exit — the mapd binary
-  # can exit on a bad tile; the manager keeps it supervised.
-  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, restart_if_crash=True),
-  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, restart_if_crash=True),
+  # mapd2pnw: the sunnypilot-derived mapd runtime (this NativeProcess + the mapd_manager
+  # Python bridge publishing liveMapDataSP) is DISABLED — it's a half-port being retired
+  # in favor of the official pfeiferj mapd v2.0.6 integration (self-contained binary that
+  # publishes mapdOut). The binary itself is now downloaded at launch by
+  # system/mapd/installer.py (see manager_init); the official process wiring lands with
+  # the full integration. Left here (disabled) as the migration anchor.
+  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, enabled=False),
+  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, enabled=False),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),

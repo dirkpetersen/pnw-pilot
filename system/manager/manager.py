@@ -3,6 +3,7 @@ import datetime
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 
@@ -43,6 +44,21 @@ def manager_init() -> None:
     default_value = params.get_default_value(k)
     if default_value is not None and params.get(k) is None:
       params.put(k, default_value, block=True)
+
+  # mapd2pnw: download-at-launch of the (un-vendored) mapd binary. Best-effort and
+  # in the background so a slow/absent network never blocks manager startup or
+  # driving; idempotent once the pinned binary from mapd_release.json is installed.
+  # NOTE: the mapd process's should_run MUST gate on the binary existing (mapd_ready
+  # does os.path.exists(MAPD_PATH)); that's what avoids a race where manager would try
+  # to exec ./mapd before this background download finishes — manager just starts it
+  # on a later ensure_running cycle once the binary lands.
+  def _install_mapd():
+    try:
+      from openpilot.system.mapd.installer import ensure_mapd
+      ensure_mapd()
+    except Exception as e:
+      cloudlog.warning(f"mapd installer: {e}")
+  threading.Thread(target=_install_mapd, name="mapd_installer", daemon=True).start()
 
   # Create folders needed for msgq
   try:
