@@ -3,10 +3,7 @@ from openpilot.common.params import Params, UnknownKeyName
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import multiple_button_item, toggle_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
-from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
-from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
-from openpilot.system.ui.widgets import DialogResult
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
@@ -31,6 +28,19 @@ DESCRIPTIONS = {
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
+  "ShowSpeedLimit": tr_noop(
+    "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
+    "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
+    "parked with Wi-Fi until the download completes (the sign shows \"-\" until then). Requires a GPS fix to display a limit."
+  ),
+  "ConditionalExperimentalSwitching": tr_noop(
+    "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
+    "switch to Experimental Mode only for tight curves, low-speed/city driving, stop lights, and when closing " +
+    "on a slower lead — then return to Chill. With this on, the top-right button cycles CES / Chill / Experimental " +
+    "(orange = forced Experimental). It also slows smoothly for upcoming curves (Vision Turn Speed Control). " +
+    "Affects speed/braking only, not steering, and only when openpilot controls longitudinal. NOT a cone/obstacle " +
+    "detector and not a substitute for attention — stay ready to brake, especially in construction zones and on curves."
+  ),
 }
 
 
@@ -48,10 +58,19 @@ class TogglesLayout(Widget):
         "chffr_wheel.png",
         True,
       ),
-      "ExperimentalMode": (
-        lambda: tr("Experimental Mode"),
-        "",
-        "experimental_white.png",
+      # ces2xnor: REPLACES the standalone Experimental Mode toggle. Full Experimental is still
+      # reachable via the top-right 3-state button (orange = forced Experimental). CES default OFF.
+      "ConditionalExperimentalSwitching": (
+        lambda: tr("Conditional Experimental Switching (CES)"),
+        DESCRIPTIONS["ConditionalExperimentalSwitching"],
+        "speed_limit.png",
+        False,
+      ),
+      # mapd2xnor: OSM speed-limit display + lower-limit warning (gates the OSM map download too)
+      "ShowSpeedLimit": (
+        lambda: tr("Speed limit display/warning (MAPD/PNW)"),
+        DESCRIPTIONS["ShowSpeedLimit"],
+        "speed_limit.png",
         False,
       ),
       "DisengageOnAccelerator": (
@@ -135,7 +154,6 @@ class TogglesLayout(Widget):
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
 
-    self._update_experimental_mode_icon()
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
 
     ui_state.add_engaged_transition_callback(self._update_toggles)
@@ -155,45 +173,13 @@ class TogglesLayout(Widget):
   def _update_toggles(self):
     ui_state.update_params()
 
-    e2e_description = tr(
-      "openpilot defaults to driving in chill mode. Experimental mode enables alpha-level features that aren't ready for chill mode. " +
-      "Experimental features are listed below:<br>" +
-      "<h4>End-to-End Longitudinal Control</h4><br>" +
-      "Let the driving model control the gas and brakes. openpilot will drive as it thinks a human would, including stopping for red lights and stop signs. " +
-      "Since the driving model decides the speed to drive, the set speed will only act as an upper bound. This is an alpha quality feature; " +
-      "mistakes should be expected.<br>" +
-      "<h4>New Driving Visualization</h4><br>" +
-      "The driving visualization will transition to the road-facing wide-angle camera at low speeds to better show some turns. " +
-      "The Experimental mode logo will also be shown in the top right corner."
-    )
-
-    if ui_state.CP is not None:
-      if ui_state.has_longitudinal_control:
-        self._toggles["ExperimentalMode"].action_item.set_enabled(True)
-        self._toggles["ExperimentalMode"].set_description(e2e_description)
-        self._long_personality_setting.action_item.set_enabled(True)
-      else:
-        # no long for now
-        self._toggles["ExperimentalMode"].action_item.set_enabled(False)
-        self._toggles["ExperimentalMode"].action_item.set_state(False)
-        self._long_personality_setting.action_item.set_enabled(False)
-        self._params.remove("ExperimentalMode")
-
-        unavailable = tr("Experimental mode is currently unavailable on this car since the car's stock ACC is used for longitudinal control.")
-
-        long_desc = unavailable + " " + tr("openpilot longitudinal control may come in a future update.")
-        if ui_state.CP.alphaLongitudinalAvailable:
-          if self._is_release:
-            long_desc = unavailable + " " + tr("An alpha version of openpilot longitudinal control can be tested, along with " +
-                                               "Experimental mode, on non-release branches.")
-          else:
-            long_desc = tr("Enable the openpilot longitudinal control (alpha) toggle to allow Experimental mode.")
-
-        self._toggles["ExperimentalMode"].set_description("<b>" + long_desc + "</b><br><br>" + e2e_description)
-    else:
-      self._toggles["ExperimentalMode"].set_description(e2e_description)
-
-    self._update_experimental_mode_icon()
+    # ces2xnor: CES replaces the Experimental Mode toggle. CES (and the longitudinal personality)
+    # only apply when openpilot controls longitudinal — grey out otherwise (symmetric enable/disable).
+    ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
+    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+    self._long_personality_setting.action_item.set_enabled(ces_long_ok)
+    if not ces_long_ok:
+      self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
 
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
@@ -208,35 +194,9 @@ class TogglesLayout(Widget):
   def _render(self, rect):
     self._scroller.render(rect)
 
-  def _update_experimental_mode_icon(self):
-    icon = "experimental.png" if self._toggles["ExperimentalMode"].action_item.get_state() else "experimental_white.png"
-    self._toggles["ExperimentalMode"].set_icon(icon)
-
-  def _handle_experimental_mode_toggle(self, state: bool):
-    confirmed = self._params.get_bool("ExperimentalModeConfirmed")
-    if state and not confirmed:
-      def confirm_callback(result: DialogResult):
-        if result == DialogResult.CONFIRM:
-          self._params.put_bool("ExperimentalMode", True, block=True)
-          self._params.put_bool("ExperimentalModeConfirmed", True, block=True)
-        else:
-          self._toggles["ExperimentalMode"].action_item.set_state(False)
-        self._update_experimental_mode_icon()
-
-      # show confirmation dialog
-      content = (f"<h1>{self._toggles['ExperimentalMode'].title}</h1><br>" +
-                 f"<p>{self._toggles['ExperimentalMode'].description}</p>")
-      dlg = ConfirmDialog(content, tr("Enable"), rich=True, callback=confirm_callback)
-      gui_app.push_widget(dlg)
-    else:
-      self._update_experimental_mode_icon()
-      self._params.put_bool("ExperimentalMode", state, block=True)
-
   def _toggle_callback(self, state: bool, param: str):
-    if param == "ExperimentalMode":
-      self._handle_experimental_mode_toggle(state)
-      return
-
+    # ces2xnor: ExperimentalMode toggle removed (replaced by CES). CES is a plain bool toggle —
+    # no confirm dialog, no icon swap. Full Experimental is reachable via the top-right button.
     self._params.put_bool(param, state, block=True)
     if self._toggle_defs[param][3]:
       self._params.put_bool("OnroadCycleRequested", True, block=True)

@@ -18,6 +18,7 @@ from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import CESController  # ces2xnor
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -120,6 +121,8 @@ class SelfdriveD:
     self.logged_comm_issue = None
     self.not_running_prev = None
     self.experimental_mode = False
+    self.manual_experimental_mode = False     # ces2xnor: the ExperimentalMode-param baseline
+    self.ces_xnor = CESController(self.CP)     # ces2xnor: default OFF
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.dm_lockout_set = False
@@ -526,6 +529,18 @@ class SelfdriveD:
       self.enabled, self.active = self.state_machine.update(self.events)
     self.update_alerts(CS)
 
+    # ces2xnor: effective experimental = manual ExperimentalMode OR CES's per-cycle decision.
+    # SAFETY (Gemini-reviewed): (1) wrap the CES core call in try/except — selfdrived is safety-critical
+    # and a raise here would crash it; default to False (chill) on any error. (2) gate the whole result
+    # on openpilotLongitudinalControl so it is byte-identical to the stock baseline (and never forces
+    # experimental on a stock-ACC car). Default OFF + this gating = behavior-neutral regression baseline.
+    try:
+      ces_req = self.ces_xnor.experimental_request(CS, self.sm)
+    except Exception:
+      cloudlog.exception("ces_xnor: experimental_request raised -> chill")
+      ces_req = False
+    self.experimental_mode = self.CP.openpilotLongitudinalControl and (self.manual_experimental_mode or ces_req)
+
     self.publish_selfdriveState(CS)
 
     self.CS_prev = CS
@@ -535,7 +550,7 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-      self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      self.manual_experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl  # ces2xnor
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 

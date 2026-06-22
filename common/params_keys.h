@@ -69,6 +69,17 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LanguageSetting", {PERSISTENT, STRING, "en"}},
     {"LastAthenaPingTime", {CLEAR_ON_MANAGER_START, INT}},
     {"LastGPSPosition", {PERSISTENT, STRING}},
+    // ces2pnw: MapTargetVelocities is mapd2pnw's param, but CES reads it for the map-curve half (it
+    // degrades to vision-only when mapd isn't merged). Registered here so ces2pnw runs standalone
+    // without an UnknownKeyName crash; dedups against mapd2pnw's identical entry at integration.
+    {"MapTargetVelocities", {PERSISTENT, JSON}},
+    // ces2xnor: Conditional Experimental Switching + VTSC
+    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
+    {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
+    {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
+    {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor
+    {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
+    {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"LastAgnosPowerMonitorShutdown", {CLEAR_ON_MANAGER_START, STRING}},
