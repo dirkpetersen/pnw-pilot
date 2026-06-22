@@ -5,7 +5,9 @@ import platform
 from cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
+from openpilot.system.hardware.hw import Paths
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.sunnypilot.mapd import MAPD_PATH
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -48,6 +50,10 @@ def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not ublox_available()
+
+# mapd2xnor: launch the bundled mapd binary only when it is present on disk
+def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return os.path.exists(MAPD_PATH)
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
@@ -107,6 +113,11 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("modem", "system.hardware.tici.modem", always_run, enabled=TICI),
+  # mapd2pnw: OSM map daemon (pfeiferj binary) + manager publishing liveMapDataSP.
+  # restart_if_crash=True so manager relaunches them if they exit — the mapd binary
+  # can exit on a bad tile; the manager keeps it supervised.
+  NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready, restart_if_crash=True),
+  PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run, restart_if_crash=True),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),

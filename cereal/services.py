@@ -93,6 +93,7 @@ _services: dict[str, tuple] = {
   "livestreamRoadEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "livestreamDriverEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "customReservedRawData0": (True, 0.),
+  "liveMapDataSP": (True, 1., 1),   # mapd2xnor: OSM map data (speed limits + road name) @ 1 Hz
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

@@ -69,6 +69,26 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LanguageSetting", {PERSISTENT, STRING, "en"}},
     {"LastAthenaPingTime", {CLEAR_ON_MANAGER_START, INT}},
     {"LastGPSPosition", {PERSISTENT, STRING}},
+    // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
+    {"MapSpeedLimit", {PERSISTENT, STRING}},
+    {"NextMapSpeedLimit", {PERSISTENT, JSON}},
+    {"RoadName", {PERSISTENT, STRING}},
+    {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
+    {"OsmDownloadedDate", {PERSISTENT, STRING}},
+    {"OsmLocationName", {PERSISTENT, STRING}},
+    {"OsmStateName", {PERSISTENT, STRING, "WA,OR,ID"}},  // mapd2xnor: 2-letter codes (binary STATE_BOXES key), NOT full names
+    {"OsmLocal", {PERSISTENT, BOOL}},
+    {"OsmAutoRequested", {PERSISTENT, BOOL}},
+    {"OSMDownloadLocations", {PERSISTENT, JSON}},
+    {"OSMDownloadBounds", {PERSISTENT, STRING}},
+    {"MapTargetVelocities", {PERSISTENT, JSON}},
+    {"ShowRoadName", {PERSISTENT, BOOL, "1"}},
+    {"ShowSpeedLimit", {PERSISTENT, BOOL, "0"}},  // mapd: speed-limit display consumer (default OFF; lives here so the foundation registers it)
+    // mapd2pnw: "Get map for this location" on-demand download
+    {"GetMapForLocation", {PERSISTENT, BOOL, "0"}},      // the toggle — ON downloads the region under current GPS
+    {"MapForLocationRegion", {CLEAR_ON_MANAGER_START, STRING}},  // mapd_manager writes the region code under current GPS (for the UI to display/gate); "" = covered/unknown
+    {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_manager writes True when current GPS is already covered by a downloaded map (UI greys the toggle)
+    {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"LastAgnosPowerMonitorShutdown", {CLEAR_ON_MANAGER_START, STRING}},

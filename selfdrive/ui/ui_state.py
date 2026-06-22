@@ -58,6 +58,7 @@ class UIState:
         "liveParameters",
         "testJoystick",
         "rawAudioData",
+        "liveMapDataSP",  # mapd2xnor: OSM speed limits + road name for the on-road display/warning
       ]
     )
 
@@ -72,6 +73,8 @@ class UIState:
 
     # Core state variables
     self.is_metric: bool = self.params.get_bool("IsMetric")
+    self.show_speed_limit: bool = self.params.get_bool("ShowSpeedLimit")  # mapd2xnor
+    self.show_road_name: bool = self.params.get_bool("ShowRoadName")      # mapd2xnor
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
@@ -201,6 +204,8 @@ class UIState:
 
     self.recording_audio = self.params.get_bool("RecordAudio") and self.started
     self.is_metric = self.params.get_bool("IsMetric")
+    self.show_speed_limit = self.params.get_bool("ShowSpeedLimit")  # mapd2xnor
+    self.show_road_name = self.params.get_bool("ShowRoadName")      # mapd2xnor
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.usbgpu = self.params.get_bool("UsbGpuPresent")
