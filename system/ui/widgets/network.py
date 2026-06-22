@@ -120,6 +120,26 @@ class AdvancedNetworkSettings(Widget):
     self._tethering_password_action = ButtonAction(lambda: tr("EDIT"))
     tethering_password_btn = ListItem(lambda: tr("Tethering Password"), action_item=self._tethering_password_action, callback=self._edit_tethering_password)
 
+    # network2xnor (multi-location): manage a LIST of priority WiFi networks, each tied to a GPS
+    # geofence. When tethering and any saved priority SSID comes into range near its location,
+    # network_arbiterd switches the radio to it. "Add" captures the current GPS for the new entry.
+    # IMPORTANT: NO description= on these ListItems. In this v0.11.2 list framework, a ListItem WITH a
+    # description renders as an expandable row whose tap toggles the description — its action button
+    # (ADD/VIEW) does NOT receive taps and looks inert/greyed. The working EDIT/CONNECT action buttons
+    # (password, APN) have no description for exactly this reason. Keep these description-free.
+    self._add_network_action = ButtonAction(lambda: tr("ADD"))
+    # NOTE: keep these titles SHORT. ListItem.get_right_item_rect() clamps the action button's
+    # hit-rect to (content_width - title_width); a long title shrinks the tappable area below the
+    # drawn BUTTON_WIDTH, so taps on the left part of the button miss. The stock action rows
+    # (password "EDIT", APN) have short titles for this reason. (Gemini-flagged latent bug; the
+    # framework's set_parent_rect also doesn't propagate to action_item, but a short title avoids it.)
+    add_network_btn = ListItem(lambda: tr("Add Network Here"),
+                               action_item=self._add_network_action, callback=self._add_priority_network)
+
+    self._list_networks_action = ButtonAction(lambda: tr("VIEW"))
+    list_networks_btn = ListItem(lambda: tr("Priority Networks"),
+                                 action_item=self._list_networks_action, callback=self._manage_priority_networks)
+
     # Roaming toggle
     roaming_enabled = self._params.get_bool("GsmRoaming")
     self._roaming_action = ToggleAction(initial_state=roaming_enabled)
@@ -144,6 +164,8 @@ class AdvancedNetworkSettings(Widget):
     items: list[Widget] = [
       tethering_btn,
       tethering_password_btn,
+      add_network_btn,
+      list_networks_btn,
       text_item(lambda: tr("IP Address"), lambda: self._wifi_manager.ipv4_address),
       self._roaming_btn,
       self._apn_btn,
@@ -248,6 +270,104 @@ class AdvancedNetworkSettings(Widget):
     self._keyboard.set_text(self._wifi_manager.tethering_password)
     self._keyboard.set_callback(update_password)
     gui_app.push_widget(self._keyboard)
+
+  # --- network2xnor (multi-location): priority-network list management ---------------------------
+
+  def _read_priority_networks(self):
+    from openpilot.system.networkd import priority_networks as pn
+    return pn.parse(self._params.get("TetheringPriorityNetworks"),
+                    legacy_ssid=(self._params.get("TetheringPriorityWifi") or ""),
+                    legacy_home_raw=self._params.get("TetheringHomeLocation"))
+
+  def _write_priority_networks(self, nets):
+    from openpilot.system.networkd import priority_networks as pn
+    self._params.put("TetheringPriorityNetworks", pn.dumps(nets))
+
+  def _current_gps(self):
+    # mapd writes LastGPSPosition to the in-memory store, locationd to the persistent one — try both.
+    import json
+    try:
+      mem_params = Params("/dev/shm/params")
+    except Exception:
+      mem_params = None
+    for store in (mem_params, self._params):
+      if store is None:
+        continue
+      try:
+        raw = store.get("LastGPSPosition")
+        if not raw:
+          continue
+        d = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+        return float(d["latitude"]), float(d["longitude"])
+      except Exception:
+        continue
+    return None
+
+  def _add_priority_network(self):
+    # Enter an SSID; capture the current GPS as this entry's geofence center. The known Peak Internet
+    # "visitor" SSID is auto-tagged with its captive-portal handler so uploads work behind the portal.
+    def on_ssid(result: DialogResult):
+      # NOTE: do NOT set_enabled(False) here — these buttons have no reason to disable, and doing so
+      # left them permanently greyed out because re-enabling only happened on a WiFi-scan callback that
+      # may not fire while on this panel. They stay enabled.
+      if result != DialogResult.CONFIRM:
+        return
+      ssid = self._keyboard.text.strip()
+      if not ssid:
+        return
+      gps = self._current_gps()
+      nets = [e for e in self._read_priority_networks() if e["ssid"] != ssid]   # de-dupe by ssid
+      portal = "peak" if ssid.lower() == "visitor" else None
+      lat, lon = (round(gps[0], 6), round(gps[1], 6)) if gps else (None, None)
+      nets.append({"label": ssid, "ssid": ssid, "lat": lat, "lon": lon, "portal": portal})
+      self._write_priority_networks(nets)
+      if gps:
+        msg = tr("Saved") + f" '{ssid}' @ {lat:.5f}, {lon:.5f}"
+      else:
+        msg = tr("Saved") + f" '{ssid}' " + tr("(no GPS yet — location will be learned when connected)")
+      gui_app.push_widget(ConfirmDialog(msg, tr("OK")))
+
+    self._keyboard.reset(min_text_size=0)
+    self._keyboard.set_title(tr("Add Priority Network"), tr("enter the WiFi SSID"))
+    self._keyboard.set_text("")
+    self._keyboard.set_callback(on_ssid)
+    gui_app.push_widget(self._keyboard)
+
+  def _manage_priority_networks(self):
+    # View saved networks; offer to remove them one at a time (raylib has no native list editor here,
+    # so removal is a sequential confirm — full inline list/edit UI is the on-device polish follow-up).
+    # NOTE: do NOT set_enabled(False) — see _add_priority_network; these buttons must stay enabled.
+    nets = self._read_priority_networks()
+    if not nets:
+      gui_app.push_widget(ConfirmDialog(tr("No priority networks saved."), tr("OK")))
+      return
+    lines = []
+    for e in nets:
+      loc = f"{e['lat']:.4f},{e['lon']:.4f}" if e.get("lat") is not None else tr("location not learned")
+      tag = "  [portal]" if e.get("portal") else ""
+      lines.append(f"• {e['label']} ({e['ssid']}) — {loc}{tag}")
+    self._remove_queue = list(nets)
+    self._prompt_remove_next(header="\n".join(lines))
+
+  def _prompt_remove_next(self, header: str = ""):
+    if not getattr(self, "_remove_queue", None):
+      return
+    e = self._remove_queue[0]
+    body = (header + "\n\n" if header else "") + tr("Remove") + f" '{e['label']}' ({e['ssid']})?"
+
+    def on_result(result: DialogResult):
+      if result == DialogResult.CONFIRM:
+        nets = [n for n in self._read_priority_networks() if n["ssid"] != e["ssid"]]
+        self._write_priority_networks(nets)
+      self._remove_queue = self._remove_queue[1:]
+      if self._remove_queue:
+        self._prompt_remove_next()
+
+    # ConfirmDialog has NO set_callback method — the callback MUST be passed via the constructor
+    # (ctor signature: ConfirmDialog(text, confirm_text, cancel_text=None, rich=False, callback=None)).
+    # Passing it any other way leaves _callback=None, so confirm/cancel do nothing (the remove silently
+    # never fires). Remove=CONFIRM, Keep=CANCEL.
+    gui_app.push_widget(ConfirmDialog(body, tr("Remove"), tr("Keep"), callback=on_result))
 
   def _update_state(self):
     self._wifi_manager.process_callbacks()

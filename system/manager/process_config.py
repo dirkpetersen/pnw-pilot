@@ -107,6 +107,7 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("modem", "system.hardware.tici.modem", always_run, enabled=TICI),
+  PythonProcess("network_arbiterd", "system.networkd.network_arbiterd", always_run, enabled=TICI),  # network2xnor
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),

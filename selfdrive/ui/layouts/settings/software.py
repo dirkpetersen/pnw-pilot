@@ -7,7 +7,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, trn
 from openpilot.system.ui.widgets import Widget, DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
-from openpilot.system.ui.widgets.list_view import button_item, text_item, ListItem
+from openpilot.system.ui.widgets.list_view import button_item, text_item, toggle_item, ListItem
 from openpilot.system.ui.widgets.option_dialog import MultiOptionDialog
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 
@@ -64,6 +64,16 @@ class SoftwareLayout(Widget):
     self._waiting_for_updater = False
     self._waiting_start_ts: float = 0.0
 
+    # network2xnor: Pause Updates -> bound to the DisableUpdates param (ON = paused). Off by default
+    # (DisableUpdates default is 0). The updater reads it live; no openpilot restart needed.
+    self._pause_updates_btn = toggle_item(
+      lambda: tr("Pause Updates"),
+      lambda: tr("Pause automatic software updates. When on, the device won't download or install " +
+                 "updates until you turn this off. Off by default."),
+      initial_state=ui_state.params.get_bool("DisableUpdates"),
+      callback=self._on_pause_updates,
+    )
+
     # Branch switcher
     self._branch_btn = button_item(lambda: tr("Target Branch"), lambda: tr("SELECT"), callback=self._on_select_branch)
     self._branch_btn.set_visible(not ui_state.params.get_bool("IsTestedBranch"))
@@ -73,6 +83,7 @@ class SoftwareLayout(Widget):
     self._scroller = Scroller([
       self._onroad_label,
       self._version_item,
+      self._pause_updates_btn,
       self._download_btn,
       self._install_btn,
       self._branch_btn,
@@ -89,6 +100,9 @@ class SoftwareLayout(Widget):
   def _update_state(self):
     # Show/hide onroad warning
     self._onroad_label.set_visible(ui_state.is_onroad())
+
+    # Mirror external changes to DisableUpdates (e.g. set elsewhere) into the toggle
+    self._pause_updates_btn.action_item.set_state(ui_state.params.get_bool("DisableUpdates"))
 
     # Update current version and release notes
     current_desc = ui_state.params.get("UpdaterCurrentDescription") or ""
@@ -164,6 +178,10 @@ class SoftwareLayout(Widget):
       self._waiting_for_updater = True
       self._waiting_start_ts = time.monotonic()
       os.system("pkill -SIGHUP -f system.updated.updated")
+
+  def _on_pause_updates(self, state: bool):
+    # ON = pause updates (DisableUpdates=1); OFF = normal updates (DisableUpdates=0).
+    ui_state.params.put_bool("DisableUpdates", state, block=True)
 
   def _on_uninstall(self):
     def handle_uninstall_confirmation(result: DialogResult):

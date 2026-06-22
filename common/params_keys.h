@@ -52,6 +52,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"GsmApn", {PERSISTENT, STRING}},
     {"GsmMetered", {PERSISTENT, BOOL, "1"}},
     {"GsmRoaming", {PERSISTENT, BOOL}},
+    // network2xnor: perpetual tethering + priority-wifi arbitration (default OFF / blank)
+    {"TetheringEnabled", {PERSISTENT, BOOL, "0"}},
+    {"TetheringPriorityWifi", {PERSISTENT, STRING, ""}},
+    {"TetheringHomeLocation", {PERSISTENT, STRING}},  // network2xnor: GPS [lat,lon] of the priority WiFi (auto-learned) -> geo-gate scanning (LEGACY single-home; migrated into TetheringPriorityNetworks)
+    {"TetheringPriorityNetworks", {PERSISTENT, STRING}},  // network2xnor: JSON list of {label,ssid,lat,lon,portal} priority WiFi networks (multi-location + captive-portal)
     {"HardwareSerial", {PERSISTENT, STRING}},
     {"HasAcceptedTerms", {PERSISTENT, STRING, "0"}},
     {"InstallDate", {PERSISTENT, TIME}},
