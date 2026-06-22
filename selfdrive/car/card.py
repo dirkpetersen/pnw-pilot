@@ -142,11 +142,21 @@ class Car:
     if prev_cp is not None:
       self.params.put("CarParamsPrevRoute", prev_cp, block=True)
 
-    # Write CarParams for controls and radard
+    # Write CarParams for controls and radard (current session — may be MOCK, which just runs passive)
     cp_bytes = self.CP.to_bytes()
     self.params.put("CarParams", cp_bytes, block=True)
-    self.params.put("CarParamsCache", cp_bytes)
-    self.params.put("CarParamsPersistent", cp_bytes)
+
+    # fingerprint2pnw: a MOCK fingerprint is a flaky / no-car read (e.g. the FW query catching only some
+    # ECUs at a transitional boot). On this shared Tesla+Lightning device BOTH cars are supported, so a
+    # MOCK is never a genuine "unsupported car" — and letting it overwrite the persistent/cache CarParams
+    # makes the OFFROAD UI show "dashcam" when the car is off (cached MOCK has dashcamOnly=True) and strips
+    # the FW cache the next boot relies on. So never persist a MOCK over a previously-good fingerprint;
+    # keep the last good car for the UI + the next-boot FW cache. A real car fingerprint persists normally.
+    if self.CP.brand != "mock" or prev_cp is None:
+      self.params.put("CarParamsCache", cp_bytes)
+      self.params.put("CarParamsPersistent", cp_bytes)
+    else:
+      cloudlog.warning("fingerprint2pnw: MOCK fingerprint — keeping previous good CarParamsPersistent/Cache")
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
