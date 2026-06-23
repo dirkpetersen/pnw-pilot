@@ -52,6 +52,9 @@ pkgs = [importlib.import_module(name) for name in pkg_names]
 allowed_system_libs = {
   "EGL", "GLESv2", "GL", "Qt5Charts", "Qt5Core", "Qt5Gui", "Qt5Widgets",
   "dl", "drm", "gbm", "m", "pthread",
+  # 3pnw CI: allow system libusb when it isn't vendored (generic aarch64 GitHub runner). On the comma
+  # device libusb is vendored in third_party, so _resolve_lib finds it first and never reaches here.
+  "usb-1.0",
 }
 
 def _resolve_lib(env, name):
