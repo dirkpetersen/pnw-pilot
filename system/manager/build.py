@@ -26,6 +26,12 @@ def build(spinner: Spinner, dirty: bool = False, minimal: bool = False) -> None:
 
   extra_args = ["--minimal"] if minimal else []
 
+  # 3pnw CI compile-verification: on a generic aarch64 GitHub runner the vendored ffmpeg wheel pulls in
+  # VAAPI/Vulkan hw-encode symbols that cannot link off-device, so the build can opt out of the
+  # device-coupled media stack (encoderd/loggerd/camerad). Never set on the device (AGNOS) builds.
+  if os.environ.get("SCONS_NO_MEDIA") == "1" and not AGNOS:
+    extra_args.append("--no-media")
+
   if AGNOS:
     HARDWARE.set_power_save(False)
     os.sched_setaffinity(0, range(8))  # ensure we can use the isolcpus cores

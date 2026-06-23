@@ -1,16 +1,20 @@
-name: 3pnw release (experimental aarch64 prebuilt)
+name: 3pnw compile check (aarch64)
 
-# Builds the 3pnw branch and publishes a prebuilt to `3pnw-release`.
+# Compile-verification gate for the 3pnw branch. Builds the buildable, non-device-coupled openpilot
+# targets on a GitHub-hosted ARM runner to catch code regressions before they reach the car.
 #
-# EXPERIMENTAL — read 3PNW-RELEASE.md. GitHub ARM runners are GENERIC aarch64, NOT the comma's
-# `larch64`: the vendored third_party libs and SCons flags differ, so the resulting prebuilt is
-# NOT guaranteed to run on the comma 3X. Panda firmware is built UNSIGNED (the release signing cert
-# lives only on the device at /data/pandaextra/certs/release) — the device must keep its own
-# matched-set panda fw and must NOT reflash from this branch. The authoritative device release is
-# still release/build_release.sh, run ON the comma.
+# WHY THIS IS A COMPILE CHECK, NOT A PREBUILT — read 3PNW-RELEASE.md.
+# GitHub ARM runners are GENERIC aarch64, NOT the comma's `larch64`. The device-coupled MEDIA/ENCODER
+# stack (system/loggerd's encoderd/loggerd + system/camerad) links the vendored ffmpeg wheel, which on
+# a generic aarch64 host pulls in VAAPI/Vulkan hardware-encode symbols (vaCreateContext,
+# vaRenderPicture, vulkan refs) that have no off-device link target — a fundamental larch64 != aarch64
+# device coupling. So this build SKIPS that stack (scons --no-media, via SCONS_NO_MEDIA=1) and verifies
+# everything else compiles: cereal, common, panda firmware, pandad, the MPC libs, modeld/tinygrad,
+# locationd, rednose, the UI, and the cython extensions. A green run means the C/C++/cython tree builds
+# clean on aarch64 — it does NOT produce a device-deployable prebuilt.
 #
-# This mirrors the proven `tests.yaml` "build release" recipe (build_stripped -> op.sh setup ->
-# system/manager/build.py) on an ARM runner, then packs + pushes the compiled tree.
+# The authoritative device release is still release/build_release.sh, run ON the comma (it has the
+# larch64 toolchain + the panda signing cert and builds the full media stack natively).
 
 on:
   push:
@@ -18,23 +22,21 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # push the 3pnw-release branch with the default GITHUB_TOKEN
+  contents: read
 
 concurrency:
-  group: 3pnw-release-${{ github.ref }}
+  group: 3pnw-compile-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: aarch64 prebuilt -> 3pnw-release
+    name: aarch64 compile check (no media stack)
     runs-on: ubuntu-24.04-arm   # GitHub-hosted ARM runner (free on public repos)
     timeout-minutes: 90
     env:
-      RELEASE_BRANCH: 3pnw-release
       TARGET_DIR: /tmp/3pnw-release
       PYTHONPATH: /tmp/3pnw-release
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_REPOSITORY: ${{ github.repository }}
+      SCONS_NO_MEDIA: "1"   # skip the device-coupled media/encoder stack (see header + SConstruct --no-media)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,18 +53,14 @@ jobs:
         run: ./tools/op.sh setup
 
       - name: Install system build deps
-        # The bare ubuntu-24.04-arm runner lacks several device libs the vendored third_party stack
-        # links against (op.sh setup doesn't install them). pandad needs libusb; the vendored ffmpeg
-        # in encoderd needs VAAPI/DRM/Vulkan. Without these the build fails partway (panda.o -> libusb,
-        # then encoderd -> undefined va*/vulkan refs).
+        # The bare ubuntu-24.04-arm runner lacks libusb, which the vendored panda/pandad stack links
+        # against (op.sh setup doesn't install it). libva/libdrm/libvulkan are NOT needed here because
+        # SCONS_NO_MEDIA=1 skips encoderd/loggerd/camerad (the only consumers of those device libs).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libusb-1.0-0-dev libva-dev libdrm-dev libvulkan-dev
+          sudo apt-get install -y libusb-1.0-0-dev
 
-      - name: Compile openpilot (aarch64)
+      - name: Compile openpilot (aarch64, no media stack)
         working-directory: ${{ env.TARGET_DIR }}
+        # SCONS_NO_MEDIA=1 makes build.py pass scons --no-media (see system/manager/build.py + SConstruct).
         run: python3 system/manager/build.py
-
-      - name: Pack + push prebuilt to ${{ env.RELEASE_BRANCH }}
-        working-directory: ${{ env.TARGET_DIR }}
-        run: ${{ github.workspace }}/release/pack_3pnw.sh
