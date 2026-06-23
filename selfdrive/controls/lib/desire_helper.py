@@ -1,5 +1,6 @@
 from cereal import log
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 
 LaneChangeState = log.LaneChangeState
@@ -7,6 +8,10 @@ LaneChangeDirection = log.LaneChangeDirection
 
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
+
+# auto2xnor: nudgeless lane change — hold the blinker this long (no blindspot) to
+# auto-start the lane change without a steering-wheel nudge.
+AUTO_LANE_CHANGE_DELAY = 0.75  # seconds (driver feedback: 1.5 felt too slow to commit the change)
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -31,7 +36,7 @@ DESIRES = {
 
 
 class DesireHelper:
-  def __init__(self):
+  def __init__(self, CP=None):
     self.lane_change_state = LaneChangeState.off
     self.lane_change_direction = LaneChangeDirection.none
     self.lane_change_timer = 0.0
@@ -39,6 +44,18 @@ class DesireHelper:
     self.keep_pulse_timer = 0.0
     self.prev_one_blinker = False
     self.desire = log.Desire.none
+
+    # auto2xnor: nudgeless lane change — Tesla, plus the Ford F-150 Lightning.
+    # Gated to specific platforms, NOT whole brands: every Tesla, and the F-150
+    # Lightning specifically (CAR.FORD_F_150_LIGHTNING_MK1). Other Ford models
+    # (and all other brands) keep the steering-wheel nudge requirement.
+    self.params = Params()
+    self.brand = CP.brand if CP is not None else ""
+    self.car_fingerprint = CP.carFingerprint if CP is not None else ""
+    self.nudgeless_supported = self.brand == "tesla" or self.car_fingerprint == "FORD_F_150_LIGHTNING_MK1"
+    self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
+    self.auto_lane_change_timer = 0.0
+    self._param_read_counter = 0
 
   @staticmethod
   def get_lane_change_direction(CS):
@@ -49,6 +66,12 @@ class DesireHelper:
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
+    # auto2xnor: refresh the nudgeless toggle ~ every 3s so changing it doesn't need a restart
+    # (still gated by nudgeless_supported — Tesla + F-150 Lightning only)
+    self._param_read_counter += 1
+    if self._param_read_counter % 60 == 0:
+      self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
+
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
       self.lane_change_direction = LaneChangeDirection.none
@@ -57,6 +80,7 @@ class DesireHelper:
       if self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker and not below_lane_change_speed:
         self.lane_change_state = LaneChangeState.preLaneChange
         self.lane_change_ll_prob = 1.0
+        self.auto_lane_change_timer = 0.0  # auto2xnor: reset nudgeless timer on entry
         # Initialize lane change direction to prevent UI alert flicker
         self.lane_change_direction = self.get_lane_change_direction(carstate)
 
@@ -72,10 +96,19 @@ class DesireHelper:
         blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
                               (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
 
+        # auto2xnor: nudgeless — accumulate time while the blinker is held with no
+        # blindspot; once past the delay, allow the lane change without a wheel nudge.
+        # Reset the timer whenever a blindspot is present so the hold must be clear.
+        if self.nudgeless_lane_change and not blindspot_detected:
+          self.auto_lane_change_timer += DT_MDL
+        else:
+          self.auto_lane_change_timer = 0.0
+        auto_lane_change = self.nudgeless_lane_change and self.auto_lane_change_timer > AUTO_LANE_CHANGE_DELAY
+
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
           self.lane_change_direction = LaneChangeDirection.none
-        elif torque_applied and not blindspot_detected:
+        elif (torque_applied or auto_lane_change) and not blindspot_detected:
           self.lane_change_state = LaneChangeState.laneChangeStarting
 
       # LaneChangeState.laneChangeStarting

@@ -99,6 +99,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapForLocationRegion", {CLEAR_ON_MANAGER_START, STRING}},  // mapd_manager writes the region code under current GPS (for the UI to display/gate); "" = covered/unknown
     {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_manager writes True when current GPS is already covered by a downloaded map (UI greys the toggle)
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
+    {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
+    {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
     // ces2xnor: Conditional Experimental Switching + VTSC (MapTargetVelocities already registered by mapd2pnw above)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable

@@ -48,6 +48,17 @@ DESCRIPTIONS = {
     "Affects speed/braking only, not steering, and only when openpilot controls longitudinal. NOT a cone/obstacle " +
     "detector and not a substitute for attention — stay ready to brake, especially in construction zones and on curves."
   ),
+  "NudgelessLaneChange": tr_noop(
+    "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
+    "Hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
+    "The lane change is blocked while the blind spot monitor detects a vehicle. Keep your hands on the wheel and check your surroundings. " +
+    "Tesla and the Ford F-150 Lightning only — other cars still require the steering-wheel nudge."
+  ),
+  "NoDisengageOnBrake": tr_noop(
+    "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
+    "openpilot will resume controlling speed as soon as you release the brake. " +
+    "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
+  ),
 }
 
 
@@ -71,6 +82,19 @@ class TogglesLayout(Widget):
         lambda: tr("Conditional Experimental Switching (CES)"),
         DESCRIPTIONS["ConditionalExperimentalSwitching"],
         "speed_limit.png",
+        False,
+      ),
+      # auto2pnw: nudgeless lane change (Tesla + F-150 Lightning) + no-disengage-on-brake (unsupported, greyed)
+      "NudgelessLaneChange": (
+        lambda: tr("Nudgeless Lane Change"),
+        DESCRIPTIONS["NudgelessLaneChange"],
+        "warning.png",
+        False,
+      ),
+      "NoDisengageOnBrake": (
+        lambda: tr("No Disengage on Braking"),
+        DESCRIPTIONS["NoDisengageOnBrake"],
+        "disengage_on_accelerator.png",
         False,
       ),
       "DisengageOnAccelerator": (
@@ -215,6 +239,18 @@ class TogglesLayout(Widget):
     if "GetMapForLocation" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["GetMapForLocation"].action_item.set_enabled(not covered)
+
+    # auto2pnw: Nudgeless Lane Change applies to Tesla + the F-150 Lightning only — grey out (and force
+    # off) on any other car. No Disengage on Braking is unsupported here on every car — always greyed off.
+    cp = ui_state.CP
+    nudgeless_ok = cp is not None and (cp.brand == "tesla" or cp.carFingerprint == "FORD_F_150_LIGHTNING_MK1")
+    if "NudgelessLaneChange" in self._toggles:
+      self._toggles["NudgelessLaneChange"].action_item.set_enabled(nudgeless_ok)
+      if not nudgeless_ok:
+        self._toggles["NudgelessLaneChange"].action_item.set_state(False)
+    if "NoDisengageOnBrake" in self._toggles:
+      self._toggles["NoDisengageOnBrake"].action_item.set_enabled(False)
+      self._toggles["NoDisengageOnBrake"].action_item.set_state(False)
 
   def _render(self, rect):
     self._scroller.render(rect)
