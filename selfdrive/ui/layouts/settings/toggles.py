@@ -284,7 +284,7 @@ class TogglesLayout(Widget):
   def _toggle_callback(self, state: bool, param: str):
     # ces2xnor: ExperimentalMode toggle removed (replaced by CES). CES is a plain bool toggle —
     # no confirm dialog, no icon swap. Full Experimental is reachable via the top-right button.
-    self._params.put_bool(param, state, block=True)
+    self._params.put_bool(param, state)
     if self._toggle_defs[param][3]:
       self._params.put_bool("OnroadCycleRequested", True)
 
@@ -294,5 +294,5 @@ class TogglesLayout(Widget):
   def _set_ces_mode(self, button_index: int):
     # light-ces-gentle: CESMode is the source of truth (0=Off, 1=Light, 2=Standard). Mirror the legacy
     # bool ConditionalExperimentalSwitching (== CESMode > 0) so any back-compat reader agrees.
-    self._params.put("CESMode", button_index, block=True)
-    self._params.put_bool("ConditionalExperimentalSwitching", button_index > 0, block=True)
+    self._params.put("CESMode", button_index)
+    self._params.put_bool("ConditionalExperimentalSwitching", button_index > 0)
