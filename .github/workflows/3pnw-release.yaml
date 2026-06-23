@@ -51,10 +51,13 @@ jobs:
         run: ./tools/op.sh setup
 
       - name: Install system build deps
-        # pandad needs libusb headers; op.sh setup doesn't install them on the bare ARM runner
-        # (build otherwise gets all the way to selfdrive/pandad/panda.o then fails on
-        # 'libusb-1.0/libusb.h: No such file or directory').
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+        # The bare ubuntu-24.04-arm runner lacks several device libs the vendored third_party stack
+        # links against (op.sh setup doesn't install them). pandad needs libusb; the vendored ffmpeg
+        # in encoderd needs VAAPI/DRM/Vulkan. Without these the build fails partway (panda.o -> libusb,
+        # then encoderd -> undefined va*/vulkan refs).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libva-dev libdrm-dev libvulkan-dev
 
       - name: Compile openpilot (aarch64)
         working-directory: ${{ env.TARGET_DIR }}
