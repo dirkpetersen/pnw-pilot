@@ -30,7 +30,18 @@ class Priority:
 
 def set_core_affinity(cores: list[int]) -> None:
   if sys.platform == 'linux' and not PC:
-    os.sched_setaffinity(0, cores)
+    # dirk: cores 4-7 on the comma 3X can be hotplugged OFFLINE (power/CPU events,
+    # e.g. after a heavy OSM map download). Pinning to an offline core raises
+    # OSError(EINVAL), which was crash-looping dmonitoringmodeld (core 7) and would
+    # also kill selfdrived (core 4) / plannerd / radard (core 5) -> "Process Not
+    # Running dmonitoringd" and no driver monitoring. Filter to currently-online cores
+    # and never let an affinity failure take the process down.
+    try:
+      online = os.sched_getaffinity(0)
+      usable = [c for c in cores if c in online] or list(online)
+      os.sched_setaffinity(0, usable)
+    except OSError:
+      pass
 
 
 def config_realtime_process(cores: int | list[int], priority: int) -> None:
