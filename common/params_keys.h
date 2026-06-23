@@ -99,6 +99,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapForLocationRegion", {CLEAR_ON_MANAGER_START, STRING}},  // mapd_manager writes the region code under current GPS (for the UI to display/gate); "" = covered/unknown
     {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_manager writes True when current GPS is already covered by a downloaded map (UI greys the toggle)
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
+    // ces2xnor: Conditional Experimental Switching + VTSC (MapTargetVelocities already registered by mapd2pnw above)
+    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
+    {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
+    {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
+    {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor
+    {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
+    {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"LastAgnosPowerMonitorShutdown", {CLEAR_ON_MANAGER_START, STRING}},

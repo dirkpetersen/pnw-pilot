@@ -102,6 +102,7 @@ _services: dict[str, tuple] = {
   "customReservedRawData0": (True, 0.),
   "customReservedRawData1": (True, 0.),
   "customReservedRawData2": (True, 0.),
+  "vtscState": (True, 20., 5),      # vtsc (ces2xnor): curve speed control decision, logged @ 20 Hz
   # mapd2pnw: official pfeiferj mapd v2.0.6 services. Queue size MUST be MEDIUM (2MB) to match the
   # binary's settings/const.go (QUEUE_SIZE_MEDIUM). mapdOut @ 20 Hz (primary driving output),
   # mapdExtendedOut @ 1 Hz (download progress + path; not logged, per mapd outputs.md), mapdIn is
