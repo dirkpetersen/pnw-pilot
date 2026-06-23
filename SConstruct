@@ -26,6 +26,13 @@ AddOption('--minimal',
 AddOption('--ubsan',
           action='store_true',
           help='turn on UBSan')
+AddOption('--no-media',
+          action='store_true',
+          dest='no_media',
+          default=False,
+          help='skip the device-coupled media stack (system/loggerd encoderd/loggerd + system/camerad). '
+               'Used by the 3pnw CI compile-verification on generic aarch64 GitHub runners, where the '
+               'vendored ffmpeg wheel pulls in VAAPI/Vulkan hw-encode symbols that do not link off-device.')
 
 # Detect platform
 arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
@@ -239,12 +246,17 @@ SConscript(['panda/SConscript'])
 SConscript(['rednose/SConscript'])
 
 # Build system services
-SConscript([
-  'system/loggerd/SConscript',
-])
+# --no-media skips the device-coupled media/encoder stack (see AddOption above): the vendored ffmpeg
+# wheel on a generic aarch64 host references VAAPI/Vulkan hw-encode symbols (vaCreateContext,
+# vaRenderPicture, ...) that have no off-device link target, so encoderd fails to link. The 3pnw CI
+# compile-verification uses this to gate the buildable, non-device-coupled tree.
+if not GetOption('no_media'):
+  SConscript([
+    'system/loggerd/SConscript',
+  ])
 
-if arch == "larch64":
-  SConscript(['system/camerad/SConscript'])
+  if arch == "larch64":
+    SConscript(['system/camerad/SConscript'])
 
 # Build openpilot
 SConscript(['third_party/SConscript'])
