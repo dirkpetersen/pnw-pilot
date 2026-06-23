@@ -207,7 +207,7 @@ def main(demo=False):
   long_delay = CP.longitudinalActuatorDelay + LONG_SMOOTH_SECONDS
   prev_action = log.ModelDataV2.Action()
 
-  DH = DesireHelper()
+  DH = DesireHelper(CP)  # auto2pnw: pass CP so nudgeless lane change can gate on Tesla / F-150 Lightning
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame

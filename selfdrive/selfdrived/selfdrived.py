@@ -96,6 +96,7 @@ class SelfdriveD:
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+    self.no_disengage_on_brake = self.params.get_bool("NoDisengageOnBrake")  # auto2pnw
 
     car_recognized = self.CP.brand != 'mock'
 
@@ -223,9 +224,13 @@ class SelfdriveD:
           self.events.add(EventName.pcmEnable)
 
       # Disable on rising edge of accelerator or brake. Also disable on brake when speed > 0
-      if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator) or \
-        (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
-        (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
+      # auto2pnw: NoDisengageOnBrake suppresses the brake/regen-braking disengage events so openpilot
+      # stays engaged through brake presses. Gas-pedal disengage is unaffected. Panda safety untouched.
+      brake_disengage = (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
+                        (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill))
+      if self.no_disengage_on_brake:
+        brake_disengage = False
+      if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator) or brake_disengage:
         self.events.add(EventName.pedalPressed)
 
     # Create events for temperature, disk space, and memory
@@ -550,6 +555,7 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.no_disengage_on_brake = self.params.get_bool("NoDisengageOnBrake")  # auto2pnw
       self.manual_experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl  # ces2xnor
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
