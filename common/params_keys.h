@@ -102,7 +102,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // ces2xnor: Conditional Experimental Switching + VTSC
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
-    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
+    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
+    {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
     {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
     {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor

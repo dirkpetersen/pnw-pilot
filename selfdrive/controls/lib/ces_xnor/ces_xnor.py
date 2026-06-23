@@ -51,8 +51,7 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
   import math
   r = 6371000.0
   p1, p2 = math.radians(lat1), math.radians(lat2)
-  dp = math.radians(lat2 - lat1)
-  dl = math.radians(lon2 - lon1)
+  dp = math.radians(lat2 - lat1); dl = math.radians(lon2 - lon1)
   a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
   return 2 * r * math.asin(min(1.0, a ** 0.5))
 
@@ -220,12 +219,14 @@ class ConditionalExperimentalSwitching:
   """Live controller. Owns the per-condition filters + the mode state machine (min-dwell + sustained
   clear). `mode()` returns 'experimental'/'chill'; `update(sm, toggles)` is called each cycle."""
 
-  def __init__(self):
+  def __init__(self, exp_min_dwell: float = C.EXP_MIN_DWELL_S, chill_min_dwell: float = C.CHILL_MIN_DWELL_S):
     # one debounce filter per condition (entry) + one for the all-clear (exit)
     self._cond = Condition()        # "any condition active" (debounced)
     self._is_experimental = False
     self._dwell = 0.0               # s in current mode
     self._status = "chill"
+    self._exp_min = exp_min_dwell   # min dwell in Experimental (gentle profile lengthens this)
+    self._chill_min = chill_min_dwell  # min dwell in Chill / re-entry cooldown
 
   def reset(self):
     self._cond.reset()
@@ -250,7 +251,7 @@ class ConditionalExperimentalSwitching:
     if not self._is_experimental:
       # enter Experimental once the debounced condition is active AND we've been in Chill at least
       # the re-entry cooldown (de-flap: stops the instant snap-back that caused the stop&go sawtooth)
-      if cond_active and self._dwell >= C.CHILL_MIN_DWELL_S:
+      if cond_active and self._dwell >= self._chill_min:
         self._is_experimental = True
         self._status = status
         self._dwell = 0.0
@@ -259,7 +260,7 @@ class ConditionalExperimentalSwitching:
       # AND we've held Experimental at least EXP_MIN_DWELL_S
       if status != "chill":
         self._status = status      # keep showing the active reason
-      if not cond_active and self._dwell >= C.EXP_MIN_DWELL_S:
+      if not cond_active and self._dwell >= self._exp_min:
         self._is_experimental = False
         self._status = "chill"
         self._dwell = 0.0
@@ -296,9 +297,7 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
   lead_drel = float(getattr(lead, 'dRel', 0.0)) if has_lead else 0.0
 
   try:
-    orz = list(model.orientationRate.z)
-    vx = list(model.velocity.x)
-    tb = list(model.orientationRate.t)
+    orz = list(model.orientationRate.z); vx = list(model.velocity.x); tb = list(model.orientationRate.t)
     vis_acc, ttc = vision_curve_lat_accel(orz, vx, tb, v_ego)
   except Exception:
     vis_acc, ttc = 0.0, 10.0
@@ -339,6 +338,11 @@ class CESController:
       self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
     except Exception:
       self.mem_params = None
+    # light-ces-gentle: the gentle profile is now USER-SELECTED via CESMode (1=Light), NOT gated on
+    # carFingerprint. Light = longer dwell + VTSC owns curves (no curve->Experimental) on ANY car;
+    # Standard = default tune. _read_params() rebuilds the state machine if the mode changes at runtime.
+    self._mode = C.CES_MODE_OFF
+    self._gentle = False
     self._sm = ConditionalExperimentalSwitching()
     self._enabled = False
     self._button = C.BTN_CES
@@ -361,12 +365,28 @@ class CESController:
     # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
 
+  def _set_mode(self, mode: int):
+    """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
+    when the gentle flag actually flips, so we don't reset the dwell every ~1 Hz read."""
+    gentle = C.ces_is_gentle(mode)
+    if mode != self._mode or gentle != self._gentle:
+      if gentle != self._gentle:
+        if gentle:
+          self._sm = ConditionalExperimentalSwitching(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
+        else:
+          self._sm = ConditionalExperimentalSwitching()
+      self._mode = mode
+      self._gentle = gentle
+
   def _read_params(self):
     if self._frame % max(1, int(1.0 / DT_CTRL)) == 0:   # ~1 Hz (selfdrived steps at 100 Hz / DT_CTRL)
       try:
-        self._enabled = self._long_ok and self.params.get_bool("ConditionalExperimentalSwitching")
+        mode = C.read_ces_mode(self.params)
       except Exception:
-        self._enabled = False
+        mode = C.CES_MODE_OFF
+      self._set_mode(mode)
+      # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
+      self._enabled = self._long_ok and C.ces_enabled(self._mode)
       if self._enabled:
         self._toggles = _toggles_from_params(self.params)
         try:
@@ -396,8 +416,7 @@ class CESController:
       pos = self.mem_params.get("LastGPSPosition", return_default=True)
       if isinstance(pos, (bytes, str)):
         pos = json.loads(pos)
-      self._cur_lat = float(pos["latitude"])
-      self._cur_lon = float(pos["longitude"])
+      self._cur_lat = float(pos["latitude"]); self._cur_lon = float(pos["longitude"])
       self._cur_bearing = float(pos.get("bearing", 0.0))
     except Exception:
       self._cur_lat = self._cur_lon = self._cur_bearing = None
@@ -433,7 +452,10 @@ class CESController:
       model = sm['modelV2']
       v_ego = float(car_state.vEgo)
       mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
-      sig = _signals_from(car_state, lead, model, self._toggles, mtv, mtd, self._speed_limit)
+      # gentle profile: VTSC handles curve speed (smooth, decel-limited), so CES does NOT trip
+      # Experimental for curves on the truck — removes the chill<->experimental planner-mode flapping.
+      toggles = {**self._toggles, "curves": False} if self._gentle else self._toggles
+      sig = _signals_from(car_state, lead, model, toggles, mtv, mtd, self._speed_limit)
     except Exception:
       sig = None
 

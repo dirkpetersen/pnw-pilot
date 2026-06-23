@@ -2,9 +2,9 @@
 VTSC Phase 2 — live controller for the longitudinal planner.
 
 `VTSCController.cap(sm, v_cruise, v_ego)` returns a possibly-lowered cruise speed (m/s) so the planner
-MPC slows for an upcoming curve. Rides the CES master toggle (`ConditionalExperimentalSwitching`,
-default OFF) + openpilotLongitudinalControl; returns v_cruise unchanged when disabled -> behavior-neutral.
-NEVER raises speed above v_cruise.
+MPC slows for an upcoming curve. Rides the CES master selector (`CESMode`: 0=Off, 1=Light->GENTLE
+tune, 2=Standard->DEFAULT tune; default Off) + openpilotLongitudinalControl; returns v_cruise
+unchanged when disabled -> behavior-neutral. NEVER raises speed above v_cruise.
 
 Apex state machine (driver feedback, drive #4):
   - the instant a binding curve is detected -> an immediate >=1 mph cut (CONFIDENCE_CUT) so the driver
@@ -27,6 +27,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import model_curve_state, brake_cap_for_apex, apply_limits
+from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as CES
 
 
 class VTSCController:
@@ -40,6 +41,11 @@ class VTSCController:
     except Exception:
       self.mem_params = None
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
+    # light-ces-gentle: the tune is now USER-SELECTED via CESMode (1=Light -> GENTLE_PROFILE, soft
+    # decel + slow recovery so a series of curves doesn't sawtooth; 2=Standard -> DEFAULT_PROFILE),
+    # NOT gated on carFingerprint. _read_enabled() re-selects the tune when the mode changes.
+    self._mode = CES.CES_MODE_OFF
+    self.tune = dict(C.DEFAULT_PROFILE)
     self._enabled = False
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
@@ -60,8 +66,11 @@ class VTSCController:
     if now - self._last_read >= 1.0:                       # ~1 Hz
       self._last_read = now
       try:
-        # VTSC rides the CES master toggle (ConditionalExperimentalSwitching): CES on -> VTSC on.
-        self._enabled = self._long_ok and self.params.get_bool("ConditionalExperimentalSwitching")
+        # VTSC rides the CES master selector (CESMode): non-Off -> VTSC on. The mode also picks the
+        # tune: Light -> GENTLE_PROFILE (anti-sawtooth), Standard -> DEFAULT_PROFILE. On ANY car.
+        self._mode = CES.read_ces_mode(self.params)
+        self._enabled = self._long_ok and CES.ces_enabled(self._mode)
+        self.tune = dict(C.GENTLE_PROFILE) if CES.ces_is_gentle(self._mode) else dict(C.DEFAULT_PROFILE)
       except Exception:
         self._enabled = False
 
@@ -90,7 +99,7 @@ class VTSCController:
     except Exception:
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
-    k_apex, d_apex, v_curve = model_curve_state(model, v_cruise)
+    k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     has_curve = d_apex >= 0.0 and v_curve < v_cruise - 0.1
     tta = (d_apex / max(v_ego, 1.0)) if has_curve else float('inf')
 
@@ -111,7 +120,7 @@ class VTSCController:
       elif tta <= C.HOLD_TTA_S:
         self._state = "hold"
       else:
-        cap = brake_cap_for_apex(v_curve, d_apex, v_ego)
+        cap = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL'])
         # never above cruise-CONFIDENCE_CUT (keep the engage cut), floored at V_MIN
         target = max(min(cap, v_cruise - C.CONFIDENCE_CUT), C.V_MIN)
 
@@ -134,7 +143,7 @@ class VTSCController:
         self._below = 0
 
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
-    self._applied = apply_limits(self._applied, target, v_cruise, dt)
+    self._applied = apply_limits(self._applied, target, v_cruise, dt, self.tune['A_DECEL_MAX'], self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
 
     engaged = capped < v_cruise - 0.5
