@@ -50,6 +50,12 @@ jobs:
       - name: Install toolchain
         run: ./tools/op.sh setup
 
+      - name: Install system build deps
+        # pandad needs libusb headers; op.sh setup doesn't install them on the bare ARM runner
+        # (build otherwise gets all the way to selfdrive/pandad/panda.o then fails on
+        # 'libusb-1.0/libusb.h: No such file or directory').
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+
       - name: Compile openpilot (aarch64)
         working-directory: ${{ env.TARGET_DIR }}
         run: python3 system/manager/build.py
