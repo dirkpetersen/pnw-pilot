@@ -1,0 +1,59 @@
+name: 3pnw release (experimental aarch64 prebuilt)
+
+# Builds the 3pnw branch and publishes a prebuilt to `3pnw-release`.
+#
+# EXPERIMENTAL — read 3PNW-RELEASE.md. GitHub ARM runners are GENERIC aarch64, NOT the comma's
+# `larch64`: the vendored third_party libs and SCons flags differ, so the resulting prebuilt is
+# NOT guaranteed to run on the comma 3X. Panda firmware is built UNSIGNED (the release signing cert
+# lives only on the device at /data/pandaextra/certs/release) — the device must keep its own
+# matched-set panda fw and must NOT reflash from this branch. The authoritative device release is
+# still release/build_release.sh, run ON the comma.
+#
+# This mirrors the proven `tests.yaml` "build release" recipe (build_stripped -> op.sh setup ->
+# system/manager/build.py) on an ARM runner, then packs + pushes the compiled tree.
+
+on:
+  push:
+    branches: [3pnw]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push the 3pnw-release branch with the default GITHUB_TOKEN
+
+concurrency:
+  group: 3pnw-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: aarch64 prebuilt -> 3pnw-release
+    runs-on: ubuntu-24.04-arm   # GitHub-hosted ARM runner (free on public repos)
+    timeout-minutes: 90
+    env:
+      RELEASE_BRANCH: 3pnw-release
+      TARGET_DIR: /tmp/3pnw-release
+      PYTHONPATH: /tmp/3pnw-release
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Fetch LFS objects (onnx models, svgs)
+        run: git lfs pull
+
+      - name: Build stripped source tree (release_files.py)
+        run: release/build_stripped.sh   # writes the release file set into $TARGET_DIR
+
+      - name: Install toolchain
+        run: ./tools/op.sh setup
+
+      - name: Compile openpilot (aarch64)
+        working-directory: ${{ env.TARGET_DIR }}
+        run: python3 system/manager/build.py
+
+      - name: Pack + push prebuilt to ${{ env.RELEASE_BRANCH }}
+        working-directory: ${{ env.TARGET_DIR }}
+        run: ${{ github.workspace }}/release/pack_3pnw.sh
