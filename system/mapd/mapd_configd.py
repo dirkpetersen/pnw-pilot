@@ -13,10 +13,13 @@ CONTROL later via MapdSettings — this daemon never enables control.
 """
 import cereal.messaging as messaging
 from cereal import log
+from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
-PNW_DOWNLOAD = "us_states.WA,us_states.OR,us_states.ID"
+# Download-menu paths are period-delimited keys from mapd's download_menu.json. The US states
+# table is "us_state" (SINGULAR), e.g. "us_state.WA". Comma-join multiple areas.
+PNW_DOWNLOAD = "us_state.WA,us_state.OR,us_state.ID"
 NetworkType = log.DeviceState.NetworkType
 
 
@@ -27,15 +30,31 @@ def _on_unmetered_wifi(ds) -> bool:
 def main():
   params = Params()
   pm = messaging.PubMaster(['mapdIn'])
-  sm = messaging.SubMaster(['deviceState', 'mapdExtendedOut'])
+  gps_service = get_gps_location_service(params)
+  sm = messaging.SubMaster(['deviceState', 'mapdExtendedOut', 'mapdOut', gps_service])
 
-  done = params.get_bool("MapdPnwMapsRequested")
-  if done:
-    cloudlog.info("mapd_configd: PNW maps already requested; idle")
+  if params.get_bool("MapdPnwMapsRequested"):
+    cloudlog.info("mapd_configd: PNW maps already requested; idle (re-checks the param each loop)")
+  last_covered = None
 
   while True:
-    sm.update(1000)  # paces the loop (blocks up to 1 s on deviceState/mapdExtendedOut); no extra sleep
-    if done:
+    sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
+
+    # mapd2pnw: drive the "Get map for this location" toggle grey-out (param MapForLocationCovered).
+    # The toggle should be GREYED (covered) unless we KNOW we're somewhere with no downloaded map.
+    # covered = no GPS fix (can't tell where we are, e.g. parked offroad) OR mapd has a map tile
+    # loaded for the current position. Only a fix in an uncovered area enables the toggle. Replaces
+    # the deleted sunnypilot coverage writer; written only on change to avoid churning the param.
+    has_fix = sm.alive[gps_service]
+    tile_here = sm.alive['mapdOut'] and sm['mapdOut'].tileLoaded
+    covered = (not has_fix) or tile_here
+    if covered != last_covered:
+      params.put_bool("MapForLocationCovered", covered)
+      last_covered = covered
+
+    # Re-read the guard each loop (not once at startup) so re-arming the download — resetting
+    # MapdPnwMapsRequested to 0 — takes effect without restarting this daemon.
+    if params.get_bool("MapdPnwMapsRequested"):
       continue
 
     if not sm.alive['mapdExtendedOut']:
@@ -45,8 +64,7 @@ def main():
     # one-shot is complete. (Checking right after send() would read pre-send state and re-spam.)
     prog = sm['mapdExtendedOut'].downloadProgress
     if prog.active or prog.totalFiles > 0:
-      params.put_bool("MapdPnwMapsRequested", True)
-      done = True
+      params.put_bool("MapdPnwMapsRequested", True)  # one-shot guard; re-read at the top of the loop
       cloudlog.warning("mapd_configd: PNW download started; one-shot guard set")
       continue
 

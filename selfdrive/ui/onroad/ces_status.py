@@ -6,7 +6,7 @@ Conditional Experimental Switching + mapd are doing, so you can validate it on t
 
 Data path: selfdrived's CESController publishes a `CESStatus` snapshot to the in-memory param store
 (/dev/shm/params) at ~5 Hz (single source of truth for the live decision + mapd diagnostics). The
-OSM speed limit comes from `liveMapDataSP` (already on the UI submaster). This widget never computes
+OSM speed limit comes from `mapdOut` (official pfeiferj mapd, already on the UI submaster). This widget never computes
 the decision itself.
 
 Lines (lower-right, short, one per line):
@@ -139,7 +139,7 @@ class CesStatusRenderer(Widget):
     elif pts > 0 and gps:
       out.append(("road clear", _C.GREY, self.font))
 
-    # current OSM speed limit (from liveMapDataSP)
+    # current OSM speed limit (from official mapdOut)
     sl = self._speed_limit_text(conv, units)
     if sl:
       out.append((sl, _C.WHITE, self.font))
@@ -148,9 +148,11 @@ class CesStatusRenderer(Widget):
 
   def _speed_limit_text(self, conv, units):
     try:
-      lmd = ui_state.sm["liveMapDataSP"]
-      if lmd.speedLimitValid and lmd.speedLimit > 0.3:
-        return f"limit {round(lmd.speedLimit * conv)} {units}"
+      # mapd2pnw: official pfeiferj mapdOut (replaces the removed sunnypilot liveMapDataSP).
+      # speedLimit is m/s; >0 means valid (mapdOut has no separate valid flag, matching speed_limit.py).
+      mo = ui_state.sm["mapdOut"]
+      if mo.speedLimit > 0.3:
+        return f"limit {round(mo.speedLimit * conv)} {units}"
     except Exception:
       pass
     return None

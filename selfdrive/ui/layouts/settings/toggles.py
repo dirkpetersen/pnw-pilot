@@ -160,6 +160,20 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # Resilience (mapd2pnw/3pnwtest): drop any toggle whose param isn't registered in params_keys.h
+    # before building the toggles. get_bool() on an unregistered key raises UnknownKeyName; if that
+    # escapes here it crashes TogglesLayout init -> the UI crash-loops -> the SDE/DRM display driver
+    # panics -> the device warm-reboots. A params/UI version mismatch should hide the toggle, not brick
+    # the device. (This exact mismatch happened deploying a branch's params_keys.h that lacked CES keys.)
+    _valid_defs = {}
+    for _param, _spec in self._toggle_defs.items():
+      try:
+        self._params.get_bool(_param)
+        _valid_defs[_param] = _spec
+      except UnknownKeyName:
+        print(f"toggles: param {_param!r} not registered in params_keys.h, hiding toggle (params/UI mismatch)")
+    self._toggle_defs = _valid_defs
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -212,14 +226,6 @@ class TogglesLayout(Widget):
   def _update_toggles(self):
     ui_state.update_params()
 
-    # ces2xnor: CES replaces the Experimental Mode toggle. CES (and the longitudinal personality)
-    # only apply when openpilot controls longitudinal — grey out otherwise (symmetric enable/disable).
-    ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
-    self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
-    self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    if not ces_long_ok:
-      self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
-
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
     for param in self._toggle_defs:
@@ -230,12 +236,21 @@ class TogglesLayout(Widget):
       if self._toggle_defs[toggle_def][3] and toggle_def not in self._locked_toggles:
         self._toggles[toggle_def].action_item.set_enabled(not ui_state.engaged)
 
+    # 3pnwtest: apply the per-feature overrides AFTER the generic refresh/engaged loops so they win
+    # (Gemini-reviewed: otherwise the refresh loop clobbers a forced state). ces2xnor: CES replaces the
+    # Experimental Mode toggle; CES + the longitudinal personality only apply when openpilot controls
+    # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
+    ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
+    self._long_personality_setting.action_item.set_enabled(ces_long_ok)
+    if "ConditionalExperimentalSwitching" in self._toggles:  # guarded: toggle hidden if its param is unregistered
+      self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
+      if not ces_long_ok:
+        self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
+
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
-    # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered).
-    # It enables (still off) only when we're somewhere uncovered, so the driver can choose to download
-    # the region they're in. NOTE: MapForLocationCovered has no writer yet (carried from the donor;
-    # the old sunnypilot mapd_manager that set it was removed) — until the official mapd subsystem
-    # writes it, the button stays enabled (covered defaults False). Tracked for follow-up.
+    # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
+    # written by system/mapd/mapd_configd.py from the official mapd tileLoaded + GPS fix). It enables
+    # (still off) only when we're somewhere uncovered, so the driver can choose to download the region.
     if "GetMapForLocation" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["GetMapForLocation"].action_item.set_enabled(not covered)
