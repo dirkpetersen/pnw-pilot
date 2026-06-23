@@ -26,6 +26,9 @@ AddOption('--minimal',
           dest='extras',
           default=(not TICI and not release),
           help='the minimum build to run openpilot. no tests, tools, etc.')
+AddOption('--ubsan',
+          action='store_true',
+          help='turn on UBSan')
 
 # Detect platform
 arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
