@@ -181,7 +181,7 @@ class SoftwareLayout(Widget):
 
   def _on_pause_updates(self, state: bool):
     # ON = pause updates (DisableUpdates=1); OFF = normal updates (DisableUpdates=0).
-    ui_state.params.put_bool("DisableUpdates", state, block=True)
+    ui_state.params.put_bool("DisableUpdates", state)
 
   def _on_uninstall(self):
     def handle_uninstall_confirmation(result: DialogResult):
