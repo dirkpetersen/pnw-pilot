@@ -55,6 +55,7 @@ class UIState:
         "carControl",
         "liveParameters",
         "rawAudioData",
+        "mapdOut",  # mapd2pnw: official mapd OSM speed limits + road name for the on-road display/warning
       ]
     )
 
@@ -69,6 +70,8 @@ class UIState:
 
     # Core state variables
     self.is_metric: bool = self.params.get_bool("IsMetric")
+    self.show_speed_limit: bool = self.params.get_bool("ShowSpeedLimit")  # mapd2xnor
+    self.show_road_name: bool = self.params.get_bool("ShowRoadName")      # mapd2xnor
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.started: bool = False
@@ -180,6 +183,8 @@ class UIState:
         self.has_longitudinal_control = self.params.get_bool("AlphaLongitudinalEnabled")
       else:
         self.has_longitudinal_control = self.CP.openpilotLongitudinalControl
+    self.show_speed_limit = self.params.get_bool("ShowSpeedLimit")  # mapd2pnw
+    self.show_road_name = self.params.get_bool("ShowRoadName")      # mapd2pnw
     self._param_update_time = time.monotonic()
 
 

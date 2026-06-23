@@ -31,6 +31,18 @@ DESCRIPTIONS = {
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
+  "GetMapForLocation": tr_noop(
+    "Download offline OSM map data for the region you are currently in (US state, or a whole country " +
+    "such as Canada for British Columbia — there is no province-level Canadian download). Greyed out " +
+    "when your current location is already covered by a downloaded map. Requires a GPS fix and a " +
+    "connection to one of your Priority Networks (Wi-Fi). The default Pacific Northwest set (WA/OR/ID) " +
+    "is downloaded automatically; use this only when you drive outside it."
+  ),
+  "ShowSpeedLimit": tr_noop(
+    "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
+    "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
+    "parked with Wi-Fi until the download completes (the sign shows \"-\" until then). Requires a GPS fix to display a limit."
+  ),
 }
 
 
@@ -88,6 +100,21 @@ class TogglesLayout(Widget):
         lambda: tr("Use Metric System"),
         DESCRIPTIONS["IsMetric"],
         "metric.png",
+        False,
+      ),
+      # mapd2pnw: OSM speed-limit display + lower-limit warning (gates the OSM map download too)
+      "ShowSpeedLimit": (
+        lambda: tr("Speed limit display/warning (MAPD/PNW)"),
+        DESCRIPTIONS["ShowSpeedLimit"],
+        "speed_limit.png",
+        False,
+      ),
+      # mapd2pnw: on-demand "Get map for this location" download. Greyed out when the current GPS is
+      # already covered by a downloaded map (or no fix); enabled (but off) when uncovered.
+      "GetMapForLocation": (
+        lambda: tr("Get map for this location"),
+        DESCRIPTIONS["GetMapForLocation"],
+        "speed_limit.png",
         False,
       ),
     }
@@ -204,6 +231,16 @@ class TogglesLayout(Widget):
     for toggle_def in self._toggle_defs:
       if self._toggle_defs[toggle_def][3] and toggle_def not in self._locked_toggles:
         self._toggles[toggle_def].action_item.set_enabled(not ui_state.engaged)
+
+    # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
+    # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered).
+    # It enables (still off) only when we're somewhere uncovered, so the driver can choose to download
+    # the region they're in. NOTE: MapForLocationCovered has no writer yet (carried from the donor;
+    # the old sunnypilot mapd_manager that set it was removed) — until the official mapd subsystem
+    # writes it, the button stays enabled (covered defaults False). Tracked for follow-up.
+    if "GetMapForLocation" in self._toggles:
+      covered = self._params.get_bool("MapForLocationCovered")
+      self._toggles["GetMapForLocation"].action_item.set_enabled(not covered)
 
   def _render(self, rect):
     self._scroller.render(rect)
