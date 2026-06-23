@@ -32,6 +32,7 @@ class Colors:
   GOOD = rl.WHITE
   WARNING = rl.Color(218, 202, 37, 255)
   DANGER = rl.Color(201, 34, 49, 255)
+  GREEN = rl.Color(0, 255, 64, 255)  # connect-upload-status: matches the engaged-green used onroad
 
   # UI elements
   METRIC_BORDER = rl.Color(255, 255, 255, 85)
@@ -129,6 +130,13 @@ class Sidebar(Widget):
       self._temp_status.update(tr_noop("TEMP"), tr_noop("HIGH"), Colors.DANGER)
 
   def _update_connection_status(self, device_state):
+    # connect-upload-status: while a pass-2 (video/rlog) transfer is in flight the uploader
+    # sets FirehoseActive; override the CONNECT indicator to a green "UPLOADING". Polled here at
+    # the deviceState cadence (~2 Hz). Cheap CLEAR_ON_MANAGER_START BOOL read, no block= kwarg.
+    if ui_state.params.get_bool("FirehoseActive"):
+      self._connect_status.update(tr_noop("CONNECT"), tr_noop("UPLOADING"), Colors.GREEN)
+      return
+
     last_ping = device_state.lastAthenaPingTime
     if last_ping == 0:
       self._connect_status.update(tr_noop("CONNECT"), tr_noop("OFFLINE"), Colors.WARNING)
