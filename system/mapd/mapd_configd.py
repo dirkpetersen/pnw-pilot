@@ -11,6 +11,7 @@ mapd reports the download started (the message can be missed if mapd's socket is
 stops. Speed-limit DISPLAY works as soon as the maps are present; the user opts into speed/curve
 CONTROL later via MapdSettings — this daemon never enables control.
 """
+import json
 import cereal.messaging as messaging
 from cereal import log
 from openpilot.common.gps import get_gps_location_service
@@ -29,6 +30,7 @@ def _on_unmetered_wifi(ds) -> bool:
 
 def main():
   params = Params()
+  mem = Params("/dev/shm/params")   # CES + the on-road overlay read the legacy map params from here
   pm = messaging.PubMaster(['mapdIn'])
   gps_service = get_gps_location_service(params)
   sm = messaging.SubMaster(['deviceState', 'mapdExtendedOut', 'mapdOut', gps_service])
@@ -39,6 +41,29 @@ def main():
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
+
+    # mapd2pnw bridge: the official pfeiferj mapd v2.0.6 publishes everything over CEREAL
+    # (mapdOut / mapdExtendedOut), but CES (selfdrive/controls/lib/ces_xnor) and the on-road CES
+    # overlay still read the legacy in-memory params the OLD mapd binary used to write directly
+    # (MapTargetVelocities / LastGPSPosition / MapSpeedLimit). Translate the cereal output into those
+    # mem params so CES's map-curve trigger + the overlay "map" line come alive. Display/decision only;
+    # actual map braking is the longitudinal_planner mapdOut.suggestedSpeed cap (separate, gated OFF).
+    try:
+      if sm.alive[gps_service]:
+        g = sm[gps_service]
+        mem.put_nonblocking("LastGPSPosition", json.dumps({
+          "latitude": float(g.latitude), "longitude": float(g.longitude),
+          "bearing": float(getattr(g, "bearingDeg", 0.0))}))
+      if sm.alive['mapdOut']:
+        mem.put_nonblocking("MapSpeedLimit", str(float(sm['mapdOut'].speedLimit)))  # m/s; 0 = none
+      if sm.alive['mapdExtendedOut']:
+        # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
+        # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s).
+        mem.put_nonblocking("MapTargetVelocities", [
+          {"latitude": float(p.latitude), "longitude": float(p.longitude), "velocity": float(p.targetVelocity)}
+          for p in sm['mapdExtendedOut'].path])
+    except Exception:
+      cloudlog.exception("mapd_configd: mapd->CES bridge write failed")
 
     # mapd2pnw: drive the "Get map for this location" toggle grey-out (param MapForLocationCovered).
     # The toggle should be GREYED (covered) unless we KNOW we're somewhere with no downloaded map.
