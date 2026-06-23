@@ -297,7 +297,13 @@ class SelfdriveD:
     # All events here should at least have NO_ENTRY and SOFT_DISABLE.
     num_events = len(self.events)
 
-    not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+    # mapd2pnw: mapd / mapd_configd are display + nav helpers (OSM speed-limit / curve hints), NOT
+    # safety-critical. Their absence must NEVER block engagement — e.g. the mapd binary can be missing
+    # or still downloading on a slow link. Exclude them from the processNotRunning gate so openpilot
+    # still drives when mapd is down (map features just go inert). Does not touch panda/control safety.
+    NON_ESSENTIAL_PROCS = {"mapd", "mapd_configd"}
+    not_running = {p.name for p in self.sm['managerState'].processes
+                   if not p.running and p.shouldBeRunning and p.name not in NON_ESSENTIAL_PROCS}
     if self.sm.recv_frame['managerState'] and len(not_running):
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)
