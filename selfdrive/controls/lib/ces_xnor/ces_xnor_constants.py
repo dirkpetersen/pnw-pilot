@@ -52,6 +52,60 @@ THRESHOLD        = 0.63      # filter level ~= "true for ~1 s"
 EXP_MIN_DWELL_S  = 8.0       # s min time in Experimental before it may return to Chill (was MIN_DWELL_S=4)
 CHILL_MIN_DWELL_S = 5.0      # s min time in Chill before it may re-enter Experimental (re-entry cooldown)
 
+# --- gentle profile (CESMode==1 "Light", car-agnostic) ----------------------
+# On a winding highway the CURVE condition can flip chill<->experimental rapidly, and experimental's
+# e2e curve braking can feel jerky ("too aggressive at curve entrance"). The gentle profile (a) hands
+# curve speed control ENTIRELY to VTSC — which brakes smoothly and is decel-limited — by NOT tripping
+# Experimental for curves (curves suppressed in the CES decision), and (b) lengthens the dwell so the
+# remaining triggers (stops / slow leads) can't flip-flop. Experimental is then reserved for where e2e
+# genuinely helps: stop lights and closing on a slow lead.
+# USER-SELECTED via CESMode==1 (Light) on ANY car — no car/fingerprint gating.
+GENTLE_EXP_MIN_DWELL_S   = 12.0  # hold Experimental longer before dropping back to Chill
+GENTLE_CHILL_MIN_DWELL_S = 8.0   # longer re-entry cooldown
+
+# --- CESMode (3-way master selector) ----------------------------------------
+# light-ces-gentle: the master is now an INT param `CESMode` (0=Off, 1=Light, 2=Standard) instead of
+# the old BOOL `ConditionalExperimentalSwitching`. CESMode picks the *profile/aggressiveness*; the
+# on-screen 3-state button (CESButtonState) still cycles Chill/CES/Experimental within whatever mode.
+#   0 (Off)      -> CES + VTSC disabled entirely (behavior-neutral; == old bool=false)
+#   1 (Light)    -> CES + VTSC enabled with the GENTLE profile on ANY car: VTSC GENTLE_PROFILE (soft
+#                   decel + slow recovery, anti-sawtooth), CES hands curves entirely to VTSC (curve
+#                   condition suppressed so no chill<->experimental flapping), longer gentle dwell.
+#   2 (Standard) -> CES + VTSC enabled with the DEFAULT tune on ANY car: VTSC DEFAULT_PROFILE, CES
+#                   trips Experimental for curves, normal dwell.
+# The gentle profile is a USER choice via CESMode, available on every car (default Off for all).
+CES_MODE_OFF      = 0
+CES_MODE_LIGHT    = 1   # full gentle behavior on any car
+CES_MODE_STANDARD = 2   # today's default tune on any car
+
+
+def ces_enabled(mode: int) -> bool:
+  """True when CES (and VTSC, which rides the same master) should run: any non-Off mode."""
+  return int(mode) > CES_MODE_OFF
+
+
+def ces_is_gentle(mode: int) -> bool:
+  """True when the gentle profile applies (Light). Standard / Off -> default tune (irrelevant if Off)."""
+  return int(mode) == CES_MODE_LIGHT
+
+
+def read_ces_mode(params) -> int:
+  """Read the CESMode INT param (source of truth). Back-compat: if CESMode is missing/0 but the old
+  BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Defensive: any failure
+  => Off (0). Used by BOTH the CES and VTSC runtime readers so they always agree."""
+  try:
+    mode = int(params.get("CESMode", return_default=True) or 0)
+  except Exception:
+    mode = 0
+  if mode == CES_MODE_OFF:
+    try:
+      if params.get_bool("ConditionalExperimentalSwitching"):
+        mode = CES_MODE_STANDARD
+    except Exception:
+      pass
+  return mode
+
+
 # --- button override states (CESButtonState mem param) ----------------------
 BTN_CES  = 0   # CES decides (default)
 BTN_CHILL = 1  # forced Chill

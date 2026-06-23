@@ -76,14 +76,8 @@ class TogglesLayout(Widget):
         "chffr_wheel.png",
         True,
       ),
-      # ces2xnor: REPLACES the standalone Experimental Mode toggle. Full Experimental is still
-      # reachable via the top-right 3-state button (orange = forced Experimental). CES default OFF.
-      "ConditionalExperimentalSwitching": (
-        lambda: tr("Conditional Experimental Switching (CES)"),
-        DESCRIPTIONS["ConditionalExperimentalSwitching"],
-        "speed_limit.png",
-        False,
-      ),
+      # light-ces-gentle: CES is the 3-way "CES Mode" selector (Off/Light/Standard) — a multiple_button_item
+      # added below like the personality selector, NOT a bool toggle. (Backed by the INT param CESMode.)
       # auto2pnw: nudgeless lane change (Tesla + F-150 Lightning) + no-disengage-on-brake (unsupported, greyed)
       "NudgelessLaneChange": (
         lambda: tr("Nudgeless Lane Change"),
@@ -160,6 +154,18 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # light-ces-gentle: CES Mode selector backed by the INT param CESMode (0=Off, 1=Light gentle profile,
+    # 2=Standard tune). Replaces the old CES bool toggle. Greyed when openpilot doesn't control longitudinal.
+    self._ces_mode_setting = multiple_button_item(
+      lambda: tr("CES Mode"),
+      lambda: tr(DESCRIPTIONS["ConditionalExperimentalSwitching"]),
+      buttons=[lambda: tr("Off"), lambda: tr("Light"), lambda: tr("Standard")],
+      button_width=255,
+      callback=self._set_ces_mode,
+      selected_index=self._params.get("CESMode", return_default=True),
+      icon="speed_limit.png"
+    )
+
     # Resilience (mapd2pnw/3pnwtest): drop any toggle whose param isn't registered in params_keys.h
     # before building the toggles. get_bool() on an unregistered key raises UnknownKeyName; if that
     # escapes here it crashes TogglesLayout init -> the UI crash-loops -> the SDE/DRM display driver
@@ -203,6 +209,10 @@ class TogglesLayout(Widget):
 
       self._toggles[param] = toggle
 
+      # light-ces-gentle: insert the CES Mode selector right after the main enable toggle
+      if param == "OpenpilotEnabledToggle":
+        self._toggles["CESMode"] = self._ces_mode_setting
+
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
@@ -242,10 +252,11 @@ class TogglesLayout(Widget):
     # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
     ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    if "ConditionalExperimentalSwitching" in self._toggles:  # guarded: toggle hidden if its param is unregistered
-      self._toggles["ConditionalExperimentalSwitching"].action_item.set_enabled(ces_long_ok)
-      if not ces_long_ok:
-        self._toggles["ConditionalExperimentalSwitching"].action_item.set_state(False)
+    # light-ces-gentle: the CES Mode selector only applies when openpilot controls longitudinal — grey it
+    # out otherwise. (The ces_xnor logic is itself gated on openpilotLongitudinalControl, so a stale
+    # CESMode>0 stays inert; no value force needed for the multi-button selector.)
+    if "CESMode" in self._toggles:
+      self._toggles["CESMode"].action_item.set_enabled(ces_long_ok)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
@@ -279,3 +290,9 @@ class TogglesLayout(Widget):
 
   def _set_longitudinal_personality(self, button_index: int):
     self._params.put("LongitudinalPersonality", button_index)
+
+  def _set_ces_mode(self, button_index: int):
+    # light-ces-gentle: CESMode is the source of truth (0=Off, 1=Light, 2=Standard). Mirror the legacy
+    # bool ConditionalExperimentalSwitching (== CESMode > 0) so any back-compat reader agrees.
+    self._params.put("CESMode", button_index, block=True)
+    self._params.put_bool("ConditionalExperimentalSwitching", button_index > 0, block=True)

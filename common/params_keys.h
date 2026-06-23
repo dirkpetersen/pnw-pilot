@@ -102,8 +102,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
-    // ces2xnor: Conditional Experimental Switching + VTSC (MapTargetVelocities already registered by mapd2pnw above)
-    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
+    // ces2xnor + light-ces-gentle: CES master + VTSC. CESMode is the 3-way source of truth; the bool is
+    // kept for back-compat. (MapTargetVelocities already registered by mapd2pnw above.)
+    {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
+    {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
     {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
     {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor

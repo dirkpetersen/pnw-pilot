@@ -23,6 +23,7 @@ import pyray as rl
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor_constants import ces_enabled, read_ces_mode
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -68,7 +69,9 @@ class CesStatusRenderer(Widget):
     if now - self._last_poll < _REFRESH_S:
       return
     self._last_poll = now
-    self._enabled = ui_state.params.get_bool("ConditionalExperimentalSwitching")
+    # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
+    # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
+    self._enabled = ces_enabled(read_ces_mode(ui_state.params))
     if not self._enabled or self._mem is None:
       self._st = {}
       self._vtsc = {}
