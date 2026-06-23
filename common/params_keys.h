@@ -101,6 +101,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
+    {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
     // ces2xnor: Conditional Experimental Switching + VTSC (MapTargetVelocities already registered by mapd2pnw above)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: master, default OFF
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
