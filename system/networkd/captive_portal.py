@@ -118,25 +118,37 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     s.headers["User-Agent"] = _UA
 
     # 1) get the portal form. Try the redirect-trigger probe first (fills the UAM params),
-    #    then the portal page directly as a fallback.
+    #    then the portal page directly as a fallback. Per-URL try/except so a failing probe
+    #    falls THROUGH to the fallback instead of aborting the whole accept.
     resp = None
-    for url in (spec.get("probe"), spec.get("fallback"), spec.get("url")):
+    for url in (spec.get("probe"), spec.get("fallback")):
       if not url:
         continue
-      r = s.get(url, timeout=PORTAL_TIMEOUT_S, allow_redirects=True)
-      if _parse_form(r.text)[2]:        # found a form with fields
-        resp = r
+      try:
+        r = s.get(url, timeout=PORTAL_TIMEOUT_S, allow_redirects=True)
+      except requests.RequestException:
+        continue
+      resp = r                          # keep the last good response (for logging / the hop loop)
+      if _parse_form(r.text)[2]:        # found a form with fields -> use this one
         break
-      resp = r                          # keep the last response for logging even if no form
+    if resp is None:                    # both GETs failed -> nothing to submit
+      cloudlog.event("network2xnor_captive_portal", handler=handler, ok=False, reason="no_response")
+      return False
 
-    # 2) replay the form, then follow a few hops (TOS form -> gateway auto-submit form -> done)
+    # 2) replay the form, then follow a few hops (TOS form -> gateway auto-submit form -> done).
+    #    Stop early if the portal just re-renders the SAME form (failed submit = no progress).
     hops = []
+    last = None
     for _ in range(MAX_FORM_HOPS):
       action, method, fields = _parse_form(resp.text)
       if not fields:
         break
       fields.update(spec.get("force", {}))
       url = urljoin(resp.url, action) if action else resp.url
+      sig = (url, tuple(sorted(fields.items())))
+      if sig == last:                   # identical re-submission -> the portal isn't advancing
+        break
+      last = sig
       if method.lower() == "get":
         resp = s.get(url, params=fields, timeout=PORTAL_TIMEOUT_S, allow_redirects=True)
       else:
