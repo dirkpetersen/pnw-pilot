@@ -51,12 +51,33 @@ def manager_init() -> None:
   # The mapd process itself is added with the full official integration; when it is,
   # its should_run must gate on the binary existing (os.path.exists) so manager never
   # tries to exec ./mapd before this background download finishes.
+  #
+  # RETRY-UNTIL-INSTALLED: every OTA update wipes this binary (it isn't in git, so the
+  # overlay swap drops it), and right after a reboot/update the network is often not up
+  # yet (e.g. a hotspot still re-associating). ensure_mapd()'s few quick retries can then
+  # ALL fail, leaving mapd absent — and silently no map data — for the entire session.
+  # So keep retrying in the background with backoff until the binary is actually present;
+  # the thread exits the moment it's installed. Never blocks startup or driving.
+  #
+  # NETWORK-AGNOSTIC ON PURPOSE: the binary fetch (installer.ensure_mapd -> plain urlopen
+  # of the pinned release URL) is NOT gated on Wi-Fi, priority networks, or metered state —
+  # it downloads over whatever connection has internet (LTE, hotspot, any Wi-Fi). Only the
+  # ~20 MB map TILE set is Wi-Fi-gated (mapd_configd); the binary must always come back so
+  # mapd can run, regardless of which network the device happens to be on.
   def _install_mapd():
-    try:
-      from openpilot.system.mapd.installer import ensure_mapd
-      ensure_mapd()
-    except Exception as e:
-      cloudlog.warning(f"mapd installer: {e}")
+    from openpilot.system.mapd.installer import ensure_mapd, is_installed
+    backoff = 10
+    while True:
+      try:
+        ensure_mapd()
+        cloudlog.warning("mapd installer: binary present")
+        return
+      except Exception as e:
+        cloudlog.warning(f"mapd installer: {e}; retrying in {backoff}s")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 300)   # cap at 5 min; network will come up eventually
+        if is_installed():                # another path installed it (or it appeared) -> done
+          return
   threading.Thread(target=_install_mapd, name="mapd_installer", daemon=True).start()
 
   # Create folders needed for msgq
