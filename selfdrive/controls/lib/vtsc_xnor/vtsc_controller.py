@@ -102,6 +102,9 @@ class VTSCController:
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     has_curve = d_apex >= 0.0 and v_curve < v_cruise - 0.1
     tta = (d_apex / max(v_ego, 1.0)) if has_curve else float('inf')
+    # drive #5: have we actually slowed to ~curve-safe speed? gates HOLD/RELEASE below so VTSC keeps
+    # braking while still materially too fast, and never accelerates out of a curve before reaching safe.
+    at_safe = (not has_curve) or v_curve <= 0.0 or v_ego <= v_curve * (1.0 + C.RELEASE_SPEED_MARGIN)
 
     if self._applied is None:
       self._applied = v_cruise
@@ -115,19 +118,23 @@ class VTSCController:
         self._applied = min(self._applied, v_cruise - C.CONFIDENCE_CUT)   # instant >=1mph cut on detect
 
     if self._state == "brake":
-      if not has_curve or tta <= C.APEX_TTA_S:
+      if not has_curve:
         self._state = "release"
-      elif tta <= C.HOLD_TTA_S:
-        self._state = "hold"
+      elif tta <= C.APEX_TTA_S:
+        # at the apex: never brake here. accelerate out only if we've slowed enough; else HOLD (no accel).
+        self._state = "release" if at_safe else "hold"
+      elif tta <= C.HOLD_TTA_S and at_safe:
+        self._state = "hold"                       # close AND already at safe speed -> maintain
       else:
+        # apex still ahead, OR still too fast inside the hold window -> keep reducing toward curve-safe
         cap = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL'])
         # never above cruise-CONFIDENCE_CUT (keep the engage cut), floored at V_MIN
         target = max(min(cap, v_cruise - C.CONFIDENCE_CUT), C.V_MIN)
 
     if self._state == "hold":
       target = self._applied                       # freeze: never reduce further, never accelerate yet
-      if tta <= C.APEX_TTA_S or not has_curve:
-        self._state = "release"
+      if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
+        self._state = "release"                    # only accelerate out once we've actually slowed
 
     if self._state == "release":
       target = v_cruise                            # accelerate back to cruise set speed
