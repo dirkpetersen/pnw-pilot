@@ -99,19 +99,26 @@ def select_available(nets: list[dict], scan_ssids: list[str], saved_connections:
                      priority_connection_id) -> dict | None:
   """The first configured network that is BOTH visible in the scan AND has a saved NM connection.
   `priority_connection_id` is the id-builder from network_arbiter (kept as a param to stay pure)."""
-  scan = set(scan_ssids)
-  saved = set(saved_connections)
+  # case-insensitive: a user often types "visitor" while the AP advertises "Visitor". WiFi SSIDs are
+  # technically case-sensitive but in practice never collide by case only, so fold case to match.
+  scan = {s.lower() for s in scan_ssids}
+  saved = {c.lower() for c in saved_connections}
   for e in nets:
-    if e["ssid"] in scan and priority_connection_id(e["ssid"]) in saved:
+    if e["ssid"].lower() in scan and priority_connection_id(e["ssid"]).lower() in saved:
       return e
   return None
 
 
 def entry_for_ssid(nets: list[dict], ssid: str) -> dict | None:
-  """The configured entry whose ssid matches (used for auto-learn + captive-portal lookup)."""
+  """The configured entry whose ssid matches (used for auto-learn + captive-portal lookup).
+
+  Case-INSENSITIVE: the active connection reports the AP's real case ("Visitor") while the saved
+  entry may be what the user typed ("visitor"); a case-sensitive compare silently skipped the portal
+  handler (observed 2026-06-24 on the Peak 'Visitor' SSID — connected fine but accept() never ran)."""
   if not ssid:
     return None
+  s = ssid.lower()
   for e in nets:
-    if e["ssid"] == ssid:
+    if e["ssid"].lower() == s:
       return e
   return None
