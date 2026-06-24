@@ -39,6 +39,11 @@ PASS2_NETWORK_TYPES = {int(NetworkType.wifi)}
 # only while a pass-2 (video/rlog) transfer is actually in flight.
 FIREHOSE_ACTIVE_PARAM = "FirehoseActive"
 
+# connect2pnw HD-interleave: force one pass-2 (HD/rlog) upload after this many consecutive successful
+# pass-1 (small) uploads, so large video isn't starved behind a long small-file backlog. Small files
+# still get priority (pass 1 runs every loop); this just guarantees HD makes steady progress.
+PASS2_INTERLEAVE = 4
+
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
                    # bugs, including ones that can cause massive log sizes
@@ -310,6 +315,7 @@ def main(exit_event: threading.Event | None = None) -> None:
   uploader = Uploader(dongle_id, Paths.log_root())
 
   backoff = 0.1
+  pass1_run = 0   # consecutive successful small (pass-1) uploads since the last HD (pass-2) upload
   while not exit_event.is_set():
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
@@ -322,14 +328,31 @@ def main(exit_event: threading.Event | None = None) -> None:
     # connect2xnor: honor force_wifi (test/debug) for the raw value too.
     network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
     metered = sm['deviceState'].networkMetered
-    success = uploader.step(network_type_raw, metered)
+    p1 = uploader.step(network_type_raw, metered)               # pass 1 (small files)
+    if p1 is None:
+      pass1_run = 0
+    elif p1:
+      pass1_run += 1
 
-    # connect2xnor: PASS 2. Only after pass 1 has nothing left to do
-    # (success is None) do we proactively upload the large firehose files, and
-    # only on real external WiFi. networkType==wifi is never true on the
-    # hotspot or LTE, so this can't burn cellular data.
-    if success is None and pass2_allowed(network_type_raw):
-      success = uploader.step(network_type_raw, metered, pass2=True)
+    # connect2pnw: PASS 2 (large "firehose" files: rlog + HD video), ONLY on real external WiFi
+    # (networkType==wifi is never true on the hotspot or LTE, so this can't burn cellular).
+    # HD-interleave: run pass 2 when pass 1 has nothing left (p1 is None) OR after every
+    # PASS2_INTERLEAVE successful small uploads, so HD video makes steady progress instead of being
+    # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
+    # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
+    p2 = None
+    if pass2_allowed(network_type_raw) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+      p2 = uploader.step(network_type_raw, metered, pass2=True)
+      pass1_run = 0
+
+    # backoff from the combined outcome: None=nothing to do anywhere; True=made progress; False=failure
+    results = [r for r in (p1, p2) if r is not None]
+    if not results:
+      success = None
+    elif any(results):
+      success = True
+    else:
+      success = False
 
     if success is None:
       backoff = 60 if offroad else 5

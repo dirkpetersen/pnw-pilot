@@ -5,7 +5,13 @@ from datetime import datetime, timedelta, UTC
 from openpilot.system.hardware.hw import Paths
 from openpilot.system.version import get_version
 
-API_HOST = os.getenv('API_HOST', 'https://api.commadotai.com')
+# connect2pnw: default to the self-hosted upload gateway (AWS API Gateway -> Lambda presigned-PUT ->
+# s3://comma-connect). This MUST NOT be left at comma's api.commadotai.com: comma replies HTTP 412
+# ("file not requested") to every proactive upload, which openpilot treats as success and stamps the
+# file user.upload=1 WITHOUT it ever reaching S3 -> the uploader silently goes idle and all drive data
+# is lost. A reflash that dropped this default (env unset) caused exactly that. launch_env.sh also
+# exports API_HOST as belt-and-suspenders. See CONNECT2XNOR.md / DEVICE-STATE.md.
+API_HOST = os.getenv('API_HOST', 'https://jh69za4byd.execute-api.us-west-2.amazonaws.com')
 
 # name: jwt signature algorithm
 KEYS = {"id_rsa": "RS256",
