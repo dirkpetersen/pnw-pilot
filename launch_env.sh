@@ -20,3 +20,9 @@ if [ -z "$AGNOS_VERSION" ]; then
 fi
 
 export STAGING_ROOT="/data/safe_staging"
+
+# connect2pnw: self-hosted upload gateway (AWS API Gateway -> Lambda presign -> s3://comma-connect).
+# Belt-and-suspenders alongside the common/api.py default. If unset, openpilot falls back to comma's
+# api.commadotai.com, which 412s every proactive upload -> files get stamped "uploaded" without ever
+# reaching S3 (silent data loss). See CONNECT2XNOR.md / DEVICE-STATE.md.
+export API_HOST="https://jh69za4byd.execute-api.us-west-2.amazonaws.com"
