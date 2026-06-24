@@ -34,12 +34,16 @@ from openpilot.common.swaglog import cloudlog
 # handler key -> portal spec. Add new portals here.
 PORTALS: dict[str, dict] = {
   # Peak Internet "Visitor" / OSU "Free Wifi" hotspot: MikroTik-style, TOS-accept only
-  # (username "T-", NO password). `probe` triggers the captive redirect so the portal form
-  # comes back with mac/ip/link-login/dst filled; `force` guarantees the CONNECT button is
-  # sent even if button-parsing misses it. `fallback` is the portal page itself, tried if
-  # the probe doesn't redirect to a form.
+  # (username "T-", NO password). `probes` are plain-http connectivity-check URLs that trigger
+  # the captive redirect so the portal form comes back with mac/ip/link-login/dst filled — we try
+  # several because a network may whitelist one OS's check. `fallback` is the portal page itself.
+  # `force` guarantees the CONNECT button is sent even if button-parsing misses it.
   "peak": {
-    "probe": "http://www.msftconnecttest.com/redirect",
+    "probes": [
+      "http://connectivitycheck.gstatic.com/generate_204",   # Android / Chrome
+      "http://www.msftconnecttest.com/redirect",              # Windows
+      "http://captive.apple.com/hotspot-detect.html",         # Apple
+    ],
     "fallback": "http://hotspot-lebjc.peak.org/",
     "force": {"formLoginSubmit": "Submit"},
   },
@@ -47,6 +51,10 @@ PORTALS: dict[str, dict] = {
 
 PORTAL_TIMEOUT_S = 8
 MAX_FORM_HOPS = 3
+# A 204 + empty body here means we have REAL internet — the only trustworthy "did the portal let us
+# through" signal. The arbiter sets portal_done_for (stops re-poking) only when accept() returns True,
+# so True must mean actually-online, not merely "the POST returned < 400".
+ONLINE_CHECK = "http://connectivitycheck.gstatic.com/generate_204"
 
 # Look like a real desktop Chrome. Some captive portals (incl. MikroTik hotspots) serve a different
 # page — or reject the request — for non-browser User-Agents or missing Accept headers, so a bare/
@@ -110,6 +118,15 @@ def _parse_form(html: str) -> tuple[str | None, str, dict[str, str]]:
   return p.action, p.method, p.fields
 
 
+def _online(session) -> bool:
+  """True iff we have real internet (204 + empty body, no redirect to a portal)."""
+  try:
+    r = session.get(ONLINE_CHECK, timeout=PORTAL_TIMEOUT_S, allow_redirects=False)
+    return r.status_code == 204 and not r.text.strip()
+  except Exception:
+    return False
+
+
 def accept(handler: str | None, already_online: bool = False) -> bool:
   """Best-effort: walk the captive portal's TOS form(s). Returns True if a submit went through OK.
 
@@ -126,11 +143,11 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     s = requests.Session()
     s.headers.update(_BROWSER_HEADERS)
 
-    # 1) get the portal form. Try the redirect-trigger probe first (fills the UAM params),
-    #    then the portal page directly as a fallback. Per-URL try/except so a failing probe
-    #    falls THROUGH to the fallback instead of aborting the whole accept.
+    # 1) get the portal form. Try each redirect-trigger probe (fills the UAM params), then the
+    #    portal page directly as a fallback. Per-URL try/except so a failing/whitelisted probe falls
+    #    THROUGH to the next instead of aborting the whole accept.
     resp = None
-    for url in (spec.get("probe"), spec.get("fallback")):
+    for url in list(spec.get("probes", [])) + [spec.get("fallback")]:
       if not url:
         continue
       try:
@@ -140,7 +157,7 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
       resp = r                          # keep the last good response (for logging / the hop loop)
       if _parse_form(r.text)[2]:        # found a form with fields -> use this one
         break
-    if resp is None:                    # both GETs failed -> nothing to submit
+    if resp is None:                    # every GET failed -> nothing to submit
       cloudlog.event("network2xnor_captive_portal", handler=handler, ok=False, reason="no_response")
       return False
 
@@ -148,6 +165,7 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     #    Stop early if the portal just re-renders the SAME form (failed submit = no progress).
     hops = []
     last = None
+    stuck = False
     for _ in range(MAX_FORM_HOPS):
       action, method, fields = _parse_form(resp.text)
       if not fields:
@@ -156,6 +174,7 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
       url = urljoin(resp.url, action) if action else resp.url
       sig = (url, tuple(sorted(fields.items())))
       if sig == last:                   # identical re-submission -> the portal isn't advancing
+        stuck = True
         break
       last = sig
       if method.lower() == "get":
@@ -164,9 +183,12 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
         resp = s.post(url, data=fields, timeout=PORTAL_TIMEOUT_S, allow_redirects=True)
       hops.append({"url": url, "status": resp.status_code, "fields": sorted(fields)})
 
-    ok = bool(hops) and resp.status_code < 400
-    cloudlog.event("network2xnor_captive_portal", handler=handler, hops=hops,
-                   final_url=getattr(resp, "url", ""),
+    # 3) the ONLY trustworthy success signal: do we actually have internet now? (status<400 can be a
+    #    re-rendered rejection.) The arbiter marks the portal "done" only on True, so be strict.
+    submitted = bool(hops) and not stuck
+    ok = submitted and _online(s)
+    cloudlog.event("network2xnor_captive_portal", handler=handler, hops=hops, submitted=submitted,
+                   stuck=stuck, online=ok, final_url=getattr(resp, "url", ""),
                    status=getattr(resp, "status_code", None), ok=ok)
     return ok
   except Exception:
