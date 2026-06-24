@@ -26,13 +26,19 @@ A_DECEL_MAX     = 2.5   # m/s^2 HARD ceiling on commanded decel (rate-limit) —
 A_RELAX         = 1.5   # m/s^2 rate the applied cap eases back UP (apex reached / curve cleared) -> smooth
                         #   acceleration out to cruise, never a jump
 
-# --- apex state machine (drive #4) -------------------------------------------
-# Zones by TIME-TO-APEX (apexDist / vEgo), so they scale with speed:
-#   tta >  HOLD_TTA_S      -> BRAKE   (apex clearly ahead: reduce, finishing before the apex)
-#   APEX_TTA_S < tta <= HOLD_TTA_S -> HOLD  (close/uncertain: maintain, NEVER reduce further)
-#   tta <= APEX_TTA_S  (or curve straightens) -> RELEASE (at apex: accelerate back to cruise)
-HOLD_TTA_S      = 1.2   # s; stop reducing once within this time of the apex (so braking completes earlier)
-APEX_TTA_S      = 0.4   # s; "at the apex" -> release the cap and accelerate out
+# --- apex state machine (drive #4; speed-gated drive #5) ---------------------
+# Zones by TIME-TO-APEX (apexDist / vEgo), so they scale with speed — BUT the HOLD/RELEASE
+# transitions are now ALSO gated on having actually slowed to ~curve-safe speed (drive #5 Terwilliger
+# log: the old time-only logic froze the cap into HOLD ~1.2 s before the apex while still ~20 mph hot,
+# then RELEASED/accelerated right at the apex while ~27 mph over safe — driver disengaged):
+#   tta >  HOLD_TTA_S, OR still above safe speed (and apex still ahead) -> BRAKE  (reduce toward safe)
+#   close to apex AND at safe speed -> HOLD     (maintain, never reduce further)
+#   at the apex AND at safe speed (or curve straightens) -> RELEASE  (accelerate back to cruise)
+# Never reduce AT/after the apex (tta <= APEX_TTA_S -> HOLD at worst, never a fresh brake); we only
+# avoid ACCELERATING out while still materially too fast.
+HOLD_TTA_S      = 1.2   # s; within this time of the apex, stop reducing -> HOLD (only once at safe speed)
+APEX_TTA_S      = 0.4   # s; "at the apex" -> release the cap and accelerate out (only once at safe speed)
+RELEASE_SPEED_MARGIN = 0.10  # release/hold only when vEgo <= vCurveSafe*(1+this); else keep braking/holding
 APEX_FINISH_S   = 1.2   # s; aim to reach curve-safe speed this long BEFORE the apex (firmer if needed)
 CONFIDENCE_CUT  = 0.5   # m/s (~1.1 mph) immediate cap cut the instant a binding curve is detected, so the
                         #   driver immediately feels VTSC engage (per drive #4). Then braking continues.
