@@ -35,6 +35,7 @@ Behavior-neutral when TetheringEnabled is unset/0 (its default).
 """
 import json
 import subprocess
+import threading
 import time
 from typing import NoReturn
 
@@ -54,6 +55,7 @@ POLL_INTERVAL_S = 20.0
 NMCLI_TIMEOUT_S = 15.0
 SIGNAL_EVERY_N = 3   # run LTE signal logging only every Nth loop (~60s) so its mmcli calls can't repeatedly stall WiFi recovery
 LEARN_MIN_MOVE_M = 50.0   # only re-write a learned home location if GPS moved more than this (flash-wear guard)
+PORTAL_MAX_TRIES = 6   # max captive-portal accept() attempts per SSID session (bounds loop time; resets on leaving)
 
 LTE_CONNECTION_ID = "lte"
 HOTSPOT_SUBNET = "192.168.43.0/24"   # AP client subnet, masqueraded out the LTE uplink
@@ -369,6 +371,9 @@ def main() -> NoReturn:
   operator: str | None = None
   signal_tick = 0
   portal_done_for: str | None = None   # ssid we've already satisfied a captive portal for this session
+  portal_tries: dict[str, int] = {}    # ssid -> accept() attempts this session (bounded by PORTAL_MAX_TRIES)
+  portal_result: dict[str, bool] = {}  # ssid -> last accept() online result (set by the worker thread)
+  portal_thread: threading.Thread | None = None  # captive-portal accept() runs here so it NEVER blocks this loop
 
   while True:
     try:
@@ -440,12 +445,42 @@ def main() -> NoReturn:
       # handler and we don't yet have full connectivity, POST its accept form (once per session).
       active_portal_entry = pn.entry_for_ssid(
         nets, current_active.replace("openpilot connection ", "")) if current_active else None
-      if active_portal_entry and active_portal_entry.get("portal") and portal_done_for != active_portal_entry["ssid"]:
-        if not _has_connectivity():
-          if captive_portal.accept(active_portal_entry["portal"], already_online=False):
-            portal_done_for = active_portal_entry["ssid"]
-      elif current_active != (f"openpilot connection {portal_done_for}" if portal_done_for else None):
-        portal_done_for = None   # left that network -> allow re-accept next time
+      if active_portal_entry and active_portal_entry.get("portal"):
+        ssid = active_portal_entry["ssid"]
+        # Poke the portal even when NM reports global connectivity "full": the comma keeps LTE up
+        # alongside WiFi, so LTE's connectivity masks a captive WiFi (the default route) and the old
+        # `if not _has_connectivity()` guard never fired here. accept() is HTTP-ONLY — it never touches
+        # NM, the LTE connection, the hotspot, or routing.
+        #
+        # CRITICAL: run accept() in a DAEMON THREAD, never inline. A DNS-blocking portal can make its
+        # GETs time out (~tens of seconds), and blocking THIS loop would delay LTE-signal logging and
+        # tethering/hotspot NAT upkeep. The thread stores its result in portal_result; we read it next
+        # loop. One thread at a time; bounded to PORTAL_MAX_TRIES per session.
+        if portal_result.get(ssid):                # worker confirmed we're actually online -> done
+          portal_done_for = ssid
+        if (portal_done_for != ssid and portal_tries.get(ssid, 0) < PORTAL_MAX_TRIES
+            and (portal_thread is None or not portal_thread.is_alive())):
+          portal_tries[ssid] = portal_tries.get(ssid, 0) + 1
+          cloudlog.event("network2xnor_portal_try", ssid=ssid, portal=active_portal_entry["portal"],
+                         current_active=current_active, connectivity_full=_has_connectivity(),
+                         attempt=portal_tries[ssid])
+
+          def _poke(handler=active_portal_entry["portal"], sid=ssid):
+            try:
+              portal_result[sid] = bool(captive_portal.accept(handler, already_online=False))
+            except Exception:
+              portal_result[sid] = False
+
+          portal_thread = threading.Thread(target=_poke, name="captive_portal", daemon=True)
+          portal_thread.start()
+      else:
+        # not on a configured portal SSID -> reset session state so re-entry re-tries cleanly. A still-
+        # running daemon thread just finishes its HTTP harmlessly (it only writes its result file).
+        # Mutate (.clear()) rather than rebind so the worker thread's closure always shares this object.
+        if portal_done_for is not None or portal_tries or portal_result:
+          portal_done_for = None
+          portal_tries.clear()
+          portal_result.clear()
     except Exception:
       cloudlog.exception("network_arbiterd: unhandled error in loop")
 

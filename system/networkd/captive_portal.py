@@ -127,6 +127,24 @@ def _online(session) -> bool:
     return False
 
 
+# Persist the last attempt so it survives swaglog rotation AND reboots (the device generates a lot of
+# swaglog, and reboots between a 'visitor' test and the device being reachable kept losing the event).
+# Read it any time with: cat /data/captive_portal_last.json   (file mtime = when it ran).
+_STATUS_FILE = "/data/captive_portal_last.json"
+
+
+def _record(d: dict) -> None:
+  try:
+    import json
+    import os
+    tmp = _STATUS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+      f.write(json.dumps(d))
+    os.replace(tmp, _STATUS_FILE)
+  except Exception:
+    pass
+
+
 def accept(handler: str | None, already_online: bool = False) -> bool:
   """Best-effort: walk the captive portal's TOS form(s). Returns True if a submit went through OK.
 
@@ -159,6 +177,7 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
         break
     if resp is None:                    # every GET failed -> nothing to submit
       cloudlog.event("network2xnor_captive_portal", handler=handler, ok=False, reason="no_response")
+      _record({"handler": handler, "ok": False, "reason": "no_response"})
       return False
 
     # 2) replay the form, then follow a few hops (TOS form -> gateway auto-submit form -> done).
@@ -187,9 +206,11 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     #    re-rendered rejection.) The arbiter marks the portal "done" only on True, so be strict.
     submitted = bool(hops) and not stuck
     ok = submitted and _online(s)
-    cloudlog.event("network2xnor_captive_portal", handler=handler, hops=hops, submitted=submitted,
-                   stuck=stuck, online=ok, final_url=getattr(resp, "url", ""),
-                   status=getattr(resp, "status_code", None), ok=ok)
+    result = {"handler": handler, "hops": hops, "submitted": submitted, "stuck": stuck,
+              "online": ok, "final_url": getattr(resp, "url", ""),
+              "status": getattr(resp, "status_code", None), "ok": ok}
+    cloudlog.event("network2xnor_captive_portal", **result)
+    _record(result)
     return ok
   except Exception:
     cloudlog.exception(f"network2xnor: captive-portal '{handler}' failed")
