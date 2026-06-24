@@ -47,7 +47,17 @@ PORTALS: dict[str, dict] = {
 
 PORTAL_TIMEOUT_S = 8
 MAX_FORM_HOPS = 3
-_UA = "Mozilla/5.0 (X11; Linux aarch64) comma-captive-portal"
+
+# Look like a real desktop Chrome. Some captive portals (incl. MikroTik hotspots) serve a different
+# page — or reject the request — for non-browser User-Agents or missing Accept headers, so a bare/
+# "comma" UA can get treated differently than a phone clicking CONNECT. Send browser-like headers so
+# the portal hands us the same form a browser gets.
+_BROWSER_HEADERS = {
+  "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/126.0.0.0 Safari/537.36"),
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def known(handler: str | None) -> bool:
@@ -115,7 +125,7 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     from urllib.parse import urljoin
 
     s = requests.Session()
-    s.headers["User-Agent"] = _UA
+    s.headers.update(_BROWSER_HEADERS)
 
     # 1) get the portal form. Try the redirect-trigger probe first (fills the UAM params),
     #    then the portal page directly as a fallback. Per-URL try/except so a failing probe
