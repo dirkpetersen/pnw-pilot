@@ -293,6 +293,26 @@ class Uploader:
         self._set_firehose_active(False)
 
 
+def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> None:
+  # connect2pnw: the firehose ("uploading") indicator is set True for the full duration of a pass-2
+  # HD PUT and only cleared in step()'s finally. If WiFi drops mid-transfer, the main uploader loop
+  # stays blocked inside that PUT until it times out (~10s), so the green CONNECT->UPLOADING logo
+  # lingers while networkType already shows LTE -- even though no HD data can move over cellular (the
+  # stalled PUT just fails and the file re-sends on the next WiFi window). This daemon watches
+  # deviceState on its OWN SubMaster (the main loop is busy) and clears the indicator within ~0.5s of
+  # the network leaving WiFi. It only ever CLEARS (never sets) the flag, so it can't make the UI show
+  # "uploading" on LTE; the uploader still sets it True only under pass2_allowed (real WiFi).
+  if force_wifi:
+    return
+  sm = messaging.SubMaster(['deviceState'])
+  while not exit_event.is_set():
+    sm.update(1000)
+    if not sm.updated['deviceState']:
+      continue
+    if not pass2_allowed(sm['deviceState'].networkType.raw) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      uploader._set_firehose_active(False)
+
+
 def main(exit_event: threading.Event | None = None) -> None:
   if exit_event is None:
     exit_event = threading.Event()
@@ -313,6 +333,11 @@ def main(exit_event: threading.Event | None = None) -> None:
 
   sm = messaging.SubMaster(['deviceState'])
   uploader = Uploader(dongle_id, Paths.log_root())
+
+  # connect2pnw: clear the firehose ("uploading") indicator promptly when WiFi drops mid-transfer.
+  # The main loop blocks inside the in-flight pass-2 PUT (up to its ~10s timeout) and can't clear the
+  # flag itself in time; this daemon watcher does, on its own deviceState sub. Dies with the process.
+  threading.Thread(target=_firehose_network_guard, args=(uploader, exit_event), daemon=True).start()
 
   backoff = 0.1
   pass1_run = 0   # consecutive successful small (pass-1) uploads since the last HD (pass-2) upload
