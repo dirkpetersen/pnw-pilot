@@ -51,10 +51,14 @@ MAX_UPLOAD_SIZES = {
 }
 
 
-def pass2_allowed(network_type: int) -> bool:
-  # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on
-  # real external WiFi (NetworkType.wifi). Never on LTE, never on the hotspot.
-  return network_type in PASS2_NETWORK_TYPES
+def pass2_allowed(network_type: int, metered: bool) -> bool:
+  # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on real external WiFi
+  # (NetworkType.wifi). Never on LTE, never on the hotspot.
+  # connect2pnw: ...and never when the active connection is flagged METERED (e.g. a phone hotspot the
+  # user marked metered -> deviceState.networkMetered True). HD video/rlog must not burn metered data
+  # (pass 1 small files still run, throttled). FirehoseActive is only set during a pass-2 transfer, so
+  # gating pass 2 here also keeps the green "uploading" indicator off on metered connections.
+  return network_type in PASS2_NETWORK_TYPES and not metered
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -295,13 +299,14 @@ class Uploader:
 
 def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> None:
   # connect2pnw: the firehose ("uploading") indicator is set True for the full duration of a pass-2
-  # HD PUT and only cleared in step()'s finally. If WiFi drops mid-transfer, the main uploader loop
-  # stays blocked inside that PUT until it times out (~10s), so the green CONNECT->UPLOADING logo
-  # lingers while networkType already shows LTE -- even though no HD data can move over cellular (the
-  # stalled PUT just fails and the file re-sends on the next WiFi window). This daemon watches
-  # deviceState on its OWN SubMaster (the main loop is busy) and clears the indicator within ~0.5s of
-  # the network leaving WiFi. It only ever CLEARS (never sets) the flag, so it can't make the UI show
-  # "uploading" on LTE; the uploader still sets it True only under pass2_allowed (real WiFi).
+  # HD PUT and only cleared in step()'s finally. If WiFi drops (or the connection is marked metered)
+  # mid-transfer, the main uploader loop stays blocked inside that PUT until it times out (~10s), so
+  # the green CONNECT->UPLOADING logo lingers while networkType already shows LTE / metered -- even
+  # though no further HD data should move (the stalled PUT fails and the file re-sends on the next
+  # eligible WiFi window). This daemon watches deviceState on its OWN SubMaster (the main loop is
+  # busy) and clears the indicator within ~0.5s of the network leaving WiFi or becoming metered. It
+  # only ever CLEARS (never sets) the flag, so it can't make the UI show "uploading" when ineligible;
+  # the uploader still sets it True only under pass2_allowed (real, non-metered WiFi).
   if force_wifi:
     return
   sm = messaging.SubMaster(['deviceState'])
@@ -312,7 +317,8 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
       sm.update(1000)
       if not sm.updated['deviceState']:
         continue
-      if not pass2_allowed(sm['deviceState'].networkType.raw) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      ds = sm['deviceState']
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
     except Exception:
       cloudlog.exception("firehose network guard iteration failed")
@@ -365,14 +371,15 @@ def main(exit_event: threading.Event | None = None) -> None:
     elif p1:
       pass1_run += 1
 
-    # connect2pnw: PASS 2 (large "firehose" files: rlog + HD video), ONLY on real external WiFi
-    # (networkType==wifi is never true on the hotspot or LTE, so this can't burn cellular).
+    # connect2pnw: PASS 2 (large "firehose" files: rlog + HD video), ONLY on real external WiFi that
+    # is NOT flagged metered (networkType==wifi is never true on the hotspot or LTE, and a WiFi the
+    # user marked metered is excluded too, so this can't burn cellular or metered data).
     # HD-interleave: run pass 2 when pass 1 has nothing left (p1 is None) OR after every
     # PASS2_INTERLEAVE successful small uploads, so HD video makes steady progress instead of being
     # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
     # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
     p2 = None
-    if pass2_allowed(network_type_raw) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 
