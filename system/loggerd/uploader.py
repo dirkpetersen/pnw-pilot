@@ -306,11 +306,17 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
     return
   sm = messaging.SubMaster(['deviceState'])
   while not exit_event.is_set():
-    sm.update(1000)
-    if not sm.updated['deviceState']:
-      continue
-    if not pass2_allowed(sm['deviceState'].networkType.raw) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
-      uploader._set_firehose_active(False)
+    # a raised exception here would silently kill this daemon and revert to the stale-indicator bug
+    # for the rest of the process, so swallow + back off (mirrors _set_firehose_active's safety).
+    try:
+      sm.update(1000)
+      if not sm.updated['deviceState']:
+        continue
+      if not pass2_allowed(sm['deviceState'].networkType.raw) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+        uploader._set_firehose_active(False)
+    except Exception:
+      cloudlog.exception("firehose network guard iteration failed")
+      time.sleep(1)
 
 
 def main(exit_event: threading.Event | None = None) -> None:
