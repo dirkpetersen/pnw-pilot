@@ -134,7 +134,12 @@ class Sidebar(Widget):
     # sets FirehoseActive; override the CONNECT indicator to a green "UPLOADING". Polled here at
     # the deviceState cadence (~2 Hz). Cheap CLEAR_ON_MANAGER_START BOOL read, no block= kwarg.
     if ui_state.params.get_bool("FirehoseActive"):
-      self._connect_status.update(tr_noop("CONNECT"), tr_noop("UPLOADING"), Colors.GREEN)
+      # connect2pnw: show the live HD upload speed (Mbps) the uploader publishes per completed pass-2
+      # file (~1/min); fall back to "UPLOADING" until the first file's speed is known. One extra cheap
+      # param read at this same ~2 Hz poll.
+      mbps = int(ui_state.params.get("FirehoseSpeed", return_default=True) or 0)
+      value = f"{mbps} Mbps" if mbps > 0 else tr_noop("UPLOADING")
+      self._connect_status.update(tr_noop("CONNECT"), value, Colors.GREEN)
       return
 
     last_ping = device_state.lastAthenaPingTime

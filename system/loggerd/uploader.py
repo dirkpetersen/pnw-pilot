@@ -39,6 +39,11 @@ PASS2_NETWORK_TYPES = {int(NetworkType.wifi)}
 # only while a pass-2 (video/rlog) transfer is actually in flight.
 FIREHOSE_ACTIVE_PARAM = "FirehoseActive"
 
+# connect2pnw: Mbps of the in-flight pass-2 transfer, published once per completed HD file (~1/min)
+# so the sidebar can show "CONNECT <n> Mbps" instead of a static "UPLOADING". One param write per
+# file = negligible overhead (the speed is already computed for the upload_success log event).
+FIREHOSE_SPEED_PARAM = "FirehoseSpeed"
+
 # connect2pnw HD-interleave: force one pass-2 (HD/rlog) upload after this many consecutive successful
 # pass-1 (small) uploads, so large video isn't starved behind a long small-file backlog. Small files
 # still get priority (pass 1 runs every loop); this just guarantees HD makes steady progress.
@@ -114,6 +119,7 @@ class Uploader:
 
     # stats for last successfully uploaded file
     self.last_filename = ""
+    self.last_upload_mbps = 0.0   # connect2pnw: speed of the last measured upload (Mbps), for the UI indicator
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
@@ -129,6 +135,14 @@ class Uploader:
       self.params.put_bool(FIREHOSE_ACTIVE_PARAM, active)
     except Exception:
       cloudlog.exception("failed to set firehose active param")
+
+  def _set_firehose_speed(self, mbps: float) -> None:
+    # connect2pnw: publish the just-finished pass-2 file's speed (Mbps) so the sidebar can show
+    # "CONNECT <n> Mbps". Written once per completed HD file (~1/min) -- negligible overhead.
+    try:
+      self.params.put(FIREHOSE_SPEED_PARAM, round(mbps))
+    except Exception:
+      cloudlog.exception("failed to set firehose speed param")
 
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -257,6 +271,7 @@ class Uploader:
         else:
           content_length = int(stat.request.headers.get("Content-Length", 0))
           speed = (content_length / 1e6) / dt
+          self.last_upload_mbps = speed * 8.0   # connect2pnw: MB/s -> Mbps for the sidebar indicator
           cloudlog.event("upload_success", key=key, fn=fn, sz=sz, content_length=content_length,
                          network_type=network_type, metered=metered, speed=speed)
         success = True
@@ -291,7 +306,10 @@ class Uploader:
     if pass2:
       self._set_firehose_active(True)
     try:
-      return self.upload(name, key, fn, network_type, metered)
+      ok = self.upload(name, key, fn, network_type, metered)
+      if pass2 and ok:
+        self._set_firehose_speed(self.last_upload_mbps)   # connect2pnw: publish Mbps for the UI (~1/file)
+      return ok
     finally:
       if pass2:
         self._set_firehose_active(False)
@@ -320,6 +338,7 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
       ds = sm['deviceState']
       if not pass2_allowed(ds.networkType.raw, ds.networkMetered) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
+        uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
       cloudlog.exception("firehose network guard iteration failed")
       time.sleep(1)
