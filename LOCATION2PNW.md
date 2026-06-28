@@ -30,10 +30,10 @@ One daemon merges three "what's ahead on the highway" sources into one lower-lef
   static rest/EV lines update every tick regardless — a hung/403 poll can never blank the overlay.
 
 ## Deviations / choices (flagged for the user)
-1. **API key is NOT hard-coded.** The daemon reads the proxy (key+host+url) from
-   **`/data/pnw/location/police_proxy.json`**; absent → police never polls, line shows "—". (The prototype
-   hard-codes a RapidAPI key; shipping it in-repo is a leak risk.) *Decision pending: ship the key this way, or
-   stub police for v1?*
+1. **API key IS shipped in-distribution (user-approved 2026-06-28, testing phase).** `DEFAULT_PROXY` in
+   `location_servicesd.py` carries the RapidAPI key/host/url so police polling works out of the box; a
+   **`/data/pnw/location/police_proxy.json`** file, if present, OVERRIDES it (picked up on daemon restart).
+   It's a rotatable third-party proxy key, not a device/account secret. Longer term → override-file-only.
 2. **Plain text labels, not emoji** (👮/🛏/⚡) — the openpilot Inter font has no emoji glyphs (would render as
    tofu). Swap to an icon atlas later if pictograms are wanted.
 

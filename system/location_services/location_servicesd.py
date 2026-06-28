@@ -16,8 +16,8 @@ engagement. Reads GPS/path/road from /dev/shm mem params (the mapd_configd bridg
 `LocationServices` JSON mem param for the lower-left UI overlay. Gated by `LocationServicesEnabled`
 (default ON) and, for the lookups, `roadContext == freeway`.
 
-The police API key is NOT hard-coded — it is read from /data/pnw/location/police_proxy.json (key+host+url).
-Absent config -> police never polls and its line shows "—" (no-data), never a false "Clear".
+The police proxy ships a DEFAULT key in-distribution (DEFAULT_PROXY) for testing, overridable by a
+/data/pnw/location/police_proxy.json file. A failed poll shows "—" (no-data), never a false "Clear".
 """
 import json
 import os
@@ -37,6 +37,16 @@ DATA_DIR = "/data/pnw/location"
 EV_FILE = os.path.join(DATA_DIR, "chargers", "ev_dc_fast.geojson")
 REST_DIR = os.path.join(DATA_DIR, "rest_areas")
 PROXY_CFG = os.path.join(DATA_DIR, "police_proxy.json")
+
+# Default Waze proxy (RapidAPI). Shipped in-distribution for TESTING (user-approved 2026-06-28) so police
+# polling works out of the box; a /data/pnw/location/police_proxy.json file, if present, OVERRIDES this.
+# This is a rotatable third-party proxy key, not a device/account secret — revoke+swap by editing here or
+# dropping the override file. (Longer term, move to the override-file-only model.)
+DEFAULT_PROXY = {
+  "url": "https://waze-api.p.rapidapi.com/alerts",
+  "host": "waze-api.p.rapidapi.com",
+  "key": "d5e52230cemshce2d7ff322c964ap18ae5cjsn058e600fcd5d",
+}
 
 TICK_HZ = 1.0
 EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile perpendicular of the highway
@@ -137,6 +147,7 @@ class PoliceUpdater(threading.Thread):
     self._stop.set()
 
   def _load_cfg(self):
+    # Override file wins; otherwise fall back to the in-distribution DEFAULT_PROXY (testing).
     try:
       with open(PROXY_CFG) as f:
         c = json.load(f)
@@ -144,7 +155,7 @@ class PoliceUpdater(threading.Thread):
         return c
     except (OSError, ValueError):
       pass
-    return None
+    return dict(DEFAULT_PROXY)
 
   def _cur_gps(self):
     try:
