@@ -59,6 +59,13 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
   ),
+  "LocationServicesEnabled": tr_noop(
+    "Show the lower-left \"Happening Ahead\" overlay while on a freeway: the nearest police report (Waze), " +
+    "rest area, and EV fast charger ahead. Display-only — never affects steering or speed."
+  ),
+  "EvIncludeLevel2": tr_noop(
+    "Also show slow Level 2 (AC) chargers in the EV line, not just DC-fast. Off by default."
+  ),
 }
 
 
@@ -139,6 +146,19 @@ class TogglesLayout(Widget):
       "GetMapForLocation": (
         lambda: tr("Get map for this location"),
         DESCRIPTIONS["GetMapForLocation"],
+        "speed_limit.png",
+        False,
+      ),
+      # location2pnw: "Happening Ahead" overlay master toggle, with the slow-L2-charger sub-option right below it
+      "LocationServicesEnabled": (
+        lambda: tr("Location Services"),
+        DESCRIPTIONS["LocationServicesEnabled"],
+        "speed_limit.png",
+        False,
+      ),
+      "EvIncludeLevel2": (
+        lambda: tr("Display slow Level 2 chargers"),
+        DESCRIPTIONS["EvIncludeLevel2"],
         "speed_limit.png",
         False,
       ),

@@ -119,6 +119,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
     {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // master toggle (UI), default ON; daemon idles + overlay hidden when off
+    {"EvIncludeLevel2", {PERSISTENT, BOOL, "0"}},  // location2pnw: also surface slow Level 2 chargers (reads ev_other_chargers.geojson); default OFF
     {"LocationServices", {CLEAR_ON_MANAGER_START, JSON}},  // mem: JSON the daemon publishes for the lower-left overlay
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},

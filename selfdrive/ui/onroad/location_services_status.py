@@ -15,6 +15,7 @@ import pyray as rl
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.onroad.driver_state import BTN_SIZE
+from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -26,6 +27,10 @@ _LINE_H = 70
 _PAD = 22
 _MARGIN = 40
 _FT_PER_MILE = 5280.0
+# Blue flashing "POLICE AHEAD" banner — same box/blink as the red speed-limit warning, but blue, when a
+# police report is <= 0.5 mi AHEAD (the police line is already ahead-only, so "behind" never triggers it).
+_POLICE_NEAR_MI = 0.5
+_BLINK_PERIOD = 0.7   # s, one on+off cycle (~1.4 Hz), matching the speed-limit warning
 # The driver-monitoring icon is a bottom-LEFT circle whose TOP edge is ~(UI_BORDER_SIZE + BTN_SIZE) up
 # from the content bottom. Lift the box to sit just ABOVE it (small gap) so they no longer overlap.
 _DRIVER_ICON_CLEAR = UI_BORDER_SIZE + BTN_SIZE + 24
@@ -38,6 +43,7 @@ class _C:
   GREEN = rl.Color(90, 205, 115, 240)
   DIM = rl.Color(140, 145, 142, 220)
   BG = rl.Color(0, 0, 0, 140)
+  BLUE_BG = rl.Color(20, 90, 220, 235)   # "POLICE AHEAD" flashing banner
 
 
 class LocationServicesStatusRenderer(Widget):
@@ -74,6 +80,9 @@ class LocationServicesStatusRenderer(Widget):
       return f"{int(round(dist_mi * _FT_PER_MILE / 50.0) * 50)} ft"
     return f"{dist_mi:.1f} mi"
 
+  def _town(self, t):
+    return f" ({t})" if t else ""    # nearest-town sanity tag at the END of the line, e.g. " (Cle Elum)"
+
   def _police_line(self):
     p = self._st.get("police", {})
     s = p.get("state")
@@ -84,7 +93,7 @@ class LocationServicesStatusRenderer(Widget):
         txt += " - your way"
       elif d == "opp":
         txt += " - other side"
-      return txt, _C.ORANGE
+      return txt + self._town(p.get("town")), _C.ORANGE
     if s == "clear":
       return "Police   Clear", _C.GREEN
     return "Police   -", _C.DIM            # nodata: never conflated with Clear
@@ -101,20 +110,27 @@ class LocationServicesStatusRenderer(Widget):
   def _rest_line(self):
     r = self._st.get("rest", {})
     if r.get("state") == "ok":
-      return f"Rest     {self._rest_dist_text(r.get('dist_mi'))}", _C.WHITE
+      txt = f"Rest     {self._rest_dist_text(r.get('dist_mi'))}"
+      name = r.get("name") or ""
+      d = r.get("dir") or ""
+      label = f"{name} ({d})" if (name and d) else name   # display name + direction, e.g. "Gee Creek (N)"
+      if label:
+        txt += f"  {label}"
+      return txt + self._town(r.get("town")), _C.WHITE
     return "Rest     -", _C.DIM
 
   def _ev_line(self):
     e = self._st.get("ev", {})
     if e.get("state") == "ok":
-      txt = f"EV fast  {self._dist_text(e.get('dist_mi'))}"
+      label = "EV fast" if e.get("fast", True) else "EV L2"   # DC-fast vs slow Level 2 (opt-in)
+      txt = f"{label}  {self._dist_text(e.get('dist_mi'))}"
       net = e.get("network")
       kw = e.get("kw")
       if net:
         txt += f" - {net}"
       if kw:
         txt += f" {int(kw)} kW"
-      return txt, _C.GREEN
+      return txt + self._town(e.get("town")), _C.GREEN
     return "EV fast  -", _C.DIM
 
   def _lines(self):
@@ -141,3 +157,29 @@ class LocationServicesStatusRenderer(Widget):
     for text, color, font in lines:
       rl.draw_text_ex(font, text, rl.Vector2(x, y), _FS, 0, color)   # left-aligned
       y += _LINE_H
+
+    # big blue flashing "POLICE AHEAD" banner when a report is <= 0.5 mi AHEAD (police is ahead-only).
+    # NOTE: dist_mi rounds to 0.0 when very close (falsy), so test `is not None`, never `or 99.0`.
+    p = self._st.get("police", {})
+    pd = p.get("dist_mi")
+    if p.get("state") == "alert" and pd is not None and pd <= _POLICE_NEAR_MI:
+      self._draw_police_banner(rect, p)
+
+  @staticmethod
+  def _text_centered(font, text, size, cx, cy, color):
+    sz = measure_text_cached(font, text, size)
+    rl.draw_text_ex(font, text, rl.Vector2(cx - sz.x / 2, cy - sz.y / 2), size, 0, color)
+
+  def _draw_police_banner(self, rect: rl.Rectangle, p: dict):
+    # blink ~1.4 Hz like the speed-limit warning — skip the draw on the "off" half-cycle
+    if (time.monotonic() % _BLINK_PERIOD) >= _BLINK_PERIOD / 2:
+      return
+    banner_w, banner_h = 1440, 520
+    bx = rect.x + (rect.width - banner_w) / 2
+    by = rect.y + UI_CONFIG.header_height + 60
+    banner = rl.Rectangle(bx, by, banner_w, banner_h)
+    rl.draw_rectangle_rounded(banner, 0.12, 10, _C.BLUE_BG)
+    rl.draw_rectangle_rounded_lines_ex(banner, 0.12, 10, 12, _C.WHITE)
+    cx = bx + banner_w / 2
+    self._text_centered(self.font_bold, "POLICE AHEAD", 120, cx, by + 150, _C.WHITE)
+    self._text_centered(self.font_bold, self._dist_text(p.get("dist_mi")), 220, cx, by + 350, _C.WHITE)

@@ -1,0 +1,167 @@
+[
+  {
+    "name": "Custer Southbound Rest Area",
+    "display": "Custer",
+    "town": "Birch Bay",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "WA",
+    "lat": 48.926833,
+    "lon": -122.645395,
+    "osm": "way/160676510"
+  },
+  {
+    "name": "Custer Northbound Rest Area",
+    "display": "Custer",
+    "town": "Ferndale",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 48.909023,
+    "lon": -122.622291,
+    "osm": "way/160676506"
+  },
+  {
+    "name": "Bow Hill Southbound Rest Area",
+    "display": "Bow Hill",
+    "town": "Edison",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "WA",
+    "lat": 48.584626,
+    "lon": -122.34686,
+    "osm": "way/160674961"
+  },
+  {
+    "name": "Bow Hill Northbound Rest Area",
+    "display": "Bow Hill",
+    "town": "Edison",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 48.581468,
+    "lon": -122.344139,
+    "osm": "way/160674962"
+  },
+  {
+    "name": "Smokey Point Northbound Rest Area",
+    "display": "Smokey Point",
+    "town": "Lakewood",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 48.169264,
+    "lon": -122.190032,
+    "osm": "way/160673667"
+  },
+  {
+    "name": "Smokey Point Southbound Rest Area",
+    "display": "Smokey Point",
+    "town": "Lakewood",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "WA",
+    "lat": 48.169216,
+    "lon": -122.193392,
+    "osm": "way/160673666"
+  },
+  {
+    "name": "Silver Lake Rest Area (closed)",
+    "display": "Silver Lake (closed)",
+    "town": "Mill Creek",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 47.901992,
+    "lon": -122.214867,
+    "osm": "way/160670081"
+  },
+  {
+    "name": "Maytown Rest Area",
+    "display": "Maytown",
+    "town": "Grand Mound",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 46.870803,
+    "lon": -122.970089,
+    "osm": "way/160433260"
+  },
+  {
+    "name": "Scatter Creek Rest Area",
+    "display": "Scatter Creek",
+    "town": "Grand Mound",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 46.835851,
+    "lon": -122.985842,
+    "osm": "way/160432668"
+  },
+  {
+    "name": "Toutle River Southbound Safety Rest Area",
+    "display": "Toutle River",
+    "town": "Vader",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "WA",
+    "lat": 46.352174,
+    "lon": -122.907509,
+    "osm": "way/119997358"
+  },
+  {
+    "name": "Toutle River Northbound Safety Rest Area",
+    "display": "Toutle River",
+    "town": "Vader",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 46.351104,
+    "lon": -122.904989,
+    "osm": "way/119997357"
+  },
+  {
+    "name": "Gee Creek Southbound Rest Area",
+    "display": "Gee Creek",
+    "town": "Ridgefield",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "WA",
+    "lat": 45.799388,
+    "lon": -122.680533,
+    "osm": "way/160429766"
+  },
+  {
+    "name": "Gee Creek Northbound Rest Area",
+    "display": "Gee Creek",
+    "town": "Ridgefield",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 45.777051,
+    "lon": -122.66942,
+    "osm": "way/23087237"
+  },
+  {
+    "name": "French Prairie Rest Area - Southbound",
+    "display": "French Prairie",
+    "town": "Wilsonville",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "OR",
+    "lat": 45.274036,
+    "lon": -122.777053,
+    "osm": "way/484162089"
+  },
+  {
+    "name": "French Prairie Rest Area - Northbound",
+    "display": "French Prairie",
+    "town": "Wilsonville",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "OR",
+    "lat": 45.270971,
+    "lon": -122.775307,
+    "osm": "way/484162085"
+  }
+]

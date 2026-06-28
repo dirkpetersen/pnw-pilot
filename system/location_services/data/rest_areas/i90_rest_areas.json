@@ -1,0 +1,123 @@
+[
+  {
+    "name": "Huetter Rest Area, I-90 Eastbound",
+    "display": "Huetter",
+    "town": "Huetter",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "ID",
+    "lat": 47.707653,
+    "lon": -116.866046,
+    "osm": "way/448268608"
+  },
+  {
+    "name": "Huetter Rest Area, I-90 Westbound",
+    "display": "Huetter",
+    "town": "Huetter",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "ID",
+    "lat": 47.710191,
+    "lon": -116.866513,
+    "osm": "way/448268609"
+  },
+  {
+    "name": "Schrag Eastbound Rest Area",
+    "display": "Schrag",
+    "town": "Warden",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 47.085211,
+    "lon": -118.845301,
+    "osm": "way/394544398"
+  },
+  {
+    "name": "Schrag Westbound Rest Area",
+    "display": "Schrag",
+    "town": "Warden",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 47.087006,
+    "lon": -118.846265,
+    "osm": "way/394544389"
+  },
+  {
+    "name": "Winchester Westbound Rest Area",
+    "display": "Winchester",
+    "town": "George",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 47.1045,
+    "lon": -119.615748,
+    "osm": "way/394545155"
+  },
+  {
+    "name": "Winchester Eastbound Rest Area",
+    "display": "Winchester",
+    "town": "George",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 47.103247,
+    "lon": -119.626412,
+    "osm": "way/394545156"
+  },
+  {
+    "name": "Ryegrass Eastbound Rest Area",
+    "display": "Ryegrass",
+    "town": "Vantage",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 46.941397,
+    "lon": -120.203878,
+    "osm": "way/394546122"
+  },
+  {
+    "name": "Ryegrass Westbound Rest Area",
+    "display": "Ryegrass",
+    "town": "Kittitas",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 46.947049,
+    "lon": -120.209416,
+    "osm": "way/394546124"
+  },
+  {
+    "name": "Indian John Hill Rest Area, I-90 Westbound",
+    "display": "Indian John Hill",
+    "town": "Cle Elum",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 47.161104,
+    "lon": -120.843602,
+    "osm": "way/394546881"
+  },
+  {
+    "name": "Indian John Hill Rest Area, I-90 Eastbound",
+    "display": "Indian John Hill",
+    "town": "Cle Elum",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 47.161024,
+    "lon": -120.848217,
+    "osm": "way/394546885"
+  },
+  {
+    "name": "Travelers Rest Rest Area",
+    "display": "Travelers Rest",
+    "town": "Easton",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 47.420891,
+    "lon": -121.411308,
+    "osm": "way/1366742193"
+  }
+]

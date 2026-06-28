@@ -33,10 +33,22 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.location_services import geo
 
-DATA_DIR = "/data/pnw/location"
-EV_FILE = os.path.join(DATA_DIR, "chargers", "ev_dc_fast.geojson")
-REST_DIR = os.path.join(DATA_DIR, "rest_areas")
-PROXY_CFG = os.path.join(DATA_DIR, "police_proxy.json")
+# POI data is bundled IN the distribution next to this daemon (small enough to vendor). The daemon
+# reloads on file-mtime, so editing these on-device still works for quick testing.
+_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+EV_FILE = os.path.join(_DATA, "chargers", "ev_dc_fast.geojson")        # DC-fast: small (~800 KB), bundled
+REST_DIR = os.path.join(_DATA, "rest_areas")
+# The police proxy key is a runtime secret -> stays in persistent /data, NOT the repo.
+PROXY_CFG = "/data/pnw/location/police_proxy.json"
+
+# Slow Level-2 chargers (3 MB) are DELIBERATELY NOT in the deploy branch (they bloated every deploy). The
+# file lives alone on the `l2-charger-data` branch and is DOWNLOADED ON DEMAND the first time the user
+# enables EvIncludeLevel2 ("Display slow Level 2 chargers"), cached to /data, then read from there. Same
+# pattern as mapd's OSM pull. Display-only -> a slow/failed download just means L2 isn't shown yet.
+EV_OTHER_CACHE = "/data/pnw/location/ev_other_chargers.geojson"        # downloaded cache (NOT in the repo)
+EV_OTHER_URL = "https://raw.githubusercontent.com/dirkpetersen/pnw-pilot/l2-charger-data/ev_other_chargers.geojson"
+EV_OTHER_TIMEOUT_S = 120
+EV_OTHER_RETRY_S = 300                                                 # min gap between download attempts (no spam on failure)
 
 # Default Waze proxy (RapidAPI). Shipped in-distribution for TESTING (user-approved 2026-06-28) so police
 # polling works out of the box; a /data/pnw/location/police_proxy.json file, if present, OVERRIDES this.
@@ -55,7 +67,7 @@ EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile p
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
 # (the gatherer scoped rest areas within ~2 km of the mainline, so 1.5 mi comfortably keeps the real ones).
 REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
-REST_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # show an upcoming rest area starting ~15 mi out (driver request)
+DISPLAY_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # all three (police/EV/rest) show a POI starting ~15 mi ahead (driver request)
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
 POLICE_STALE_S = 45 * 60                   # drop crowd reports older than this
@@ -75,9 +87,9 @@ class StaticData:
   def __init__(self):
     self.ev: list = []
     self.rest: list = []
-    self._ev_mtime = 0.0
+    self._ev_sig = None
     self._rest_sig = ()
-    self.reload()
+    self.reload(False)
 
   def _mtime(self, path):
     try:
@@ -85,28 +97,46 @@ class StaticData:
     except OSError:
       return 0.0
 
-  def reload(self):
-    # EV DC-fast geojson: FeatureCollection; geometry.coordinates = [lon, lat]
-    m = self._mtime(EV_FILE)
-    if m != self._ev_mtime:
-      self._ev_mtime = m
-      ev = []
+  def _load_ev(self, path, fast, del_on_error=False):
+    """Load a charger geojson (FeatureCollection; coordinates=[lon,lat]) -> POI dicts tagged `fast`
+    (True=DC-fast, False=slow L1/L2). town comes from the NREL `city` property. del_on_error: for the
+    downloaded L2 cache, unlink a corrupt/truncated file so it gets re-downloaded (don't strand it)."""
+    out = []
+    try:
+      with open(path) as f:
+        gj = json.load(f)
+    except OSError:
+      return out
+    except ValueError:                                     # corrupt/truncated JSON (e.g. half-written cache)
+      if del_on_error:
+        try:
+          os.remove(path)
+        except OSError:
+          pass
+      return out
+    if not isinstance(gj, dict):                            # an array/garbage root would AttributeError below
+      return out
+    for feat in gj.get("features", []):
       try:
-        with open(EV_FILE) as f:
-          gj = json.load(f)
-        for feat in gj.get("features", []):
-          try:
-            lon, lat = feat["geometry"]["coordinates"][:2]
-            p = feat.get("properties", {})
-            ev.append({"lat": float(lat), "lon": float(lon),
-                       "network": p.get("ev_network") or "",
-                       "kw": p.get("ev_max_power_kw")})
-          except (KeyError, TypeError, ValueError, IndexError):
-            continue
-        self.ev = ev
-        cloudlog.info("location_services: loaded %d DC-fast chargers", len(ev))
-      except (OSError, ValueError):
-        self.ev = []
+        lon, lat = feat["geometry"]["coordinates"][:2]
+        p = feat.get("properties") or {}                   # properties may be null in external GIS data
+        out.append({"lat": float(lat), "lon": float(lon), "network": p.get("ev_network") or "",
+                    "kw": p.get("ev_max_power_kw"), "town": p.get("city") or "", "fast": fast})
+      except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+        continue
+    return out
+
+  def reload(self, include_l2=False):
+    # EV chargers: DC-fast always; slow L1/L2 (ev_other) only when opted in via EvIncludeLevel2. Reload on
+    # a file-mtime change OR the include_l2 flag flipping.
+    sig = (self._mtime(EV_FILE), self._mtime(EV_OTHER_CACHE) if include_l2 else 0.0, include_l2)
+    if sig != self._ev_sig:
+      self._ev_sig = sig
+      ev = self._load_ev(EV_FILE, fast=True)
+      if include_l2:                          # cache may not exist yet (download in flight) -> _load_ev returns []
+        ev += self._load_ev(EV_OTHER_CACHE, fast=False, del_on_error=True)
+      self.ev = ev
+      cloudlog.info("location_services: loaded %d chargers (include_l2=%s)", len(ev), include_l2)
     # rest areas: merge ALL *.json under REST_DIR, each a list of {name, lat, lon, ...}
     try:
       files = sorted(f for f in os.listdir(REST_DIR) if f.endswith(".json"))
@@ -123,7 +153,9 @@ class StaticData:
           for it in (items if isinstance(items, list) else items.get("rest_areas", [])):
             try:
               rest.append({"lat": float(it["lat"]), "lon": float(it["lon"]),
-                           "name": it.get("name") or "Rest area"})
+                           "name": it.get("display") or it.get("name") or "Rest area",
+                           "dir": it.get("dir") or "",
+                           "town": it.get("town") or it.get("city") or ""})
             except (KeyError, TypeError, ValueError):
               continue
         except (OSError, ValueError):
@@ -191,7 +223,8 @@ class PoliceUpdater(threading.Thread):
       try:
         out.append({"lat": float(a["locationY"]), "lon": float(a["locationX"]),
                     "magvar": a.get("magvar"), "ts": a.get("timestamp"),
-                    "uuid": a.get("uuid") or a.get("id"), "street": a.get("street") or ""})
+                    "uuid": a.get("uuid") or a.get("id"), "street": a.get("street") or "",
+                    "town": a.get("city") or ""})
       except (KeyError, TypeError, ValueError):
         continue
     return out
@@ -288,11 +321,12 @@ def _line_police(alerts, state, lat, lon, brg, path):
     age = _age_min(al.get("ts"), now)
     if age is None or age * 60 <= POLICE_STALE_S:
       fresh.append(al)
-  poi, a = geo.nearest_ahead(path, lat, lon, brg, fresh)
+  poi, a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
   if poi is None:
     return {"state": "clear"}                              # fresh poll genuinely returned nothing ahead
   return {"state": "alert", "dist_mi": round(a["along_m"] / geo.M_PER_MILE, 1),
-          "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now), "uuid": poi.get("uuid")}
+          "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now),
+          "uuid": poi.get("uuid"), "town": poi.get("town", "")}
 
 
 def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
@@ -305,6 +339,58 @@ def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
   return poi, round(a["along_m"] / geo.M_PER_MILE, 1)
 
 
+# ----------------------------- L2 charger download (network, isolated thread) -----------------------
+class L2Downloader:
+  """Fetches the opt-in slow-Level-2 charger file (3 MB) on demand into a /data cache, in a BACKGROUND
+  thread so the one-time 3 MB pull NEVER stalls the always-on main loop (same HARD RULE as the police
+  thread). The file is EXCLUDED from the deploy branch; it lives alone on the `l2-charger-data` branch
+  and is pulled once via raw.githubusercontent, then cached. Display-only: a failed/slow download just
+  means L2 isn't shown yet — it retries on the next tick the cache is still missing."""
+  def __init__(self):
+    self._thread = None
+    self._lock = threading.Lock()
+    self._last_attempt = 0.0
+
+  def ensure(self):
+    # Non-blocking: if the cache is missing and no download is already in flight, kick one off. Returns
+    # immediately every tick (cheap os.path.exists), so the main loop never waits on the network. A failed
+    # download exits its thread; EV_OTHER_RETRY_S throttles re-attempts so we don't spam the net/log at 1 Hz.
+    if os.path.exists(EV_OTHER_CACHE):
+      return
+    now = time.monotonic()
+    with self._lock:
+      if self._thread is not None and self._thread.is_alive():
+        return
+      if now - self._last_attempt < EV_OTHER_RETRY_S:
+        return
+      self._last_attempt = now
+      self._thread = threading.Thread(target=self._fetch, daemon=True)
+      self._thread.start()
+
+  def _fetch(self):
+    tmp = EV_OTHER_CACHE + ".tmp"
+    try:
+      os.makedirs(os.path.dirname(EV_OTHER_CACHE), exist_ok=True)
+      cloudlog.info("location_services: downloading L2 charger file %s", EV_OTHER_URL)
+      req = urllib.request.Request(EV_OTHER_URL, headers={"User-Agent": "pnw-location/1.0"})
+      with urllib.request.urlopen(req, timeout=EV_OTHER_TIMEOUT_S) as resp:
+        data = resp.read()
+      if len(data) < 1024 or b'"features"' not in data:      # guard against caching an HTML error page
+        raise ValueError("L2 download did not look like a charger geojson")
+      with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())                                   # durable before the rename (survive power loss)
+      os.replace(tmp, EV_OTHER_CACHE)                          # atomic -> reload's mtime-sig picks it up
+      cloudlog.info("location_services: L2 charger file cached (%d bytes)", len(data))
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
+      cloudlog.warning("location_services: L2 download failed (%s)", type(e).__name__)
+      try:
+        os.remove(tmp)
+      except OSError:
+        pass
+
+
 # ----------------------------- main -----------------------------------------------------------------
 def main():
   params = Params()
@@ -312,8 +398,10 @@ def main():
   static = StaticData()
   police = PoliceUpdater()
   police.start()
+  l2dl = L2Downloader()
   rk = Ratekeeper(TICK_HZ, print_delay_threshold=None)
   last_reload = 0.0
+  last_l2 = None
 
   while True:
     enabled = params.get_bool("LocationServicesEnabled")
@@ -323,9 +411,13 @@ def main():
       continue
 
     now = time.monotonic()
-    if now - last_reload > 30.0:        # pick up newly-staged data files without a restart
-      static.reload()
+    include_l2 = params.get_bool("EvIncludeLevel2")
+    if include_l2:
+      l2dl.ensure()                                          # non-blocking: pull the 3 MB L2 file once, in the bg
+    if include_l2 != last_l2 or now - last_reload > 30.0:   # reload on the L2 toggle flipping, or every 30s (data mtime)
+      static.reload(include_l2)
       last_reload = now
+      last_l2 = include_l2
 
     lat, lon, brg, path, ctx = _read_mem(mem)
     out = {"enabled": True, "ts": int(_now_epoch())}
@@ -340,12 +432,14 @@ def main():
       alerts, pstate = police.snapshot()
       out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
 
-      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=REST_MAX_DIST_M)
-      out["rest"] = {"state": "ok", "dist_mi": r[1], "name": r[0].get("name")} if r else {"state": "nodata"}
+      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
+                      "town": r[0].get("town", "")} if r else {"state": "nodata"})
 
-      e = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M)
+      e = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
       if e:
-        ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or ""}
+        ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or "",
+              "fast": e[0].get("fast", True), "town": e[0].get("town", "")}
         if e[0].get("kw"):                                  # omit kW for the ~2% lacking it (decision #6)
           ev["kw"] = e[0]["kw"]
         out["ev"] = ev

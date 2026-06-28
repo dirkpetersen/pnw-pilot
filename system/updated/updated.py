@@ -414,9 +414,11 @@ class Updater:
 def main() -> None:
   params = Params()
 
-  if params.get_bool("DisableUpdates"):
-    cloudlog.warning("updates are disabled by the DisableUpdates param")
-    exit(0)
+  # location2pnw: DisableUpdates is now honored LIVE inside the update loop below (it used to exit(0) here,
+  # which killed the updater process -> un-pausing "Pause Updates" required a reboot to re-enable updates
+  # and the software fields stayed blank). The process now always runs; while paused it just idles, and
+  # un-pausing resumes within ~1 min with no reboot. While paused it never fetches/finalizes, so manual
+  # deploys stay safe.
 
   with open(LOCK_FILE, 'w') as ov_lock_fd:
     try:
@@ -451,6 +453,12 @@ def main() -> None:
     first_run = True
     while True:
       wait_helper.ready_event.clear()
+
+      # location2pnw: honor Pause Updates live — idle while paused, resume on un-pause (~1 min, no reboot).
+      if params.get_bool("DisableUpdates"):
+        params.put("UpdaterState", "updates paused")
+        wait_helper.sleep(60)
+        continue
 
       # Attempt an update
       exception = None
