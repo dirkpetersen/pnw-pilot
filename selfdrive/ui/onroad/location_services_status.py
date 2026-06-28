@@ -13,6 +13,8 @@ import time
 import pyray as rl
 
 from openpilot.common.params import Params
+from openpilot.selfdrive.ui import UI_BORDER_SIZE
+from openpilot.selfdrive.ui.onroad.driver_state import BTN_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -24,6 +26,9 @@ _LINE_H = 70
 _PAD = 22
 _MARGIN = 40
 _FT_PER_MILE = 5280.0
+# The driver-monitoring icon is a bottom-LEFT circle whose TOP edge is ~(UI_BORDER_SIZE + BTN_SIZE) up
+# from the content bottom. Lift the box to sit just ABOVE it (small gap) so they no longer overlap.
+_DRIVER_ICON_CLEAR = UI_BORDER_SIZE + BTN_SIZE + 24
 
 
 class _C:
@@ -119,7 +124,7 @@ class LocationServicesStatusRenderer(Widget):
     box_w = max(measure_text_cached(f, t, _FS).x for t, _, f in lines) + _PAD * 2
     box_h = _LINE_H * len(lines) + _PAD * 2
     bx = rect.x + _MARGIN                       # LOWER-LEFT
-    by = rect.y + rect.height - box_h - _MARGIN
+    by = rect.y + rect.height - box_h - _DRIVER_ICON_CLEAR   # ABOVE the driver-monitoring icon
 
     rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), 0.12, 8, _C.BG)
     x = bx + _PAD
