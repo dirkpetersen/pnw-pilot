@@ -124,6 +124,11 @@ class VTSCController:
       mv, md = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.MAP_LOOKAHEAD_S)
     except Exception:
       return k_apex, d_apex, v_curve
+    # soften MTSC (driver: mapd's curve targets ran ~10 mph too slow on I-90): carry more speed through
+    # map curves by scaling the target up, capped at cruise. Still feeds the decel-limited + V_MIN-floored
+    # state machine below, so it can never slam. Scale applied BEFORE the fold test so trivial curves drop.
+    if mv > 0.0:
+      mv = min(mv * C.MAP_SPEED_SCALE, v_cruise)
     # only a real map curve meaningfully below cruise counts (ignore GPS noise / trivial targets)
     if not (0.0 < mv < v_cruise - C.MAP_MIN_SLOWDOWN) or md <= 0.0:
       return k_apex, d_apex, v_curve

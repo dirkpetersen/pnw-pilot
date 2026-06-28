@@ -8,9 +8,10 @@ Pure literals (no imports) so the core is unit-testable without the openpilot st
 # --- the two knobs that shape the behavior -----------------------------------
 # Tuned for a SMOOTH, SLIGHT adjustment (driver feedback after the first VTSC drive: 57 was too
 # aggressive — only a slight trim is wanted). Higher A_LAT_TARGET = less slowdown; lower A_DECEL = gentler.
-A_LAT_TARGET = 1.9    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
-                      #   (more margin). At Terwilliger (R~415): 1.9 -> ~62 mph (an ~8 mph trim from 70,
-                      #   lateral 2.6 -> 1.9), 1.5 -> ~57 (too firm per drive #4), 2.2 -> ~67 (barely).
+A_LAT_TARGET = 2.2    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
+                      #   (more margin). RAISED 1.9 -> 2.2 (I-90 westbound 22:08-22:10 PT 2026-06-27: held
+                      #   62-77 mph at a 90 set on a 100%-curve stretch, ~10-15 mph too conservative).
+                      #   At Terwilliger (R~415): 2.2 -> ~67 mph, 1.9 -> ~62, 1.5 -> ~57 (too firm drive #4).
                       #   Gentler curves scale up automatically: v_safe = sqrt(a_lat/kappa), so R~600 m
                       #   -> ~76 mph (no cap at 70) — only curves tighter than ~R550 bind at all.
 A_DECEL      = 1.2    # m/s^2 decel the envelope plans for -> how gently speed bleeds off. ~0.12 g, like
@@ -73,7 +74,11 @@ CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this man
 # so even a wrong map speed brakes SMOOTHLY (never slams) and stays bounded — which is what makes
 # defaulting it ON safe. Set VtscMapCurves=0 to fall back to vision-only.
 MAP_LOOKAHEAD_S   = 12.0  # s; trust map curve targets within v_ego * this (longer reach than vision's 8 s)
-MAP_MIN_SLOWDOWN  = 3.0   # m/s; only fold a map curve whose target is this far below cruise (a real curve)
+MAP_MIN_SLOWDOWN  = 4.5   # m/s; only fold a map curve whose (scaled) target is this far below cruise (~10 mph)
+# I-90 22:08-22:10 PT 2026-06-27: mapd's curve targets (60-68 mph at a 90 set) were the BINDING floor,
+# ~10 mph too conservative. Carry more speed through map curves by scaling the map target up (then capped
+# at cruise). 1.12x ~= +8 mph at 65; still decel-limited + V_MIN-floored downstream, so it can never slam.
+MAP_SPEED_SCALE   = 1.12  # >1 = carry more speed through map curves (less conservative MTSC)
 
 # --- profiles (DEFAULT vs GENTLE) -------------------------------------------
 # The above constants are the DEFAULT tune. On a winding highway the default tune can SAWTOOTH: VTSC
@@ -87,7 +92,7 @@ MAP_MIN_SLOWDOWN  = 3.0   # m/s; only fold a map curve whose target is this far 
 #   - a hair less slowdown so trims feel light (A_LAT_TARGET 1.9 -> 2.0)
 # Only ever makes VTSC GENTLER (still decel-limited, still floored, still <= v_cruise) — safe.
 DEFAULT_PROFILE = dict(A_LAT_TARGET=A_LAT_TARGET, A_DECEL=A_DECEL, A_DECEL_MAX=A_DECEL_MAX, A_RELAX=A_RELAX)
-GENTLE_PROFILE  = dict(A_LAT_TARGET=2.0, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)
+GENTLE_PROFILE  = dict(A_LAT_TARGET=2.2, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)  # A_LAT bumped 2.0->2.2 to match DEFAULT
 
 # light-ces-gentle: which profile is used is USER-SELECTED via CESMode (1=Light->GENTLE,
 # 2=Standard->DEFAULT) in vtsc_controller.py, on ANY car — no car/fingerprint gating.
