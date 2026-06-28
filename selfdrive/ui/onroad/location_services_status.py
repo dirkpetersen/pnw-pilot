@@ -89,10 +89,19 @@ class LocationServicesStatusRenderer(Widget):
       return "Police   Clear", _C.GREEN
     return "Police   -", _C.DIM            # nodata: never conflated with Clear
 
+  def _rest_dist_text(self, d):
+    # driver request: coarse far, fine near — whole-mile steps from ~15 mi down to 3 mi, then 0.2-mi
+    # steps inside 3 mi. Quantizing here means the line only changes at those steps (no flicker far out).
+    if d is None:
+      return ""
+    if d >= 3.0:
+      return f"{round(d):.0f} mi"
+    return f"{round(d / 0.2) * 0.2:.1f} mi"
+
   def _rest_line(self):
     r = self._st.get("rest", {})
     if r.get("state") == "ok":
-      return f"Rest     {self._dist_text(r.get('dist_mi'))}", _C.WHITE
+      return f"Rest     {self._rest_dist_text(r.get('dist_mi'))}", _C.WHITE
     return "Rest     -", _C.DIM
 
   def _ev_line(self):

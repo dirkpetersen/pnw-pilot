@@ -55,6 +55,7 @@ EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile p
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
 # (the gatherer scoped rest areas within ~2 km of the mainline, so 1.5 mi comfortably keeps the real ones).
 REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
+REST_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # show an upcoming rest area starting ~15 mi out (driver request)
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
 POLICE_STALE_S = 45 * 60                   # drop crowd reports older than this
@@ -294,8 +295,11 @@ def _line_police(alerts, state, lat, lon, brg, path):
           "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now), "uuid": poi.get("uuid")}
 
 
-def _line_static(items, lat, lon, brg, path, max_perp_m=None):
-  poi, a = geo.nearest_ahead(path, lat, lon, brg, items, max_perp_m=max_perp_m)
+def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
+  kw = {"max_perp_m": max_perp_m}
+  if max_dist_m is not None:
+    kw["max_fallback_m"] = max_dist_m          # how far ahead a POI may be and still show
+  poi, a = geo.nearest_ahead(path, lat, lon, brg, items, **kw)
   if poi is None:
     return None
   return poi, round(a["along_m"] / geo.M_PER_MILE, 1)
@@ -336,7 +340,7 @@ def main():
       alerts, pstate = police.snapshot()
       out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
 
-      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M)
+      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=REST_MAX_DIST_M)
       out["rest"] = {"state": "ok", "dist_mi": r[1], "name": r[0].get("name")} if r else {"state": "nodata"}
 
       e = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M)
