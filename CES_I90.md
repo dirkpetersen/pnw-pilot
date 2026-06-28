@@ -2,8 +2,9 @@
 
 **Branch:** `ces-i90-2pnw` (off `4devpnw`, base `3d87fe68`).
 **Status:** built + Gemini-reviewed (APPROVE WITH NITS), lint-clean, **committed to this branch only —
-NOT merged into a dev/integration branch, NOT deployed to the 3X.** Default behavior is unchanged
-(the new feature is gated default-OFF), so merging it later is behavior-neutral until the param is set.
+NOT merged into a dev/integration branch, NOT deployed to the 3X.** This branch **intentionally changes
+curve behavior** (it is no longer behavior-neutral): the ≥1 mph cue is always on when VTSC is, and
+map-curve braking (MTSC) now **defaults ON**. Set `VtscMapCurves=0` to fall back to vision-only.
 
 This doc records what the I-90 eastbound drive (Seattle → Snoqualmie Pass summit, Tesla Raven) taught
 us about VTSC / CES curve behavior, and exactly what was (and was **not**) changed in response.
@@ -59,7 +60,7 @@ Two facts that were *already true* in the tree before this branch (don't re-do t
 | Too-slow / over-braked at the summit curve | **CES→Experimental** e2e braking, not VTSC | **Use Light mode (`CESMode=1`).** Light hands curves *entirely to VTSC* and does **not** switch to Experimental for curves — so the e2e over-brake can't happen. This already exists (light-ces-gentle); it just needs to be the selected mode. |
 | "≥1 mph dip at the start of *every* curve" | The cut only fired on *binding* curves (curve-safe speed below set speed); gentle bends got nothing | **Extended:** new `CUE_MIN_CURVATURE` (~5°/200 m ≈ R2300 m) makes a mild bend "count" so it gets the `CONFIDENCE_CUT` ≥1 mph dip too. See the cue section below. |
 | Curve cap too aggressive | — | `A_LAT_TARGET` **already 1.9** (softened). No change. |
-| **Decel happened *in* the curve / too late** (vision sees sharp curves late); summit curve under-read by vision (cap 82 while a 58 mph curve was real) | VTSC is **vision-only**, ~8 s horizon | **NEW feature: MTSC** — fold pfeiferj map curve safe-speeds (`MapTargetVelocities`, longer horizon) into VTSC so it can start braking earlier and catch sharp curves vision under-reads. **Gated default-OFF** (`VtscMapCurves`). |
+| **Decel happened *in* the curve / too late** (vision sees sharp curves late); summit curve under-read by vision (cap 82 while a 58 mph curve was real) | VTSC is **vision-only**, ~8 s horizon | **NEW feature: MTSC** — fold pfeiferj map curve safe-speeds (`MapTargetVelocities`, longer horizon) into VTSC so it can start braking earlier and catch sharp curves vision under-reads. **Default ON** (`VtscMapCurves`; the new mapd is reliable). |
 | "road clear" shown with a car right in front | overlay only checked map curve | **Overlay fix:** show the lead gap (`lead Nm`) when a lead is tracked; only say "road clear" (now green) when there's neither an upcoming map curve nor a tracked lead. |
 
 ---
@@ -103,9 +104,9 @@ core stays unit-testable without the openpilot stack.
 
 ---
 
-## What this branch changes (4 files, all default-OFF / display-only)
+## What this branch changes (4 files)
 
-1. **`common/params_keys.h`** — new param `VtscMapCurves` (`PERSISTENT BOOL "0"`, **default OFF**).
+1. **`common/params_keys.h`** — new param `VtscMapCurves` (`PERSISTENT BOOL "1"`, **default ON**).
 2. **`selfdrive/controls/lib/vtsc_xnor/vtsc_constants.py`** — `MAP_LOOKAHEAD_S = 12.0`,
    `MAP_MIN_SLOWDOWN = 3.0` (+ a documentation block).
 3. **`selfdrive/controls/lib/vtsc_xnor/vtsc_controller.py`** — the MTSC core:
@@ -116,8 +117,9 @@ core stays unit-testable without the openpilot stack.
    - one-line hook in `cap()` after `model_curve_state`, only when `self._map_curves` is true.
    - **Safety:** the chosen curve (map or vision) feeds the **same** decel-limited brake/hold/release
      state machine → still rate-limited by `A_DECEL_MAX`, still floored at `V_MIN`. A wrong/low map
-     speed therefore brakes **smoothly (never slams)** and stays bounded. When the param is OFF,
-     `_map_curves` stays False and the fold is skipped → **behavior-neutral**.
+     speed therefore brakes **smoothly (never slams)** and stays bounded — which is what makes
+     defaulting it **ON** safe. Set `VtscMapCurves=0` and `_map_curves` stays False, the fold is
+     skipped, and VTSC is vision-only again.
 4. **`selfdrive/ui/onroad/ces_status.py`** — overlay: `lead Nm` instead of a false "road clear"; "road
    clear" recolored green. `dRel` is published by `decision_telemetry` (`ces_xnor.py:211`), verified.
 
@@ -126,8 +128,9 @@ core stays unit-testable without the openpilot stack.
 VTSC reads the driving model's predicted path curvature (~8 s). MTSC reads pfeiferj mapd's
 per-point OSM curve safe-speeds (`MapTargetVelocities`, longer horizon). Folding map in lets VTSC
 **brake earlier** and **catch sharp curves vision under-reads**. Map was historically the MTSC
-*deferral* reason ("until mapd safe-speeds are fixed"), which is exactly why it ships **default-OFF**
-behind `VtscMapCurves` and rides the existing safety envelope rather than commanding speed directly.
+*deferral* reason ("until mapd safe-speeds are fixed"); the new pfeiferj mapd is reliable enough to lean
+on, so it ships **default ON** (`VtscMapCurves`) — and because the map curve rides the existing
+decel-limited + floored safety envelope rather than commanding speed directly, defaulting it ON is safe.
 
 ---
 
@@ -149,7 +152,7 @@ behind `VtscMapCurves` and rides the existing safety envelope rather than comman
 1. Deploy this branch's 4 files (surgical overlay) + **rebuild `params_pyx.so`** on-device (a new param
    key requires it, else UI crash-loop on `UnknownKeyName`). Set persistence guards.
 2. Set **`CESMode = 1` (Light)** so curves are VTSC-only (no Experimental over-brake at summits).
-3. Set **`VtscMapCurves = 1`** to enable MTSC.
+3. **`VtscMapCurves` now defaults ON** — MTSC is active out of the box (set `=0` only to A/B against vision-only).
 4. Re-drive I-90 to the Snoqualmie summit. Expect: earlier, gentler braking *before* the summit curve
    (map horizon), no e2e drop to 55, the ≥1 mph engage cut felt at each curve onset.
 
@@ -157,9 +160,11 @@ behind `VtscMapCurves` and rides the existing safety envelope rather than comman
 
 ## Follow-ups (not in this branch)
 
-- **Validate the map safe-speeds.** They are the reason MTSC is default-OFF. Compare
-  `MapTargetVelocities` targets against real curve geometry on the I-90 / I-5 logs before flipping the
-  default on by default.
+- **Validate the map safe-speeds on logs.** MTSC now defaults ON (the new mapd is trusted), so this is a
+  *confirm-in-the-field* item rather than a gate: compare `MapTargetVelocities` targets against real curve
+  geometry on the I-90 / I-5 logs and watch for any spurious slowdowns. The safety envelope (decel-limit +
+  V_MIN floor) bounds any bad target to a smooth, mild trim, but a pattern of false curves would argue for
+  tightening `MAP_MIN_SLOWDOWN` or reverting the default.
 - **Accelerate-zone tuning** so the car recovers speed promptly after a curve series (the "going 55,
   way too slow" lingered into the follow-on straight).
 - **A_LAT_TARGET clean-data validation** on a non-summit curve where VTSC *is* the binding system, to

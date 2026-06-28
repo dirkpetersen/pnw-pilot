@@ -67,10 +67,11 @@ CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this man
 # curve, should have been before it). pfeiferj mapd publishes MapTargetVelocities (per-point curve
 # safe-speeds) with a much longer horizon, so folding the map curve in as an additional brake source
 # lets VTSC begin braking earlier AND catch sharp curves the vision under-reads (Snoqualmie summit: map
-# target ~58 mph while vision capped at ~82). Gated default-OFF by the VtscMapCurves param because map
-# safe-speeds were historically the MTSC deferral reason; the map curve is fed through the SAME
-# decel-limited + floored (V_MIN) + only-reduce state machine as the vision path, so a wrong map speed
-# brakes SMOOTHLY (never slams) and stays bounded.
+# target ~58 mph while vision capped at ~82). Default ON via the VtscMapCurves param: the new pfeiferj
+# mapd is reliable enough to lean on (map safe-speeds were the old MTSC deferral reason). The map curve
+# is fed through the SAME decel-limited + floored (V_MIN) + only-reduce state machine as the vision path,
+# so even a wrong map speed brakes SMOOTHLY (never slams) and stays bounded — which is what makes
+# defaulting it ON safe. Set VtscMapCurves=0 to fall back to vision-only.
 MAP_LOOKAHEAD_S   = 12.0  # s; trust map curve targets within v_ego * this (longer reach than vision's 8 s)
 MAP_MIN_SLOWDOWN  = 3.0   # m/s; only fold a map curve whose target is this far below cruise (a real curve)
 
