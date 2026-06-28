@@ -21,6 +21,7 @@ drives are analyzable) AND a `VTSCStatus` JSON to /dev/shm/params for the live o
 Runs inside plannerd (20 Hz / DT_MDL). Uses a MEASURED loop dt for the rate-limiter (don't assume a
 fixed rate — that was the CES 5x bug). Pure curve/curvature math lives in vtsc_xnor.py.
 """
+import json
 import time
 
 from openpilot.common.realtime import DT_MDL
@@ -28,6 +29,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import model_curve_state, brake_cap_for_apex, apply_limits
 from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as CES
+from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve   # ces-i90-2pnw (MTSC)
 
 
 class VTSCController:
@@ -47,6 +49,10 @@ class VTSCController:
     self._mode = CES.CES_MODE_OFF
     self.tune = dict(C.DEFAULT_PROFILE)
     self._enabled = False
+    # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
+    self._map_curves = False
+    self._map_targets: list = []
+    self._cur_lat = self._cur_lon = None
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
     self._below = 0           # consecutive cycles a far curve is present (debounce into brake)
@@ -71,14 +77,60 @@ class VTSCController:
         self._mode = CES.read_ces_mode(self.params)
         self._enabled = self._long_ok and CES.ces_enabled(self._mode)
         self.tune = dict(C.GENTLE_PROFILE) if CES.ces_is_gentle(self._mode) else dict(C.DEFAULT_PROFILE)
+        # ces-i90-2pnw (MTSC): fold map curves only when VTSC is enabled AND opted-in via the param
+        self._map_curves = self._enabled and bool(self.params.get_bool("VtscMapCurves"))
+        if self._map_curves:
+          self._read_map()
+        else:
+          self._map_targets = []
       except Exception:
         self._enabled = False
+        self._map_curves = False
 
   def _reset(self):
     self._state = "idle"
     self._applied = None
     self._below = 0
     self._clear = 0
+
+  def _read_map(self):
+    """ces-i90-2pnw (MTSC): refresh the pfeiferj map curve inputs (MapTargetVelocities + GPS) from the
+    /dev/shm mem params — the SAME source CES reads. Any failure -> no map curve (vision still works)."""
+    if self.mem_params is None:
+      self._map_targets = []
+      return
+    try:
+      self._map_targets = self.mem_params.get("MapTargetVelocities", return_default=True) or []
+    except Exception:
+      self._map_targets = []
+    try:
+      pos = self.mem_params.get("LastGPSPosition", return_default=True)
+      if isinstance(pos, (bytes, str)):
+        pos = json.loads(pos)
+      self._cur_lat = float(pos["latitude"])
+      self._cur_lon = float(pos["longitude"])
+    except Exception:
+      self._cur_lat = self._cur_lon = None
+
+  def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise, v_ego):
+    """ces-i90-2pnw (MTSC): fold the upcoming MAP curve (pfeiferj MapTargetVelocities) into the curve
+    picture, using whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel
+    envelope). Lets VTSC start braking earlier and catch sharp curves the vision under-reads (Snoqualmie
+    summit: map ~58 mph vs vision ~82). The chosen curve feeds the SAME decel-limited + floored state
+    machine, so even a wrong/low map speed brakes smoothly (never slams) and stays >= V_MIN."""
+    try:
+      mv, md = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.MAP_LOOKAHEAD_S)
+    except Exception:
+      return k_apex, d_apex, v_curve
+    # only a real map curve meaningfully below cruise counts (ignore GPS noise / trivial targets)
+    if not (0.0 < mv < v_cruise - C.MAP_MIN_SLOWDOWN) or md <= 0.0:
+      return k_apex, d_apex, v_curve
+    rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
+    rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
+    if rsn_map < rsn_vis:                       # map curve is the more binding -> use it
+      k_map = (self.tune['A_LAT_TARGET'] / (mv * mv)) if mv > 0.0 else 0.0   # equiv curvature, logging only
+      return k_map, md, mv
+    return k_apex, d_apex, v_curve
 
   def cap(self, sm, v_cruise: float, v_ego: float) -> float:
     """Return the VTSC-capped cruise speed (m/s). v_cruise when disabled / no curve. Safe: <= v_cruise."""
@@ -100,6 +152,8 @@ class VTSCController:
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
+    if self._map_curves:                        # ces-i90-2pnw (MTSC): fold in the upcoming map curve
+      k_apex, d_apex, v_curve = self._fold_map_curve(k_apex, d_apex, v_curve, v_cruise, v_ego)
     has_curve = d_apex >= 0.0 and v_curve < v_cruise - 0.1
     tta = (d_apex / max(v_ego, 1.0)) if has_curve else float('inf')
     # drive #5: have we actually slowed to ~curve-safe speed? gates HOLD/RELEASE below so VTSC keeps

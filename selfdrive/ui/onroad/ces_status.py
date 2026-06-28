@@ -134,13 +134,18 @@ class CesStatusRenderer(Widget):
     else:
       out.append((f"map {pts}pts gps", _C.GREEN, self.font))
 
-    # next binding map curve (only when a real slowdown is ahead)
+    # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
+    # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
+    # not clear"). Only call it clear when there's NEITHER an upcoming map curve NOR a tracked lead.
     mapv = float(st.get("mapV", 0.0))
     mapd = float(st.get("mapDist", 0.0))
+    drel = float(st.get("dRel", 0.0))
     if 0.0 < mapv < _REAL_CURVE_MS and mapd > 0.0:
       out.append((f"next {round(mapv * conv)} {round(mapd)}m", _C.ORANGE, self.font))
+    elif drel > 0.0:
+      out.append((f"lead {round(drel)}m", _C.GREY, self.font))
     elif pts > 0 and gps:
-      out.append(("road clear", _C.GREY, self.font))
+      out.append(("road clear", _C.GREEN, self.font))
 
     # current OSM speed limit (from official mapdOut)
     sl = self._speed_limit_text(conv, units)

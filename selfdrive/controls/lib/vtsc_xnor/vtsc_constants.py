@@ -50,6 +50,19 @@ MIN_CURVATURE   = 1e-4  # 1/m; at or below this the path is "straight" (ignored)
 LOOKAHEAD_MAX_S = 8.0   # s; only trust the model's predicted path out to here
 CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this many cycles before braking
 
+# --- map curve speed (MTSC) — added on ces-i90-2pnw from the Snoqualmie Pass drive ----------
+# VTSC is otherwise VISION-ONLY (model path curvature, ~5-6 s horizon). On a sharp curve the model sees
+# it too LATE to finish braking before the entry (drive feedback "4:56": the decel happened IN the
+# curve, should have been before it). pfeiferj mapd publishes MapTargetVelocities (per-point curve
+# safe-speeds) with a much longer horizon, so folding the map curve in as an additional brake source
+# lets VTSC begin braking earlier AND catch sharp curves the vision under-reads (Snoqualmie summit: map
+# target ~58 mph while vision capped at ~82). Gated default-OFF by the VtscMapCurves param because map
+# safe-speeds were historically the MTSC deferral reason; the map curve is fed through the SAME
+# decel-limited + floored (V_MIN) + only-reduce state machine as the vision path, so a wrong map speed
+# brakes SMOOTHLY (never slams) and stays bounded.
+MAP_LOOKAHEAD_S   = 12.0  # s; trust map curve targets within v_ego * this (longer reach than vision's 8 s)
+MAP_MIN_SLOWDOWN  = 3.0   # m/s; only fold a map curve whose target is this far below cruise (a real curve)
+
 # --- profiles (DEFAULT vs GENTLE) -------------------------------------------
 # The above constants are the DEFAULT tune. On a winding highway the default tune can SAWTOOTH: VTSC
 # releases all the way to cruise at each apex then re-brakes for the very next curve, so speed bounces
