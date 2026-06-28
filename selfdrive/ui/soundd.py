@@ -10,6 +10,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.utils import retry
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.params import Params
 
 from openpilot.system import micd
 from openpilot.system.hardware import HARDWARE
@@ -18,6 +19,15 @@ SAMPLE_RATE = 48000
 SAMPLE_BUFFER = 4096 # (approx 100ms)
 MAX_VOLUME = 1.0
 MIN_VOLUME = 0.1
+
+# location2pnw: one-shot police siren chirp, played ONCE when a police report appears <= this far AHEAD
+# (mirrors the UI "POLICE AHEAD" banner trigger). Fully isolated from the safety alert sounds: it ONLY
+# plays when no AudibleAlert is active, so it can never delay or mask a warning/disengage. A failed siren
+# load just disables the chirp; soundd still starts (alert sounds are essential).
+SIREN_FILE = "police_siren.wav"
+SIREN_VOLUME = 0.7
+POLICE_NEAR_MI = 0.5
+POLICE_CHECK_S = 0.5   # how often soundd polls the police mem param
 SELFDRIVE_STATE_TIMEOUT = 5 # 5 seconds
 FILTER_DT = 1. / (micd.SAMPLE_RATE / micd.FFT_SAMPLES)
 
@@ -73,6 +83,23 @@ class Soundd:
 
     self.spl_filter_weighted = FirstOrderFilter(0, 2.5, FILTER_DT, initialized=False)
 
+    # police siren (isolated, one-shot) — load guarded so a missing/bad file can't stop soundd starting
+    self.siren_sound = None
+    self.siren_frame = None          # None = idle; int = playback position
+    self.siren_uuid = None           # last police report we chirped for (one chirp per report)
+    self.siren_near = False          # were we within range last check (handles uuid=None re-trigger)
+    self.last_police_check = 0.0
+    try:
+      self.mem = Params("/dev/shm/params")
+    except Exception:
+      self.mem = None
+    try:
+      with wave.open(BASEDIR + "/selfdrive/assets/sounds/" + SIREN_FILE, 'r') as wf:
+        assert wf.getnchannels() == 1 and wf.getsampwidth() == 2 and wf.getframerate() == SAMPLE_RATE
+        self.siren_sound = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / (2**16/2)
+    except Exception:
+      cloudlog.exception("soundd: police siren load failed (chirp disabled)")
+
   def load_sounds(self):
     self.loaded_sounds: dict[int, np.ndarray] = {}
 
@@ -106,6 +133,20 @@ class Soundd:
         ret[written_frames:written_frames+frames_to_write] = sound_data[current_sound_frame:current_sound_frame+frames_to_write]
         written_frames += frames_to_write
         self.current_sound_frame += frames_to_write
+    elif self.siren_sound is not None and self.siren_frame is not None:
+      # No safety alert active -> play the one-shot police siren at its own fixed volume. Isolated: this
+      # branch is unreachable while any AudibleAlert is sounding, so it can never delay/mask a warning.
+      # SNAPSHOT siren_frame to a LOCAL first (this runs on the PortAudio callback thread while soundd_thread
+      # may re-arm siren_frame=0): reading the attribute multiple times could make a malformed slice ->
+      # ValueError -> crash the callback -> halt ALL audio incl. safety alerts. (The alert path above
+      # snapshots current_sound_frame for the same reason.)
+      frame = self.siren_frame
+      if frame is not None and frame < len(self.siren_sound):
+        n = min(frames, len(self.siren_sound) - frame)
+        ret[:n] = self.siren_sound[frame:frame + n]
+        if self.siren_frame == frame:          # only advance if soundd_thread didn't re-arm mid-callback
+          self.siren_frame = None if frame + n >= len(self.siren_sound) else frame + n
+        return ret * SIREN_VOLUME
 
     return ret * self.current_volume
 
@@ -160,6 +201,26 @@ class Soundd:
           self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
 
         self.get_audible_alert(sm)
+
+        # police siren: arm one chirp per new report that's <= POLICE_NEAR_MI ahead (mirrors the UI banner).
+        # Reading a /dev/shm mem param; fully guarded so it can never disrupt the alert audio path.
+        if self.mem is not None and self.siren_sound is not None:
+          now = time.monotonic()
+          if now - self.last_police_check > POLICE_CHECK_S:
+            self.last_police_check = now
+            try:
+              ls = self.mem.get("LocationServices", return_default=True)
+              p = ls.get("police", {}) if isinstance(ls, dict) else {}
+              pd = p.get("dist_mi")
+              near = p.get("state") == "alert" and pd is not None and pd <= POLICE_NEAR_MI
+              if near:
+                uuid = p.get("uuid")
+                if not self.siren_near or uuid != self.siren_uuid:   # new appearance or new report -> chirp
+                  self.siren_frame = 0
+                  self.siren_uuid = uuid
+              self.siren_near = near
+            except Exception:
+              pass
 
         rk.keep_time()
 
