@@ -85,6 +85,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RoadName", {PERSISTENT, STRING}},
     {"WayRef", {PERSISTENT, STRING}},        // location2pnw: mapd road ref (e.g. "I 5") bridged to mem params
     {"RoadContext", {PERSISTENT, STRING}},   // location2pnw: mapd road class 'freeway'|'city'|'unknown' (freeway-gate)
+    {"MapDownloadStatus", {CLEAR_ON_MANAGER_START, STRING}},  // mapd2pnw: live OSM DB download state ("OK"/"downloading X/Y"/"incomplete X/Y"/"none") for the debug overlay (updates ~1Hz -> not PERSISTENT)
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
     {"OsmDownloadedDate", {PERSISTENT, STRING}},
     {"OsmLocationName", {PERSISTENT, STRING}},

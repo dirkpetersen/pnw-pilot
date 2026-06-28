@@ -12,6 +12,7 @@ stops. Speed-limit DISPLAY works as soon as the maps are present; the user opts 
 CONTROL later via MapdSettings — this daemon never enables control.
 """
 import json
+import os
 import cereal.messaging as messaging
 from cereal import log
 from openpilot.common.gps import get_gps_location_service
@@ -22,6 +23,17 @@ from openpilot.common.swaglog import cloudlog
 # table is "us_state" (SINGULAR), e.g. "us_state.WA". Comma-join multiple areas.
 PNW_DOWNLOAD = "us_state.WA,us_state.OR,us_state.ID"
 NetworkType = log.DeviceState.NetworkType
+OSM_OFFLINE_DIR = "/data/media/0/osm/offline"   # where mapd stores downloaded region tiles
+
+
+def _maps_on_disk() -> bool:
+  """True if any OSM region tiles are present (i.e. maps have been downloaded at least once). Used to
+  report a meaningful 'OK' after a reboot, when downloadProgress reflects no active/this-session pull."""
+  try:
+    with os.scandir(OSM_OFFLINE_DIR) as it:
+      return any(True for _ in it)
+  except OSError:
+    return False
 
 
 def _on_unmetered_wifi(ds) -> bool:
@@ -70,6 +82,25 @@ def main():
           for p in sm['mapdExtendedOut'].path])
     except Exception:
       cloudlog.exception("mapd_configd: mapd->CES bridge write failed")
+
+    # mapd2pnw/debug: publish a SEPARATE "is the OSM DB downloaded?" status, distinct from the live
+    # "is there map data for my current spot" line (mapPts). OK = tiles on disk and no pull in flight;
+    # downloading/incomplete while a pull is active or stopped short; none = nothing downloaded yet.
+    try:
+      mdl = "none"
+      if sm.alive['mapdExtendedOut']:
+        dp = sm['mapdExtendedOut'].downloadProgress
+        if dp.active:
+          mdl = f"downloading {dp.downloadedFiles}/{dp.totalFiles}"
+        elif dp.totalFiles > 0 and dp.downloadedFiles < dp.totalFiles:
+          mdl = f"incomplete {dp.downloadedFiles}/{dp.totalFiles}"
+        elif _maps_on_disk():
+          mdl = "OK"
+      elif _maps_on_disk():
+        mdl = "OK"          # post-reboot: no active pull this session, but tiles are present
+      mem.put_nonblocking("MapDownloadStatus", mdl)
+    except Exception:
+      pass
 
     # mapd2pnw: drive the "Get map for this location" toggle grey-out (param MapForLocationCovered).
     # The toggle should be GREYED (covered) unless we KNOW we're somewhere with no downloaded map.

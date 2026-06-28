@@ -62,6 +62,7 @@ DEFAULT_PROXY = {
 
 TICK_HZ = 1.0
 EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile perpendicular of the highway
+EV_FAST_PREFER_MI = 3.0                    # if a DC-fast charger is within this many mi ahead, show it instead of a closer slow L2
 # location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
 # pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
@@ -436,7 +437,12 @@ def main():
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
                       "town": r[0].get("town", "")} if r else {"state": "nodata"})
 
-      e = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      # EV: prefer a DC-fast charger if one is within EV_FAST_PREFER_MI ahead, even when a slow L2 is closer
+      # (driver request). Only fall back to the nearest (possibly L2) charger when no fast one is that close.
+      e_fast = _line_static([c for c in static.ev if c.get("fast")], lat, lon, brg, path,
+                            max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      e_any = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      e = e_fast if (e_fast and e_fast[1] <= EV_FAST_PREFER_MI) else e_any
       if e:
         ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or "",
               "fast": e[0].get("fast", True), "town": e[0].get("town", "")}

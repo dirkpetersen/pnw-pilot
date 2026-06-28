@@ -57,6 +57,7 @@ class CesStatusRenderer(Widget):
     self._enabled = False
     self._st: dict = {}
     self._vtsc: dict = {}
+    self._mapdl: str = ""
     self.font = gui_app.font(FontWeight.MEDIUM)
     self.font_bold = gui_app.font(FontWeight.BOLD)
 
@@ -86,6 +87,11 @@ class CesStatusRenderer(Widget):
       self._vtsc = vt if isinstance(vt, dict) else {}
     except Exception:
       self._vtsc = {}
+    try:
+      mdl = self._mem.get("MapDownloadStatus", return_default=True)  # OSM DB download state (mapd_configd)
+      self._mapdl = mdl.decode() if isinstance(mdl, bytes) else (mdl or "")
+    except Exception:
+      self._mapdl = ""
 
   # ---- build the lines -----------------------------------------------------
   def _lines(self) -> list[tuple]:
@@ -133,6 +139,13 @@ class CesStatusRenderer(Widget):
       out.append((f"map {pts}pts no-gps", _C.ORANGE, self.font))
     else:
       out.append((f"map {pts}pts gps", _C.GREEN, self.font))
+
+    # SEPARATE from the live map-data line above: is the OSM map DB actually downloaded? (driver asked for
+    # this so "map no-data" isn't conflated with "maps not installed".) green=OK, orange=downloading, red=not.
+    mdl = self._mapdl
+    if mdl:
+      col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
+      out.append((f"map-DB {mdl}", col, self.font))
 
     # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
     # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
