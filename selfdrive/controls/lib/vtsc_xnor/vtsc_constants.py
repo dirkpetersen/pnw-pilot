@@ -47,6 +47,17 @@ CLEAR_CYCLES    = 5     # cycles with no curve before RELEASE -> IDLE (debounce 
 
 V_MIN           = 6.7   # m/s (~15 mph) floor — never command a curve speed below this
 MIN_CURVATURE   = 1e-4  # 1/m; at or below this the path is "straight" (ignored)
+# ces-i90-2pnw: GUARANTEED >=1 mph cue on EVERY real bend. A gentle curve whose curve-safe speed stays
+# ABOVE cruise (the decel envelope never binds) used to get NOTHING; the driver wanted a definite "I see
+# the curve" dip at the START of every curve. CUE_MIN_CURVATURE is that trip threshold: ~5 deg of heading
+# change over the upcoming ~200 m of road == radius ~2300 m. It sits ABOVE straight-road / lane noise
+# (MIN_CURVATURE, R~10 km) and BELOW where VTSC already brakes for real (~R840 m @ 90 mph), so it only
+# adds the CONFIDENCE_CUT (>=1 mph) nibble in the "mild curve" band and changes nothing else. The same
+# state machine then holds the dip through the bend and eases back out -> nothing stacks (floor is
+# v_cruise - CONFIDENCE_CUT, never lower for a cue-only curve). Pure geometry: curvature = 1/radius.
+CUE_HEADING_RAD = 5.0 * 3.141592653589793 / 180.0  # 5 degrees, in radians
+CUE_OVER_M      = 200.0                             # ...measured over the upcoming ~200 m of path
+CUE_MIN_CURVATURE = CUE_HEADING_RAD / CUE_OVER_M    # ~4.36e-4 1/m  (radius ~2292 m)
 LOOKAHEAD_MAX_S = 8.0   # s; only trust the model's predicted path out to here
 CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this many cycles before braking
 

@@ -7,8 +7,10 @@ tune, 2=Standard->DEFAULT tune; default Off) + openpilotLongitudinalControl; ret
 unchanged when disabled -> behavior-neutral. NEVER raises speed above v_cruise.
 
 Apex state machine (driver feedback, drive #4):
-  - the instant a binding curve is detected -> an immediate >=1 mph cut (CONFIDENCE_CUT) so the driver
-    feels VTSC engage right away;
+  - the instant a curve is detected -> an immediate >=1 mph cut (CONFIDENCE_CUT) so the driver feels VTSC
+    engage right away. ces-i90-2pnw: this now fires for EVERY real bend (apex curvature >= CUE_MIN_CURVATURE,
+    ~5 deg / R~2300 m), not only curves that need real slowing -> a guaranteed small cue at the start of
+    each curve; gentle bends get just the >=1 mph dip (held through, then released), sharper curves brake more;
   - BRAKE while the apex is clearly ahead (tta > HOLD_TTA_S): slow to reach curve-safe speed BEFORE the
     apex (firmer if needed — pre-apex braking is flexible);
   - HOLD when close/uncertain (APEX_TTA_S < tta <= HOLD_TTA_S): maintain, NEVER reduce further;
@@ -154,7 +156,11 @@ class VTSCController:
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     if self._map_curves:                        # ces-i90-2pnw (MTSC): fold in the upcoming map curve
       k_apex, d_apex, v_curve = self._fold_map_curve(k_apex, d_apex, v_curve, v_cruise, v_ego)
-    has_curve = d_apex >= 0.0 and v_curve < v_cruise - 0.1
+    # ces-i90-2pnw: a curve "counts" if it BINDS (curve-safe speed below cruise -> real braking) OR is a
+    # mild bend past CUE_MIN_CURVATURE (~5 deg / R~2300 m). The mild-bend case never needs real slowing, so
+    # the state machine below only applies the CONFIDENCE_CUT (>=1 mph) engage dip then releases -> a
+    # guaranteed small "I see the curve" cue on EVERY real bend, automatic, no toggle.
+    has_curve = d_apex >= 0.0 and (v_curve < v_cruise - 0.1 or k_apex >= C.CUE_MIN_CURVATURE)
     tta = (d_apex / max(v_ego, 1.0)) if has_curve else float('inf')
     # drive #5: have we actually slowed to ~curve-safe speed? gates HOLD/RELEASE below so VTSC keeps
     # braking while still materially too fast, and never accelerates out of a curve before reaching safe.

@@ -45,10 +45,10 @@ Two facts that were *already true* in the tree before this branch (don't re-do t
 
 - **`A_LAT_TARGET` is already `1.9`** (not the old `1.5`). VTSC's curve aggressiveness was already
   softened — see `vtsc_constants.py:11`.
-- **The "≥1 mph at curve start" rule already exists** as `CONFIDENCE_CUT = 0.5 m/s` (~1.1 mph): the
-  instant a binding curve is detected, VTSC applies an immediate ≥1 mph cap cut so the driver feels it
-  engage (`vtsc_constants.py:43`, applied in `vtsc_controller.py` on the `idle→brake` transition). The
-  driver's proposed rule is, in effect, already implemented for VTSC.
+- **The "≥1 mph at curve start" mechanism already exists** as `CONFIDENCE_CUT = 0.5 m/s` (~1.1 mph): the
+  instant a *binding* curve is detected, VTSC applies an immediate ≥1 mph cap cut (`vtsc_constants.py:43`,
+  applied on the `idle→brake` transition). **What this branch added (driver follow-up):** extend that cut
+  to fire on **every** real bend, not only binding ones — see the cue section below.
 
 ---
 
@@ -57,10 +57,49 @@ Two facts that were *already true* in the tree before this branch (don't re-do t
 | Drive complaint | Root cause | Resolution |
 |-----------------|-----------|------------|
 | Too-slow / over-braked at the summit curve | **CES→Experimental** e2e braking, not VTSC | **Use Light mode (`CESMode=1`).** Light hands curves *entirely to VTSC* and does **not** switch to Experimental for curves — so the e2e over-brake can't happen. This already exists (light-ces-gentle); it just needs to be the selected mode. |
-| "≥1 mph cut at curve start" | — | **Already implemented** as `CONFIDENCE_CUT` (≥1 mph immediate cut on detect). No change. |
+| "≥1 mph dip at the start of *every* curve" | The cut only fired on *binding* curves (curve-safe speed below set speed); gentle bends got nothing | **Extended:** new `CUE_MIN_CURVATURE` (~5°/200 m ≈ R2300 m) makes a mild bend "count" so it gets the `CONFIDENCE_CUT` ≥1 mph dip too. See the cue section below. |
 | Curve cap too aggressive | — | `A_LAT_TARGET` **already 1.9** (softened). No change. |
 | **Decel happened *in* the curve / too late** (vision sees sharp curves late); summit curve under-read by vision (cap 82 while a 58 mph curve was real) | VTSC is **vision-only**, ~8 s horizon | **NEW feature: MTSC** — fold pfeiferj map curve safe-speeds (`MapTargetVelocities`, longer horizon) into VTSC so it can start braking earlier and catch sharp curves vision under-reads. **Gated default-OFF** (`VtscMapCurves`). |
 | "road clear" shown with a car right in front | overlay only checked map curve | **Overlay fix:** show the lead gap (`lead Nm`) when a lead is tracked; only say "road clear" (now green) when there's neither an upcoming map curve nor a tracked lead. |
+
+---
+
+## Guaranteed ≥1 mph cue on every curve (driver follow-up)
+
+The driver wanted a definite small "I see the curve" dip at the **start of every real curve**, including
+the gentle bends VTSC would otherwise ignore. Today the ≥1 mph `CONFIDENCE_CUT` only fires when VTSC
+decides to *brake* (curve-safe speed below the set speed); a gentle sweeper produced nothing.
+
+**The fix is a one-predicate change**, not a new code path. `model_curve_state` already returns the real
+apex curvature `k_apex` for *any* bend — even a gentle one whose curve-safe speed stays above cruise. So
+a new threshold `CUE_MIN_CURVATURE` lets a mild bend "count" as a curve:
+
+```python
+# vtsc_constants.py — ~5° of heading change over the upcoming ~200 m == radius ~2300 m
+CUE_MIN_CURVATURE = (5° in rad) / 200 m  ≈ 4.36e-4 1/m   (R ≈ 2292 m)
+
+# vtsc_controller.py — a curve "counts" if it BINDS *or* is a mild bend past the cue threshold
+has_curve = d_apex >= 0.0 and (v_curve < v_cruise - 0.1 or k_apex >= C.CUE_MIN_CURVATURE)
+```
+
+Why this is enough — the **existing** state machine does the rest:
+- For a gentle bend, `brake_cap_for_apex` returns a speed well above cruise (no real slowing needed), so
+  the brake target clamps to exactly `v_cruise − CONFIDENCE_CUT` → a single ~1 mph dip, held through the
+  bend, then eased back out at the apex. It never brakes harder than the dip.
+- **Binding (sharp) curves are byte-identical** — they already satisfied `v_curve < v_cruise − 0.1`, so
+  the new OR term changes nothing for them; they still get graduated braking.
+- **No stacking** on a winding road: the floor is `min(applied, v_cruise − CONFIDENCE_CUT)` against the
+  *base* `v_cruise`, so repeated cue curves can never ratchet below `v_cruise − 0.5`.
+
+**Threshold sanity:** at 90 mph the cue radius is ~0.07 g lateral — gentle, **above** straight-road / lane
+noise (`MIN_CURVATURE`, R≈10 km) and **below** where VTSC already brakes for real (~R851 m @ 90 mph). It
+catches sweeping highway bends without firing on straights. **Folded into normal behavior — no toggle**;
+active whenever VTSC is on (`CESMode` ≥ 1). With maps ON it also fires *earlier* (before the bend).
+
+Reviewed by Gemini (`gemini-pro-latest`): **APPROVE WITH NITS** — it traced the gentle-bend path, confirmed
+no binding-curve regression, no stacking, and `≤ v_cruise` / `≥ V_MIN` bounds hold. The one nit (hardcoded
+π vs `math.pi`) is intentional: `vtsc_constants.py` is deliberately import-free ("pure literals") so the
+core stays unit-testable without the openpilot stack.
 
 ---
 
