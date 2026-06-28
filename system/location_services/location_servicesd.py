@@ -61,14 +61,24 @@ DEFAULT_PROXY = {
 }
 
 TICK_HZ = 1.0
-EV_MAX_PERP_M = 3.0 * geo.M_PER_MILE      # chargers are detour DESTINATIONS, often just off the freeway at
-                                          # exits/in town (e.g. North Bend Supercharger ~1.6 mi off I-90) — so
-                                          # allow up to 3 mi perpendicular on the highway (was 1 mi, too tight;
-                                          # rest areas keep the tight 1.5 mi since they sit ON the highway).
-EV_FAST_PREFER_MI = 3.0                    # if a DC-fast charger is within this many mi ahead, show it instead of a closer slow L2
+EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # chargers within 1 mi of the highway (driver rule, reaffirmed
+                                          # 2026-06-28: a Renton charger 12 mi off-corridor leaked in at 3 mi).
+EV_MAX_DIST_M = 6.0 * geo.M_PER_MILE      # cap EV ahead-range shorter than rest/police (15 mi): beyond the
+                                          # short mapd path the "ahead" perp is measured off the extrapolated
+                                          # HEADING LINE (not the real curvy road), so far off-corridor POIs
+                                          # (Renton) leak through the 1-mi filter. A ~6 mi cap keeps the 1-mi
+                                          # corridor meaningful. Trade-off: very-far on-corridor chargers
+                                          # preview later (still appear by 6 mi, and on surface within 3 mi).
+EV_FAST_DETOUR_MI = 3.0                     # prefer a DC-fast charger over a CLOSER slow L2 unless the fast
+                                           # one is MORE than this many mi FURTHER than the slow one (driver
+                                           # rule 2026-06-28): only show the slow charger if the fast is >3 mi
+                                           # further than it; otherwise the fast (quality) wins.
 SURFACE_RANGE_MI = 3.0                      # OFF-freeway: show nearest EV/rest within this straight-line radius (any direction)
 POI_HOLD_S = 8.0                            # debounce: keep showing a POI for this long after the ahead-cone
                                             # momentarily drops it (curvy roads swing it in/out) — anti-flicker
+POI_RECEDE_MI = 0.3                         # ...but if a held POI gets this much farther than its closest
+                                            # approach, we've PASSED it -> drop immediately (distance-trend,
+                                            # not bearing, so a sweeping curve doesn't false-drop a still-ahead POI)
 # location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
 # pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
@@ -177,7 +187,8 @@ class PoliceUpdater(threading.Thread):
   (the main loop does that against fresh GPS). Defensive: any failure -> state 'nodata' + backoff."""
   def __init__(self):
     super().__init__(daemon=True)
-    self._mem = Params("/dev/shm/params")
+    self._mem = Params("/dev/shm/params")     # mem store: LastGPSPosition lives here
+    self._params = Params()                   # persistent store: LocationServicesEnabled lives here (NOT mem!)
     self._lock = threading.Lock()
     self._alerts: list = []         # cached raw POLICE alerts (lat, lon, magvar, ts, uuid, street)
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
@@ -239,32 +250,37 @@ class PoliceUpdater(threading.Thread):
   def run(self):
     backoff = POLICE_POLL_S
     while not self._stop.is_set():
-      cfg = self._cfg or self._load_cfg()
-      enabled = False
       try:
-        enabled = self._mem.get_bool("LocationServicesEnabled")
+        cfg = self._cfg or self._load_cfg()
+        enabled = False
+        try:
+          enabled = self._params.get_bool("LocationServicesEnabled")   # PERSISTENT store (was wrongly read
+                                                                        # from mem -> always False -> never polled)
+        except Exception:
+          pass
+        if cfg is None or not enabled:
+          with self._lock:
+            self._alerts, self._state = [], "nodata"
+          self._stop.wait(POLICE_POLL_S)
+          continue
+        self._cfg = cfg
+        gps = self._cur_gps()
+        if gps is None:
+          self._stop.wait(POLICE_POLL_S)
+          continue
+        try:
+          alerts = self._poll(cfg, gps[0], gps[1])
+          with self._lock:
+            self._alerts, self._state = alerts, "ok"
+          cloudlog.info("location_services: police poll ok (%d alerts)", len(alerts))   # heartbeat for diagnosis
+          backoff = POLICE_POLL_S                            # success -> reset backoff
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
+          cloudlog.warning("location_services: police poll failed (%s); backing off %ds", type(e).__name__, int(backoff))
+          with self._lock:
+            self._state = "nodata"                          # NEVER a false 'clear' on failure (decision #4)
+          backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
       except Exception:
-        pass
-      if cfg is None or not enabled:
-        with self._lock:
-          self._alerts, self._state = [], "nodata"
-        self._stop.wait(POLICE_POLL_S)
-        continue
-      self._cfg = cfg
-      gps = self._cur_gps()
-      if gps is None:
-        self._stop.wait(POLICE_POLL_S)
-        continue
-      try:
-        alerts = self._poll(cfg, gps[0], gps[1])
-        with self._lock:
-          self._alerts, self._state = alerts, "ok"
-        backoff = POLICE_POLL_S                              # success -> reset backoff
-      except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
-        cloudlog.warning("location_services: police poll failed (%s); backing off %ds", type(e).__name__, int(backoff))
-        with self._lock:
-          self._state = "nodata"                            # NEVER a false 'clear' on failure (decision #4)
-        backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
+        cloudlog.exception("location_services: police thread loop error (continuing)")  # HARD RULE: never die silently
       self._stop.wait(backoff)
 
 
@@ -339,23 +355,33 @@ def _line_police(alerts, state, lat, lon, brg, path):
 class _Hold:
   """Anti-flicker debounce for one overlay line. On a curvy road the highway 'ahead' cone swings a POI in
   and out each second, so the line blinks. Keep the last good POI for POI_HOLD_S after it drops, re-emitting
-  it with a refreshed straight-line distance; clear once it's been gone longer than the hold."""
+  it with a refreshed straight-line distance — BUT only while we're still approaching it. Track the closest
+  approach (min_d); once the held POI recedes past it by POI_RECEDE_MI we've PASSED it -> drop immediately
+  (so passed chargers don't linger). Distance-trend, not bearing, so a sweeping curve that still has the POI
+  ahead doesn't false-drop it."""
   def __init__(self, hold_s):
     self.hold_s = hold_s
     self.poi = None
     self.t = 0.0
+    self.min_d = None
 
   def update(self, found, now, lat, lon):
     # found = (poi, dist_mi) or None. Returns the same shape (possibly the held POI).
     if found is not None:
+      self.min_d = found[1] if self.poi is not found[0] else min(self.min_d, found[1])
       self.poi, self.t = found[0], now
       return found
     if self.poi is not None and (now - self.t) < self.hold_s:
       try:
         d = geo.haversine_m(lat, lon, self.poi["lat"], self.poi["lon"]) / geo.M_PER_MILE
-        return (self.poi, round(d, 1))
       except (KeyError, TypeError, ValueError):
-        pass
+        self.poi = None
+        return None
+      if self.min_d is not None and d > self.min_d + POI_RECEDE_MI:   # receding past closest approach = passed
+        self.poi = None
+        return None
+      self.min_d = d if self.min_d is None else min(self.min_d, d)
+      return (self.poi, round(d, 1))
     self.poi = None
     return None
 
@@ -492,19 +518,24 @@ def main():
         out["police"] = {"state": "nodata"}
 
       ev_fast_items = [c for c in static.ev if c.get("fast")]
+      ev_slow_items = [c for c in static.ev if not c.get("fast")]
       if on_freeway:
         r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
-        e_fast = _line_static(ev_fast_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
-        e_any = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+        e_fast = _line_static(ev_fast_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
+        e_slow = _line_static(ev_slow_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
       else:                                                  # surface street: 3-mi proximity (any direction)
         r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
         e_fast = _nearest_within(ev_fast_items, lat, lon, SURFACE_RANGE_MI)
-        e_any = _nearest_within(static.ev, lat, lon, SURFACE_RANGE_MI)
+        e_slow = _nearest_within(ev_slow_items, lat, lon, SURFACE_RANGE_MI)
 
-      # EV: prefer a DC-fast charger if one is within EV_FAST_PREFER_MI, else fall back to nearest (incl. L2).
-      e = e_fast if (e_fast and e_fast[1] <= EV_FAST_PREFER_MI) else e_any
+      # EV fast/slow rule (driver 2026-06-28): prefer the DC-fast charger; only show a CLOSER slow L2 when
+      # the nearest fast one is MORE than EV_FAST_DETOUR_MI further than it (not worth the detour for fast).
+      if e_fast and e_slow and e_slow[1] < e_fast[1] and (e_fast[1] - e_slow[1]) > EV_FAST_DETOUR_MI:
+        e = e_slow
+      else:
+        e = e_fast or e_slow
 
-      r = rest_hold.update(r, now, lat, lon)   # anti-flicker debounce (curvy roads swing the ahead-cone)
+      r = rest_hold.update(r, now, lat, lon)   # debounce: anti-flicker on curves + drop-when-passed (distance-trend)
       e = ev_hold.update(e, now, lat, lon)
 
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
