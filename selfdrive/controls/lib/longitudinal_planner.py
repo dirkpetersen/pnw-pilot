@@ -16,7 +16,13 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCContro
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+# long2pnw (2026-06-28): brisker free-flow / on-ramp-merge acceleration. Stock [1.6,1.2,0.8,0.6] capped
+# accel at ~0.82 m/s^2 (0.08 g) at 55 mph -> timid merges (driver had to use the pedal). Raised the mid/high
+# bands -> ~1.2 m/s^2 (0.12 g) at 55 mph, peak 1.5 (0.15 g), still below the ~0.2 g comfort knee and within
+# ACCEL_MAX=2.0 / panda tesla_legacy max_accel=2. Standstill band (0-10 m/s) unchanged. The MPC still takes
+# the most-conservative of lead/curve/free trajectories, so a higher free-flow ceiling can't drive into a
+# lead or curve. Gemini-endorsed. (Coast-dip after a gas override = separate future hold-off, not this.)
+A_CRUISE_MAX_VALS = [1.6, 1.5, 1.2, 0.9]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
