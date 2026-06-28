@@ -31,6 +31,7 @@ _FT_PER_MILE = 5280.0
 # police report is <= 0.5 mi AHEAD (the police line is already ahead-only, so "behind" never triggers it).
 _POLICE_NEAR_MI = 0.5
 _BLINK_PERIOD = 0.7   # s, one on+off cycle (~1.4 Hz), matching the speed-limit warning
+_POLICE_BANNER_MAX_S = 15.0   # blink the "POLICE AHEAD" banner for at most this long, then stop (driver req)
 # The driver-monitoring icon is a bottom-LEFT circle whose TOP edge is ~(UI_BORDER_SIZE + BTN_SIZE) up
 # from the content bottom. Lift the box to sit just ABOVE it (small gap) so they no longer overlap.
 _DRIVER_ICON_CLEAR = UI_BORDER_SIZE + BTN_SIZE + 24
@@ -57,6 +58,9 @@ class LocationServicesStatusRenderer(Widget):
     self._st: dict = {}
     self.font = gui_app.font(FontWeight.MEDIUM)
     self.font_bold = gui_app.font(FontWeight.BOLD)
+    self._banner_active = False    # police banner: 15 s blink window per report
+    self._banner_uuid = None
+    self._banner_start = 0.0
 
   def _update_state(self):
     now = time.monotonic()
@@ -164,10 +168,20 @@ class LocationServicesStatusRenderer(Widget):
 
     # big blue flashing "POLICE AHEAD" banner when a report is <= 0.5 mi AHEAD (police is ahead-only).
     # NOTE: dist_mi rounds to 0.0 when very close (falsy), so test `is not None`, never `or 99.0`.
+    # Blink for at most _POLICE_BANNER_MAX_S (15 s) per report, then stop (driver req); a NEW report
+    # (different uuid) or a fresh appearance restarts the window.
     p = self._st.get("police", {})
     pd = p.get("dist_mi")
     if p.get("state") == "alert" and pd is not None and pd <= _POLICE_NEAR_MI:
-      self._draw_police_banner(rect, p)
+      uuid = p.get("uuid")
+      if not self._banner_active or uuid != self._banner_uuid:
+        self._banner_start = time.monotonic()
+        self._banner_uuid = uuid
+      self._banner_active = True
+      if time.monotonic() - self._banner_start < _POLICE_BANNER_MAX_S:
+        self._draw_police_banner(rect, p)
+    else:
+      self._banner_active = False
 
   @staticmethod
   def _text_centered(font, text, size, cx, cy, color):
