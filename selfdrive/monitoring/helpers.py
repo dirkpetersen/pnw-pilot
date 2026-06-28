@@ -187,6 +187,18 @@ class DriverMonitoring:
     self.params = Params()
     self.too_distracted = self.params.get_bool("DriverTooDistracted")
 
+    # glare2pnw: optional, default-OFF tolerance for the driver camera being washed out by side glare.
+    # When the sun blinds the DM camera the model's pose uncertainty (faceOrientationStd) spikes; the
+    # stock 10 s high-std fallback then drops to passive wheel-touch and reads the (attentive) driver as
+    # inattentive. This lengthens that fallback and raises the std-trust threshold so brief glare is
+    # tolerated. It is a BOUNDED relaxation, not a disable: face/blink/phone/pose-distraction logic is
+    # untouched, and it is behavior-neutral when off. SAFETY: glare-uncertainty and genuine inattention
+    # look identical to the std signal, so this widens the window in which a truly distracted driver
+    # isn't caught -- keep it OFF unless glare false-positives are a real problem. See docs/GLARE.md.
+    if self.params.get_bool("GlareTolerantDM"):
+      self.settings._HI_STD_FALLBACK_TIME = int(20 / self.settings._DT_DMON)  # 10 s -> 20 s
+      self.settings._POSESTD_THRESHOLD = 0.4                                  # 0.3 -> 0.4
+
     # PNW: dual-counter state + pre-computed thresholds (3 h pose / 1 h cell phone)
     self.awareness_pose = 1.
     self.awareness_phone = 1.

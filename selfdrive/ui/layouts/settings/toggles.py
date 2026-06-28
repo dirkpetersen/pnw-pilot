@@ -59,6 +59,13 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
   ),
+  "GlareTolerantDM": tr_noop(
+    "Glare-Tolerant Driver Monitoring: when low sun blinds the driver-facing camera, openpilot can " +
+    "briefly lose confidence in your head pose and warn that you're not paying attention even though you " +
+    "are. This gives the camera more time to recover before it falls back to asking for a steering-wheel " +
+    "touch. It does NOT relax attention monitoring otherwise — keep watching the road. Leave OFF unless " +
+    "you get frequent false \"pay attention\" warnings in bright side sunlight."
+  ),
 }
 
 
@@ -108,6 +115,14 @@ class TogglesLayout(Widget):
         DESCRIPTIONS["AlwaysOnDM"],
         "monitoring.png",
         False,
+      ),
+      # glare2pnw: tolerate brief side-glare blinding the DM camera (relaxed model-uncertainty fallback,
+      # default OFF). needs_restart -> picked up by dmonitoringd on the next onroad cycle.
+      "GlareTolerantDM": (
+        lambda: tr("Glare-Tolerant Driver Monitoring"),
+        DESCRIPTIONS["GlareTolerantDM"],
+        "monitoring.png",
+        True,
       ),
       "RecordFront": (
         lambda: tr("Record and Upload Driver Camera"),
