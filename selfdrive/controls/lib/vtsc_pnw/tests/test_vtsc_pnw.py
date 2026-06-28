@@ -4,9 +4,9 @@ the car held 70 mph through a ~415 m-radius curve (2.6 m/s^2 lateral) and did NO
 driver intervened. VTSC must instead command a slowdown to a safe speed (~57 mph at A_LAT_TARGET=1.5)
 and START braking ~100 m before the apex, not at it.
 """
-from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import (
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   v_safe, curve_speed_target, apply_limits, sharpest_ahead, brake_cap_for_apex)
-from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
+from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 
 MPH = 0.44704
 def mph(v):
@@ -174,7 +174,7 @@ def _fake_model(apex_k, apex_d, v_ego):
 
 
 def _make_ctrl():
-  from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_controller import VTSCController
+  from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
   cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
   c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: True))
   c.mem_params = None              # no overlay publish in the test
@@ -224,7 +224,7 @@ def test_state_machine_confidence_cut_then_brake_hold_release():
 
 
 def test_state_machine_disabled_is_neutral():
-  from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_controller import VTSCController
+  from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
   cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
   c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: False))  # CES off
   c.mem_params = None

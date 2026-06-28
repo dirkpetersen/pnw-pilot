@@ -43,7 +43,7 @@ def main():
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
 
     # mapd2pnw bridge: the official pfeiferj mapd v2.0.6 publishes everything over CEREAL
-    # (mapdOut / mapdExtendedOut), but CES (selfdrive/controls/lib/ces_xnor) and the on-road CES
+    # (mapdOut / mapdExtendedOut), but CES (selfdrive/controls/lib/ces_pnw) and the on-road CES
     # overlay still read the legacy in-memory params the OLD mapd binary used to write directly
     # (MapTargetVelocities / LastGPSPosition / MapSpeedLimit). Translate the cereal output into those
     # mem params so CES's map-curve trigger + the overlay "map" line come alive. Display/decision only;

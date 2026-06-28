@@ -12,7 +12,7 @@ Default OFF; the wrapper/toggle live in Phase 2.
 """
 import math
 
-from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
+from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 
 
 def v_safe(curvature: float, a_lat: float = C.A_LAT_TARGET) -> float:

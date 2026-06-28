@@ -124,5 +124,5 @@ registry) live in the workbench:
   `docs/CONNECT2XNOR.md`, `docs/FINGERPRINT2XNOR.md`, `docs/SecOC.md`, `docs/GLARE.md`
 
 > Branch note: this list reflects the `3devpnw` line (feature toggles present in `common/params_keys.h`
-> + `selfdrive/controls/lib/{ces_xnor,vtsc_xnor}` + `system/networkd/`). Status tags are point-in-time;
+> + `selfdrive/controls/lib/{ces_pnw,vtsc_pnw}` + `system/networkd/`). Status tags are point-in-time;
 > validate against `docs/DEVICE-STATE.md` before relying on "deployed" claims.

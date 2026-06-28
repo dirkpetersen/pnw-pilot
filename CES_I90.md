@@ -107,9 +107,9 @@ core stays unit-testable without the openpilot stack.
 ## What this branch changes (4 files)
 
 1. **`common/params_keys.h`** — new param `VtscMapCurves` (`PERSISTENT BOOL "1"`, **default ON**).
-2. **`selfdrive/controls/lib/vtsc_xnor/vtsc_constants.py`** — `MAP_LOOKAHEAD_S = 12.0`,
+2. **`selfdrive/controls/lib/vtsc_pnw/vtsc_constants.py`** — `MAP_LOOKAHEAD_S = 12.0`,
    `MAP_MIN_SLOWDOWN = 3.0` (+ a documentation block).
-3. **`selfdrive/controls/lib/vtsc_xnor/vtsc_controller.py`** — the MTSC core:
+3. **`selfdrive/controls/lib/vtsc_pnw/vtsc_controller.py`** — the MTSC core:
    - `_read_map()` reads `MapTargetVelocities` + `LastGPSPosition` from `/dev/shm/params` (the **same**
      source CES uses), ~1 Hz, fully exception-guarded.
    - `_fold_map_curve()` compares the upcoming **map** curve against the **vision** curve via
@@ -121,7 +121,7 @@ core stays unit-testable without the openpilot stack.
      defaulting it **ON** safe. Set `VtscMapCurves=0` and `_map_curves` stays False, the fold is
      skipped, and VTSC is vision-only again.
 4. **`selfdrive/ui/onroad/ces_status.py`** — overlay: `lead Nm` instead of a false "road clear"; "road
-   clear" recolored green. `dRel` is published by `decision_telemetry` (`ces_xnor.py:211`), verified.
+   clear" recolored green. `dRel` is published by `decision_telemetry` (`ces_pnw.py:211`), verified.
 
 ### MTSC = MAP Turn Speed Control (vs. VTSC = VISION)
 

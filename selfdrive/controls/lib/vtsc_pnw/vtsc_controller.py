@@ -21,17 +21,17 @@ Logging: publishes the decision as a `vtscState` cereal message every cycle (rec
 drives are analyzable) AND a `VTSCStatus` JSON to /dev/shm/params for the live on-screen overlay.
 
 Runs inside plannerd (20 Hz / DT_MDL). Uses a MEASURED loop dt for the rate-limiter (don't assume a
-fixed rate — that was the CES 5x bug). Pure curve/curvature math lives in vtsc_xnor.py.
+fixed rate — that was the CES 5x bug). Pure curve/curvature math lives in vtsc_pnw.py.
 """
 import json
 import time
 
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.controls.lib.vtsc_xnor import vtsc_constants as C
-from openpilot.selfdrive.controls.lib.vtsc_xnor.vtsc_xnor import model_curve_state, brake_cap_for_apex, apply_limits
-from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as CES
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve   # ces-i90-2pnw (MTSC)
+from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import model_curve_state, brake_cap_for_apex, apply_limits
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import upcoming_curve   # ces-i90-2pnw (MTSC)
 
 
 class VTSCController:

@@ -23,7 +23,7 @@ import pyray as rl
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor_constants import ces_enabled, read_ces_mode
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, read_ces_mode
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached

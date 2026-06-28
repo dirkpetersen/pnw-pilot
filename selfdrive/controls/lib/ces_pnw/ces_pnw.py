@@ -24,7 +24,7 @@ from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).

@@ -5,8 +5,8 @@ anchors from CES.md (I-5 Terwilliger / Marquam / Wilsonville) and the lead/speed
 Run:  pytest selfdrive/controls/lib/ces/tests/test_ces.py
 """
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.ces_xnor import ces_xnor_constants as C
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import (
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (
   decide_active, vision_curve_lat_accel, curve_closeness, decision_telemetry, _accelerate_zone,
 )
 
@@ -95,7 +95,7 @@ def test_map_and_vision_both_quiet_is_chill():
 
 # ---- upcoming_curve helper (MapTargetVelocities parsing + distance) --------
 def test_upcoming_curve_picks_binding_point_within_horizon():
-  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import upcoming_curve
   # ~111 m north (0.001 deg lat) target 15; ~5.5 km north target 5 (beyond horizon)
   tv = [{"latitude": 45.001, "longitude": -122.0, "velocity": 15.0},
         {"latitude": 45.05, "longitude": -122.0, "velocity": 5.0}]
@@ -104,7 +104,7 @@ def test_upcoming_curve_picks_binding_point_within_horizon():
 
 
 def test_upcoming_curve_empty_returns_none():
-  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import upcoming_curve
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import upcoming_curve
   mtv, mtd = upcoming_curve([], 45.0, -122.0, 20.0, 10.0)
   assert mtv == 0.0 and mtd == float('inf')
 
@@ -301,7 +301,7 @@ def test_accelerate_zone_does_not_override_a_curve():
 
 # ---- de-flap: entry cooldown + exit dwell (state machine) ------------------
 def test_deflap_entry_cooldown_and_exit_dwell():
-  from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import ConditionalExperimentalSwitching
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import ConditionalExperimentalSwitching
   sm = ConditionalExperimentalSwitching()
   active = base(v_ego=20 * CV.MPH_TO_MS, has_lead=False)   # lowSpeed condition active
   clear = base(v_ego=60 * CV.MPH_TO_MS, has_lead=False)    # nothing -> chill

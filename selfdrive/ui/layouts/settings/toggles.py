@@ -253,7 +253,7 @@ class TogglesLayout(Widget):
     ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
     # light-ces-gentle: the CES Mode selector only applies when openpilot controls longitudinal — grey it
-    # out otherwise. (The ces_xnor logic is itself gated on openpilotLongitudinalControl, so a stale
+    # out otherwise. (The ces_pnw logic is itself gated on openpilotLongitudinalControl, so a stale
     # CESMode>0 stays inert; no value force needed for the multi-button selector.)
     if "CESMode" in self._toggles:
       self._toggles["CESMode"].action_item.set_enabled(ces_long_ok)

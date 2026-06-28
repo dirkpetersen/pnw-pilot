@@ -18,7 +18,7 @@ from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
-from openpilot.selfdrive.controls.lib.ces_xnor.ces_xnor import CESController  # ces2xnor
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController  # ces2xnor
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -120,7 +120,7 @@ class SelfdriveD:
     self.not_running_prev = None
     self.experimental_mode = False
     self.manual_experimental_mode = False     # ces2xnor: the ExperimentalMode-param baseline
-    self.ces_xnor = CESController(self.CP)     # ces2xnor: default OFF
+    self.ces_pnw = CESController(self.CP)     # ces2xnor: default OFF
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.state_machine = StateMachine()
@@ -518,9 +518,9 @@ class SelfdriveD:
     # on openpilotLongitudinalControl so it is byte-identical to the stock baseline (and never forces
     # experimental on a stock-ACC car). Default OFF + this gating = behavior-neutral regression baseline.
     try:
-      ces_req = self.ces_xnor.experimental_request(CS, self.sm)
+      ces_req = self.ces_pnw.experimental_request(CS, self.sm)
     except Exception:
-      cloudlog.exception("ces_xnor: experimental_request raised -> chill")
+      cloudlog.exception("ces_pnw: experimental_request raised -> chill")
       ces_req = False
     self.experimental_mode = self.CP.openpilotLongitudinalControl and (self.manual_experimental_mode or ces_req)
 
