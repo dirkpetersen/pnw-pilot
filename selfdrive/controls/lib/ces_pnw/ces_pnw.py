@@ -124,11 +124,16 @@ def decide_active(s) -> tuple[bool, str]:
   v = s["v_ego"]
 
   # 1) curve — map (primary, ~10 s) OR vision (fallback, ~3.5 s)
-  # Freeway gate: on a known-freeway (OSM spd_lim >= CURVE_HWY_GATE) hand curves to VTSC+MTSC (bounded,
-  # decel-limited) and DON'T trip Experimental e2e curve braking — it stacks below the VTSC floor and
-  # over-slows (driver had to gas-override on the 2026-06-28 Snoqualmie sweepers). spd_lim 0/unknown =>
-  # not gated (keep tripping, safe default). Only the curve reason is gated; stop/lead/radar are intact.
-  if t["curves"] and v > C.CRUISING_SPEED and s["spd_lim"] < C.CURVE_HWY_GATE:
+  # Freeway gate: on a known-freeway (OSM spd_lim >= CURVE_HWY_GATE) hand MODERATE curves to VTSC+MTSC
+  # (bounded, decel-limited) and DON'T trip Experimental e2e curve braking — it stacks below the VTSC floor
+  # and over-slows (driver gas-override on the 2026-06-28 Snoqualmie sweepers). spd_lim 0/unknown => not
+  # gated (keep tripping, safe default). Only the curve reason is gated; stop/lead/radar are intact.
+  # SHARP-curve exception: a genuinely sharp curve (map target < CURVE_SHARP_MAP_V) keeps the trip even on
+  # a freeway — that's where steering-limit/EPS risk is (2026-06-28 North Bend descent take-control), so we
+  # want maximum braking authority (e2e + VTSC + MTSC), not just the bounded cap.
+  freeway_gated = s["spd_lim"] >= C.CURVE_HWY_GATE
+  sharp_curve = 0.0 < s["map_target_v"] < C.CURVE_SHARP_MAP_V
+  if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve):
     # MAP: pfeiferj MapTargetVelocities gives a safe curve speed ahead. Trip when an upcoming
     # target speed within the lookahead is meaningfully (>MIN_SLOWDOWN) below current speed.
     map_curve = (s["map_target_v"] > 0.0

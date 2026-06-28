@@ -35,6 +35,12 @@ CURVE_MAP_MIN_SLOWDOWN = 3.0  # m/s
 # curve trip when the OSM speed limit says we're on a freeway; stop/lead/radar braking stay intact.
 # Gated ONLY when spd_lim is KNOWN to be high (0/unknown -> keep tripping, safe default). ~55 mph.
 CURVE_HWY_GATE = 55 * CV.MPH_TO_MS  # m/s; spd_lim >= this => hand freeway curves to VTSC+MTSC, no CES e2e curve braking
+# SHARP-curve exception to the freeway gate (drive 2026-06-28 take-control on the North Bend descent): if
+# the upcoming MAP curve target is below this, the curve is genuinely sharp -> KEEP the CES e2e curve trip
+# even on a freeway (maximum braking authority: e2e + VTSC + MTSC), since a sharp curve at freeway speed is
+# where steering-limit/EPS saturation risk lives. Only MODERATE freeway curves (map target above this) are
+# gated (the over-slowdown fix). 30 m/s ~= 67 mph: the take-control curve's map target was 65 mph.
+CURVE_SHARP_MAP_V = 30.0  # m/s
 
 # --- lead -------------------------------------------------------------------
 SLOW_LEAD_DV   = 5.0          # m/s: lead this much slower than us -> closing -> Experimental

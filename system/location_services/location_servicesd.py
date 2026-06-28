@@ -61,9 +61,14 @@ DEFAULT_PROXY = {
 }
 
 TICK_HZ = 1.0
-EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile perpendicular of the highway
+EV_MAX_PERP_M = 3.0 * geo.M_PER_MILE      # chargers are detour DESTINATIONS, often just off the freeway at
+                                          # exits/in town (e.g. North Bend Supercharger ~1.6 mi off I-90) — so
+                                          # allow up to 3 mi perpendicular on the highway (was 1 mi, too tight;
+                                          # rest areas keep the tight 1.5 mi since they sit ON the highway).
 EV_FAST_PREFER_MI = 3.0                    # if a DC-fast charger is within this many mi ahead, show it instead of a closer slow L2
 SURFACE_RANGE_MI = 3.0                      # OFF-freeway: show nearest EV/rest within this straight-line radius (any direction)
+POI_HOLD_S = 8.0                            # debounce: keep showing a POI for this long after the ahead-cone
+                                            # momentarily drops it (curvy roads swing it in/out) — anti-flicker
 # location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
 # pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
@@ -331,6 +336,30 @@ def _line_police(alerts, state, lat, lon, brg, path):
           "uuid": poi.get("uuid"), "town": poi.get("town", "")}
 
 
+class _Hold:
+  """Anti-flicker debounce for one overlay line. On a curvy road the highway 'ahead' cone swings a POI in
+  and out each second, so the line blinks. Keep the last good POI for POI_HOLD_S after it drops, re-emitting
+  it with a refreshed straight-line distance; clear once it's been gone longer than the hold."""
+  def __init__(self, hold_s):
+    self.hold_s = hold_s
+    self.poi = None
+    self.t = 0.0
+
+  def update(self, found, now, lat, lon):
+    # found = (poi, dist_mi) or None. Returns the same shape (possibly the held POI).
+    if found is not None:
+      self.poi, self.t = found[0], now
+      return found
+    if self.poi is not None and (now - self.t) < self.hold_s:
+      try:
+        d = geo.haversine_m(lat, lon, self.poi["lat"], self.poi["lon"]) / geo.M_PER_MILE
+        return (self.poi, round(d, 1))
+      except (KeyError, TypeError, ValueError):
+        pass
+    self.poi = None
+    return None
+
+
 def _nearest_within(items, lat, lon, max_mi):
   """OFF-freeway proximity search: the nearest POI within max_mi straight-line, in ANY direction.
   On surface streets there is no highway 'path ahead' (you navigate a grid), so use a radius instead of
@@ -416,6 +445,8 @@ def main():
   police = PoliceUpdater()
   police.start()
   l2dl = L2Downloader()
+  rest_hold = _Hold(POI_HOLD_S)              # anti-flicker debounce for the rest + EV lines
+  ev_hold = _Hold(POI_HOLD_S)
   rk = Ratekeeper(TICK_HZ, print_delay_threshold=None)
   last_reload = 0.0
   last_l2 = None
@@ -452,6 +483,7 @@ def main():
       out["police"] = {"state": "nodata"}
       out["rest"] = {"state": "nodata"}
       out["ev"] = {"state": "nodata"}
+      rest_hold.poi = ev_hold.poi = None     # no fix -> drop any held POI
     else:
       if on_freeway:
         alerts, pstate = police.snapshot()
@@ -469,11 +501,14 @@ def main():
         e_fast = _nearest_within(ev_fast_items, lat, lon, SURFACE_RANGE_MI)
         e_any = _nearest_within(static.ev, lat, lon, SURFACE_RANGE_MI)
 
-      out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
-                      "town": r[0].get("town", "")} if r else {"state": "nodata"})
-
       # EV: prefer a DC-fast charger if one is within EV_FAST_PREFER_MI, else fall back to nearest (incl. L2).
       e = e_fast if (e_fast and e_fast[1] <= EV_FAST_PREFER_MI) else e_any
+
+      r = rest_hold.update(r, now, lat, lon)   # anti-flicker debounce (curvy roads swing the ahead-cone)
+      e = ev_hold.update(e, now, lat, lon)
+
+      out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
+                      "town": r[0].get("town", "")} if r else {"state": "nodata"})
       if e:
         ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or "",
               "fast": e[0].get("fast", True), "town": e[0].get("town", "")}
