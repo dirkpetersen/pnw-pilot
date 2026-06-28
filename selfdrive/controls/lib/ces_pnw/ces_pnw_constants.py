@@ -28,6 +28,13 @@ CRUISING_SPEED = 5.0          # m/s; below this, curve detection is meaningless
 # curve when an upcoming target speed within the lookahead is this much BELOW current speed (a real
 # curve, not GPS noise). Target-speed based — the binary already did curvature->safe-speed physics.
 CURVE_MAP_MIN_SLOWDOWN = 3.0  # m/s
+# Freeway gate on the CES *curve* trip (drive 2026-06-28, Snoqualmie): on a freeway, VTSC+MTSC already
+# cap curve speed smoothly (decel-limited, bounded floor). CES tripping Experimental for a curve there
+# adds redundant e2e braking that STACKS BELOW that floor -> over-slowdown the driver overrides with gas
+# (10:05 left curve: braked 85->74 below the 79 mph map floor; 10:03 right: down to 61). Suppress the
+# curve trip when the OSM speed limit says we're on a freeway; stop/lead/radar braking stay intact.
+# Gated ONLY when spd_lim is KNOWN to be high (0/unknown -> keep tripping, safe default). ~55 mph.
+CURVE_HWY_GATE = 55 * CV.MPH_TO_MS  # m/s; spd_lim >= this => hand freeway curves to VTSC+MTSC, no CES e2e curve braking
 
 # --- lead -------------------------------------------------------------------
 SLOW_LEAD_DV   = 5.0          # m/s: lead this much slower than us -> closing -> Experimental
