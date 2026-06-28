@@ -63,6 +63,7 @@ DEFAULT_PROXY = {
 TICK_HZ = 1.0
 EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile perpendicular of the highway
 EV_FAST_PREFER_MI = 3.0                    # if a DC-fast charger is within this many mi ahead, show it instead of a closer slow L2
+SURFACE_RANGE_MI = 3.0                      # OFF-freeway: show nearest EV/rest within this straight-line radius (any direction)
 # location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
 # pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
@@ -330,6 +331,21 @@ def _line_police(alerts, state, lat, lon, brg, path):
           "uuid": poi.get("uuid"), "town": poi.get("town", "")}
 
 
+def _nearest_within(items, lat, lon, max_mi):
+  """OFF-freeway proximity search: the nearest POI within max_mi straight-line, in ANY direction.
+  On surface streets there is no highway 'path ahead' (you navigate a grid), so use a radius instead of
+  along-track distance — you can detour to a charger/rest in range. Returns (poi, dist_mi) or None."""
+  best, best_m = None, max_mi * geo.M_PER_MILE
+  for it in items:
+    try:
+      d = geo.haversine_m(lat, lon, it["lat"], it["lon"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if d <= best_m:
+      best, best_m = it, d
+  return (best, round(best_m / geo.M_PER_MILE, 1)) if best is not None else None
+
+
 def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
   kw = {"max_perp_m": max_perp_m}
   if max_dist_m is not None:
@@ -423,25 +439,40 @@ def main():
     lat, lon, brg, path, ctx = _read_mem(mem)
     out = {"enabled": True, "ts": int(_now_epoch())}
 
-    # Freeway-gate the lookups: off-freeway (or no GPS) -> all lines no-data, never guess (§6).
+    # Two rules (driver request 2026-06-28):
+    #  • FREEWAY (RoadContext=="freeway"): show POIs directly ALONGSIDE the highway, AHEAD, in the agreed
+    #    ranges (EV/rest perp-filtered + up to 15 mi ahead along the mapd path).
+    #  • SURFACE street (any other road, with a GPS fix): no highway path -> show the nearest EV/rest within
+    #    a SURFACE_RANGE_MI (3 mi) straight-line radius, any direction (you can detour).
+    # Police stays freeway-only (the "ahead"/banner concept is highway-specific).
     on_freeway = (ctx == "freeway") and lat is not None and lon is not None
-    if not on_freeway:
+    have_gps = lat is not None and lon is not None
+    out["freeway"] = on_freeway              # UI header: "HAPPENING AHEAD" (freeway) vs "NEARBY (3 MI)" (surface)
+    if not have_gps:
       out["police"] = {"state": "nodata"}
       out["rest"] = {"state": "nodata"}
       out["ev"] = {"state": "nodata"}
     else:
-      alerts, pstate = police.snapshot()
-      out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
+      if on_freeway:
+        alerts, pstate = police.snapshot()
+        out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
+      else:
+        out["police"] = {"state": "nodata"}
 
-      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      ev_fast_items = [c for c in static.ev if c.get("fast")]
+      if on_freeway:
+        r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+        e_fast = _line_static(ev_fast_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+        e_any = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      else:                                                  # surface street: 3-mi proximity (any direction)
+        r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
+        e_fast = _nearest_within(ev_fast_items, lat, lon, SURFACE_RANGE_MI)
+        e_any = _nearest_within(static.ev, lat, lon, SURFACE_RANGE_MI)
+
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
                       "town": r[0].get("town", "")} if r else {"state": "nodata"})
 
-      # EV: prefer a DC-fast charger if one is within EV_FAST_PREFER_MI ahead, even when a slow L2 is closer
-      # (driver request). Only fall back to the nearest (possibly L2) charger when no fast one is that close.
-      e_fast = _line_static([c for c in static.ev if c.get("fast")], lat, lon, brg, path,
-                            max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
-      e_any = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+      # EV: prefer a DC-fast charger if one is within EV_FAST_PREFER_MI, else fall back to nearest (incl. L2).
       e = e_fast if (e_fast and e_fast[1] <= EV_FAST_PREFER_MI) else e_any
       if e:
         ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or "",

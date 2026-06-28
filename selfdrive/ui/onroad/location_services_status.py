@@ -134,12 +134,16 @@ class LocationServicesStatusRenderer(Widget):
     return "EV fast  -", _C.DIM
 
   def _lines(self):
-    return [
-      ("HAPPENING AHEAD", _C.WHITE, self.font_bold),
-      (*self._police_line(), self.font),
-      (*self._rest_line(), self.font),
-      (*self._ev_line(), self.font),
-    ]
+    # Header doubles as a road-context cue: "HAPPENING AHEAD" on the highway (POIs alongside, ahead) vs
+    # "NEARBY (3 MI)" on surface streets (nearest within a 3-mi radius). Police is highway-only, so its
+    # line is dropped off-freeway to keep the surface view clean.
+    freeway = bool(self._st.get("freeway"))
+    lines = [("HAPPENING AHEAD" if freeway else "NEARBY (3 MI)", _C.WHITE, self.font_bold)]
+    if freeway:
+      lines.append((*self._police_line(), self.font))
+    lines.append((*self._rest_line(), self.font))
+    lines.append((*self._ev_line(), self.font))
+    return lines
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
