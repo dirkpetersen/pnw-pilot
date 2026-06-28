@@ -50,6 +50,11 @@ DEFAULT_PROXY = {
 
 TICK_HZ = 1.0
 EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # decision #5: DC-fast within 1 mile perpendicular of the highway
+# location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
+# pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
+# I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
+# (the gatherer scoped rest areas within ~2 km of the mainline, so 1.5 mi comfortably keeps the real ones).
+REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
 POLICE_STALE_S = 45 * 60                   # drop crowd reports older than this
@@ -331,7 +336,7 @@ def main():
       alerts, pstate = police.snapshot()
       out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
 
-      r = _line_static(static.rest, lat, lon, brg, path)
+      r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M)
       out["rest"] = {"state": "ok", "dist_mi": r[1], "name": r[0].get("name")} if r else {"state": "nodata"}
 
       e = _line_static(static.ev, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M)
