@@ -115,6 +115,7 @@ procs = [
   # binary existing (see mapd_running) so manager never execs it before the download completes.
   NativeProcess("mapd", "selfdrive", ["./mapd"], mapd_running),
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
+  PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),

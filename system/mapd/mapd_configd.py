@@ -55,7 +55,13 @@ def main():
           "latitude": float(g.latitude), "longitude": float(g.longitude),
           "bearing": float(getattr(g, "bearingDeg", 0.0))}))
       if sm.alive['mapdOut']:
-        mem.put_nonblocking("MapSpeedLimit", str(float(sm['mapdOut'].speedLimit)))  # m/s; 0 = none
+        mo = sm['mapdOut']
+        mem.put_nonblocking("MapSpeedLimit", str(float(mo.speedLimit)))  # m/s; 0 = none
+        # location2pnw: bridge the road identity/class so pnw_location_services can name the road and
+        # freeway-gate its "happening ahead" lookups. roadContext enum -> 'freeway'|'city'|'unknown'.
+        mem.put_nonblocking("RoadName", mo.roadName or "")
+        mem.put_nonblocking("WayRef", mo.wayRef or "")
+        mem.put_nonblocking("RoadContext", str(mo.roadContext))
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s).

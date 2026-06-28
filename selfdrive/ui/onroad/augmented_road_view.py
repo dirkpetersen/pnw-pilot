@@ -12,6 +12,7 @@ from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitRenderer  # mapd2xnor
 from openpilot.selfdrive.ui.onroad.ces_status import CesStatusRenderer  # ces2xnor
+from openpilot.selfdrive.ui.onroad.location_services_status import LocationServicesStatusRenderer  # location2pnw
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
@@ -52,6 +53,7 @@ class AugmentedRoadView(CameraView):
     self.driver_state_renderer = DriverStateRenderer()
     self.speed_limit_renderer = SpeedLimitRenderer()  # mapd2xnor
     self.ces_status_renderer = CesStatusRenderer()  # ces2xnor
+    self.location_services_renderer = LocationServicesStatusRenderer()  # location2pnw (lower-left)
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -92,6 +94,7 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.render(self._content_rect)
     self.speed_limit_renderer.render(self._content_rect)  # mapd2xnor
     self.ces_status_renderer.render(self._content_rect)  # ces2xnor
+    self.location_services_renderer.render(self._content_rect)  # location2pnw (lower-left)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)
 

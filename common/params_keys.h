@@ -83,6 +83,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, JSON}},
     {"RoadName", {PERSISTENT, STRING}},
+    {"WayRef", {PERSISTENT, STRING}},        // location2pnw: mapd road ref (e.g. "I 5") bridged to mem params
+    {"RoadContext", {PERSISTENT, STRING}},   // location2pnw: mapd road class 'freeway'|'city'|'unknown' (freeway-gate)
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
     {"OsmDownloadedDate", {PERSISTENT, STRING}},
     {"OsmLocationName", {PERSISTENT, STRING}},
@@ -115,6 +117,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
     {"VTSCStatus", {CLEAR_ON_MANAGER_START, JSON}}, // vtsc: live status (plannerd -> UI overlay). Gated on the CES toggle.
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
+    // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
+    {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // master toggle (UI), default ON; daemon idles + overlay hidden when off
+    {"LocationServices", {CLEAR_ON_MANAGER_START, JSON}},  // mem: JSON the daemon publishes for the lower-left overlay
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},
     {"LastOffroadStatusPacket", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"LastAgnosPowerMonitorShutdown", {CLEAR_ON_MANAGER_START, STRING}},
