@@ -37,10 +37,16 @@ A_RELAX         = 1.5   # m/s^2 rate the applied cap eases back UP (apex reached
 #   at the apex AND at safe speed (or curve straightens) -> RELEASE  (accelerate back to cruise)
 # Never reduce AT/after the apex (tta <= APEX_TTA_S -> HOLD at worst, never a fresh brake); we only
 # avoid ACCELERATING out while still materially too fast.
-HOLD_TTA_S      = 1.2   # s; within this time of the apex, stop reducing -> HOLD (only once at safe speed)
-APEX_TTA_S      = 0.4   # s; "at the apex" -> release the cap and accelerate out (only once at safe speed)
+# sharpcurve2pnw: shifted EARLIER so the curve ENTRANCE is the slowest point and we accelerate out
+# BEFORE the apex (driver: "the entrance should be the slowest... at the apex you should be able to
+# accelerate, sometimes even before the apex"). Reach curve-safe speed ~APEX_FINISH_S before the apex
+# (~the entrance), HOLD briefly, then RELEASE ~APEX_TTA_S before the apex. The at-safe gate
+# (RELEASE_SPEED_MARGIN) still guards RELEASE, so we only accelerate pre-apex once actually slowed to
+# curve-safe speed -> there's lateral margin at the apex.
+HOLD_TTA_S      = 2.5   # s; reach this far from the apex (~the entrance) at safe speed, then HOLD (stop reducing)
+APEX_TTA_S      = 1.2   # s; begin accelerating out BEFORE the apex (only once at safe speed)
 RELEASE_SPEED_MARGIN = 0.10  # release/hold only when vEgo <= vCurveSafe*(1+this); else keep braking/holding
-APEX_FINISH_S   = 1.2   # s; aim to reach curve-safe speed this long BEFORE the apex (firmer if needed)
+APEX_FINISH_S   = 2.5   # s; reach curve-safe speed this long BEFORE the apex (~the entrance = slowest point)
 CONFIDENCE_CUT  = 0.5   # m/s (~1.1 mph) immediate cap cut the instant a binding curve is detected, so the
                         #   driver immediately feels VTSC engage (per drive #4). Then braking continues.
 CLEAR_CYCLES    = 5     # cycles with no curve before RELEASE -> IDLE (debounce the exit so we don't re-brake
@@ -75,6 +81,38 @@ CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this man
 # defaulting it ON safe. Set VtscMapCurves=0 to fall back to vision-only.
 MAP_LOOKAHEAD_S   = 12.0  # s; trust map curve targets within v_ego * this (longer reach than vision's 8 s)
 MAP_MIN_SLOWDOWN  = 4.5   # m/s; only fold a map curve whose (scaled) target is this far below cruise (~10 mph)
+
+# --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
+# Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a
+# FIXED 500 m path horizon (MIN_WAY_DIST in mapd/settings/const.go), but VTSC only scanned
+# v_ego*MAP_LOOKAHEAD_S (~370 m @ 70 mph) and CES ~310 m — throwing away ~130-190 m (~6 s) of warning,
+# so on the blindest curves the slowdown started too late.
+# Driver model (EV / Model S): "on the freeway braking should almost never be required; as soon as you
+# decelerate, regen [recoup] makes it much slower." Lifting the accelerator gives ~0.2 g of regen, which
+# is plenty to bleed curve speed IF we see the curve early enough. So the fix leans on LOOKAHEAD + REGEN,
+# not friction braking. Goal: get off the gas early so the curve ENTRANCE is the slowest point, then
+# accelerate out (sometimes before the apex). All changes ride the CES master and only ever REDUCE speed:
+#   1) scan the FULL available 500 m and pick the most-binding curve by decel envelope (not nearest);
+#   2) cap the normal commanded decel to regen authority (REGEN_A_DECEL) -> coast/regen, no friction brake;
+#   3) allow firm friction braking (SHARP_A_DECEL_MAX) ONLY as a last resort when regen alone can't reach
+#      curve-safe speed before a blind SHARP curve's entrance (anti-take-control); still bounded — no slam.
+MAP_SOURCE_HORIZON_M = 500.0  # m; mapd's hard MIN_WAY_DIST cap — no path data exists beyond this (don't scan past)
+MAP_BRAKE_MARGIN_M   = 40.0   # m; cushion added to the computed brake distance when sizing the scan horizon
+REGEN_A_DECEL        = 2.0    # m/s^2 (~0.2 g) EV regen authority — NORMAL commanded-decel ceiling (no friction brake)
+SHARP_CURVE_V        = 30.0   # m/s (~67 mph); a map curve target below this is "sharp" (in sync with CES CURVE_SHARP_MAP_V)
+SHARP_A_DECEL_MAX    = 2.8    # m/s^2 LAST-RESORT friction-brake ceiling, only when regen can't make a sharp curve — bounded
+
+# --- twisty-DESCENT base trim ("auto-lower the set on twisty descents") -------
+# Backstop for blind sharp curves on a winding DOWNHILL — where gravity fights regen and packed blind
+# curves are the take-control risk. ONLY trims when BOTH (a) several curves are packed into the upcoming
+# 500 m AND (b) the road is descending (pitch < TWISTY_DESCENT_PITCH): hold a lower base cruise through
+# the section instead of releasing to full set speed between each blind curve. A FLAT twisty section is
+# left at full speed (per-curve VTSC handles it) so we don't lose speed where it isn't needed (driver:
+# "we do not want to lose any speed overall"). Bounded by TWISTY_MIN_FACTOR; only ever reduces -> safe.
+TWISTY_MIN_CURVES    = 3       # >= this many binding curves within the horizon => "twisty section"
+TWISTY_SLOWDOWN      = 3.0     # m/s; a map point counts as a curve when its target is this far below cruise
+TWISTY_MIN_FACTOR    = 0.82    # never trim the section base below this * v_cruise (~18% floor, descents only)
+TWISTY_DESCENT_PITCH = -0.035  # rad (~ -2 deg); road pitch below this is treated as a descent (trim active)
 # I-90 22:08-22:10 PT 2026-06-27: mapd's curve targets (60-68 mph at a 90 set) were the BINDING floor,
 # ~10 mph too conservative. Carry more speed through map curves by scaling the map target up (then capped
 # at cruise). 1.12x ~= +8 mph at 65; still decel-limited + V_MIN-floored downstream, so it can never slam.

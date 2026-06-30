@@ -112,6 +112,95 @@ def curvatures_from_model(model):
   return curvs, dists
 
 
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+  """Great-circle distance in metres (pure). Local copy so this module stays self-contained/testable."""
+  r = 6371000.0
+  p1, p2 = math.radians(lat1), math.radians(lat2)
+  dp = math.radians(lat2 - lat1)
+  dl = math.radians(lon2 - lon1)
+  a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+  return 2 * r * math.asin(min(1.0, a ** 0.5))
+
+
+def required_decel(v_ego: float, v_target: float, dist: float) -> float:
+  """Constant decel (m/s^2) needed to reach v_target by `dist` ahead. 0 if no slowing needed / dist<=0.
+  Used to decide when REGEN alone won't make a sharp curve (-> allow last-resort firmer braking). Pure."""
+  if dist <= 0.0 or v_target >= v_ego:
+    return 0.0
+  return (v_ego * v_ego - v_target * v_target) / (2.0 * dist)
+
+
+def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: float,
+                           a_decel: float = C.A_DECEL, finish_s: float = C.APEX_FINISH_S,
+                           sharp_v: float = C.SHARP_CURVE_V, speed_scale: float = 1.0,
+                           v_cruise_cap: float = float('inf')):
+  """sharpcurve2pnw: scan pfeiferj map path points {latitude,longitude,velocity} within horizon_m and
+  return (v_target, dist, is_sharp) of the curve whose decel-limited brake cap is the LOWEST right now
+  — i.e. the one to start slowing for first. This is the distance-based lookahead: a far sharp curve
+  has a high (non-binding) envelope until we're close enough, a near curve binds sooner — picking by
+  envelope (not nearest / not min-speed) chooses the right one over the FULL ~500 m mapd horizon.
+  The MTSC target scale (speed_scale) and clamp (v_cruise_cap) are applied to each point BEFORE the
+  envelope so the SELECTED curve matches the value actually used downstream (no selection/use mismatch).
+  v_target is the effective (scaled+clamped) target. (0.0, inf, False) if no point / no data. Pure."""
+  if not points or cur_lat is None or cur_lon is None:
+    return 0.0, float('inf'), False
+  best_cap = float('inf')
+  best_v = 0.0
+  best_d = float('inf')
+  best_sharp = False
+  for p in points:
+    try:
+      d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
+      tv = float(p["velocity"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if tv <= 0.0 or not (0.0 < d <= horizon_m):
+      continue
+    tv_eff = min(tv * speed_scale, v_cruise_cap)   # MTSC scale + clamp applied before selection
+    if tv_eff <= 0.0:
+      continue
+    cap = brake_cap_for_apex(tv_eff, d, v_ego, a_decel, finish_s)
+    if cap < best_cap:
+      # is_sharp = the RAW (unscaled) target is physically sharp. Classifying on tv_eff would let the
+      # 1.12x scale inflate a genuinely sharp 28 m/s curve to 31.4 and DROP its sharp flag -> the
+      # last-resort firmer brake would be denied while we target the inflated entrance speed (overshoot).
+      best_cap, best_v, best_d, best_sharp = cap, tv_eff, d, (tv < sharp_v)
+  return best_v, best_d, best_sharp
+
+
+def twisty_section_cap(points, cur_lat, cur_lon, v_cruise: float, v_ego: float, horizon_m: float,
+                       pitch=None, min_curves: int = C.TWISTY_MIN_CURVES,
+                       slowdown: float = C.TWISTY_SLOWDOWN, min_factor: float = C.TWISTY_MIN_FACTOR,
+                       descent_pitch: float = C.TWISTY_DESCENT_PITCH) -> float:
+  """sharpcurve2pnw ("auto-lower the set on twisty descents"): trim the base cruise ONLY on a winding
+  DOWNHILL — both (a) >= min_curves binding curves (target this far below cruise) within horizon_m AND
+  (b) the road descending (pitch < descent_pitch rad). Holds a lower base cruise through the section so
+  we don't re-accelerate to full set between blind curves. A FLAT twisty section keeps full speed
+  (per-curve VTSC handles it) -> no speed lost where it isn't needed. Returns v_cruise unchanged
+  otherwise (incl. no pitch data). Bounded by min_factor*v_cruise; only ever <= v_cruise. Pure."""
+  if not points or cur_lat is None or cur_lon is None or v_cruise <= 0.0:
+    return v_cruise
+  if pitch is None or pitch >= descent_pitch:     # not a descent (or no pitch data) -> no trim, keep speed
+    return v_cruise
+  targets = []
+  for p in points:
+    try:
+      d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
+      tv = float(p["velocity"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if 0.0 < d <= horizon_m and 0.0 < tv < v_cruise - slowdown:
+      targets.append(tv)
+  if len(targets) < min_curves:
+    return v_cruise
+  # Use the RAW (unscaled) curve targets for the descent base on purpose: a twisty DOWNHILL is the more
+  # dangerous case (gravity fights regen), so we hold a more conservative base than the per-curve scaled
+  # targets carry on flat ground — this IS the "lower the set on twisty descents" behavior. The
+  # min_factor floor (~0.82) bounds the trim either way, so it stays a modest, capped reduction.
+  base = sum(targets) / len(targets)
+  return max(v_cruise * min_factor, min(v_cruise, base))
+
+
 def model_curve_state(model, v_cruise: float, a_lat: float = C.A_LAT_TARGET):
   """Read the model's predicted path and return the curve picture the apex state machine needs:
     (apex_curvature 1/m, apex_dist m, v_curve_safe m/s) where v_curve_safe = sqrt(a_lat/apex_curvature).

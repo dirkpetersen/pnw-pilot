@@ -29,9 +29,10 @@ import time
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
-from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import model_curve_state, brake_cap_for_apex, apply_limits
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
+  model_curve_state, brake_cap_for_apex, apply_limits,
+  most_binding_map_curve, twisty_section_cap, required_decel)   # sharpcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import upcoming_curve   # ces-i90-2pnw (MTSC)
 
 
 class VTSCController:
@@ -57,6 +58,11 @@ class VTSCController:
     self._cur_lat = self._cur_lon = None
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
+    # sharpcurve2pnw: per-cycle effective decels. Normal commanded decel is capped to EV regen authority
+    # (REGEN_A_DECEL ~0.2 g) -> the slowdown is coast/regen, no friction braking. A SHARP curve that regen
+    # alone can't make before its entrance raises the rate-limit ceiling to SHARP_A_DECEL_MAX (last resort).
+    self._a_decel = C.A_DECEL       # envelope decel (plan shape)
+    self._a_decel_max = C.REGEN_A_DECEL  # rate-limit ceiling (regen-only by default)
     self._below = 0           # consecutive cycles a far curve is present (debounce into brake)
     self._clear = 0           # consecutive cycles no curve (debounce release -> idle)
     self._last_t = None       # monotonic stamp of last cap() call (real dt)
@@ -114,30 +120,33 @@ class VTSCController:
     except Exception:
       self._cur_lat = self._cur_lon = None
 
-  def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise, v_ego):
-    """ces-i90-2pnw (MTSC): fold the upcoming MAP curve (pfeiferj MapTargetVelocities) into the curve
-    picture, using whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel
-    envelope). Lets VTSC start braking earlier and catch sharp curves the vision under-reads (Snoqualmie
-    summit: map ~58 mph vs vision ~82). The chosen curve feeds the SAME decel-limited + floored state
-    machine, so even a wrong/low map speed brakes smoothly (never slams) and stays >= V_MIN."""
+  def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
+    """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
+    whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
+    scans the FULL available horizon (mapd's ~500 m) and picks the most-binding curve by envelope, not
+    nearest — so a blind sharp curve is seen ~6 s earlier than the old v_ego*12 s reach. Returns
+    (k, d, v, is_sharp_map): is_sharp_map flags a genuinely sharp MAP curve (for the last-resort firmer
+    rate-limit). The chosen curve feeds the SAME decel-limited + V_MIN-floored state machine.
+
+    All thresholds/clamps use the driver's true SET speed (v_cruise_set), NOT a twisty-trimmed working
+    cruise — otherwise a lowered base would dismiss a real sharp curve as 'trivial' (it must still brake).
+    The MTSC scale (driver: mapd targets ran ~10 mph slow) + clamp are applied INSIDE the selection so the
+    chosen curve matches the value used here."""
     try:
-      mv, md = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.MAP_LOOKAHEAD_S)
+      mv, md, sharp = most_binding_map_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego,
+                                             horizon_m, self.tune['A_DECEL'], C.APEX_FINISH_S,
+                                             C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set)
     except Exception:
-      return k_apex, d_apex, v_curve
-    # soften MTSC (driver: mapd's curve targets ran ~10 mph too slow on I-90): carry more speed through
-    # map curves by scaling the target up, capped at cruise. Still feeds the decel-limited + V_MIN-floored
-    # state machine below, so it can never slam. Scale applied BEFORE the fold test so trivial curves drop.
-    if mv > 0.0:
-      mv = min(mv * C.MAP_SPEED_SCALE, v_cruise)
-    # only a real map curve meaningfully below cruise counts (ignore GPS noise / trivial targets)
-    if not (0.0 < mv < v_cruise - C.MAP_MIN_SLOWDOWN) or md <= 0.0:
-      return k_apex, d_apex, v_curve
+      return k_apex, d_apex, v_curve, False
+    # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
+    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN) or md <= 0.0:
+      return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
     if rsn_map < rsn_vis:                       # map curve is the more binding -> use it
       k_map = (self.tune['A_LAT_TARGET'] / (mv * mv)) if mv > 0.0 else 0.0   # equiv curvature, logging only
-      return k_map, md, mv
-    return k_apex, d_apex, v_curve
+      return k_map, md, mv, sharp
+    return k_apex, d_apex, v_curve, False
 
   def cap(self, sm, v_cruise: float, v_ego: float) -> float:
     """Return the VTSC-capped cruise speed (m/s). v_cruise when disabled / no curve. Safe: <= v_cruise."""
@@ -158,9 +167,42 @@ class VTSCController:
     except Exception:
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
+    # sharpcurve2pnw: keep the driver's SET speed for display; the state machine works against a possibly
+    # twisty-trimmed working cruise. Read road pitch (carControl.orientationNED[1], rad; <0 = downhill).
+    v_cruise_set = v_cruise
+    pitch = None
+    try:
+      ned = sm['carControl'].orientationNED
+      if len(ned) == 3:
+        pitch = float(ned[1])
+    except Exception:
+      pitch = None
+
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
-    if self._map_curves:                        # ces-i90-2pnw (MTSC): fold in the upcoming map curve
-      k_apex, d_apex, v_curve = self._fold_map_curve(k_apex, d_apex, v_curve, v_cruise, v_ego)
+    sharp_map = False
+    if self._map_curves:                        # ces-i90-2pnw (MTSC) + sharpcurve2pnw
+      horizon_m = C.MAP_SOURCE_HORIZON_M        # scan the FULL ~500 m mapd publishes (envelope gates binding)
+      # most-binding upcoming map curve over the FULL horizon (earlier detection of blind sharp curves).
+      # Thresholds use the true SET speed, so a real curve isn't dismissed by the twisty trim below.
+      k_apex, d_apex, v_curve, sharp_map = self._fold_map_curve(k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m)
+      # twisty-section base trim (descent-only): hold a LOWER base cruise through a winding DOWNHILL so we
+      # don't re-accelerate to full set between blind curves. Only ever lowers the working cruise.
+      try:
+        v_cruise = twisty_section_cap(self._map_targets, self._cur_lat, self._cur_lon,
+                                      v_cruise, v_ego, horizon_m, pitch)
+      except Exception:
+        pass
+
+    # sharpcurve2pnw: NORMAL commanded decel = EV regen authority -> coast/regen, no friction braking
+    # (driver: "on the freeway braking should almost never be required"). A genuinely SHARP map curve that
+    # regen alone can't reach before its ENTRANCE (apex minus the finish lead) raises the ceiling to
+    # SHARP_A_DECEL_MAX (last resort). Measured to the entrance, not the apex, since that's where we must
+    # already be at curve-safe speed.
+    self._a_decel = self.tune['A_DECEL']
+    self._a_decel_max = min(self.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)
+    d_entrance = max(d_apex - v_ego * C.APEX_FINISH_S, 1.0)
+    if sharp_map and d_apex > 0.0 and required_decel(v_ego, v_curve, d_entrance) > C.REGEN_A_DECEL:
+      self._a_decel_max = max(self._a_decel_max, C.SHARP_A_DECEL_MAX)
     # ces-i90-2pnw: a curve "counts" if it BINDS (curve-safe speed below cruise -> real braking) OR is a
     # mild bend past CUE_MIN_CURVATURE (~5 deg / R~2300 m). The mild-bend case never needs real slowing, so
     # the state machine below only applies the CONFIDENCE_CUT (>=1 mph) engage dip then releases -> a
@@ -192,7 +234,7 @@ class VTSCController:
         self._state = "hold"                       # close AND already at safe speed -> maintain
       else:
         # apex still ahead, OR still too fast inside the hold window -> keep reducing toward curve-safe
-        cap = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL'])
+        cap = brake_cap_for_apex(v_curve, d_apex, v_ego, self._a_decel)
         # never above cruise-CONFIDENCE_CUT (keep the engage cut), floored at V_MIN
         target = max(min(cap, v_cruise - C.CONFIDENCE_CUT), C.V_MIN)
 
@@ -215,15 +257,15 @@ class VTSCController:
         self._below = 0
 
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
-    self._applied = apply_limits(self._applied, target, v_cruise, dt, self.tune['A_DECEL_MAX'], self.tune['A_RELAX'])
+    self._applied = apply_limits(self._applied, target, v_cruise, dt, self._a_decel_max, self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
 
-    engaged = capped < v_cruise - 0.5
+    engaged = capped < v_cruise_set - 0.5
     if engaged != self._engaged:
       cloudlog.info("VTSC %s [%s]: cap=%.1f cruise=%.1f vEgo=%.1f apex=%.0fm tta=%.1fs",
-                    "ENGAGE" if engaged else "clear", self._state, capped, v_cruise, v_ego, d_apex, tta)
+                    "ENGAGE" if engaged else "clear", self._state, capped, v_cruise_set, v_ego, d_apex, tta)
       self._engaged = engaged
-    return self._finish(capped, v_cruise, v_ego, k_apex, d_apex, v_curve, now)
+    return self._finish(capped, v_cruise_set, v_ego, k_apex, d_apex, v_curve, now)
 
   def _finish(self, capped, v_cruise, v_ego, k_apex, d_apex, v_curve, now):
     active = capped < v_cruise - 0.5
