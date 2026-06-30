@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import urllib.request
 
 # Resolve paths from this file's REAL location, not BASEDIR. On the device, system/
@@ -36,13 +37,25 @@ def load_release() -> dict:
     return json.load(f)
 
 
-# Resolve the install path once at import so callers can reference MAPD_BINARY
-# (e.g. a process should_run check). Falls back to the conventional path if the
-# config can't be read, so an import never hard-fails.
-try:
-  MAPD_BINARY = os.path.join(REPO_ROOT, load_release()["install_path"])
-except Exception:
-  MAPD_BINARY = os.path.join(REPO_ROOT, "selfdrive", "mapd")
+# Legacy in-tree install path (pre-2026-06-29). The binary is UNTRACKED, so an auto-update's
+# `git clean -xdff` DELETES it from the working tree, forcing a flaky boot re-download (DNS/clock
+# not ready before NTP) and leaving the map dead until a lucky retry. See the 2026-06-29 incident.
+def _legacy_in_tree() -> str:
+  try:
+    return os.path.join(REPO_ROOT, load_release()["install_path"])
+  except Exception:
+    return os.path.join(REPO_ROOT, "selfdrive", "mapd")
+
+
+# PERSISTENT install location OUTSIDE the git working tree so `git clean` can never delete it. On the
+# device /data is persistent and survives every update/reboot; off-device (dev/CI, no writable /data)
+# fall back to the in-tree path — mapd doesn't run there anyway (gated on the binary existing). Resolved
+# once at import so callers (process_config's should_run + exec path) reference a single MAPD_BINARY.
+MAPD_PERSIST_DIR = "/data/mapd"
+if os.path.isdir("/data") and os.access("/data", os.W_OK):
+  MAPD_BINARY = os.path.join(MAPD_PERSIST_DIR, "mapd")
+else:
+  MAPD_BINARY = _legacy_in_tree()
 
 
 def _sha256(path: str) -> str:
@@ -55,7 +68,7 @@ def _sha256(path: str) -> str:
 
 def is_installed(rel: dict | None = None) -> bool:
   rel = rel or load_release()
-  dest = os.path.join(REPO_ROOT, rel["install_path"])
+  dest = MAPD_BINARY
   if not os.path.exists(dest) or not os.access(dest, os.X_OK):
     return False
   expected = rel.get("sha256")
@@ -69,13 +82,38 @@ def ensure_mapd(retries: int = 3) -> str:
   killed download or dropped link never leaves a half-written executable in place.
   """
   rel = load_release()
-  dest = os.path.join(REPO_ROOT, rel["install_path"])
+  dest = MAPD_BINARY
   expected = rel.get("sha256")
 
   if is_installed(rel):
     return dest
 
   os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+  # Migration / no-download path: if a valid binary already exists at the legacy in-tree location
+  # (first boot after this change, or a fresh download landed there), copy it to the persistent dir
+  # instead of re-downloading. This is what lets the fix survive even when the boot network is down.
+  legacy = _legacy_in_tree()
+  if legacy != dest and os.path.exists(legacy) and os.access(legacy, os.X_OK):
+    try:
+      if (not expected) or _sha256(legacy) == expected:
+        # atomic: copy to a temp in the same dir, chmod, then os.replace — so the manager never
+        # execs a half-written file (ETXTBSY / partial binary) and a hard-reboot mid-copy can't
+        # leave a corrupt dest that is_installed() would falsely accept when the release has no sha.
+        tmp = dest + ".migrate"
+        shutil.copy2(legacy, tmp)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, dest)
+        print(f"mapd installer: copied existing binary {legacy} -> {dest} (no download)")
+        return dest
+    except Exception as e:
+      print(f"mapd installer: migrate from {legacy} failed ({e}); will download")
+      try:
+        if os.path.exists(dest + ".migrate"):
+          os.remove(dest + ".migrate")
+      except OSError:
+        pass
+
   url = rel["url"]
   # Static temp name (not mkstemp): a download hard-killed mid-flight (ignition off,
   # reboot) leaves at most ONE stale temp that the next run simply overwrites — no

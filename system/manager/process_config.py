@@ -110,10 +110,11 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("network_arbiterd", "system.networkd.network_arbiterd", always_run, enabled=TICI),  # network2pnw
-  # mapd2pnw: official pfeiferj mapd v2.0.6 — self-contained binary downloaded at launch by
-  # system/mapd/installer.py. Publishes mapdOut/mapdExtendedOut, subscribes mapdIn. Gated on the
-  # binary existing (see mapd_running) so manager never execs it before the download completes.
-  NativeProcess("mapd", "selfdrive", ["./mapd"], mapd_running),
+  # mapd2pnw: official pfeiferj mapd v2.0.6 — self-contained binary installed by system/mapd/installer.py
+  # into the PERSISTENT /data/mapd (outside the git tree, so an auto-update's `git clean` can't delete it
+  # and force a flaky boot re-download). Exec the absolute MAPD_BINARY; publishes mapdOut/mapdExtendedOut,
+  # subscribes mapdIn. Gated on the binary existing (mapd_running) so manager never execs a missing file.
+  NativeProcess("mapd", "selfdrive", [MAPD_BINARY], mapd_running),
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
