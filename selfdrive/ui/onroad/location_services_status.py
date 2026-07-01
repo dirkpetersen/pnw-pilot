@@ -30,7 +30,9 @@ _FT_PER_MILE = 5280.0
 _CONT_INDENT = "   "   # 3-char hanging indent on each advisory line's wrapped continuation line
 # Blue flashing "POLICE AHEAD" banner — same box/blink as the red speed-limit warning, but blue, when a
 # police report is <= 0.5 mi AHEAD (the police line is already ahead-only, so "behind" never triggers it).
-_POLICE_NEAR_MI = 0.25   # banner shows only when a police report is this close ahead (shrunk from 0.5, driver req)
+_POLICE_NEAR_MI = 0.5    # banner shows when a police report is this close ahead (restored 0.25->0.5 2026-07-01
+                         # so it actually appears; the SIREN stays OFF — audio playback was the CPU/comms-timing
+                         # stressor on the near-capacity 3X, the visual banner is far lighter)
 _BLINK_PERIOD = 0.7   # s, one on+off cycle (~1.4 Hz), matching the speed-limit warning
 _POLICE_BANNER_MAX_S = 15.0   # blink the "POLICE AHEAD" banner for at most this long, then stop (driver req)
 # The driver-monitoring icon is a bottom-LEFT circle whose TOP edge is ~(UI_BORDER_SIZE + BTN_SIZE) up

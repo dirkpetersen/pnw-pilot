@@ -8,10 +8,13 @@ Pure literals (no imports) so the core is unit-testable without the openpilot st
 # --- the two knobs that shape the behavior -----------------------------------
 # Tuned for a SMOOTH, SLIGHT adjustment (driver feedback after the first VTSC drive: 57 was too
 # aggressive — only a slight trim is wanted). Higher A_LAT_TARGET = less slowdown; lower A_DECEL = gentler.
-A_LAT_TARGET = 2.2    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
-                      #   (more margin). RAISED 1.9 -> 2.2 (I-90 westbound 22:08-22:10 PT 2026-06-27: held
-                      #   62-77 mph at a 90 set on a 100%-curve stretch, ~10-15 mph too conservative).
-                      #   At Terwilliger (R~415): 2.2 -> ~67 mph, 1.9 -> ~62, 1.5 -> ~57 (too firm drive #4).
+A_LAT_TARGET = 3.0    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
+                      #   (more margin). RAISED 2.2 -> 3.0 (Snoqualmie I-90 2026-07-01, see
+                      #   drives/2026-07-01/hotspot-drive/DRIVE_REPORT.md: VTSC over-capped repeatedly and the
+                      #   driver had to override with throttle / take control; calibration point 62 -> wanted
+                      #   72 mph == x1.35 on A_LAT (sqrt -> x1.16 on speed). 3.0 ~= 0.31 g lateral; use CES
+                      #   Light/Off in poor grip). Prior: RAISED 1.9 -> 2.2 (I-90 2026-06-27, still ~10-15 too low).
+                      #   At Terwilliger (R~415): 3.0 -> ~78 mph, 2.2 -> ~67, 1.9 -> ~62, 1.5 -> ~57.
                       #   Gentler curves scale up automatically: v_safe = sqrt(a_lat/kappa), so R~600 m
                       #   -> ~76 mph (no cap at 70) — only curves tighter than ~R550 bind at all.
 A_DECEL      = 1.2    # m/s^2 decel the envelope plans for -> how gently speed bleeds off. ~0.12 g, like
@@ -116,7 +119,10 @@ TWISTY_DESCENT_PITCH = -0.035  # rad (~ -2 deg); road pitch below this is treate
 # I-90 22:08-22:10 PT 2026-06-27: mapd's curve targets (60-68 mph at a 90 set) were the BINDING floor,
 # ~10 mph too conservative. Carry more speed through map curves by scaling the map target up (then capped
 # at cruise). 1.12x ~= +8 mph at 65; still decel-limited + V_MIN-floored downstream, so it can never slam.
-MAP_SPEED_SCALE   = 1.12  # >1 = carry more speed through map curves (less conservative MTSC)
+MAP_SPEED_SCALE   = 1.5   # >1 = carry more speed through map curves (less conservative MTSC). RAISED
+                          #   1.12 -> 1.5 (Snoqualmie I-90 2026-07-01): map safe-speeds came back absurdly low
+                          #   (mapV 22-29 mph on curves taken at 60-85), over-capping + forcing throttle
+                          #   overrides. Still decel-limited + V_MIN-floored downstream, so it can't slam.
 
 # --- profiles (DEFAULT vs GENTLE) -------------------------------------------
 # The above constants are the DEFAULT tune. On a winding highway the default tune can SAWTOOTH: VTSC
@@ -130,7 +136,7 @@ MAP_SPEED_SCALE   = 1.12  # >1 = carry more speed through map curves (less conse
 #   - a hair less slowdown so trims feel light (A_LAT_TARGET 1.9 -> 2.0)
 # Only ever makes VTSC GENTLER (still decel-limited, still floored, still <= v_cruise) — safe.
 DEFAULT_PROFILE = dict(A_LAT_TARGET=A_LAT_TARGET, A_DECEL=A_DECEL, A_DECEL_MAX=A_DECEL_MAX, A_RELAX=A_RELAX)
-GENTLE_PROFILE  = dict(A_LAT_TARGET=2.2, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)  # A_LAT bumped 2.0->2.2 to match DEFAULT
+GENTLE_PROFILE  = dict(A_LAT_TARGET=3.0, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)  # A_LAT tracks DEFAULT (2.2->3.0, 2026-07-01)
 
 # light-ces-gentle: which profile is used is USER-SELECTED via CESMode (1=Light->GENTLE,
 # 2=Standard->DEFAULT) in vtsc_controller.py, on ANY car — no car/fingerprint gating.

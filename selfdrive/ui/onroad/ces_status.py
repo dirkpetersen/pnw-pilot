@@ -5,9 +5,8 @@ Display-only. Shown only when the CES master toggle is on. Gives at-a-glance fee
 Conditional Experimental Switching + mapd are doing, so you can validate it on the road.
 
 Data path: selfdrived's CESController publishes a `CESStatus` snapshot to the in-memory param store
-(/dev/shm/params) at ~5 Hz (single source of truth for the live decision + mapd diagnostics). The
-OSM speed limit comes from `mapdOut` (official pfeiferj mapd, already on the UI submaster). This widget never computes
-the decision itself.
+(/dev/shm/params) at ~5 Hz (single source of truth for the live decision + mapd diagnostics). This
+widget never computes the decision itself.
 
 Lines (lower-right, short, one per line):
   CES AUTO            button mode (AUTO / CHILL* / EXP*  — * = forced)
@@ -16,7 +15,7 @@ Lines (lower-right, short, one per line):
   curve 57% vis       curve closeness % + source (map/vision), color ramps green->orange
   map 24pts gps       mapd liveness: cached MapTargetVelocities points + GPS fix
   next 34 140m        next binding map curve (target speed + distance) or "road clear"
-  limit 30            current OSM speed limit
+  (speed-limit line removed 2026-07-01, driver req — frees bottom space)
 """
 import time
 import pyray as rl
@@ -97,7 +96,6 @@ class CesStatusRenderer(Widget):
   def _lines(self) -> list[tuple]:
     st = self._st
     conv = self._conv
-    units = "kph" if ui_state.is_metric else "mph"
     out: list[tuple] = []
 
     button = int(st.get("button", 0))
@@ -160,23 +158,9 @@ class CesStatusRenderer(Widget):
     elif pts > 0 and gps:
       out.append(("road clear", _C.GREEN, self.font))
 
-    # current OSM speed limit (from official mapdOut)
-    sl = self._speed_limit_text(conv, units)
-    if sl:
-      out.append((sl, _C.WHITE, self.font))
+    # (speed-limit line removed 2026-07-01, driver req — frees space at the bottom of the CES overlay)
 
     return out
-
-  def _speed_limit_text(self, conv, units):
-    try:
-      # mapd2pnw: official pfeiferj mapdOut (replaces the removed sunnypilot liveMapDataSP).
-      # speedLimit is m/s; >0 means valid (mapdOut has no separate valid flag, matching speed_limit.py).
-      mo = ui_state.sm["mapdOut"]
-      if mo.speedLimit > 0.3:
-        return f"limit {round(mo.speedLimit * conv)} {units}"
-    except Exception:
-      pass
-    return None
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
