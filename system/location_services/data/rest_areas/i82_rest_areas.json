@@ -1,0 +1,35 @@
+[
+  {
+    "name": "Selah Creek Rest Area, I-82 Westbound",
+    "display": "Selah Creek",
+    "town": "Selah",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 46.711204,
+    "lon": -120.415463,
+    "osm": "way/120099690"
+  },
+  {
+    "name": "Selah Creek Rest Area, I-82 Eastbound",
+    "display": "Selah Creek",
+    "town": "Selah",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 46.69674,
+    "lon": -120.44512,
+    "osm": "way/120099674"
+  },
+  {
+    "name": "Prosser Rest Area",
+    "display": "Prosser",
+    "town": "Prosser",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 46.220607,
+    "lon": -119.790359,
+    "osm": "way/394566548"
+  }
+]

@@ -16,8 +16,9 @@ engagement. Reads GPS/path/road from /dev/shm mem params (the mapd_configd bridg
 `LocationServices` JSON mem param for the lower-left UI overlay. Gated by `LocationServicesEnabled`
 (default ON) and, for the lookups, `roadContext == freeway`.
 
-The police proxy ships a DEFAULT key in-distribution (DEFAULT_PROXY) for testing, overridable by a
-/data/pnw/location/police_proxy.json file. A failed poll shows "—" (no-data), never a false "Clear".
+The police proxy key is NOT shipped in-distribution: it is supplied only via the persistent
+/data/pnw/location/police_proxy.json override file (survives reboot / git reset). No key -> "—" (no-data);
+a failed poll also shows "—", never a false "Clear".
 """
 import json
 import os
@@ -50,14 +51,14 @@ EV_OTHER_URL = "https://raw.githubusercontent.com/dirkpetersen/pnw-pilot/l2-char
 EV_OTHER_TIMEOUT_S = 120
 EV_OTHER_RETRY_S = 300                                                 # min gap between download attempts (no spam on failure)
 
-# Default Waze proxy (RapidAPI). Shipped in-distribution for TESTING (user-approved 2026-06-28) so police
-# polling works out of the box; a /data/pnw/location/police_proxy.json file, if present, OVERRIDES this.
-# This is a rotatable third-party proxy key, not a device/account secret — revoke+swap by editing here or
-# dropping the override file. (Longer term, move to the override-file-only model.)
+# Default Waze proxy (RapidAPI). Override-file-only model: NO key ships in the distribution. The key must
+# be supplied at runtime via the PROXY_CFG file (/data/pnw/location/police_proxy.json) — which lives on the
+# device's persistent /data (survives reboot AND git reset/clean, unlike the in-tree code). With no key,
+# police polling stays 'nodata' (no false alerts). This shape only carries the public url/host defaults.
 DEFAULT_PROXY = {
   "url": "https://waze-api.p.rapidapi.com/alerts",
   "host": "waze-api.p.rapidapi.com",
-  "key": "d5e52230cemshce2d7ff322c964ap18ae5cjsn058e600fcd5d",
+  "key": "",                                        # NOT shipped — supplied by the PROXY_CFG override file
 }
 
 TICK_HZ = 1.0
@@ -192,18 +193,19 @@ class PoliceUpdater(threading.Thread):
     self._lock = threading.Lock()
     self._alerts: list = []         # cached raw POLICE alerts (lat, lon, magvar, ts, uuid, street)
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
+    self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "quota (429)", "HTTP 403", "no key")
     self._stop = threading.Event()
     self._cfg = None
 
   def snapshot(self):
     with self._lock:
-      return list(self._alerts), self._state
+      return list(self._alerts), self._state, self._err
 
   def stop(self):
     self._stop.set()
 
   def _load_cfg(self):
-    # Override file wins; otherwise fall back to the in-distribution DEFAULT_PROXY (testing).
+    # Override file (persistent /data) supplies the key; otherwise DEFAULT_PROXY has none -> nodata.
     try:
       with open(PROXY_CFG) as f:
         c = json.load(f)
@@ -258,9 +260,11 @@ class PoliceUpdater(threading.Thread):
                                                                         # from mem -> always False -> never polled)
         except Exception:
           pass
-        if cfg is None or not enabled:
+        nokey = not (cfg and cfg.get("key"))                   # no key (override file absent) -> nodata, don't poll
+        if cfg is None or nokey or not enabled:
           with self._lock:
             self._alerts, self._state = [], "nodata"
+            self._err = "no key" if (nokey and enabled) else ""   # surface the actionable case; disabled = plain "-"
           self._stop.wait(POLICE_POLL_S)
           continue
         self._cfg = cfg
@@ -271,13 +275,24 @@ class PoliceUpdater(threading.Thread):
         try:
           alerts = self._poll(cfg, gps[0], gps[1])
           with self._lock:
-            self._alerts, self._state = alerts, "ok"
+            self._alerts, self._state, self._err = alerts, "ok", ""
           cloudlog.info("location_services: police poll ok (%d alerts)", len(alerts))   # heartbeat for diagnosis
           backoff = POLICE_POLL_S                            # success -> reset backoff
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
-          cloudlog.warning("location_services: police poll failed (%s); backing off %ds", type(e).__name__, int(backoff))
+          # Surface the real cause on-screen. HTTPError carries the status code (429 = Waze quota exceeded);
+          # HTTPError subclasses URLError so it must be checked first. Non-200 status -> "HTTP <code>".
+          if isinstance(e, urllib.error.HTTPError):
+            emsg = "quota (429)" if e.code == 429 else f"HTTP {e.code}"
+          elif isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+            emsg = "timeout"                                # urlopen timeouts can arrive wrapped in URLError.reason
+          elif isinstance(e, ValueError):
+            emsg = "bad resp"
+          else:                                              # URLError / OSError -> connectivity
+            emsg = "net err"
+          cloudlog.warning("location_services: police poll failed (%s: %s); backing off %ds",
+                           type(e).__name__, emsg, int(backoff))
           with self._lock:
-            self._state = "nodata"                          # NEVER a false 'clear' on failure (decision #4)
+            self._state, self._err = "nodata", emsg         # NEVER a false 'clear' on failure (decision #4)
           backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
       except Exception:
         cloudlog.exception("location_services: police thread loop error (continuing)")  # HARD RULE: never die silently
@@ -333,9 +348,20 @@ def _age_min(ts, now):
     return None
 
 
-def _line_police(alerts, state, lat, lon, brg, path):
+_COMPASS8 = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _compass8(bearing):
+  """8-point compass label (N/NE/E/SE/S/SW/W/NW) for a 0-360 geographic bearing; "" if None. Absolute
+  direction TO a point from here (e.g. the charger is "NW" of me), not relative to heading."""
+  if bearing is None:
+    return ""
+  return _COMPASS8[int(bearing % 360.0 / 45.0 + 0.5) % 8]
+
+
+def _line_police(alerts, state, err, lat, lon, brg, path):
   if state != "ok":
-    return {"state": "nodata"}
+    return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
   # Drop STALE reports BEFORE picking the nearest, so a near-but-ancient report can't mask a fresh one
   # further ahead (Gemini bug #1). A report with no timestamp is kept — we can't age it.
@@ -512,8 +538,8 @@ def main():
       rest_hold.poi = ev_hold.poi = None     # no fix -> drop any held POI
     else:
       if on_freeway:
-        alerts, pstate = police.snapshot()
-        out["police"] = _line_police(alerts, pstate, lat, lon, brg, path)
+        alerts, pstate, perr = police.snapshot()
+        out["police"] = _line_police(alerts, pstate, perr, lat, lon, brg, path)
       else:
         out["police"] = {"state": "nodata"}
 
@@ -541,8 +567,12 @@ def main():
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
                       "town": r[0].get("town", "")} if r else {"state": "nodata"})
       if e:
+        try:                                                # absolute compass direction TO the charger from here
+          compass = _compass8(geo.bearing_deg(lat, lon, e[0]["lat"], e[0]["lon"]))
+        except (KeyError, TypeError, ValueError):
+          compass = ""
         ev = {"state": "ok", "dist_mi": e[1], "network": e[0].get("network") or "",
-              "fast": e[0].get("fast", True), "town": e[0].get("town", "")}
+              "fast": e[0].get("fast", True), "town": e[0].get("town", ""), "compass": compass}
         if e[0].get("kw"):                                  # omit kW for the ~2% lacking it (decision #6)
           ev["kw"] = e[0]["kw"]
         out["ev"] = ev

@@ -27,6 +27,7 @@ _LINE_H = 70
 _PAD = 22
 _MARGIN = 40
 _FT_PER_MILE = 5280.0
+_CONT_INDENT = "   "   # 3-char hanging indent on each advisory line's wrapped continuation line
 # Blue flashing "POLICE AHEAD" banner — same box/blink as the red speed-limit warning, but blue, when a
 # police report is <= 0.5 mi AHEAD (the police line is already ahead-only, so "behind" never triggers it).
 _POLICE_NEAR_MI = 0.5
@@ -42,6 +43,7 @@ class _C:
   GREY = rl.Color(175, 180, 177, 235)
   ORANGE = rl.Color(255, 149, 0, 240)
   GREEN = rl.Color(90, 205, 115, 240)
+  RED = rl.Color(235, 70, 60, 240)       # poll error surfaced on the police line (e.g. quota (429), HTTP 403)
   DIM = rl.Color(140, 145, 142, 220)
   BG = rl.Color(0, 0, 0, 140)
   BLUE_BG = rl.Color(20, 90, 220, 235)   # "POLICE AHEAD" flashing banner
@@ -100,6 +102,9 @@ class LocationServicesStatusRenderer(Widget):
       return txt + self._town(p.get("town")), _C.ORANGE
     if s == "clear":
       return "Police   Clear", _C.GREEN
+    err = p.get("err")
+    if err:                                # surface the real poll error (quota (429), HTTP 403, timeout, no key)
+      return f"Police   {err}", _C.RED
     return "Police   -", _C.DIM            # nodata: never conflated with Clear
 
   def _rest_dist_text(self, d):
@@ -128,6 +133,9 @@ class LocationServicesStatusRenderer(Widget):
     if e.get("state") == "ok":
       label = "EV fast" if e.get("fast", True) else "EV L2"   # DC-fast vs slow Level 2 (opt-in)
       txt = f"{label}  {self._dist_text(e.get('dist_mi'))}"
+      c = e.get("compass")
+      if c:                                                    # compass direction to the charger, e.g. "0.5 mi (NW)"
+        txt += f" ({c})"
       net = e.get("network")
       kw = e.get("kw")
       if net:
@@ -137,17 +145,48 @@ class LocationServicesStatusRenderer(Widget):
       return txt + self._town(e.get("town")), _C.GREEN
     return "EV fast  -", _C.DIM
 
+  @staticmethod
+  def _split_near(s, p):
+    """Split s into (head, tail) near index p, snapped to the NEAREST space so whole words stay intact.
+    tail is "" when s already fits (len <= p). p comes from the longest of the 3 advisory lines."""
+    if len(s) <= p:
+      return s, ""
+    left = s.rfind(" ", 0, p + 1)
+    right = s.find(" ", p)
+    cands = [i for i in (left, right) if i > 0]
+    if not cands:
+      return s, ""
+    i = min(cands, key=lambda j: abs(j - p))
+    return s[:i], s[i:].lstrip()
+
+  def _wrap(self, content):
+    """Wrap each of the 3 advisory lines (police/rest/ev) onto two lines, breaking near the middle-3 of the
+    LONGEST of them (snapped to a space so words aren't cut); the continuation line is hanging-indented 3
+    (_CONT_INDENT). All lines stay left-aligned. `content` = [(text,color,font),...]; returns the flat list
+    with continuations inserted."""
+    if not content:
+      return []
+    p = max(1, max(len(t) for t, _, _ in content) // 2 - 3)   # "the middle - 3" of the longest line
+    out = []
+    for t, color, font in content:
+      head, tail = self._split_near(t, p)
+      out.append((head, color, font))
+      if tail:
+        out.append((_CONT_INDENT + tail, color, font))
+    return out
+
   def _lines(self):
     # Header doubles as a road-context cue: "HAPPENING AHEAD" on the highway (POIs alongside, ahead) vs
     # "NEARBY (3 MI)" on surface streets (nearest within a 3-mi radius). Police is highway-only, so its
-    # line is dropped off-freeway to keep the surface view clean.
+    # line is dropped off-freeway to keep the surface view clean. The 3 advisory lines are wrapped to two
+    # lines each (hanging indent); the header is not wrapped.
     freeway = bool(self._st.get("freeway"))
-    lines = [("HAPPENING AHEAD" if freeway else "NEARBY (3 MI)", _C.WHITE, self.font_bold)]
+    content = []
     if freeway:
-      lines.append((*self._police_line(), self.font))
-    lines.append((*self._rest_line(), self.font))
-    lines.append((*self._ev_line(), self.font))
-    return lines
+      content.append((*self._police_line(), self.font))
+    content.append((*self._rest_line(), self.font))
+    content.append((*self._ev_line(), self.font))
+    return [("HAPPENING AHEAD" if freeway else "NEARBY (3 MI)", _C.WHITE, self.font_bold)] + self._wrap(content)
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):

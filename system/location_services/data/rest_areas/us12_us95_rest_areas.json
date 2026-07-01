@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Dodge Junction Rest Area",
+    "display": "Dodge Junction",
+    "town": "Pomeroy",
+    "type": "rest_area",
+    "dir": "",
+    "state": "WA",
+    "lat": 46.525153,
+    "lon": -117.822416,
+    "osm": "way/394555475"
+  },
+  {
+    "name": "Alpowa Summit Westbound Rest Area",
+    "display": "Alpowa Summit",
+    "town": "Pomeroy",
+    "type": "rest_area",
+    "dir": "W",
+    "state": "WA",
+    "lat": 46.436137,
+    "lon": -117.424741,
+    "osm": "way/394554407"
+  },
+  {
+    "name": "Alpowa Summit Eastbound Rest Area",
+    "display": "Alpowa Summit",
+    "town": "Pomeroy",
+    "type": "rest_area",
+    "dir": "E",
+    "state": "WA",
+    "lat": 46.435696,
+    "lon": -117.424154,
+    "osm": "way/394554409"
+  },
+  {
+    "name": "US-95 Winchester Rest Area",
+    "display": "Winchester",
+    "town": "Craigmont",
+    "type": "rest_area",
+    "dir": "",
+    "state": "ID",
+    "lat": 46.239872,
+    "lon": -116.582783,
+    "osm": "node/10281487882"
+  },
+  {
+    "name": "Slaterville Historical Site",
+    "display": "Slaterville Historical Site",
+    "town": "Peck",
+    "type": "rest_area",
+    "dir": "",
+    "state": "ID",
+    "lat": 46.510757,
+    "lon": -116.562352,
+    "osm": "node/796144172"
+  },
+  {
+    "name": "Sheep Creek Rest Stop",
+    "display": "Sheep Creek Rest Stop",
+    "town": "Grangeville",
+    "type": "rest_area",
+    "dir": "",
+    "state": "ID",
+    "lat": 45.342806,
+    "lon": -116.350302,
+    "osm": "way/895358928"
+  }
+]
