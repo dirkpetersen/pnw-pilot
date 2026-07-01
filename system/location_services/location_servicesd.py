@@ -29,6 +29,8 @@ import urllib.parse
 import urllib.error
 from datetime import UTC, datetime
 
+import cereal.messaging as messaging
+from cereal import car
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
@@ -80,6 +82,11 @@ POI_HOLD_S = 8.0                            # debounce: keep showing a POI for t
 POI_RECEDE_MI = 0.3                         # ...but if a held POI gets this much farther than its closest
                                             # approach, we've PASSED it -> drop immediately (distance-trend,
                                             # not bearing, so a sweeping curve doesn't false-drop a still-ahead POI)
+# --- Tesla EV alternation + charger drop-when-receding (driver req 2026-07-01) --------------------
+EV_ALT_S = 4.0                              # Tesla only: alternate the EV line Supercharger<->other every this many s
+EV_RECEDE_MI = 1.0                          # drop a charger once you're >this far PAST your closest approach to it
+                                           #   (left it behind) -> show the next-nearest; re-eligible if you re-approach
+EV_TRACK_MI = 8.0                          # only recede-track chargers within this straight-line range (small state)
 # location2pnw FIX: rest areas ALSO need a perpendicular filter. The design assumed the rest data was
 # pre-scoped to the road being driven, but a rest area from another corridor (e.g. an I-5 entry while on
 # I-90) projects "ahead" onto the path with a bogus along-track distance. Reject anything far off-road
@@ -97,6 +104,58 @@ def _now_epoch() -> float:
   """Wall-clock epoch seconds — needed to age crowd reports against Waze's epoch-ms timestamps
   (time.monotonic is banned-for-good-reason for intervals but is NOT a wall clock; datetime is)."""
   return datetime.now(UTC).timestamp()
+
+
+def _is_supercharger(c):
+  """A Tesla Supercharger row (NREL ev_network == 'Tesla' in ev_dc_fast.geojson)."""
+  return "tesla" in (c.get("network") or "").lower()
+
+
+def _read_is_tesla(params):
+  """True if the current car is a Tesla (from CarParamsPersistent, same parse as ui_state.py). Any
+  failure -> False (fall back to the normal fast/slow EV logic)."""
+  try:
+    b = params.get("CarParamsPersistent")
+    if b:
+      return messaging.log_from_bytes(b, car.CarParams).brand == "tesla"
+  except Exception:
+    pass
+  return False
+
+
+class _RecedeFilter:
+  """Drop-when-receding: once you've moved > recede_mi PAST your closest approach to a POI (you've left it
+  behind), drop it so the NEXT-nearest shows instead; it's re-eligible if you approach it again. Only tracks
+  POIs currently within track_mi so the min-distance table stays tiny. `keep()` returns the input list minus
+  the receded POIs. Pure-ish (reads geo only)."""
+  def __init__(self, recede_mi, track_mi):
+    self.recede_mi = recede_mi
+    self.track_mi = track_mi
+    self.min_d = {}          # (rlat, rlon) -> closest-approach distance (mi) seen while in range
+
+  def keep(self, items, lat, lon):
+    if lat is None or lon is None:
+      return items
+    out, seen = [], set()
+    for it in items:
+      try:
+        d = geo.haversine_m(lat, lon, float(it["lat"]), float(it["lon"])) / geo.M_PER_MILE
+      except (KeyError, TypeError, ValueError):
+        out.append(it)                       # can't measure -> never drop
+        continue
+      if d > self.track_mi:
+        out.append(it)                       # too far to track -> pass through (not receding)
+        continue
+      k = (round(float(it["lat"]), 4), round(float(it["lon"]), 4))
+      seen.add(k)
+      m = min(self.min_d.get(k, d), d)
+      self.min_d[k] = m
+      if d <= m + self.recede_mi:            # not yet >recede_mi past closest -> keep; else drop (left behind)
+        out.append(it)
+    for k in list(self.min_d):               # forget POIs that left tracking range (re-eligible if re-approached)
+      if k not in seen:
+        del self.min_d[k]
+    return out
 
 
 # ----------------------------- static sources (no network) ------------------------------------------
@@ -495,6 +554,13 @@ class L2Downloader:
         pass
 
 
+def _pick_ev(items, on_freeway, lat, lon, brg, path):
+  """Nearest charger: AHEAD along the mapd path on a freeway, else nearest within the surface radius."""
+  if on_freeway:
+    return _line_static(items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
+  return _nearest_within(items, lat, lon, SURFACE_RANGE_MI)
+
+
 # ----------------------------- main -----------------------------------------------------------------
 def main():
   params = Params()
@@ -505,9 +571,14 @@ def main():
   l2dl = L2Downloader()
   rest_hold = _Hold(POI_HOLD_S)              # anti-flicker debounce for the rest + EV lines
   ev_hold = _Hold(POI_HOLD_S)
+  sc_hold = _Hold(POI_HOLD_S)                # Tesla: anti-flicker for the Supercharger side of the alternation
+  other_hold = _Hold(POI_HOLD_S)             # Tesla: anti-flicker for the other-charger side
+  ev_recede = _RecedeFilter(EV_RECEDE_MI, EV_TRACK_MI)   # drop chargers left >1 mi behind -> show the next-nearest
   rk = Ratekeeper(TICK_HZ, print_delay_threshold=None)
   last_reload = 0.0
   last_l2 = None
+  is_tesla = _read_is_tesla(params)          # Tesla -> alternate Supercharger<->other; refreshed periodically below
+  last_car_check = 0.0
 
   while True:
     enabled = params.get_bool("LocationServicesEnabled")
@@ -524,6 +595,9 @@ def main():
       static.reload(include_l2)
       last_reload = now
       last_l2 = include_l2
+    if now - last_car_check > 30.0:            # the one device moves between cars -> re-check the brand periodically
+      is_tesla = _read_is_tesla(params)
+      last_car_check = now
 
     lat, lon, brg, path, ctx = _read_mem(mem)
     out = {"enabled": True, "ts": int(_now_epoch())}
@@ -541,7 +615,7 @@ def main():
       out["police"] = {"state": "nodata"}
       out["rest"] = {"state": "nodata"}
       out["ev"] = {"state": "nodata"}
-      rest_hold.poi = ev_hold.poi = None     # no fix -> drop any held POI
+      rest_hold.poi = ev_hold.poi = sc_hold.poi = other_hold.poi = None     # no fix -> drop any held POI
     else:
       if on_freeway:
         alerts, pstate, perr = police.snapshot()
@@ -549,26 +623,31 @@ def main():
       else:
         out["police"] = {"state": "nodata"}
 
-      ev_fast_items = [c for c in static.ev if c.get("fast")]
-      ev_slow_items = [c for c in static.ev if not c.get("fast")]
+      # rest area (car-agnostic)
       if on_freeway:
         r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
-        e_fast = _line_static(ev_fast_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
-        e_slow = _line_static(ev_slow_items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
-      else:                                                  # surface street: 3-mi proximity (any direction)
-        r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
-        e_fast = _nearest_within(ev_fast_items, lat, lon, SURFACE_RANGE_MI)
-        e_slow = _nearest_within(ev_slow_items, lat, lon, SURFACE_RANGE_MI)
-
-      # EV fast/slow rule (driver 2026-06-28): prefer the DC-fast charger; only show a CLOSER slow L2 when
-      # the nearest fast one is MORE than EV_FAST_DETOUR_MI further than it (not worth the detour for fast).
-      if e_fast and e_slow and e_slow[1] < e_fast[1] and (e_fast[1] - e_slow[1]) > EV_FAST_DETOUR_MI:
-        e = e_slow
       else:
-        e = e_fast or e_slow
-
+        r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
       r = rest_hold.update(r, now, lat, lon)   # debounce: anti-flicker on curves + drop-when-passed (distance-trend)
-      e = ev_hold.update(e, now, lat, lon)
+
+      # EV chargers: first DROP any charger we've left >EV_RECEDE_MI behind (so the next-nearest shows), then select.
+      ev_items = ev_recede.keep(static.ev, lat, lon)
+      if is_tesla:
+        # Tesla: ALTERNATE the EV line between the nearest Tesla SUPERCHARGER and the nearest OTHER charger
+        # (driver req 2026-07-01), Supercharger first, toggling every EV_ALT_S. Each side anti-flickered.
+        sc = sc_hold.update(_pick_ev([c for c in ev_items if _is_supercharger(c)], on_freeway, lat, lon, brg, path), now, lat, lon)
+        oth = other_hold.update(_pick_ev([c for c in ev_items if not _is_supercharger(c)], on_freeway, lat, lon, brg, path), now, lat, lon)
+        e = (sc if int(now / EV_ALT_S) % 2 == 0 else oth) or sc or oth   # only one in range -> just show it
+      else:
+        # non-Tesla (e.g. Lightning): prefer the DC-fast charger; only show a CLOSER slow L2 when the nearest
+        # fast one is MORE than EV_FAST_DETOUR_MI further (driver 2026-06-28).
+        e_fast = _pick_ev([c for c in ev_items if c.get("fast")], on_freeway, lat, lon, brg, path)
+        e_slow = _pick_ev([c for c in ev_items if not c.get("fast")], on_freeway, lat, lon, brg, path)
+        if e_fast and e_slow and e_slow[1] < e_fast[1] and (e_fast[1] - e_slow[1]) > EV_FAST_DETOUR_MI:
+          e = e_slow
+        else:
+          e = e_fast or e_slow
+        e = ev_hold.update(e, now, lat, lon)
 
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
                       "town": r[0].get("town", "")} if r else {"state": "nodata"})

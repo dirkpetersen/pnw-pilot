@@ -55,6 +55,8 @@ class VTSCController:
     # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
     self._map_curves = False
     self._map_targets: list = []
+    self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
+    self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._cur_lat = self._cur_lon = None
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
@@ -91,6 +93,16 @@ class VTSCController:
           self._read_map()
         else:
           self._map_targets = []
+        # speed-limit floor inputs (driver rule 2026-07-01): posted limit + road context from the mapd bridge
+        # mem params (same source as the map curves). Applied in cap(); 0 / non-freeway -> no floor.
+        try:
+          sl = self.mem_params.get("MapSpeedLimit", return_default=True) if self.mem_params else None
+          self._speed_limit = float(sl) if sl is not None else 0.0
+          ctx = self.mem_params.get("RoadContext", return_default=True) if self.mem_params else None
+          ctx = ctx.decode() if isinstance(ctx, bytes) else (ctx or "")
+          self._is_freeway = (ctx == "freeway")
+        except Exception:
+          self._speed_limit, self._is_freeway = 0.0, False
       except Exception:
         self._enabled = False
         self._map_curves = False
@@ -259,6 +271,13 @@ class VTSCController:
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
     self._applied = apply_limits(self._applied, target, v_cruise, dt, self._a_decel_max, self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
+
+    # SPEED-LIMIT FLOOR (driver rule 2026-07-01): on a HIGHWAY, never trim below the posted limit — only from
+    # the set speed DOWN TOWARD the limit. This bounds the downside (worst case = the limit, never the old deep
+    # over-slow), which is what makes the lower A_LAT_TARGET safe. Off-highway / no limit data -> no floor
+    # (V_MIN still applies). A curve genuinely too tight for the limit is then the driver's to handle.
+    if self._is_freeway and self._speed_limit > 0.0:
+      capped = min(v_cruise, max(capped, self._speed_limit))
 
     engaged = capped < v_cruise_set - 0.5
     if engaged != self._engaged:

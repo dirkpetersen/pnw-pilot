@@ -8,13 +8,13 @@ Pure literals (no imports) so the core is unit-testable without the openpilot st
 # --- the two knobs that shape the behavior -----------------------------------
 # Tuned for a SMOOTH, SLIGHT adjustment (driver feedback after the first VTSC drive: 57 was too
 # aggressive — only a slight trim is wanted). Higher A_LAT_TARGET = less slowdown; lower A_DECEL = gentler.
-A_LAT_TARGET = 3.0    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
-                      #   (more margin). RAISED 2.2 -> 3.0 (Snoqualmie I-90 2026-07-01, see
-                      #   drives/2026-07-01/hotspot-drive/DRIVE_REPORT.md: VTSC over-capped repeatedly and the
-                      #   driver had to override with throttle / take control; calibration point 62 -> wanted
-                      #   72 mph == x1.35 on A_LAT (sqrt -> x1.16 on speed). 3.0 ~= 0.31 g lateral; use CES
-                      #   Light/Off in poor grip). Prior: RAISED 1.9 -> 2.2 (I-90 2026-06-27, still ~10-15 too low).
-                      #   At Terwilliger (R~415): 3.0 -> ~78 mph, 2.2 -> ~67, 1.9 -> ~62, 1.5 -> ~57.
+A_LAT_TARGET = 2.5    # m/s^2 max lateral accel held through a curve. AGGRESSIVENESS knob: lower = slower
+                      #   (more margin). SET 2.5 (Snoqualmie I-90 2026-07-01, see
+                      #   drives/2026-07-01/hotspot-drive/DRIVE_REPORT.md): 3.0 under-slowed the tightest curves
+                      #   (take-controls); lowered to 2.5 for RELIABLE tight-curve slowing. Safe to be lower now
+                      #   because the SPEED-LIMIT FLOOR (vtsc_controller) bounds the downside -> worst case is the
+                      #   posted limit, never the old deep over-slow. History: 1.9->2.2 (06-27), 2.2->3.0 then
+                      #   ->2.5 (07-01). At Terwilliger (R~415): 3.0->~78 mph, 2.5->~71, 2.2->~67, 1.5->~57.
                       #   Gentler curves scale up automatically: v_safe = sqrt(a_lat/kappa), so R~600 m
                       #   -> ~76 mph (no cap at 70) — only curves tighter than ~R550 bind at all.
 A_DECEL      = 1.2    # m/s^2 decel the envelope plans for -> how gently speed bleeds off. ~0.12 g, like
@@ -136,7 +136,7 @@ MAP_SPEED_SCALE   = 1.5   # >1 = carry more speed through map curves (less conse
 #   - a hair less slowdown so trims feel light (A_LAT_TARGET 1.9 -> 2.0)
 # Only ever makes VTSC GENTLER (still decel-limited, still floored, still <= v_cruise) — safe.
 DEFAULT_PROFILE = dict(A_LAT_TARGET=A_LAT_TARGET, A_DECEL=A_DECEL, A_DECEL_MAX=A_DECEL_MAX, A_RELAX=A_RELAX)
-GENTLE_PROFILE  = dict(A_LAT_TARGET=3.0, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)  # A_LAT tracks DEFAULT (2.2->3.0, 2026-07-01)
+GENTLE_PROFILE  = dict(A_LAT_TARGET=2.5, A_DECEL=1.0, A_DECEL_MAX=1.5, A_RELAX=0.6)  # A_LAT tracks DEFAULT (->2.5, 2026-07-01)
 
 # light-ces-gentle: which profile is used is USER-SELECTED via CESMode (1=Light->GENTLE,
 # 2=Standard->DEFAULT) in vtsc_controller.py, on ANY car — no car/fingerprint gating.
