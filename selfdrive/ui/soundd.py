@@ -24,6 +24,7 @@ MIN_VOLUME = 0.1
 # (mirrors the UI "POLICE AHEAD" banner trigger). Fully isolated from the safety alert sounds: it ONLY
 # plays when no AudibleAlert is active, so it can never delay or mask a warning/disengage. A failed siren
 # load just disables the chirp; soundd still starts (alert sounds are essential).
+SIREN_ENABLED = False  # driver req 2026-07-01: police siren OFF (keep the visual banner only). Flip to True to restore.
 SIREN_FILE = "police_siren.wav"
 SIREN_VOLUME = 0.7
 POLICE_NEAR_MI = 0.5
@@ -204,7 +205,7 @@ class Soundd:
 
         # police siren: arm one chirp per new report that's <= POLICE_NEAR_MI ahead (mirrors the UI banner).
         # Reading a /dev/shm mem param; fully guarded so it can never disrupt the alert audio path.
-        if self.mem is not None and self.siren_sound is not None:
+        if SIREN_ENABLED and self.mem is not None and self.siren_sound is not None:
           now = time.monotonic()
           if now - self.last_police_check > POLICE_CHECK_S:
             self.last_police_check = now

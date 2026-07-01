@@ -88,7 +88,7 @@ REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
 DISPLAY_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # all three (police/EV/rest) show a POI starting ~15 mi ahead (driver request)
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
-POLICE_STALE_S = 45 * 60                   # drop crowd reports older than this
+POLICE_STALE_S = 20 * 60                   # drop crowd reports older than this (fresher-only, driver req 2026-07-01)
 POLICE_TIMEOUT_S = 20
 POLICE_MAX_BACKOFF_S = 15 * 60
 
@@ -364,12 +364,18 @@ def _line_police(alerts, state, err, lat, lon, brg, path):
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
   # Drop STALE reports BEFORE picking the nearest, so a near-but-ancient report can't mask a fresh one
-  # further ahead (Gemini bug #1). A report with no timestamp is kept — we can't age it.
+  # further ahead (Gemini bug #1). A report with no timestamp is kept — we can't age it. Also drop
+  # OPPOSITE-direction reports ("other side" of the highway) so we don't alert for police on the other
+  # carriageway (driver req 2026-07-01); unknown-direction reports (no magvar -> 'none') are KEPT, since
+  # we can't tell they're across and dropping them would silently miss most reports (Waze often omits magvar).
   fresh = []
   for al in alerts:
     age = _age_min(al.get("ts"), now)
-    if age is None or age * 60 <= POLICE_STALE_S:
-      fresh.append(al)
+    if age is not None and age * 60 > POLICE_STALE_S:
+      continue                                    # too old
+    if _police_dir(al, brg) == "opp":
+      continue                                    # other side of the road -> don't alert
+    fresh.append(al)
   poi, a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
   if poi is None:
     return {"state": "clear"}                              # fresh poll genuinely returned nothing ahead
