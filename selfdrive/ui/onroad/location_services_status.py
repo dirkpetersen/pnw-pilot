@@ -65,7 +65,7 @@ class LocationServicesStatusRenderer(Widget):
     self._banner_active = False    # police banner: 15 s blink window per report
     self._banner_uuid = None
     self._banner_start = 0.0
-    self._layout = None            # (lines, fs, line_h, box_w, box_h) — rebuilt at poll time, not per frame
+    self._cached_layout = None            # (lines, fs, line_h, box_w, box_h) — rebuilt at poll time, not per frame
 
   def _update_state(self):
     now = time.monotonic()
@@ -73,7 +73,7 @@ class LocationServicesStatusRenderer(Widget):
       return
     self._last_poll = now
     if self._mem is None or not ui_state.params.get_bool("LocationServicesEnabled"):
-      self._st, self._layout = {}, None
+      self._st, self._cached_layout = {}, None
       return
     try:
       st = self._mem.get("LocationServices", return_default=True)
@@ -82,7 +82,7 @@ class LocationServicesStatusRenderer(Widget):
       self._st = {}
     # Build the wrapped-line layout HERE (5 Hz) instead of in _render (20 Hz): the string assembly +
     # wrapping only depends on the polled state, so doing it per frame was pure waste.
-    self._layout = self._build_layout() if self._st.get("enabled") else None
+    self._cached_layout = self._build_layout() if self._st.get("enabled") else None
 
   # ---- formatting ----------------------------------------------------------
   def _dist_text(self, dist_mi):
@@ -213,13 +213,13 @@ class LocationServicesStatusRenderer(Widget):
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
-    if self._layout is None or not self._st.get("enabled"):
+    if self._cached_layout is None or not self._st.get("enabled"):
       return
     # Yield the (bottom-anchored) space to openpilot alerts — same gate the DM head uses. At the true
     # bottom of the screen the box would otherwise sit under the alert text.
     if ui_state.sm["selfdriveState"].alertSize != AlertSize.none:
       return
-    lines, fs, line_h, box_w, box_h = self._layout
+    lines, fs, line_h, box_w, box_h = self._cached_layout
     bx = rect.x + _MARGIN                       # true LOWER-LEFT (DM head moved to the top header row)
     by = rect.y + rect.height - box_h - _MARGIN
 
