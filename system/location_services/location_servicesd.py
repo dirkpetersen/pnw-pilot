@@ -22,14 +22,14 @@ a failed poll also shows "—", never a false "Clear".
 """
 import json
 import os
-import re
-import subprocess
 import time
 import threading
 import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import UTC, datetime
+
+import cereal.messaging as messaging
 
 import cereal.messaging as messaging
 from cereal import car
@@ -660,21 +660,23 @@ class L2Downloader:
 NET_EVENT_LOG = "/data/dirk/net_events.jsonl"
 NET_EVENT_LOG_MAX_BYTES = 10 * 1024 * 1024   # rotate at 10 MB, one .1 generation (~20 MB cap)
 NET_LOG_PERIOD_S = 15.0                       # one sample / 15 s (~240 points/hr of driving)
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class NetLogger(threading.Thread):
-  """LTE/network signal-by-GPS breadcrumb (driver req 2026-07-06): map coverage holes along the route
-  so weak-LTE locations are known by geolocation — groundwork for proactive failover later (e.g.
-  Starlink). Every NET_LOG_PERIOD_S: sample the modem via mmcli (subprocess, timeout-bounded, in THIS
-  daemon thread — never the main loop), the default-route interface, and current GPS; append one JSON
-  line to NET_EVENT_LOG (size-rotated like the CES event log). Same HARD RULE as the police thread:
-  logging only, never touches control, never dies silently. mmcli absent/hung -> empty fields, keep going."""
+  """Network signal-by-GPS breadcrumb (driver req 2026-07-06): map coverage holes along the route so
+  weak-LTE locations are known by geolocation — groundwork for proactive failover later (e.g.
+  Starlink). Every NET_LOG_PERIOD_S: read the latest `deviceState` msg (hardwared already publishes
+  networkType/networkStrength — NO mmcli/DBus of our own: the first mmcli-based version contended
+  with hardwared's ModemManager access and deviceState started failing its frequency check ->
+  commIssue events, 2026-07-06 route 96), plus the default-route interface and current GPS; append
+  one JSON line to NET_EVENT_LOG (size-rotated like the CES event log). Same HARD RULE as the police
+  thread: logging only, never touches control, never dies silently."""
 
   def __init__(self, mem):
     super().__init__(daemon=True)
     self._mem = mem
     self._stop = threading.Event()
+    self._last_net: dict = {}
 
   def stop(self):
     self._stop.set()
@@ -692,30 +694,16 @@ class NetLogger(threading.Thread):
       pass
     return ""
 
-  @staticmethod
-  def _modem():
-    out = {}
+  def _net(self, sock):
+    # latest deviceState (conflated -> newest only); keep the previous sample if none arrived
     try:
-      r = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True, timeout=8)
-      for ln in _ANSI_RE.sub("", r.stdout).splitlines():
-        if ":" not in ln:
-          continue
-        k, v = ln.split(":", 1)
-        k, v = k.strip(" |"), v.strip()
-        if k == "signal quality":
-          try:
-            out["signal_pct"] = int(v.split("%")[0].split()[-1])
-          except ValueError:
-            pass
-        elif k == "access tech":
-          out["tech"] = v
-        elif k == "operator name":
-          out["operator"] = v
-        elif k == "state" and "state" not in out:
-          out["state"] = v
+      msg = messaging.recv_one_or_none(sock) if sock is not None else None
+      if msg is not None:
+        ds = msg.deviceState
+        self._last_net = {"net_type": str(ds.networkType), "strength": str(ds.networkStrength)}
     except Exception:
-      pass                                      # no mmcli / timeout / modem off -> log what we have
-    return out
+      pass
+    return self._last_net
 
   def _gps(self):
     try:
@@ -727,11 +715,15 @@ class NetLogger(threading.Thread):
       return None, None
 
   def run(self):
+    try:
+      sock = messaging.sub_sock("deviceState", conflate=True)
+    except Exception:
+      sock = None
     while not self._stop.is_set():
       try:
         lat, lon = self._gps()
         rec = {"t": round(time.time(), 1), "lat": lat, "lon": lon,  # noqa: TID251 -- wall clock, route correlation
-               "iface": self._default_iface(), **self._modem()}
+               "iface": self._default_iface(), **self._net(sock)}
         try:
           if os.path.getsize(NET_EVENT_LOG) > NET_EVENT_LOG_MAX_BYTES:
             os.replace(NET_EVENT_LOG, NET_EVENT_LOG + ".1")
