@@ -40,7 +40,11 @@ CURVE_HWY_GATE = 55 * CV.MPH_TO_MS  # m/s; spd_lim >= this => hand freeway curve
 # even on a freeway (maximum braking authority: e2e + VTSC + MTSC), since a sharp curve at freeway speed is
 # where steering-limit/EPS saturation risk lives. Only MODERATE freeway curves (map target above this) are
 # gated (the over-slowdown fix). 30 m/s ~= 67 mph: the take-control curve's map target was 65 mph.
-CURVE_SHARP_MAP_V = 30.0  # m/s
+# I-84 2026-07-06: compared against the SCALED map target (raw * MAP_SPEED_SCALE) in decide_active — mapd
+# raw safe-speeds run systematically low, and the raw compare tripped Experimental on sweepers driven at
+# 79-86 mph. MAP_SPEED_SCALE is imported from vtsc_constants so MTSC and this exception always agree.
+CURVE_SHARP_MAP_V = 30.0  # m/s (vs scaled map target)
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import MAP_SPEED_SCALE  # noqa: E402
 
 # --- lead -------------------------------------------------------------------
 SLOW_LEAD_DV   = 5.0          # m/s: lead this much slower than us -> closing -> Experimental

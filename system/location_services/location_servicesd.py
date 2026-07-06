@@ -22,6 +22,8 @@ a failed poll also shows "—", never a false "Clear".
 """
 import json
 import os
+import re
+import subprocess
 import time
 import threading
 import urllib.request
@@ -654,6 +656,94 @@ class L2Downloader:
         pass
 
 
+# ----------------------------- network (LTE) coverage logger ---------------------------------------
+NET_EVENT_LOG = "/data/dirk/net_events.jsonl"
+NET_EVENT_LOG_MAX_BYTES = 10 * 1024 * 1024   # rotate at 10 MB, one .1 generation (~20 MB cap)
+NET_LOG_PERIOD_S = 15.0                       # one sample / 15 s (~240 points/hr of driving)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class NetLogger(threading.Thread):
+  """LTE/network signal-by-GPS breadcrumb (driver req 2026-07-06): map coverage holes along the route
+  so weak-LTE locations are known by geolocation — groundwork for proactive failover later (e.g.
+  Starlink). Every NET_LOG_PERIOD_S: sample the modem via mmcli (subprocess, timeout-bounded, in THIS
+  daemon thread — never the main loop), the default-route interface, and current GPS; append one JSON
+  line to NET_EVENT_LOG (size-rotated like the CES event log). Same HARD RULE as the police thread:
+  logging only, never touches control, never dies silently. mmcli absent/hung -> empty fields, keep going."""
+
+  def __init__(self, mem):
+    super().__init__(daemon=True)
+    self._mem = mem
+    self._stop = threading.Event()
+
+  def stop(self):
+    self._stop.set()
+
+  @staticmethod
+  def _default_iface():
+    # default-route interface (wwan0=LTE, wlan0=WiFi, usb tether, ...) without spawning a process
+    try:
+      with open("/proc/net/route") as f:
+        for line in f.readlines()[1:]:
+          p = line.split()
+          if len(p) > 1 and p[1] == "00000000":
+            return p[0]
+    except OSError:
+      pass
+    return ""
+
+  @staticmethod
+  def _modem():
+    out = {}
+    try:
+      r = subprocess.run(["mmcli", "-m", "any"], capture_output=True, text=True, timeout=8)
+      for ln in _ANSI_RE.sub("", r.stdout).splitlines():
+        if ":" not in ln:
+          continue
+        k, v = ln.split(":", 1)
+        k, v = k.strip(" |"), v.strip()
+        if k == "signal quality":
+          try:
+            out["signal_pct"] = int(v.split("%")[0].split()[-1])
+          except ValueError:
+            pass
+        elif k == "access tech":
+          out["tech"] = v
+        elif k == "operator name":
+          out["operator"] = v
+        elif k == "state" and "state" not in out:
+          out["state"] = v
+    except Exception:
+      pass                                      # no mmcli / timeout / modem off -> log what we have
+    return out
+
+  def _gps(self):
+    try:
+      pos = self._mem.get("LastGPSPosition", return_default=True)
+      if isinstance(pos, (bytes, str)):
+        pos = json.loads(pos)
+      return round(float(pos["latitude"]), 5), round(float(pos["longitude"]), 5)
+    except (KeyError, TypeError, ValueError):
+      return None, None
+
+  def run(self):
+    while not self._stop.is_set():
+      try:
+        lat, lon = self._gps()
+        rec = {"t": round(time.time(), 1), "lat": lat, "lon": lon,  # noqa: TID251 -- wall clock, route correlation
+               "iface": self._default_iface(), **self._modem()}
+        try:
+          if os.path.getsize(NET_EVENT_LOG) > NET_EVENT_LOG_MAX_BYTES:
+            os.replace(NET_EVENT_LOG, NET_EVENT_LOG + ".1")
+        except OSError:
+          pass
+        with open(NET_EVENT_LOG, "a") as f:
+          f.write(json.dumps(rec) + "\n")
+      except Exception:
+        cloudlog.exception("location_services: net logger tick failed (continuing)")
+      self._stop.wait(NET_LOG_PERIOD_S)
+
+
 def _pick_ev(items, on_freeway, lat, lon, brg, path):
   """Nearest charger: AHEAD along the mapd path on a freeway, else nearest within the surface radius."""
   if on_freeway:
@@ -668,6 +758,8 @@ def main():
   static = StaticData()
   police = PoliceUpdater()
   police.start()
+  netlog = NetLogger(mem)                    # LTE coverage-by-GPS breadcrumb (logging only)
+  netlog.start()
   l2dl = L2Downloader()
   rest_hold = _Hold(POI_HOLD_S)              # anti-flicker debounce for the rest + EV lines
   ev_hold = _Hold(POI_HOLD_S)

@@ -136,7 +136,11 @@ def decide_active(s) -> tuple[bool, str]:
   # a freeway — that's where steering-limit/EPS risk is (2026-06-28 North Bend descent take-control), so we
   # want maximum braking authority (e2e + VTSC + MTSC), not just the bounded cap.
   freeway_gated = s["spd_lim"] >= C.CURVE_HWY_GATE
-  sharp_curve = 0.0 < s["map_target_v"] < C.CURVE_SHARP_MAP_V
+  # Compare the SCALED map target (what MTSC actually drives to), not the raw one: mapd's raw safe-speeds
+  # run systematically low (~1.5-1.8x), so the raw compare tripped Experimental on I-84 sweepers the driver
+  # takes at 79-86 mph (raw 24-30 m/s, 2026-07-06 09:42-09:48 cluster). Genuinely sharp curves (scaled
+  # target still < CURVE_SHARP_MAP_V) keep the exception and full braking authority.
+  sharp_curve = 0.0 < s["map_target_v"] * C.MAP_SPEED_SCALE < C.CURVE_SHARP_MAP_V
   if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve):
     # MAP: pfeiferj MapTargetVelocities gives a safe curve speed ahead. Trip when an upcoming
     # target speed within the lookahead is meaningfully (>MIN_SLOWDOWN) below current speed.
@@ -362,6 +366,7 @@ class CESController:
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
     self._cur_lat = self._cur_lon = self._cur_bearing = None
+    self._vtsc_cap = self._vtsc_state = None
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
@@ -439,6 +444,15 @@ class CESController:
       self._speed_limit = float(sl) if sl not in (None, "", b"") else 0.0
     except Exception:
       self._speed_limit = 0.0
+    # VTSC applied cap + state — logging only (see _event_record)
+    try:
+      vt = self.mem_params.get("VTSCStatus", return_default=True)
+      if isinstance(vt, (bytes, str)):
+        vt = json.loads(vt)
+      self._vtsc_cap = round(float(vt["cap"]), 1) if vt.get("engaged") else None
+      self._vtsc_state = vt.get("state")
+    except Exception:
+      self._vtsc_cap = self._vtsc_state = None
 
   def enabled(self) -> bool:
     return self._enabled
@@ -552,6 +566,9 @@ class CESController:
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
       "gps": tele.get("gps"), "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
+      # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
+      # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
+      "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
     }
 
   def _append_event(self, rec: dict) -> None:

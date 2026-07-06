@@ -119,10 +119,15 @@ TWISTY_DESCENT_PITCH = -0.035  # rad (~ -2 deg); road pitch below this is treate
 # I-90 22:08-22:10 PT 2026-06-27: mapd's curve targets (60-68 mph at a 90 set) were the BINDING floor,
 # ~10 mph too conservative. Carry more speed through map curves by scaling the map target up (then capped
 # at cruise). 1.12x ~= +8 mph at 65; still decel-limited + V_MIN-floored downstream, so it can never slam.
-MAP_SPEED_SCALE   = 1.5   # >1 = carry more speed through map curves (less conservative MTSC). RAISED
+MAP_SPEED_SCALE   = 1.8   # >1 = carry more speed through map curves (less conservative MTSC). RAISED
                           #   1.12 -> 1.5 (Snoqualmie I-90 2026-07-01): map safe-speeds came back absurdly low
                           #   (mapV 22-29 mph on curves taken at 60-85), over-capping + forcing throttle
-                          #   overrides. Still decel-limited + V_MIN-floored downstream, so it can't slam.
+                          #   overrides. RAISED 1.5 -> 1.8 (I-84 2026-07-06): even at 1.5 the map fold was
+                          #   the binding cap through the 09:42-09:48 sweeping-curve cluster (708/756
+                          #   gas-override-at-speed ticks were in CHILL -> VTSC/MTSC, not CES; raw targets
+                          #   24-36 m/s on curves driven at 79-86 mph). VISION VTSC remains the independent
+                          #   safety net for real curves; still decel-limited + V_MIN-floored + speed-limit
+                          #   floor downstream, so it can't slam and the downside is bounded.
 
 # --- profiles (DEFAULT vs GENTLE) -------------------------------------------
 # The above constants are the DEFAULT tune. On a winding highway the default tune can SAWTOOTH: VTSC
