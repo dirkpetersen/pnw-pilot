@@ -23,9 +23,14 @@ from openpilot.system.ui.widgets import Widget
 AlertSize = log.SelfdriveState.AlertSize
 
 _REFRESH_S = 0.2     # poll the mem param at ~5 Hz (matches the daemon publish cadence)
-_FS_STEPS = (56, 52, 48, 44)   # base font size, then auto-shrink steps if a word can't fit the cap
+_FS_STEPS = (56, 52, 48, 44)   # base font size, then auto-shrink steps (LAST resort)
 _LINE_H_RATIO = 1.25           # line height = font size * this
-_WIDTH_CAP_RATIO = 1.5         # box content width cap = header pixel width * this (driver req 2026-07-06)
+# Width policy (driver req 2026-07-06 v2): DEFAULT the box to exactly the header ("HAPPENING AHEAD")
+# width and grow DOWN in lines; only when the box would run out of VERTICAL room may it widen, in
+# steps, up to 1.5x the header. Font shrink only if even the widest cap can't fit an unbreakable word.
+_WIDTH_RATIOS = (1.0, 1.25, 1.5)
+_MAX_H_FRAC = 0.62             # box may use at most this fraction of the view height (keeps clear of
+                               # the top header row and the bottom margin) before widening/shrinking
 _PAD = 22
 _MARGIN = 40
 _FT_PER_MILE = 5280.0
@@ -181,10 +186,12 @@ class LocationServicesStatusRenderer(Widget):
     return lines
 
   def _build_layout(self):
-    """Assemble header + advisory lines, pixel-wrapped to a box no wider than _WIDTH_CAP_RATIO x the
-    header ("HAPPENING AHEAD") width; if an unbreakable word still overflows, step the font size down
-    (_FS_STEPS) until everything fits (driver req 2026-07-06: fixed predictable width, grow DOWN in
-    lines not sideways, shrink font only as the last resort). Returns (lines, fs, line_h, box_w, box_h)."""
+    """Assemble header + advisory lines, pixel-wrapped. Candidate order implements the width policy:
+    at each font size try the NARROW cap first (1.0x header) and only widen (1.25x, 1.5x) when the
+    wrapped box would exceed the vertical budget (_MAX_H_FRAC of the view) or an unbreakable word
+    overflows; step the font down only when even the widest cap can't fit. First candidate that fits
+    BOTH width and height wins; the final (widest, smallest-font) candidate is the fallback.
+    Returns (lines, fs, line_h, box_w, box_h)."""
     freeway = bool(self._st.get("freeway"))
     header = "HAPPENING AHEAD" if freeway else "NEARBY (3 MI)"
     content = []
@@ -193,23 +200,27 @@ class LocationServicesStatusRenderer(Widget):
     content.append((*self._rest_line(), self.font))
     content.append((*self._ev_line(), self.font))
 
-    lines = []
-    fs = _FS_STEPS[-1]
+    view_h = self._rect.height if (self._rect is not None and self._rect.height > 200) else 1080.0
+    max_h = view_h * _MAX_H_FRAC
+
+    result = None
     for fs in _FS_STEPS:
-      cap = measure_text_cached(self.font_bold, header, fs).x * _WIDTH_CAP_RATIO
-      lines = [(header, _C.WHITE, self.font_bold)]
-      fits = True
-      for t, color, font in content:
-        for seg in self._wrap_px(t, font, fs, cap):
-          lines.append((seg, color, font))
-          if measure_text_cached(font, seg, fs).x > cap:
-            fits = False                       # unbreakable word overflows -> try the next-smaller font
-      if fits:
-        break
-    line_h = int(fs * _LINE_H_RATIO)
-    box_w = max(measure_text_cached(f, t, fs).x for t, _, f in lines) + _PAD * 2
-    box_h = line_h * len(lines) + _PAD * 2
-    return lines, fs, line_h, box_w, box_h
+      for ratio in _WIDTH_RATIOS:
+        cap = measure_text_cached(self.font_bold, header, fs).x * ratio
+        lines = [(header, _C.WHITE, self.font_bold)]
+        fits_w = True
+        for t, color, font in content:
+          for seg in self._wrap_px(t, font, fs, cap):
+            lines.append((seg, color, font))
+            if measure_text_cached(font, seg, fs).x > cap:
+              fits_w = False                   # unbreakable word overflows this cap
+        line_h = int(fs * _LINE_H_RATIO)
+        box_w = max(measure_text_cached(f, t, fs).x for t, _, f in lines) + _PAD * 2
+        box_h = line_h * len(lines) + _PAD * 2
+        result = (lines, fs, line_h, box_w, box_h)
+        if fits_w and box_h <= max_h:
+          return result
+    return result                              # nothing fit the budget -> widest cap at smallest font
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
