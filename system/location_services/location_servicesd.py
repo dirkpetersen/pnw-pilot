@@ -96,6 +96,9 @@ DISPLAY_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # all three (police/EV/rest) show a
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
 POLICE_STALE_S = 20 * 60                   # drop crowd reports older than this (fresher-only, driver req 2026-07-01)
+POLICE_RECEDE_MI = 0.3                     # once we've receded this far past closest approach to a police report
+                                           # we've PASSED it -> clear it (driver req 2026-07-06: "distance
+                                           # increasing = moving away -> give it a clear"). Matches POI_RECEDE_MI.
 POLICE_TIMEOUT_S = 20
 POLICE_MAX_BACKOFF_S = 15 * 60
 
@@ -418,15 +421,94 @@ def _compass8(bearing):
   return _COMPASS8[int(bearing % 360.0 / 45.0 + 0.5) % 8]
 
 
-def _line_police(alerts, state, err, lat, lon, brg, path):
+class _PoliceRecede:
+  """Track closest approach to each shown police report so a PASSED report clears immediately and the
+  displayed distance counts down LIVE (driver req 2026-07-06).
+
+  Why it's needed: police reports sit beyond the ~500 m mapd path, so `nearest_ahead` uses the 60-deg
+  forward-cone fallback whose along-track distance (d*cos(angle)) PLATEAUS near the perpendicular offset
+  instead of counting to zero — a report you're passing froze at ~1.2 mi until it fell >60 deg behind (or
+  aged out at 20 min). Fix: display the LIVE straight-line distance (recomputed every tick from GPS, no
+  Waze re-query), and mark a report PASSED once we've both (a) receded POLICE_RECEDE_MI past its closest
+  approach AND (b) it's genuinely BEHIND us (bearing > 90 deg off the nose). The behind-gate is what makes
+  it robust on a winding road: straight-line distance to a still-AHEAD report can briefly grow mid-curve,
+  but such a report isn't behind us, so it isn't false-dropped (Gemini). `observe()` runs for EVERY fresh
+  report each tick (not just the shown one) so a report is marked passed even while a nearer one is on
+  screen — otherwise it could reappear when a later curve swings it back into the ahead cone."""
+  BEHIND_DEG = 90.0                                        # bearing-to-report vs heading beyond this = behind us
+  def __init__(self, recede_mi):
+    self.recede_mi = recede_mi
+    self.min_d = {}       # key -> min straight-line miles seen while approaching
+    self.passed = set()   # keys we've driven past -> suppressed (don't resurrect a report we passed)
+
+  @staticmethod
+  def _key(al):
+    u = al.get("uuid")
+    if u:
+      return u
+    return (round(float(al["lat"]), 4), round(float(al["lon"]), 4))   # no uuid -> quantized position
+
+  def is_passed(self, al):
+    try:
+      return self._key(al) in self.passed
+    except (KeyError, TypeError, ValueError):
+      return False
+
+  def prune(self, alerts):
+    """Bound state to the CURRENT Waze pull (a handful of reports in the ~±20 mi bbox). A report that ages
+    out / drops from the pull has its tracking discarded — you're past it, and if it ever re-reports while
+    you're still near, it's behind you so `nearest_ahead`'s cone won't resurface it. Prevents the passed/
+    min_d sets from growing unbounded over the daemon's multi-drive lifetime (Gemini)."""
+    keys = set()
+    for al in alerts:
+      try:
+        keys.add(self._key(al))
+      except (KeyError, TypeError, ValueError):
+        pass
+    self.min_d = {k: v for k, v in self.min_d.items() if k in keys}
+    self.passed &= keys
+
+  def observe(self, al, lat, lon, brg):
+    """Update closest-approach tracking for one report and mark it PASSED when we've receded past it AND
+    it's behind us. Call once per tick for every fresh report."""
+    try:
+      k = self._key(al)
+      al_lat, al_lon = float(al["lat"]), float(al["lon"])
+      d = geo.haversine_m(lat, lon, al_lat, al_lon) / geo.M_PER_MILE
+    except (KeyError, TypeError, ValueError):
+      return
+    if k in self.passed:
+      return
+    m = self.min_d.get(k)
+    if m is not None and d > m + self.recede_mi and brg is not None:
+      rel = abs(geo.normalize180(geo.bearing_deg(lat, lon, al_lat, al_lon) - brg))
+      if rel > self.BEHIND_DEG:                            # receded AND behind us -> we drove past it
+        self.passed.add(k)
+        self.min_d.pop(k, None)
+        return
+    self.min_d[k] = d if m is None else min(m, d)
+
+  def live_mi(self, al, lat, lon):
+    """Live straight-line distance to this report (mi) for display, recomputed each tick. None if unusable."""
+    try:
+      d = geo.haversine_m(lat, lon, float(al["lat"]), float(al["lon"])) / geo.M_PER_MILE
+    except (KeyError, TypeError, ValueError):
+      return None
+    return round(d, 1)
+
+
+def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   if state != "ok":
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
+  recede.prune(alerts)                           # bound tracking state to the current Waze pull
   # Drop STALE reports BEFORE picking the nearest, so a near-but-ancient report can't mask a fresh one
   # further ahead (Gemini bug #1). A report with no timestamp is kept — we can't age it. Also drop
   # OPPOSITE-direction reports ("other side" of the highway) so we don't alert for police on the other
   # carriageway (driver req 2026-07-01); unknown-direction reports (no magvar -> 'none') are KEPT, since
   # we can't tell they're across and dropping them would silently miss most reports (Waze often omits magvar).
+  # Track closest-approach on EVERY surviving report so one is marked PASSED even while a nearer one shows,
+  # then drop reports we've already driven past so they can't linger / reappear (2026-07-06).
   fresh = []
   for al in alerts:
     age = _age_min(al.get("ts"), now)
@@ -434,11 +516,17 @@ def _line_police(alerts, state, err, lat, lon, brg, path):
       continue                                    # too old
     if _police_dir(al, brg) == "opp":
       continue                                    # other side of the road -> don't alert
+    if recede.is_passed(al):
+      continue                                    # already drove past this one -> don't resurrect it
+    recede.observe(al, lat, lon, brg)             # update closest-approach; may mark it passed this tick
+    if recede.is_passed(al):
+      continue                                    # just crossed behind us -> drop
     fresh.append(al)
-  poi, a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
+  poi, _a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
   if poi is None:
-    return {"state": "clear"}                              # fresh poll genuinely returned nothing ahead
-  return {"state": "alert", "dist_mi": round(a["along_m"] / geo.M_PER_MILE, 1),
+    return {"state": "clear"}                     # nothing ahead
+  live = recede.live_mi(poi, lat, lon)
+  return {"state": "alert", "dist_mi": live if live is not None else round(_a["along_m"] / geo.M_PER_MILE, 1),
           "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now),
           "uuid": poi.get("uuid"), "town": poi.get("town", "")}
 
@@ -574,6 +662,7 @@ def main():
   sc_hold = _Hold(POI_HOLD_S)                # Tesla: anti-flicker for the Supercharger side of the alternation
   other_hold = _Hold(POI_HOLD_S)             # Tesla: anti-flicker for the other-charger side
   ev_recede = _RecedeFilter(EV_RECEDE_MI, EV_TRACK_MI)   # drop chargers left >1 mi behind -> show the next-nearest
+  police_recede = _PoliceRecede(POLICE_RECEDE_MI)        # live distance + clear-when-passed for police reports
   rk = Ratekeeper(TICK_HZ, print_delay_threshold=None)
   last_reload = 0.0
   last_l2 = None
@@ -619,7 +708,7 @@ def main():
     else:
       if on_freeway:
         alerts, pstate, perr = police.snapshot()
-        out["police"] = _line_police(alerts, pstate, perr, lat, lon, brg, path)
+        out["police"] = _line_police(alerts, pstate, perr, lat, lon, brg, path, police_recede)
       else:
         out["police"] = {"state": "nodata"}
 
