@@ -66,6 +66,11 @@ DESCRIPTIONS = {
   "EvIncludeLevel2": tr_noop(
     "Also show slow Level 2 (AC) chargers in the EV line, not just DC-fast. Off by default."
   ),
+  "DeferHDVideoUpload": tr_noop(
+    "Hold back the large HD video files (road/wide camera) from uploading while ON; " +
+    "logs (qlog/rlog) and low-res video keep uploading. Held files upload normally once " +
+    "this is turned OFF (if the disk cleaner has not removed them). Use on precious WiFi."
+  ),
 }
 
 
@@ -160,6 +165,13 @@ class TogglesLayout(Widget):
         lambda: tr("Display slow Level 2 chargers"),
         DESCRIPTIONS["EvIncludeLevel2"],
         "speed_limit.png",
+        False,
+      ),
+      # connect2pnw: hold HD video uploads on precious "unmetered" connections; logs keep flowing
+      "DeferHDVideoUpload": (
+        lambda: tr("Defer HD Video Upload"),
+        DESCRIPTIONS["DeferHDVideoUpload"],
+        "network.png",
         False,
       ),
     }

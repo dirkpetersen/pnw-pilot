@@ -28,6 +28,12 @@ UPLOAD_ATTR_VALUE = b'1'
 # user's self-hosted backend issues no such request, so we proactively upload
 # them ourselves -- but ONLY over real external WiFi (see PASS2_NETWORK_TYPES).
 FIREHOSE_FILES = {"rlog", "rlog.zst", "fcamera.hevc", "ecamera.hevc"}
+# connect2pnw: the HD-video subset of pass 2, deferrable via the DeferHDVideoUpload toggle (driver
+# req 2026-07-06): on a connection that qualifies as unmetered but is actually precious (RV park
+# WiFi, borrowed hotspot), keep uploading logs (qlog/rlog/qcam) but HOLD the big video files.
+# Deferred = skipped-but-kept: never xattr-marked, so they upload normally once the toggle is off.
+HD_VIDEO_FILES = {"fcamera.hevc", "ecamera.hevc", "dcamera.hevc"}
+DEFER_HD_PARAM = "DeferHDVideoUpload"
 
 # connect2xnor: only real external WiFi clients qualify for pass-2. The comma's
 # own hotspot is never-default, so NM's PrimaryConnection stays LTE while
@@ -123,6 +129,7 @@ class Uploader:
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
 
     # connect2xnor: clear the firehose indicator on startup so a stale param
     # from a crash doesn't leave the UI showing "uploading" forever.
@@ -147,6 +154,10 @@ class Uploader:
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
+    try:
+      self._defer_hd = self.params.get_bool(DEFER_HD_PARAM)   # refresh once per listing
+    except Exception:
+      self._defer_hd = False
 
     for logdir in listdir_by_creation(self.root):
       path = os.path.join(self.root, logdir)
@@ -176,6 +187,11 @@ class Uploader:
         # files stock openpilot uploads proactively; pass 2 handles ONLY the
         # large firehose files (rlog/fcamera/ecamera). Each pass ignores the
         # other's files so they never interleave.
+        # DeferHDVideoUpload: hold video in EITHER pass (Gemini: dcamera isn't a pass-2 file), keep
+        # logs flowing. Skipped-not-marked -> uploads normally once the toggle is off.
+        if self._defer_hd and name in HD_VIDEO_FILES:
+          continue
+
         if pass2:
           if name not in FIREHOSE_FILES:
             continue
