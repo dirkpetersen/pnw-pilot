@@ -128,11 +128,14 @@ class CesStatusRenderer(Widget):
     if is_exp and reason and reason not in ("chill", ""):
       out.append((f"why {reason}", _C.WHITE, self.font))
 
-    # accelerate-zone / highway-gate: held in Chill (lowSpeed suppressed) — show why
+    # accelerate-zone / highway-gate: held in Chill (lowSpeed suppressed) — show why.
+    # Width budget (driver req 2026-07-06): no line wider than ">> EXPERIMENTAL" — the old
+    # "hwy-gate (no lowSpd)" single line made the whole box ~1.5x wider, so it wraps to two lines.
     if st.get("accelZone"):
-      out.append(("accel-zone (open)", _C.GREEN, self.font))
+      out.append(("accel-zone open", _C.GREEN, self.font))
     if st.get("hwyGate"):
-      out.append(("hwy-gate (no lowSpd)", _C.GREEN, self.font))
+      out.append(("hwy-gate", _C.GREEN, self.font))
+      out.append(("(no lowSpd)", _C.GREEN, self.font))
 
     pct = max(0, min(100, int(st.get("curvePct", 0))))
     src = st.get("curveSrc", "") or "--"
@@ -145,7 +148,7 @@ class CesStatusRenderer(Widget):
     if pts == 0:
       out.append(("map no-data", _C.RED, self.font))
     elif not gps:
-      out.append((f"map {pts}pts no-gps", _C.ORANGE, self.font))
+      out.append((f"map {pts}p no-gps", _C.ORANGE, self.font))   # "p" not "pts": width budget
     else:
       out.append((f"map {pts}pts gps", _C.GREEN, self.font))
 
@@ -154,7 +157,8 @@ class CesStatusRenderer(Widget):
     mdl = self._mapdl
     if mdl:
       col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
-      out.append((f"map-DB {mdl}", col, self.font))
+      # keep within the width budget: "downloading 42%" -> "dl 42%"; clamp odd/error strings
+      out.append((f"map-DB {mdl.replace('downloading', 'dl')[:8]}", col, self.font))
 
     # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
     # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
