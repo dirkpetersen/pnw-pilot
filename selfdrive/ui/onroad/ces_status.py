@@ -157,8 +157,12 @@ class CesStatusRenderer(Widget):
     mdl = self._mapdl
     if mdl:
       col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
-      # keep within the width budget: "downloading 42%" -> "dl 42%"; clamp odd/error strings
-      out.append((f"map-DB {mdl.replace('downloading', 'dl')[:8]}", col, self.font))
+      # keep within the width budget: "downloading 42%" -> "dl 42%"; long/error strings get a
+      # visible ellipsis instead of a silent mid-word chop (Gemini: "unreachable" -> "unreacha")
+      disp = mdl.replace("downloading", "dl")
+      if len(disp) > 8:
+        disp = disp[:7] + "…"
+      out.append((f"map-DB {disp}", col, self.font))
 
     # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
     # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
