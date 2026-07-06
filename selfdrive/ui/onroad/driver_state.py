@@ -2,7 +2,7 @@ import numpy as np
 import pyray as rl
 from cereal import log
 from dataclasses import dataclass
-from openpilot.selfdrive.ui import UI_BORDER_SIZE
+from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
@@ -162,11 +162,13 @@ class DriverStateRenderer(Widget):
 
   def _pre_calculate_drawing_elements(self):
     """Pre-calculate all drawing elements based on the current rectangle"""
-    # Calculate icon position (bottom-left or bottom-right)
-    width, height = self._rect.width, self._rect.height
-    offset = UI_BORDER_SIZE + BTN_SIZE // 2
-    self.position_x = self._rect.x + (width - offset if self.is_rhd else offset)
-    self.position_y = self._rect.y + height - offset
+    # PNW (driver req 2026-07-06): DM head lives in the TOP header row, right of the speed-limit sign
+    # (MAX box | speed-limit sign | DM head), freeing the lower-left corner for the location-services
+    # box. Position derives from the same width constants the MAX box / sign use, so metric (200 px)
+    # and imperial (172 px) both line up. No RHD mirroring — top-right holds the CES button.
+    sign_w = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
+    self.position_x = self._rect.x + 60 + 2 * sign_w + 24 + 40 + BTN_SIZE // 2
+    self.position_y = self._rect.y + 45 + UI_CONFIG.set_speed_height // 2
 
     # Pre-calculate the face lines positions
     positioned_keypoints = self.face_keypoints_transformed + np.array([self.position_x, self.position_y])

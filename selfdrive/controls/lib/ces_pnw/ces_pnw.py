@@ -88,7 +88,9 @@ class Condition:
     self.active = False
 
   def update(self, raw: bool, dt: float = DT_CTRL) -> bool:
-    if dt != self.f.dt:
+    # tolerance, not equality: the measured dt jitters every cycle, and an exact != recomputed the
+    # filter alpha (an exp()) at 100 Hz per condition for no behavioral gain
+    if abs(dt - self.f.dt) > 1e-3:
       self.f.dt = dt
       self.f.update_alpha(C.FILTER_TAU)
     self.f.update(1.0 if raw else 0.0)

@@ -12,18 +12,20 @@ render as tofu. Swap to an icon atlas later if pictograms are wanted.
 import time
 import pyray as rl
 
+from cereal import log
 from openpilot.common.params import Params
-from openpilot.selfdrive.ui import UI_BORDER_SIZE
-from openpilot.selfdrive.ui.onroad.driver_state import BTN_SIZE
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
+AlertSize = log.SelfdriveState.AlertSize
+
 _REFRESH_S = 0.2     # poll the mem param at ~5 Hz (matches the daemon publish cadence)
-_FS = 56
-_LINE_H = 70
+_FS_STEPS = (56, 52, 48, 44)   # base font size, then auto-shrink steps if a word can't fit the cap
+_LINE_H_RATIO = 1.25           # line height = font size * this
+_WIDTH_CAP_RATIO = 1.5         # box content width cap = header pixel width * this (driver req 2026-07-06)
 _PAD = 22
 _MARGIN = 40
 _FT_PER_MILE = 5280.0
@@ -35,9 +37,7 @@ _POLICE_NEAR_MI = 0.5    # banner shows when a police report is this close ahead
                          # stressor on the near-capacity 3X, the visual banner is far lighter)
 _BLINK_PERIOD = 0.7   # s, one on+off cycle (~1.4 Hz), matching the speed-limit warning
 _POLICE_BANNER_MAX_S = 15.0   # blink the "POLICE AHEAD" banner for at most this long, then stop (driver req)
-# The driver-monitoring icon is a bottom-LEFT circle whose TOP edge is ~(UI_BORDER_SIZE + BTN_SIZE) up
-# from the content bottom. Lift the box to sit just ABOVE it (small gap) so they no longer overlap.
-_DRIVER_ICON_CLEAR = UI_BORDER_SIZE + BTN_SIZE + 24
+# The DM head moved to the TOP header row (2026-07-06), so this box owns the true lower-left corner.
 
 
 class _C:
@@ -65,6 +65,7 @@ class LocationServicesStatusRenderer(Widget):
     self._banner_active = False    # police banner: 15 s blink window per report
     self._banner_uuid = None
     self._banner_start = 0.0
+    self._layout = None            # (lines, fs, line_h, box_w, box_h) — rebuilt at poll time, not per frame
 
   def _update_state(self):
     now = time.monotonic()
@@ -72,13 +73,16 @@ class LocationServicesStatusRenderer(Widget):
       return
     self._last_poll = now
     if self._mem is None or not ui_state.params.get_bool("LocationServicesEnabled"):
-      self._st = {}
+      self._st, self._layout = {}, None
       return
     try:
       st = self._mem.get("LocationServices", return_default=True)
       self._st = st if isinstance(st, dict) else {}
     except Exception:
       self._st = {}
+    # Build the wrapped-line layout HERE (5 Hz) instead of in _render (20 Hz): the string assembly +
+    # wrapping only depends on the polled state, so doing it per frame was pure waste.
+    self._layout = self._build_layout() if self._st.get("enabled") else None
 
   # ---- formatting ----------------------------------------------------------
   def _dist_text(self, dist_mi):
@@ -147,65 +151,84 @@ class LocationServicesStatusRenderer(Widget):
       return txt + self._town(e.get("town")), _C.GREEN
     return "EV fast  -", _C.DIM
 
-  @staticmethod
-  def _split_near(s, p):
-    """Split s into (head, tail) near index p, snapped to the NEAREST space so whole words stay intact.
-    tail is "" when s already fits (len <= p). p comes from the longest of the 3 advisory lines."""
-    if len(s) <= p:
-      return s, ""
-    left = s.rfind(" ", 0, p + 1)
-    right = s.find(" ", p)
-    cands = [i for i in (left, right) if i > 0]
-    if not cands:
-      return s, ""
-    i = min(cands, key=lambda j: abs(j - p))
-    return s[:i], s[i:].lstrip()
+  def _wrap_px(self, text, font, fs, max_w):
+    """Greedy PIXEL-measured wrap to max_w, breaking only at space runs and hanging-indenting
+    continuation lines (_CONT_INDENT). Operates on string slices (not split/rejoin) so the
+    multi-space tabular alignment inside a line ("Police   2.1 mi") is preserved (Gemini). A
+    segment with no breakable space that still overflows is emitted as-is — the font-shrink loop
+    in _build_layout handles that case by stepping the size down."""
+    lines: list[str] = []
+    indent = ""
+    rest = text
+    while rest:
+      if measure_text_cached(font, indent + rest, fs).x <= max_w:
+        lines.append(indent + rest)
+        break
+      cut = -1                               # longest prefix ending at a space that still fits
+      i = rest.find(" ")
+      while i > 0:
+        if measure_text_cached(font, indent + rest[:i], fs).x <= max_w:
+          cut = i
+        else:
+          break
+        i = rest.find(" ", i + 1)
+      if cut <= 0:                           # nothing breakable fits -> emit (overflow; shrink handles)
+        lines.append(indent + rest)
+        break
+      lines.append(indent + rest[:cut])
+      rest = rest[cut:].lstrip(" ")
+      indent = _CONT_INDENT
+    return lines
 
-  def _wrap(self, content):
-    """Wrap each of the 3 advisory lines (police/rest/ev) onto two lines, breaking near the middle-3 of the
-    LONGEST of them (snapped to a space so words aren't cut); the continuation line is hanging-indented 3
-    (_CONT_INDENT). All lines stay left-aligned. `content` = [(text,color,font),...]; returns the flat list
-    with continuations inserted."""
-    if not content:
-      return []
-    p = max(1, max(len(t) for t, _, _ in content) // 2 - 3)   # "the middle - 3" of the longest line
-    out = []
-    for t, color, font in content:
-      head, tail = self._split_near(t, p)
-      out.append((head, color, font))
-      if tail:
-        out.append((_CONT_INDENT + tail, color, font))
-    return out
-
-  def _lines(self):
-    # Header doubles as a road-context cue: "HAPPENING AHEAD" on the highway (POIs alongside, ahead) vs
-    # "NEARBY (3 MI)" on surface streets (nearest within a 3-mi radius). Police is highway-only, so its
-    # line is dropped off-freeway to keep the surface view clean. The 3 advisory lines are wrapped to two
-    # lines each (hanging indent); the header is not wrapped.
+  def _build_layout(self):
+    """Assemble header + advisory lines, pixel-wrapped to a box no wider than _WIDTH_CAP_RATIO x the
+    header ("HAPPENING AHEAD") width; if an unbreakable word still overflows, step the font size down
+    (_FS_STEPS) until everything fits (driver req 2026-07-06: fixed predictable width, grow DOWN in
+    lines not sideways, shrink font only as the last resort). Returns (lines, fs, line_h, box_w, box_h)."""
     freeway = bool(self._st.get("freeway"))
+    header = "HAPPENING AHEAD" if freeway else "NEARBY (3 MI)"
     content = []
     if freeway:
       content.append((*self._police_line(), self.font))
     content.append((*self._rest_line(), self.font))
     content.append((*self._ev_line(), self.font))
-    return [("HAPPENING AHEAD" if freeway else "NEARBY (3 MI)", _C.WHITE, self.font_bold)] + self._wrap(content)
+
+    lines = []
+    fs = _FS_STEPS[-1]
+    for fs in _FS_STEPS:
+      cap = measure_text_cached(self.font_bold, header, fs).x * _WIDTH_CAP_RATIO
+      lines = [(header, _C.WHITE, self.font_bold)]
+      fits = True
+      for t, color, font in content:
+        for seg in self._wrap_px(t, font, fs, cap):
+          lines.append((seg, color, font))
+          if measure_text_cached(font, seg, fs).x > cap:
+            fits = False                       # unbreakable word overflows -> try the next-smaller font
+      if fits:
+        break
+    line_h = int(fs * _LINE_H_RATIO)
+    box_w = max(measure_text_cached(f, t, fs).x for t, _, f in lines) + _PAD * 2
+    box_h = line_h * len(lines) + _PAD * 2
+    return lines, fs, line_h, box_w, box_h
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
-    if not self._st or not self._st.get("enabled"):
+    if self._layout is None or not self._st.get("enabled"):
       return
-    lines = self._lines()
-    box_w = max(measure_text_cached(f, t, _FS).x for t, _, f in lines) + _PAD * 2
-    box_h = _LINE_H * len(lines) + _PAD * 2
-    bx = rect.x + _MARGIN                       # LOWER-LEFT
-    by = rect.y + rect.height - box_h - _DRIVER_ICON_CLEAR   # ABOVE the driver-monitoring icon
+    # Yield the (bottom-anchored) space to openpilot alerts — same gate the DM head uses. At the true
+    # bottom of the screen the box would otherwise sit under the alert text.
+    if ui_state.sm["selfdriveState"].alertSize != AlertSize.none:
+      return
+    lines, fs, line_h, box_w, box_h = self._layout
+    bx = rect.x + _MARGIN                       # true LOWER-LEFT (DM head moved to the top header row)
+    by = rect.y + rect.height - box_h - _MARGIN
 
     rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), 0.12, 8, _C.BG)
     x = bx + _PAD
     y = by + _PAD
     for text, color, font in lines:
-      rl.draw_text_ex(font, text, rl.Vector2(x, y), _FS, 0, color)   # left-aligned
-      y += _LINE_H
+      rl.draw_text_ex(font, text, rl.Vector2(x, y), fs, 0, color)   # left-aligned
+      y += line_h
 
     # big blue flashing "POLICE AHEAD" banner when a report is <= 0.5 mi AHEAD (police is ahead-only).
     # NOTE: dist_mi rounds to 0.0 when very close (falsy), so test `is not None`, never `or 99.0`.

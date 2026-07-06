@@ -57,6 +57,7 @@ class CesStatusRenderer(Widget):
     self._st: dict = {}
     self._vtsc: dict = {}
     self._mapdl: str = ""
+    self._layout = None   # (lines, box_w, box_h) — rebuilt at poll time (5 Hz), not per frame (20 Hz)
     self.font = gui_app.font(FontWeight.MEDIUM)
     self.font_bold = gui_app.font(FontWeight.BOLD)
 
@@ -75,6 +76,7 @@ class CesStatusRenderer(Widget):
     if not self._enabled or self._mem is None:
       self._st = {}
       self._vtsc = {}
+      self._layout = None
       return
     try:
       st = self._mem.get("CESStatus", return_default=True)
@@ -91,6 +93,15 @@ class CesStatusRenderer(Widget):
       self._mapdl = mdl.decode() if isinstance(mdl, bytes) else (mdl or "")
     except Exception:
       self._mapdl = ""
+    # Build the line list + box size HERE (5 Hz poll) instead of every render frame (20 Hz): the
+    # content only changes when the polled state does.
+    self._layout = None
+    if self._st.get("enabled") and int(self._st.get("button", 0)) == 0:
+      lines = self._lines()
+      if lines:
+        box_w = max(measure_text_cached(f, t, _FS).x for t, _, f in lines) + _PAD * 2
+        box_h = _LINE_H * len(lines) + _PAD * 2
+        self._layout = (lines, box_w, box_h)
 
   # ---- build the lines -----------------------------------------------------
   def _lines(self) -> list[tuple]:
@@ -164,20 +175,11 @@ class CesStatusRenderer(Widget):
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
-    if not self._enabled:
+    # visibility gates (enabled, CES-auto button mode only) are applied at poll time in _update_state;
+    # _layout is None whenever the overlay should be hidden
+    if not self._enabled or self._layout is None:
       return
-    if not self._st or not self._st.get("enabled"):
-      return
-    # show the debug overlay ONLY in CES-auto button mode — hide it when the driver forced
-    # Chill (1) or Experimental (2) via the top-right button (driver feedback, drive #4)
-    if int(self._st.get("button", 0)) != 0:
-      return
-    lines = self._lines()
-    if not lines:
-      return
-
-    box_w = max(measure_text_cached(f, t, _FS).x for t, _, f in lines) + _PAD * 2
-    box_h = _LINE_H * len(lines) + _PAD * 2
+    lines, box_w, box_h = self._layout
     bx = rect.x + rect.width - box_w - _MARGIN
     by = rect.y + rect.height - box_h - _MARGIN
 

@@ -70,6 +70,13 @@ class DRIVER_MONITOR_SETTINGS:
     # inattention on a fully washed-out face).
     self._POSESTD_THRESHOLD = 0.45  # was 0.3 — tolerate more pose uncertainty under glare
     self._HI_STD_FALLBACK_TIME = int(30  / self._DT_DMON)  # was 10s — wait 30s of sustained uncertainty before wheel-touch fallback
+    # PNW glare round 2 (2026-07-06 log review, routes 92/93): the pose-std knobs above WORK (hiStdCount
+    # ~0 all hour) but face loss has ZERO debounce — one frame of faceProb<=0.7 (direct side sun washes it
+    # to 0.27-0.45) flips DM to passive wheel-touch mode instantly (faceLost% == passive% frame-for-frame
+    # in every segment). Grace window: a face lost for less than this (after having been seen) is treated
+    # as still present for MODE/decay purposes only — distraction detection still requires a real face.
+    # Safety tradeoff accepted by the driver ("less aggressive, if in doubt"); see docs/GLARE.md.
+    self._FACE_LOST_GRACE_TIME = int(30 / self._DT_DMON)   # glare burst tolerance before passive fallback
     self._DISTRACTED_FILTER_TS = 0.25  # 0.6Hz
     self._ALWAYS_ON_ALERT_MIN_SPEED = 11
 
@@ -182,6 +189,12 @@ class DriverMonitoring:
     self.wheel_on_right_last = None
     self.wheel_on_right_default = rhd_saved
     self.face_detected = False
+    # PNW glare: face-loss grace. Starts EXPIRED (no face seen yet this drive -> no free grace window);
+    # arms only after a face has actually been detected. face_detected_deb is face_detected debounced by
+    # the grace and is what mode-switching/awareness-decay consume; raw face_detected still gates all
+    # distraction detection and pose calibration.
+    self.face_lost_cnt = self.settings._FACE_LOST_GRACE_TIME + 1
+    self.face_detected_deb = False
     self.terminal_alert_cnt = 0
     self.terminal_time = 0
     self.step_change = 0.
@@ -359,8 +372,17 @@ class DriverMonitoring:
         if self.dcam_reset_cnt > self.settings._DCAM_UNCERTAIN_RESET_COUNT:
           self.dcam_uncertain_cnt = 0
 
+    # PNW glare: debounce face LOSS with a grace window (see _FACE_LOST_GRACE_TIME). Direct side sun
+    # washes faceProb to ~0.3-0.45 for seconds at a time; without this, ONE sub-threshold frame dropped
+    # DM to passive wheel-touch mode ("touch steering wheel" while attentive, 2026-07-06 logs).
+    if self.face_detected:
+      self.face_lost_cnt = 0
+    else:
+      self.face_lost_cnt += 1
+    self.face_detected_deb = self.face_detected or self.face_lost_cnt <= self.settings._FACE_LOST_GRACE_TIME
+
     self.is_model_uncertain = self.hi_stds > self.settings._HI_STD_FALLBACK_TIME
-    self._set_timers(self.face_detected and not self.is_model_uncertain)
+    self._set_timers(self.face_detected_deb and not self.is_model_uncertain)
     if self.face_detected and not self.pose.low_std and not self.driver_distracted:
       self.hi_stds += 1
     elif self.face_detected and self.pose.low_std:
@@ -439,6 +461,14 @@ class DriverMonitoring:
       # Combined awareness for UI/state compatibility
       self.awareness = min(self.awareness_pose, self.awareness_phone)
 
+      # PNW glare: recover the PASSIVE counter while fully attentive in active mode. Stock keeps
+      # awareness_passive frozen here (this branch returns early), so under flapping glare it only ever
+      # ratchets DOWN — 2026-07-06 logs show minAwareness 0.71 -> 0.32 -> 0.19 across three consecutive
+      # glare-burst segments, each burst resuming the "touch wheel" countdown where the last left off.
+      # Full recovery takes _AWARENESS_TIME (30 s) of attentive active driving.
+      if self.awareness >= 1.:
+        self.awareness_passive = min(self.awareness_passive + self.settings._DT_DMON / self.settings._AWARENESS_TIME, 1.)
+
       # Classify each counter, emit the more-severe alert
       def _level(awareness, t_pre, t_prompt):
         if awareness <= 0:      return 3
@@ -489,7 +519,8 @@ class DriverMonitoring:
     always_on_lowspeed_exemption = always_on_valid and not op_engaged and car_speed < self.settings._ALWAYS_ON_ALERT_MIN_SPEED
 
     certainly_distracted = self.driver_distraction_filter.x > 0.63 and self.driver_distracted and self.face_detected
-    maybe_distracted = self.hi_stds > self.settings._HI_STD_FALLBACK_TIME or not self.face_detected
+    # PNW glare: decay on the DEBOUNCED face flag — a face inside the grace window doesn't count down
+    maybe_distracted = self.hi_stds > self.settings._HI_STD_FALLBACK_TIME or not self.face_detected_deb
 
     if certainly_distracted or maybe_distracted:
       # should always be counting if distracted unless at standstill (lowspeed for always-on) and reaching orange
