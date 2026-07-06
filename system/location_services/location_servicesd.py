@@ -257,7 +257,6 @@ class PoliceUpdater(threading.Thread):
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
     self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "quota (429)", "HTTP 403", "no key")
     self._stop = threading.Event()
-    self._cfg = None
 
   def snapshot(self):
     with self._lock:
@@ -315,7 +314,9 @@ class PoliceUpdater(threading.Thread):
     backoff = POLICE_POLL_S
     while not self._stop.is_set():
       try:
-        cfg = self._cfg or self._load_cfg()
+        cfg = self._load_cfg()                             # re-read EVERY cycle (tiny file, 1/min) so a key
+                                                           # rotation/fix in the override file takes effect
+                                                           # without a daemon restart (was cached forever)
         enabled = False
         try:
           enabled = self._params.get_bool("LocationServicesEnabled")   # PERSISTENT store (was wrongly read
@@ -329,7 +330,6 @@ class PoliceUpdater(threading.Thread):
             self._err = "no key" if (nokey and enabled) else ""   # surface the actionable case; disabled = plain "-"
           self._stop.wait(POLICE_POLL_S)
           continue
-        self._cfg = cfg
         gps = self._cur_gps()
         if gps is None:
           self._stop.wait(POLICE_POLL_S)
@@ -369,7 +369,10 @@ def _read_mem(mem):
     pos = mem.get("LastGPSPosition", return_default=True)
     if isinstance(pos, (bytes, str)):
       pos = json.loads(pos)
-    lat, lon, brg = float(pos["latitude"]), float(pos["longitude"]), float(pos.get("bearing", 0.0))
+    lat, lon = float(pos["latitude"]), float(pos["longitude"])
+    b = pos.get("bearing")
+    brg = float(b) if b is not None else None    # missing heading stays None (geo declines to answer);
+                                                 # never fabricate "due north" for the cone/behind-gate
   except (KeyError, TypeError, ValueError):
     pass
   try:
@@ -545,11 +548,20 @@ class _Hold:
     self.min_d = None
 
   def update(self, found, now, lat, lon):
-    # found = (poi, dist_mi) or None. Returns the same shape (possibly the held POI).
+    # found = (poi, along-track dist_mi) or None. Returns (poi, LIVE straight-line mi) or None.
+    # The along-track distance is SELECTION-only: on a winding road it projects onto the mapd polyline
+    # (which can even land on the far arm of a switchback — Indian John Hill read 2.2 mi vs the 1 mi
+    # road sign), and the displayed metric silently FLIPPED to straight-line whenever the hold branch
+    # kept the POI alive. Display + recede-tracking now use straight-line everywhere (2026-07-06).
     if found is not None:
-      self.min_d = found[1] if self.poi is not found[0] else min(self.min_d, found[1])
-      self.poi, self.t = found[0], now
-      return found
+      poi = found[0]
+      try:
+        d = geo.haversine_m(lat, lon, poi["lat"], poi["lon"]) / geo.M_PER_MILE
+      except (KeyError, TypeError, ValueError):
+        d = found[1]
+      self.min_d = d if (self.poi is not poi or self.min_d is None) else min(self.min_d, d)
+      self.poi, self.t = poi, now
+      return (poi, round(d, 1))
     if self.poi is not None and (now - self.t) < self.hold_s:
       try:
         d = geo.haversine_m(lat, lon, self.poi["lat"], self.poi["lon"]) / geo.M_PER_MILE

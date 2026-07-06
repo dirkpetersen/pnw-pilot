@@ -30,6 +30,8 @@ from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
 # One JSON line per CES mode transition, with GPS so we can map where each adoption happened.
 CES_EVENT_LOG = "/data/dirk/ces_events.jsonl"
+CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB; one .1 generation kept -> ~40 MB cap
+                                             # (was unbounded — 43 MB and growing on a 90%-full disk)
 
 
 def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
@@ -556,6 +558,11 @@ class CESController:
     if not self._event_log_ok:
       return
     try:
+      try:
+        if os.path.getsize(CES_EVENT_LOG) > CES_EVENT_LOG_MAX_BYTES:
+          os.replace(CES_EVENT_LOG, CES_EVENT_LOG + ".1")   # atomic rotate; overwrites the previous .1
+      except OSError:
+        pass                                                # no file yet / stat race -> just append
       with open(CES_EVENT_LOG, "a") as f:
         f.write(json.dumps(rec) + "\n")
     except Exception:
