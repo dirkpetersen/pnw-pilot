@@ -53,7 +53,7 @@ class CesStatusRenderer(Widget):
     except Exception:
       self._mem = None
     self._last_poll = 0.0
-    self._enabled = False
+    self._ces_enabled = False
     self._st: dict = {}
     self._vtsc: dict = {}
     self._mapdl: str = ""
@@ -72,8 +72,8 @@ class CesStatusRenderer(Widget):
     self._last_poll = now
     # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
     # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
-    self._enabled = ces_enabled(read_ces_mode(ui_state.params))
-    if not self._enabled or self._mem is None:
+    self._ces_enabled = ces_enabled(read_ces_mode(ui_state.params))
+    if not self._ces_enabled or self._mem is None:
       self._st = {}
       self._vtsc = {}
       self._cached_layout = None
@@ -181,7 +181,7 @@ class CesStatusRenderer(Widget):
   def _render(self, rect: rl.Rectangle):
     # visibility gates (enabled, CES-auto button mode only) are applied at poll time in _update_state;
     # _layout is None whenever the overlay should be hidden
-    if not self._enabled or self._cached_layout is None:
+    if not self._ces_enabled or self._cached_layout is None:
       return
     lines, box_w, box_h = self._cached_layout
     bx = rect.x + rect.width - box_w - _MARGIN
