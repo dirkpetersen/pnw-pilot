@@ -114,7 +114,11 @@ procs = [
   # into the PERSISTENT /data/mapd (outside the git tree, so an auto-update's `git clean` can't delete it
   # and force a flaky boot re-download). Exec the absolute MAPD_BINARY; publishes mapdOut/mapdExtendedOut,
   # subscribes mapdIn. Gated on the binary existing (mapd_running) so manager never execs a missing file.
-  NativeProcess("mapd", "selfdrive", [MAPD_BINARY], mapd_running),
+  # USE_MSGQ_PREFIX=true: gomsgq otherwise AUTO-DETECTS the /dev/shm naming by stat'ing msgq_logMessage
+  # at startup — a boot race. If mapd starts before that segment exists it falls back to UNPREFIXED
+  # names and is silently deaf+mute all session (no speed limit / map curves / road context; seen
+  # I-82 2026-07-06). Forcing the prefix matches this tree's msgq (msgq.cc uses /dev/shm/msgq_<name>).
+  NativeProcess("mapd", "selfdrive", ["/usr/bin/env", "USE_MSGQ_PREFIX=true", MAPD_BINARY], mapd_running),
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),

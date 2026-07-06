@@ -57,9 +57,19 @@ class DRIVER_MONITOR_SETTINGS:
 
     self._DCAM_UNCERTAIN_ALERT_THRESHOLD = 0.1
     self._DCAM_UNCERTAIN_ALERT_COUNT = int(60  / self._DT_DMON)
-    self._DCAM_UNCERTAIN_RESET_COUNT = int(20  / self._DT_DMON)
-    self._POSESTD_THRESHOLD = 0.3
-    self._HI_STD_FALLBACK_TIME = int(10  / self._DT_DMON)  # fall back to wheel touch if model is uncertain for 10s
+    # PNW glare: reset the "DM camera uncertain" nag after 2 s of clear vision instead of 20 s (ports
+    # commaai 4ecbdb0d7a). Diagnostic-only, but stops the offroad nag flapping on transient side-sun.
+    self._DCAM_UNCERTAIN_RESET_COUNT = int(2   / self._DT_DMON)
+    # PNW glare (2026-07-06, I-82 westbound low sun): side/back sunlight washes the DM image so pose std
+    # spikes -> the model is judged "uncertain" -> monitoring drops OUT of the relaxed dual-counter ACTIVE
+    # mode into the stock PASSIVE wheel-touch mode within 10 s (the "DM going mad" the driver reports).
+    # The relaxed 3 h/1 h timeouts only apply in active mode, so glare bypasses them entirely. Two knobs
+    # keep it in active mode through a glare burst (docs/GLARE.md Layer C band-aid; safety tradeoff noted
+    # there): tolerate noisier pose before counting a frame "high std", and wait 3x longer before the
+    # passive fallback. faceProb cutoff (0.7) left alone — lowering it is the riskiest (masks real
+    # inattention on a fully washed-out face).
+    self._POSESTD_THRESHOLD = 0.45  # was 0.3 — tolerate more pose uncertainty under glare
+    self._HI_STD_FALLBACK_TIME = int(30  / self._DT_DMON)  # was 10s — wait 30s of sustained uncertainty before wheel-touch fallback
     self._DISTRACTED_FILTER_TS = 0.25  # 0.6Hz
     self._ALWAYS_ON_ALERT_MIN_SPEED = 11
 
