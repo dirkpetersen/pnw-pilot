@@ -22,7 +22,15 @@ from openpilot.common.swaglog import cloudlog
 # ACCEL_MAX=2.0 / panda tesla_legacy max_accel=2. Standstill band (0-10 m/s) unchanged. The MPC still takes
 # the most-conservative of lead/curve/free trajectories, so a higher free-flow ceiling can't drive into a
 # lead or curve. Gemini-endorsed. (Coast-dip after a gas override = separate future hold-off, not this.)
-A_CRUISE_MAX_VALS = [1.6, 1.5, 1.2, 0.9]
+#
+# long2pnw ITER 2 (2026-07-07): the [.,.,1.2,0.9] tune above was live for the 2026-07-05 (US-12) and
+# 2026-07-06 (I-84/I-5) drives and STILL wasn't enough — of highway gas-overrides >55 mph, 60% (freeway)
+# to 73% (2-lane) had vEgo BELOW vSet and only ~0-1% exceeded it: the driver was pedaling to close the
+# gap to an already-set cruise speed because op ramps up too gently (see drives/2026-07-0{5,6}/*/DRIVE_REPORT.md).
+# So lift ONLY the highway region (25 & 40 m/s bands) again: 1.2->1.4 (0.14 g) at 56 mph, 0.9->1.2 (0.12 g)
+# at 89 mph. Still under the 0.2 g knee and ACCEL_MAX. Straight-road only: limit_accel_in_turns() clamps
+# this AFTER get_max_accel() (line ~130), and VTSC only lowers the target speed, so curve braking is untouched.
+A_CRUISE_MAX_VALS = [1.6, 1.5, 1.4, 1.2]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
