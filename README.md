@@ -1,3 +1,82 @@
+# PNW Pilot — openpilot for the Pacific Northwest
+
+**PNW Pilot** is a fork of openpilot tuned for one job: driving in the PNW, especially the 
+**I-5 corridor between Seattle, WA and central-western Oregon**.
+
+
+<div align="center"> <img width="512" height="432" alt="image" src="https://github.com/user-attachments/assets/5dca7817-02cc-431b-83e3-d7fec3733ada" /> </div>
+
+
+```
+commaai/openpilot          upstream
+  └─ xnor-tech/openpilot   adds full legacy Tesla HW1/HW2/HW3 (Raven) support
+       └─ dirkpetersen/pnw-pilot   ← this distribution (Pacific Northwest)
+```
+
+### Focus
+
+- **Region:** map data ships for **Washington, Oregon, and Idaho** by default — the first map
+  download auto-arms on a fresh device, no settings page required. (British Columbia is optional
+  and can be added to the state list.)
+- **Drives:** predominantly **Seattle ↔ Corvallis** (central-western Oregon) on I-5; curve and
+  longitudinal behavior is calibrated against real drive logs from that corridor (plus I-90
+  Snoqualmie Pass and US-12).
+- **Vehicles:** shaped entirely around two cars — a **2021 Tesla Model S Long Range Plus** (Raven
+  class, HW3; the primary I-5 car) and a **2025 Ford F-150 Lightning**. Car-specific code is
+  fingerprint-gated, so it stays inert on the other car.
+- **Development:** all code is written by **Claude Code** and validated by the **Gemini MCP server**
+  running inside Claude Code.
+- **Hardware:** only the **comma 3X** is tested. The **comma four is completely untested and will
+  likely not work.**
+
+### Enhancements over upstream / xnor
+
+- **Tesla Model S Raven (HW1/HW2/HW3) support** — inherited from the xnor base; the reason PNW
+  forks xnor rather than commaai directly.
+- **Ford F-150 Lightning (2025)** — fingerprint and SecOC support for the Flash truck.
+- **Vision + Map Turn Speed Control (VTSC/MTSC)** — actively caps cruise speed through curves using
+  the model's predicted path curvature **and** OSM map-curve data, so it also slows for sharp curves
+  the camera can't see yet (500 m lookahead, apex-timed so the entrance is the slowest point).
+  Smooth by construction: a gentle regen-style decel envelope that only ever reduces speed. Tuned
+  against the I-5 Terwilliger curve and I-90 Snoqualmie Pass drive logs.
+- **Conditional Experimental Switching (CES)** — chill by default, automatically switches to
+  Experimental mode for curves, low-speed, stop-lights, and slow leads; with a per-car gentle
+  profile and an Off / Light / Standard selector.
+- **"Happening Ahead" overlay** — on freeways, a lower-left panel shows the nearest **police
+  report** (Waze), **rest area**, and **EV fast charger** ahead along your route (nearest-anything
+  within 3 mi on surface streets). Display-only — it never affects steering or speed.
+- **OSM speed-limit display** — shows the current posted limit and warns on lower limits, sourced
+  from the bundled PNW map data (downloaded automatically on first launch).
+- **Tuned highway acceleration** — a brisker ramp to your set cruise speed at freeway speeds,
+  calibrated from real drive logs (straight roads only; curve braking is untouched).
+- **Nudgeless lane change + no-disengage-on-brake** — hands-light lane changes and braking that
+  doesn't kick you out of engagement.
+- **Networking** — tethering/hotspot NAT fix, perpetual tethering, priority-WiFi switching,
+  GPS-gated WiFi scanning with a Set Home Location button, **captive-portal auto-login** for
+  visitor hotspots, and an LTE throttle guard.
+- **Smarter drive upload** — two-pass upload (small files automatically, HD video on real WiFi), an
+  optional **Defer HD Video Upload** toggle for precious WiFi, and a deleter that preserves
+  anything not yet uploaded.
+
+### Installing PNW Pilot
+
+PNW Pilot installs the same way as any custom openpilot fork — by entering its installer URL on the
+comma device's setup screen. **Only the comma 3X is tested.**
+
+1. On the comma 3X, do a factory reset / start the **Setup** flow (Settings → Device → Reset, or a
+   fresh device boot).
+2. Connect the device to Wi-Fi.
+3. When asked for the software to install, choose **Custom Software** and enter one of:
+   - **Production (stable):** `installer.comma.ai/dirkpetersen/pnwprod`
+   - **Test / staging:** `installer.comma.ai/dirkpetersen/pnwtest`
+4. Confirm; the device downloads and installs PNW Pilot, then reboots into it.
+
+These URLs resolve through GitHub's `dirkpetersen/openpilot` → `dirkpetersen/pnw-pilot` redirect, so
+the comma installer (which clones `<user>/openpilot`) finds the PNW fork automatically. Use
+`pnwtest` to validate a build, then `pnwprod` for the stable install.
+
+---
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>
