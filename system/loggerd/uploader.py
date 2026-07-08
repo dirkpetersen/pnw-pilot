@@ -3,6 +3,7 @@ import json
 import os
 import random
 import requests
+import socket
 import threading
 import time
 import traceback
@@ -54,6 +55,28 @@ FIREHOSE_SPEED_PARAM = "FirehoseSpeed"
 # pass-1 (small) uploads, so large video isn't starved behind a long small-file backlog. Small files
 # still get priority (pass 1 runs every loop); this just guarantees HD makes steady progress.
 PASS2_INTERLEAVE = 4
+
+# connect2pnw device-locator (2026-07-08): the device roams WiFi segments and its LAN IP keeps
+# changing, defeating SSH. AWS only ever sees the public NAT address, so the uploader self-reports
+# its LAN IP as a `local_ip` query param on every upload_url request; the comma-uploader-api Lambda
+# prints it as a CLIENT_IP line in CloudWatch. Look the device up any time with:
+#   aws --profile dipeit logs filter-log-events --region us-west-2 \
+#     --log-group-name /aws/lambda/comma-uploader-api --filter-pattern CLIENT_IP \
+#     --start-time $(( ($(date +%s) - 3600) * 1000 )) --query 'events[-1].message' --output text
+
+
+def _get_local_ip() -> str:
+  # primary-route LAN address; the UDP connect only selects a route, no packet is sent.
+  # Uncached on purpose: it must track WiFi roams, and the syscall cost is negligible per upload.
+  try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+      s.connect(("8.8.8.8", 80))
+      return s.getsockname()[0]
+    finally:
+      s.close()
+  except OSError:
+    return ""
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -232,7 +255,10 @@ class Uploader:
     return None
 
   def do_upload(self, key: str, fn: str):
-    url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
+    # connect2pnw device-locator: local_ip rides along as a query param (api_get forwards **kwargs
+    # as query-string params); the Lambda logs it so the roaming device's LAN IP is findable in AWS.
+    url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key,
+                            local_ip=_get_local_ip(), access_token=self.api.get_token())
     if url_resp.status_code == 412:
       return url_resp
 
