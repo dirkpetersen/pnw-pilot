@@ -18,7 +18,7 @@ commaai/openpilot          upstream
 - **Region:** map data ships for **Washington, Oregon, and Idaho** by default — the first map
   download auto-arms on a fresh device, no settings page required. (British Columbia is optional
   and can be added to the state list.)
-- **Drives:** predominantly **Seattle ↔ Corvallis** (central-western Oregon) on I-5; curve and
+- **Drives:** predominantly **Seattle ↔ central-western Oregon** on I-5; curve and
   longitudinal behavior is calibrated against real drive logs from that corridor (plus I-90
   Snoqualmie Pass and US-12).
 - **Vehicles:** shaped entirely around two cars — a **2021 Tesla Model S Long Range Plus** (Raven
