@@ -74,8 +74,8 @@ class TestLagd:
       with subtests.test(msg=f"liveDelay={msg_dict}"):
         msg = messaging.new_message('liveDelay')
         msg.liveDelay = msg_dict
-        params.put("LiveDelay", msg.to_bytes(), block=True)
-        params.put("CarParamsPrevRoute", CP.as_builder().to_bytes(), block=True)
+        params.put("LiveDelay", msg.to_bytes())
+        params.put("CarParamsPrevRoute", CP.as_builder().to_bytes())
         assert retrieve_initial_lag(params, CP) is None
 
   def test_ncc(self):
