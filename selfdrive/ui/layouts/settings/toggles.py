@@ -26,10 +26,11 @@ DESCRIPTIONS = {
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
   "DmMode": tr_noop(
-    "How long you may look away / hold a phone before openpilot alerts. Off = stock openpilot (strict, " +
-    "everywhere). Highway = relaxed only on freeways and divided multi-lane roads (pose 15 min, phone 30 min), " +
-    "stock-strict on surface streets. Relaxed = relaxed everywhere (pose 3 h, phone 1 h). Glare handling is " +
-    "unchanged in every mode. Your attention is required at all times regardless of this setting."
+    "How long you may look away / hold a phone before openpilot alerts. Default = standard openpilot " +
+    "monitoring (strict, everywhere). Highway = relaxed only on freeways and divided multi-lane roads " +
+    "(pose 15 min, phone 30 min), standard on surface streets. Relaxed = relaxed everywhere (pose 3 h, " +
+    "phone 1 h). Monitoring is never disabled. Glare handling is unchanged in every mode. Your attention " +
+    "is required at all times regardless of this setting."
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
@@ -204,13 +205,14 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
-    # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Off stock strict,
-    # 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after the
-    # Always-On DM toggle below. Not longitudinal-gated — always available.
+    # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Default stock
+    # strict, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
+    # the Always-On DM toggle below. Not longitudinal-gated — always available. ("Default", not "Off" —
+    # monitoring is never off; 0 just means no relaxation.)
     self._dm_mode_setting = multiple_button_item(
       lambda: tr("Driver Monitoring"),
       lambda: tr(DESCRIPTIONS["DmMode"]),
-      buttons=[lambda: tr("Off"), lambda: tr("Highway"), lambda: tr("Relaxed")],
+      buttons=[lambda: tr("Default"), lambda: tr("Highway"), lambda: tr("Relaxed")],
       button_width=255,
       callback=self._set_dm_mode,
       selected_index=self._params.get("DmMode", return_default=True),
