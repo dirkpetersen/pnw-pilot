@@ -38,6 +38,11 @@ PORTALS: dict[str, dict] = {
   # the captive redirect so the portal form comes back with mac/ip/link-login/dst filled — we try
   # several because a network may whitelist one OS's check. `fallback` is the portal page itself.
   # `force` guarantees the CONNECT button is sent even if button-parsing misses it.
+  # `uam_user_prefix` enables the MikroTik GATEWAY-LOGIN step (see accept() step 4): the OSU
+  # "osuvisitor" variant of this portal never forwards us to the gateway's /login (a browser does it
+  # via JS we can't run), so after the TOS hops we POST username="T-<MAC>" + empty password to the
+  # gateway's link-login ourselves (observed 2026-07-08, hotspot-lebjc.peak.org/osuvisitor: manual
+  # POST to http://10.0.0.10/login returned "You are logged in" and restored real internet).
   "peak": {
     "probes": [
       "http://connectivitycheck.gstatic.com/generate_204",   # Android / Chrome
@@ -46,6 +51,7 @@ PORTALS: dict[str, dict] = {
     ],
     "fallback": "http://hotspot-lebjc.peak.org/",
     "force": {"formLoginSubmit": "Submit"},
+    "uam_user_prefix": "T-",
   },
 }
 
@@ -127,6 +133,33 @@ def _online(session) -> bool:
     return False
 
 
+def _wlan_mac() -> str | None:
+  """The comma's own WiFi MAC, uppercase (MikroTik UAM usernames are 'T-<MAC>' in this form)."""
+  try:
+    with open("/sys/class/net/wlan0/address") as f:
+      return f.read().strip().upper()
+  except Exception:
+    return None
+
+
+def _gateway_login_url(session, spec) -> str | None:
+  """Recover the MikroTik gateway's /login URL from a probe's captive redirect (Location header).
+
+  Fallback for when form-parsing yielded nothing (e.g. the portal 403'd our fetches, as recorded on
+  2026-07-08): the redirect itself still names the gateway, e.g.
+  Location: http://10.0.0.10/login?dst=... -> http://10.0.0.10/login
+  """
+  for url in spec.get("probes", []):
+    try:
+      r = session.get(url, timeout=PORTAL_TIMEOUT_S, allow_redirects=False)
+    except Exception:
+      continue
+    loc = r.headers.get("Location", "")
+    if "/login" in loc:
+      return loc.split("?", 1)[0]
+  return None
+
+
 # Persist the last attempt so it survives swaglog rotation AND reboots (the device generates a lot of
 # swaglog, and reboots between a 'visitor' test and the device being reachable kept losing the event).
 # Read it any time with: cat /data/captive_portal_last.json   (file mtime = when it ran).
@@ -182,13 +215,20 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
 
     # 2) replay the form, then follow a few hops (TOS form -> gateway auto-submit form -> done).
     #    Stop early if the portal just re-renders the SAME form (failed submit = no progress).
+    #    While hopping, harvest the MikroTik gateway login target (link-login-only/link-login) and the
+    #    portal-issued UAM username ("T-<MAC>") for the gateway-login step below.
     hops = []
     last = None
     stuck = False
+    gw_login = None
+    uam_user = None
     for _ in range(MAX_FORM_HOPS):
       action, method, fields = _parse_form(resp.text)
       if not fields:
         break
+      gw_login = fields.get("link-login-only") or fields.get("link-login") or gw_login
+      if fields.get("username"):
+        uam_user = fields["username"]
       fields.update(spec.get("force", {}))
       url = urljoin(resp.url, action) if action else resp.url
       sig = (url, tuple(sorted(fields.items())))
@@ -206,8 +246,36 @@ def accept(handler: str | None, already_online: bool = False) -> bool:
     #    re-rendered rejection.) The arbiter marks the portal "done" only on True, so be strict.
     submitted = bool(hops) and not stuck
     ok = submitted and _online(s)
+
+    # 4) MikroTik GATEWAY-LOGIN step (portals with `uam_user_prefix`, e.g. the OSU "osuvisitor"
+    #    variant): the external TOS page relies on JS to bounce the browser to the gateway's /login
+    #    with the "T-<MAC>" username — we can't run JS, so the hop loop above circles on the TOS page
+    #    and never authenticates. Finish the flow explicitly: POST username + empty password to the
+    #    gateway login. Harvested values first; if the portal blocked our page fetches entirely
+    #    (hops=[] / 403, seen 2026-07-08), fall back to deriving both — the login URL from a probe's
+    #    redirect Location and the username from our own wlan0 MAC. Harmless on the variant that
+    #    already worked: this only runs when we're still offline after the hops.
+    gw_hop = None
+    prefix = spec.get("uam_user_prefix")
+    if not ok and prefix is not None:
+      login_url = gw_login or _gateway_login_url(s, spec)
+      user = uam_user
+      if not user:
+        mac = _wlan_mac()
+        user = (prefix + mac) if mac else None
+      if login_url and user:
+        try:
+          resp = s.post(login_url, data={"username": user, "password": "", "dst": ""},
+                        timeout=PORTAL_TIMEOUT_S, allow_redirects=True)
+          gw_hop = {"url": login_url, "status": resp.status_code, "user": user}
+          hops.append(gw_hop)
+          ok = _online(s)
+          submitted = submitted or ok
+        except requests.RequestException:
+          pass
+
     result = {"handler": handler, "hops": hops, "submitted": submitted, "stuck": stuck,
-              "online": ok, "final_url": getattr(resp, "url", ""),
+              "gateway_login": gw_hop, "online": ok, "final_url": getattr(resp, "url", ""),
               "status": getattr(resp, "status_code", None), "ok": ok}
     cloudlog.event("network2xnor_captive_portal", **result)
     _record(result)
