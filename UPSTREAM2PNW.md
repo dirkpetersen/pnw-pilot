@@ -1,7 +1,20 @@
 # UPSTREAM2PNW — commaai/master picks for a new dev branch
 
-**STATUS:** survey only — nothing picked yet. Branch **`upstream2pnw`** (off `4devpnw`) is created to
-receive the picks. Audited 2026-07-08.
+**STATUS: Tier 1 + Tier 2 PICKED 2026-07-08** — all 15 picks + 1 dependency + 1 adaptation are on
+**`upstream2pnw`** (`20d523f99b`, pushed). NOT merged to `4devpnw`, NOT deployed — needs an on-device
+build (log.capnp changed ⇒ full rebuild) and a drive test (esp. camerad BPS). Survey audited 2026-07-08.
+
+**Pick session notes (2026-07-08):**
+- 4 conflicts, all resolved: `test_lagd.py` (dropped `block=True` — this base's `put()` is
+  synchronous-by-default and has no such kwarg), `athenad.py` (dropped upstream's webrtc `startStream`
+  context — not in our tree), `modeld.py` (hand-merged at our 4-space indent; kwargs ctor →
+  field-assign builder, form verified working against the device venv's pycapnp), `ui_state.py`
+  (kept ours — we have no bg worker threads; took the `drop_realtime` helper + `prime_state` use).
+- **+1 dependency discovered and picked:** `d5e75dd0af` "locationd: publish filter time" — adds
+  `LivePose.timestamp @8`, required by the `7fae59167e` torqued/paramsd pick (Gemini caught this).
+- Gemini review (gemini-pro-latest): 4 findings — #2 (missing dep) REAL and fixed; #1
+  (`Action()` not instantiable) refuted on-device; #3 (capnp "corruption") a diff misread (change is
+  one clean line); #4 (block= race) wrong for this base (put blocks by default).
 
 ## Baseline
 
