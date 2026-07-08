@@ -110,6 +110,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
     {"DmMode", {PERSISTENT, INT, "0"}},  // dmroad2pnw: 3-way driver-monitoring timeout selector. 0=Off (stock strict everywhere), 1=Highway (900s pose/1800s phone on freeway or divided-2-lane, stock elsewhere), 2=Relaxed (10800s/3600s everywhere). Default OFF. Does NOT touch the glare knobs.
+    // lebowski2pnw: used by the master-snapshot modeld (usbgpu state); registration verbatim from commaai/master.
+    // Without these, modeld crash-loops with UnknownKeyName at startup (caught in the port review).
+    {"UsbGpuPresent", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
+    {"UsbGpuCompiled", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     // ces2xnor + light-ces-gentle: CES master + VTSC. CESMode is the 3-way source of truth; the bool is
     // kept for back-compat. (MapTargetVelocities already registered by mapd2pnw above.)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
