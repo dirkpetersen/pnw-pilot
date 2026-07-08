@@ -7,7 +7,7 @@ from openpilot.selfdrive.selfdrived.events import Events
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.common.realtime import DT_DMON
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.stat_live import RunningStatFilter
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.hardware import HARDWARE
@@ -210,17 +210,29 @@ class DriverMonitoring:
     self.params = Params()
     self.too_distracted = self.params.get_bool("DriverTooDistracted")
 
-    # PNW: dual-counter state + pre-computed thresholds (3 h pose / 1 h cell phone)
+    # PNW: dual-counter state (decay steps + pre/prompt thresholds are set by DmMode, see below)
     self.awareness_pose = 1.
     self.awareness_phone = 1.
     self._pose_clear_frames = 0
     self._phone_clear_frames = 0
-    self._pose_step = self.settings._DT_DMON / self.settings._POSE_DISTRACTED_TIME
-    self._phone_step = self.settings._DT_DMON / self.settings._PHONE_DISTRACTED_TIME
-    self._pose_threshold_pre    = self.settings._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL    / self.settings._POSE_DISTRACTED_TIME
-    self._pose_threshold_prompt = self.settings._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._POSE_DISTRACTED_TIME
-    self._phone_threshold_pre    = self.settings._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL    / self.settings._PHONE_DISTRACTED_TIME
-    self._phone_threshold_prompt = self.settings._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.settings._PHONE_DISTRACTED_TIME
+
+    # dmroad2pnw: 3-way driver-monitoring timeout selector (param DmMode). _apply_dm_timeouts() derives
+    # the pose/phone decay steps + pre/prompt thresholds from the effective timeout; only the ACTIVE
+    # dual-counter path consumes them, so passive wheel-touch and every GLARE knob are left untouched.
+    #   0=Off      -> stock strict timeouts everywhere (_DISTRACTED_TIME)
+    #   1=Highway  -> 900s pose / 1800s phone on freeway|divided-2-lane, stock strict elsewhere (90 s hold)
+    #   2=Relaxed  -> 10800s pose / 3600s phone everywhere (the prior ungated behavior)
+    self.mem_params = Params("/dev/shm/params")
+    self._ROAD_HOLD_FRAMES = int(90. / self.settings._DT_DMON)   # keep last road verdict 90 s through map dropouts
+    self._DM_REFRESH_FRAMES = int(1.0 / self.settings._DT_DMON)  # re-read mode/road ~1 Hz, not every frame
+    self._dm_refresh_cnt = self._DM_REFRESH_FRAMES               # force a read on the first cycle
+    self._road_relaxed = False
+    self._road_hold_frames = self._ROAD_HOLD_FRAMES              # start expired -> strict until a definite verdict
+    try:
+      self._dm_mode = int(self.params.get("DmMode", return_default=True) or 0)
+    except (UnknownKeyName, ValueError, TypeError):
+      self._dm_mode = 0
+    self._apply_dm_timeouts()
     # End BluePilot
 
     self._reset_awareness()
@@ -309,6 +321,71 @@ class DriverMonitoring:
       distracted_types.append(DistractedType.DISTRACTED_PHONE)
 
     return distracted_types
+
+  def _apply_dm_timeouts(self):
+    # dmroad2pnw: map (DmMode, road verdict) -> effective pose/phone timeout, then recompute the decay
+    # step and pre/prompt thresholds. Counters are normalized 0..1 fractions that persist across a regime
+    # change, so switching (e.g. freeway->city, or relaxed->off) only changes the rate/thresholds — the
+    # worst case on a downshift is an immediate orange PROMPT, never a jump straight to terminal lockout.
+    s = self.settings
+    # pre/prompt lead times (green/orange before terminal) are the same for both relaxed regimes
+    pose_pre, pose_prompt   = s._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL,  s._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
+    phone_pre, phone_prompt = s._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL, s._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
+    if self._dm_mode == 2:                                # Relaxed everywhere (3 h / 1 h)
+      pose_t, phone_t = s._POSE_DISTRACTED_TIME, s._PHONE_DISTRACTED_TIME
+    elif self._dm_mode == 1 and self._road_relaxed:       # Highway, on a qualifying road (15 min / 30 min)
+      pose_t, phone_t = 900., 1800.
+    else:                                                 # Off, or Highway off a qualifying road -> stock strict
+      pose_t = phone_t = s._DISTRACTED_TIME
+      pose_pre = phone_pre = s._DISTRACTED_PRE_TIME_TILL_TERMINAL
+      pose_prompt = phone_prompt = s._DISTRACTED_PROMPT_TIME_TILL_TERMINAL
+    self._pose_step  = s._DT_DMON / pose_t
+    self._phone_step = s._DT_DMON / phone_t
+    self._pose_threshold_pre     = pose_pre    / pose_t
+    self._pose_threshold_prompt  = pose_prompt / pose_t
+    self._phone_threshold_pre    = phone_pre   / phone_t
+    self._phone_threshold_prompt = phone_prompt / phone_t
+
+  def _refresh_dm_mode(self):
+    # dmroad2pnw: throttled (~1 Hz) re-read of the DmMode selector + mapd road class, with a 90 s hold on
+    # the last definite road verdict so brief map/GPS dropouts (tunnels, unmapped stretches) don't yank
+    # the timeout strict at speed. Cheap tmpfs reads; recompute only when the effective regime changes.
+    self._dm_refresh_cnt += 1
+    if self._dm_refresh_cnt < self._DM_REFRESH_FRAMES:
+      return
+    self._dm_refresh_cnt = 0
+
+    try:
+      mode = int(self.params.get("DmMode", return_default=True) or 0)
+    except (UnknownKeyName, ValueError, TypeError):
+      mode = 0
+
+    road_relaxed = self._road_relaxed
+    if mode == 1:  # road class only matters in Highway mode
+      try:
+        ctx = self.mem_params.get("RoadContext", return_default=True) or ""
+        one_way = (self.mem_params.get("MapOneWay", return_default=True) or "") == "1"
+        lanes = int(self.mem_params.get("MapLanes", return_default=True) or 0)
+      except (UnknownKeyName, ValueError, TypeError):
+        # keys not yet registered (helpers running before the params_pyx.so rebuild) or malformed ->
+        # treat as unknown road so the 90 s hold falls strict; never crashes the DM loop.
+        ctx, one_way, lanes = "", False, 0
+      divided_multilane = one_way and lanes >= 2
+      if ctx == "freeway" or divided_multilane:
+        road_relaxed = True
+        self._road_hold_frames = 0
+      elif ctx == "city":
+        road_relaxed = False
+        self._road_hold_frames = 0
+      else:  # unknown / no map -> hold the last verdict up to 90 s, then fall strict
+        self._road_hold_frames += self._DM_REFRESH_FRAMES
+        if self._road_hold_frames >= self._ROAD_HOLD_FRAMES:
+          road_relaxed = False
+
+    if mode != self._dm_mode or road_relaxed != self._road_relaxed:
+      self._dm_mode = mode
+      self._road_relaxed = road_relaxed
+      self._apply_dm_timeouts()
 
   def _update_states(self, driver_state, cal_rpy, car_speed, op_engaged, standstill, demo_mode=False):
     rhd_pred = driver_state.wheelOnRightProb
@@ -595,6 +672,9 @@ class DriverMonitoring:
       brake_disengage_prob=brake_disengage_prob,
       car_speed=highway_speed,
     )
+
+    # dmroad2pnw: pick up the DmMode selector + road class (throttled ~1 Hz) before decaying counters
+    self._refresh_dm_mode()
 
     # Parse data from dmonitoringmodeld
     self._update_states(

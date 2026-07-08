@@ -74,6 +74,10 @@ def main():
         mem.put_nonblocking("RoadName", mo.roadName or "")
         mem.put_nonblocking("WayRef", mo.wayRef or "")
         mem.put_nonblocking("RoadContext", str(mo.roadContext))
+        # dmroad2pnw: bridge oneWay + lane count so driver monitoring (DmMode=Highway) can relax on a
+        # divided multi-lane carriageway even where mapd doesn't class it 'freeway' (oneWay && lanes>=2).
+        mem.put_nonblocking("MapOneWay", "1" if mo.oneWay else "0")
+        mem.put_nonblocking("MapLanes", str(int(mo.lanes)))
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s).

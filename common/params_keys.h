@@ -85,6 +85,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RoadName", {PERSISTENT, STRING}},
     {"WayRef", {PERSISTENT, STRING}},        // location2pnw: mapd road ref (e.g. "I 5") bridged to mem params
     {"RoadContext", {PERSISTENT, STRING}},   // location2pnw: mapd road class 'freeway'|'city'|'unknown' (freeway-gate)
+    {"MapOneWay", {PERSISTENT, STRING}},      // dmroad2pnw: mapd oneWay bridged to mem params ("1"/"0"); with MapLanes -> divided-multilane detect
+    {"MapLanes", {PERSISTENT, STRING}},       // dmroad2pnw: mapd lane count bridged to mem params (int as string; 0 = unknown)
     {"MapDownloadStatus", {CLEAR_ON_MANAGER_START, STRING}},  // mapd2pnw: live OSM DB download state ("OK"/"downloading X/Y"/"incomplete X/Y"/"none") for the debug overlay (updates ~1Hz -> not PERSISTENT)
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
     {"OsmDownloadedDate", {PERSISTENT, STRING}},
@@ -107,6 +109,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
+    {"DmMode", {PERSISTENT, INT, "0"}},  // dmroad2pnw: 3-way driver-monitoring timeout selector. 0=Off (stock strict everywhere), 1=Highway (900s pose/1800s phone on freeway or divided-2-lane, stock elsewhere), 2=Relaxed (10800s/3600s everywhere). Default OFF. Does NOT touch the glare knobs.
     // ces2xnor + light-ces-gentle: CES master + VTSC. CESMode is the 3-way source of truth; the bool is
     // kept for back-compat. (MapTargetVelocities already registered by mapd2pnw above.)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
