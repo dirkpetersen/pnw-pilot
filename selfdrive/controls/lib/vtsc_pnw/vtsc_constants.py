@@ -119,6 +119,14 @@ TWISTY_DESCENT_PITCH = -0.035  # rad (~ -2 deg); road pitch below this is treate
 # I-90 22:08-22:10 PT 2026-06-27: mapd's curve targets (60-68 mph at a 90 set) were the BINDING floor,
 # ~10 mph too conservative. Carry more speed through map curves by scaling the map target up (then capped
 # at cruise). 1.12x ~= +8 mph at 65; still decel-limited + V_MIN-floored downstream, so it can never slam.
+# sharpcurve2pnw iter2 (2026-07-08 US-20 downhill-left takeover, 02:13:32Z): a FLAT 1.8 scale is right
+# for freeway sweepers (mapd's raw targets absurdly low there) but let a genuinely TIGHT rural curve cap
+# at 71 mph -> late -1.5 m/s2 e2e brake -> driver takeover. Scale is now TIERED by the RAW map target:
+# tight curves (raw <= MAP_SCALE_BP[0]) get only MAP_SCALE_MIN inflation (trust mapd where it matters),
+# sweepers (raw >= MAP_SCALE_BP[1]) keep the full MAP_SPEED_SCALE override. Linear between.
+# Tonight's curve: raw ~17.6 m/s -> old cap 71 mph, tiered cap ~58 mph (matches the speed the driver chose).
+MAP_SCALE_MIN     = 1.35  # scale at/below MAP_SCALE_BP[0] raw target (tight curves)
+MAP_SCALE_BP      = (13.4, 29.0)  # m/s raw map target (30 mph .. 65 mph) — interp band for the scale
 MAP_SPEED_SCALE   = 1.8   # >1 = carry more speed through map curves (less conservative MTSC). RAISED
                           #   1.12 -> 1.5 (Snoqualmie I-90 2026-07-01): map safe-speeds came back absurdly low
                           #   (mapV 22-29 mph on curves taken at 60-85), over-capping + forcing throttle
