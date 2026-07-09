@@ -73,6 +73,11 @@ EV_MAX_DIST_M = 6.0 * geo.M_PER_MILE      # cap EV ahead-range shorter than rest
                                           # (Renton) leak through the 1-mi filter. A ~6 mi cap keeps the 1-mi
                                           # corridor meaningful. Trade-off: very-far on-corridor chargers
                                           # preview later (still appear by 6 mi, and on surface within 3 mi).
+EV_FAST_SUPPRESS_L2_MI = 5.0                # driver rule 2026-07-09 (refined): a slow L2 charger is NEVER
+                                           # shown if any DC-fast charger exists within this radius OF THE
+                                           # SLOW CHARGER ITSELF ("why stop at the L2 when a fast one is just
+                                           # up the road from it"). Static dataset property -> computed once
+                                           # at load (bucketed), not per tick. Detour rule below unchanged.
 EV_FAST_DETOUR_MI = 3.0                     # prefer a DC-fast charger over a CLOSER slow L2 unless the fast
                                            # one is MORE than this many mi FURTHER than the slow one (driver
                                            # rule 2026-06-28): only show the slow charger if the fast is >3 mi
@@ -216,8 +221,11 @@ class StaticData:
       ev = self._load_ev(EV_FILE, fast=True)
       if include_l2:                          # cache may not exist yet (download in flight) -> _load_ev returns []
         ev += self._load_ev(EV_OTHER_CACHE, fast=False, del_on_error=True)
+      _annotate_near_fast(ev)                 # driver rule 2026-07-09: slow-with-fast-nearby -> suppressed
       self.ev = ev
-      cloudlog.info("location_services: loaded %d chargers (include_l2=%s)", len(ev), include_l2)
+      n_sup = sum(1 for c in ev if c.get("nearFast"))
+      cloudlog.info("location_services: loaded %d chargers (include_l2=%s, %d L2 suppressed by nearby fast)",
+                    len(ev), include_l2, n_sup)
     # rest areas: merge ALL *.json under REST_DIR, each a list of {name, lat, lon, ...}
     try:
       files = sorted(f for f in os.listdir(REST_DIR) if f.endswith(".json"))
@@ -818,6 +826,43 @@ class NetLogger(threading.Thread):
       self._stop.wait(NET_LOG_PERIOD_S)
 
 
+def _fast_over_slow(e_fast, e_slow):
+  """Fast-vs-slow preference (2026-06-28 detour rule): fast preferred unless a CLOSER slow one makes
+  the fast a >EV_FAST_DETOUR_MI detour. (The 2026-07-09 near-fast suppression happens EARLIER, as a
+  per-item nearFast flag set at load — slow items with a fast charger within EV_FAST_SUPPRESS_L2_MI of
+  THEM never reach this chooser.)"""
+  if e_fast and e_slow and e_slow[1] < e_fast[1] and (e_fast[1] - e_slow[1]) > EV_FAST_DETOUR_MI:
+    return e_slow
+  return e_fast or e_slow
+
+
+def _annotate_near_fast(ev):
+  """driver rule 2026-07-09: flag each SLOW charger that has a DC-fast charger within
+  EV_FAST_SUPPRESS_L2_MI of the slow charger's own location (nearFast=True -> suppressed from display).
+  Bucketed by 0.1 deg latitude so the one-time pass at data load stays cheap (no per-tick cost)."""
+  lim_m = EV_FAST_SUPPRESS_L2_MI * geo.M_PER_MILE
+  buckets = {}
+  for c in ev:
+    if c.get("fast"):
+      buckets.setdefault(round(c["lat"], 1), []).append(c)
+  dlat = 0.1
+  for c in ev:
+    if c.get("fast"):
+      continue
+    near = False
+    b = round(c["lat"], 1)
+    for bb in (b - dlat, b, b + dlat):
+      for fc in buckets.get(round(bb, 1), ()):
+        if abs(fc["lon"] - c["lon"]) > 0.15:     # ~7 mi lon prefilter at these latitudes
+          continue
+        if geo.haversine_m(c["lat"], c["lon"], fc["lat"], fc["lon"]) <= lim_m:
+          near = True
+          break
+      if near:
+        break
+    c["nearFast"] = near
+
+
 def _pick_ev(items, on_freeway, lat, lon, brg, path):
   """Nearest charger: AHEAD along the mapd path on a freeway, else nearest within the surface radius."""
   if on_freeway:
@@ -907,18 +952,19 @@ def main():
         # Tesla: ALTERNATE the EV line between the nearest Tesla SUPERCHARGER and the nearest OTHER charger
         # (driver req 2026-07-01), Supercharger first, toggling every EV_ALT_S. Each side anti-flickered.
         sc = sc_hold.update(_pick_ev([c for c in ev_items if _is_supercharger(c)], on_freeway, lat, lon, brg, path), now, lat, lon)
-        oth = other_hold.update(_pick_ev([c for c in ev_items if not _is_supercharger(c)], on_freeway, lat, lon, brg, path), now, lat, lon)
+        # driver rule 2026-07-09: within the OTHER (non-Supercharger) side, DC-fast within 5 mi
+        # suppresses slow L2 — pick fast/slow separately and combine via _fast_over_slow.
+        oth_f = _pick_ev([c for c in ev_items if not _is_supercharger(c) and c.get("fast")], on_freeway, lat, lon, brg, path)
+        oth_s = _pick_ev([c for c in ev_items if not _is_supercharger(c) and not c.get("fast") and not c.get("nearFast")],
+                         on_freeway, lat, lon, brg, path)
+        oth = other_hold.update(_fast_over_slow(oth_f, oth_s), now, lat, lon)
         e = (sc if int(now / EV_ALT_S) % 2 == 0 else oth) or sc or oth   # only one in range -> just show it
       else:
         # non-Tesla (e.g. Lightning): prefer the DC-fast charger; only show a CLOSER slow L2 when the nearest
         # fast one is MORE than EV_FAST_DETOUR_MI further (driver 2026-06-28).
         e_fast = _pick_ev([c for c in ev_items if c.get("fast")], on_freeway, lat, lon, brg, path)
-        e_slow = _pick_ev([c for c in ev_items if not c.get("fast")], on_freeway, lat, lon, brg, path)
-        if e_fast and e_slow and e_slow[1] < e_fast[1] and (e_fast[1] - e_slow[1]) > EV_FAST_DETOUR_MI:
-          e = e_slow
-        else:
-          e = e_fast or e_slow
-        e = ev_hold.update(e, now, lat, lon)
+        e_slow = _pick_ev([c for c in ev_items if not c.get("fast") and not c.get("nearFast")], on_freeway, lat, lon, brg, path)
+        e = ev_hold.update(_fast_over_slow(e_fast, e_slow), now, lat, lon)
 
       out["rest"] = ({"state": "ok", "dist_mi": r[1], "name": r[0].get("name"), "dir": r[0].get("dir", ""),
                       "town": r[0].get("town", "")} if r else {"state": "nodata"})
