@@ -2,3 +2,8 @@
 	url = https://gitlab.com/commaai/openpilot-lfs.git/info/lfs
 	pushurl = ssh://git@gitlab.com/commaai/openpilot-lfs.git
 	locksverify = false
+	# lebowski2pnw (2026-07-09): the 1.7 GB big_driving_supercombo is USB-GPU-only — the 3X never
+	# reads its content (modeld builds the big pkl only when UsbGpuPresent). Excluding it from LFS
+	# fetches cuts ~95% of install/update download bytes. Pull it explicitly if ever needed:
+	#   git lfs pull --include big_driving_supercombo.onnx
+	fetchexclude = *big_driving_supercombo.onnx
