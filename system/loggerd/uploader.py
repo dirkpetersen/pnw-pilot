@@ -85,14 +85,18 @@ MAX_UPLOAD_SIZES = {
 }
 
 
-def pass2_allowed(network_type: int, metered: bool) -> bool:
+def pass2_allowed(network_type: int, metered: bool, onroad: bool = False) -> bool:
   # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on real external WiFi
   # (NetworkType.wifi). Never on LTE, never on the hotspot.
   # connect2pnw: ...and never when the active connection is flagged METERED (e.g. a phone hotspot the
   # user marked metered -> deviceState.networkMetered True). HD video/rlog must not burn metered data
   # (pass 1 small files still run, throttled). FirehoseActive is only set during a pass-2 transfer, so
   # gating pass 2 here also keeps the green "uploading" indicator off on metered connections.
-  return network_type in PASS2_NETWORK_TYPES and not metered
+  # connect2pnw ONROAD gate (2026-07-09 night drive): ...and never while DRIVING. 75 MB pass-2 bursts +
+  # segment rotation caused transient CPU/IO stalls that surfaced as selfdrivedLagging ('System
+  # Lagging') and locationdTemporaryError (inputsOK false ~0.4 s: late camOdo frames) alerts. Pass 1
+  # (qlog/qcam, tiny) still flows onroad so the dashboard stays live; the HD bulk uploads when parked.
+  return network_type in PASS2_NETWORK_TYPES and not metered and not onroad
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -378,7 +382,8 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
       if not sm.updated['deviceState']:
         continue
       ds = sm['deviceState']
-      if not pass2_allowed(ds.networkType.raw, ds.networkMetered) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      onroad = ds.started   # onroad gate: clear the indicator too when a drive starts mid-transfer
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
         uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
@@ -417,6 +422,7 @@ def main(exit_event: threading.Event | None = None) -> None:
   while not exit_event.is_set():
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
+    onroad = not offroad   # connect2pnw onroad gate: pass 2 (75 MB bursts) only while parked
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
     if network_type == NetworkType.none:
       if allow_sleep:
@@ -440,7 +446,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
     # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
     p2 = None
-    if pass2_allowed(network_type_raw, metered) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, onroad) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 
