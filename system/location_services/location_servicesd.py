@@ -82,6 +82,10 @@ EV_FAST_DETOUR_MI = 3.0                     # prefer a DC-fast charger over a CL
                                            # one is MORE than this many mi FURTHER than the slow one (driver
                                            # rule 2026-06-28): only show the slow charger if the fast is >3 mi
                                            # further than it; otherwise the fast (quality) wins.
+EV_NEARFIELD_MI = 2.5                       # ev2pnw 2026-07-09: freeway near-field bypass — a charger this
+                                           # close (straight-line, not yet passed) shows regardless of the
+                                           # ahead-cone (heading-line perp fails on curves right when you
+                                           # are closest). Rochester SC incident.
 SURFACE_RANGE_MI = 3.0                      # OFF-freeway: show nearest EV/rest within this straight-line radius (any direction)
 POI_HOLD_S = 8.0                            # debounce: keep showing a POI for this long after the ahead-cone
                                             # momentarily drops it (curvy roads swing it in/out) — anti-flicker
@@ -864,9 +868,20 @@ def _annotate_near_fast(ev):
 
 
 def _pick_ev(items, on_freeway, lat, lon, brg, path):
-  """Nearest charger: AHEAD along the mapd path on a freeway, else nearest within the surface radius."""
+  """Nearest charger: AHEAD along the mapd path on a freeway, else nearest within the surface radius.
+
+  ev2pnw near-field bypass (2026-07-09, Rochester WA Supercharger 0.8 mi away not shown): beyond
+  mapd's ~350 m path the freeway 'ahead' filter projects onto the straight heading line, so on a
+  curve a charger right beside the highway fails the 1 mi perpendicular test and never displays
+  (same disease the rest line had). Any charger within EV_NEARFIELD_MI straight-line shows
+  REGARDLESS of the cone — items are already recede-filtered upstream (ev_recede.keep), so a
+  passed charger still drops. The cone stays in charge of the far preview."""
   if on_freeway:
-    return _line_static(items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
+    near = _nearest_within(items, lat, lon, EV_NEARFIELD_MI)
+    far = _line_static(items, lat, lon, brg, path, max_perp_m=EV_MAX_PERP_M, max_dist_m=EV_MAX_DIST_M)
+    if near and (far is None or near[1] < far[1]):
+      return near
+    return far
   return _nearest_within(items, lat, lon, SURFACE_RANGE_MI)
 
 
