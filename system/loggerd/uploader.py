@@ -161,6 +161,21 @@ class Uploader:
     # connect2xnor: clear the firehose indicator on startup so a stale param
     # from a crash doesn't leave the UI showing "uploading" forever.
     self._set_firehose_active(False)
+    # connect2pnw phase indicator: same startup clear for the pass-1 flag (sidebar GREEN)
+    self._pass1_active = None
+    self.set_pass1_active(False)
+
+  def set_pass1_active(self, active: bool) -> None:
+    # connect2pnw (driver req 2026-07-09): sidebar upload-phase colors — GREEN while pass-1 (qlog/qcam)
+    # uploads make progress, BLUE while a pass-2 HD transfer is in flight (FirehoseActive). Write only
+    # on CHANGE (the main loop iterates fast; a per-iteration param write would be needless churn).
+    if active == self._pass1_active:
+      return
+    self._pass1_active = active
+    try:
+      self.params.put_bool_nonblocking("Pass1UploadActive", active)
+    except Exception:
+      cloudlog.exception("failed to set pass1 active param")
 
   def _set_firehose_active(self, active: bool) -> None:
     # connect2xnor: drives the repurposed "Firehose Mode" UI indicator. ON only
@@ -433,6 +448,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
     metered = sm['deviceState'].networkMetered
     p1 = uploader.step(network_type_raw, metered)               # pass 1 (small files)
+    uploader.set_pass1_active(p1 is True)   # sidebar GREEN while pass-1 progresses (change-only write)
     if p1 is None:
       pass1_run = 0
     elif p1:

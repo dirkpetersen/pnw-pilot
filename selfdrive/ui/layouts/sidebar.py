@@ -33,6 +33,7 @@ class Colors:
   WARNING = rl.Color(218, 202, 37, 255)
   DANGER = rl.Color(201, 34, 49, 255)
   GREEN = rl.Color(0, 255, 64, 255)  # connect-upload-status: matches the engaged-green used onroad
+  BLUE = rl.Color(74, 150, 255, 255)  # connect2pnw: pass-2 (HD) upload phase (driver req 2026-07-09)
 
   # UI elements
   METRIC_BORDER = rl.Color(255, 255, 255, 85)
@@ -136,10 +137,14 @@ class Sidebar(Widget):
     if ui_state.params.get_bool("FirehoseActive"):
       # connect2pnw: show the live HD upload speed (Mbps) the uploader publishes per completed pass-2
       # file (~1/min); fall back to "UPLOADING" until the first file's speed is known. One extra cheap
-      # param read at this same ~2 Hz poll.
+      # param read at this same ~2 Hz poll. BLUE = pass-2/HD phase (driver req 2026-07-09).
       mbps = int(ui_state.params.get("FirehoseSpeed", return_default=True) or 0)
       value = f"{mbps} Mbps" if mbps > 0 else tr_noop("UPLOADING")
-      self._connect_status.update(tr_noop("CONNECT"), value, Colors.GREEN)
+      self._connect_status.update(tr_noop("CONNECT"), value, Colors.BLUE)
+      return
+    if ui_state.params.get_bool("Pass1UploadActive"):
+      # connect2pnw: GREEN = pass-1 phase (qlog/qcam logs flowing; the small always-allowed files)
+      self._connect_status.update(tr_noop("CONNECT"), tr_noop("UPLOADING"), Colors.GREEN)
       return
 
     last_ping = device_state.lastAthenaPingTime

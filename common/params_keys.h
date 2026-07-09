@@ -107,6 +107,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
+    {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
     {"DmMode", {PERSISTENT, INT, "0"}},  // dmroad2pnw: 3-way driver-monitoring timeout selector. 0=Off (stock strict everywhere), 1=Highway (900s pose/1800s phone on freeway or divided-2-lane, stock elsewhere), 2=Relaxed (10800s/3600s everywhere). Default OFF. Does NOT touch the glare knobs.
