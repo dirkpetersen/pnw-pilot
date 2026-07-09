@@ -31,7 +31,6 @@ from datetime import UTC, datetime
 
 import cereal.messaging as messaging
 
-import cereal.messaging as messaging
 from cereal import car
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
@@ -502,6 +501,32 @@ class _PoliceRecede:
     return round(d, 1)
 
 
+_POLICE_DEBUG_PATH = "/data/pnw/location/police_debug.jsonl"
+_POLICE_DEBUG_MAX_B = 2_000_000   # ~2 MB cap; truncate-restart beyond (forensics, not an archive)
+_police_dbg_last = {"sig": None}
+
+
+def _police_debug_log(dbg, poi, lat, lon, brg):
+  """police2pnw forensics (2026-07-09): the driver saw our banner place a report ~0.5 mi beyond the
+  Waze app's icon. The raw pull only ever lived in memory, so the discrepancy was undiagnosable after
+  the fact. Persist one line per CHANGE (not per tick) with every report's coords/age/magvar and which
+  filter dropped it (stale/opp/passed) + which one we chose — so the next mismatch is a one-minute
+  lookup. Best-effort: any failure is swallowed; display path is unaffected."""
+  try:
+    sig = (tuple((d["uuid"], d["v"]) for d in dbg), (poi or {}).get("uuid"))
+    if sig == _police_dbg_last["sig"] or not dbg:
+      return
+    _police_dbg_last["sig"] = sig
+    import os
+    if os.path.exists(_POLICE_DEBUG_PATH) and os.path.getsize(_POLICE_DEBUG_PATH) > _POLICE_DEBUG_MAX_B:
+      os.replace(_POLICE_DEBUG_PATH, _POLICE_DEBUG_PATH + ".1")   # keep one generation
+    with open(_POLICE_DEBUG_PATH, "a") as f:
+      f.write(json.dumps({"t": _now_epoch(), "gps": [round(lat, 5), round(lon, 5)], "brg": round(brg or 0, 1),
+                          "chosen": (poi or {}).get("uuid", "")[:8] if poi else None, "reports": dbg}) + "\n")
+  except Exception:
+    pass
+
+
 def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   if state != "ok":
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
@@ -515,19 +540,30 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   # Track closest-approach on EVERY surviving report so one is marked PASSED even while a nearer one shows,
   # then drop reports we've already driven past so they can't linger / reappear (2026-07-06).
   fresh = []
+  dbg = []          # police2pnw forensics (2026-07-09 "0.5 mi off vs the Waze app"): per-report verdicts
   for al in alerts:
+    verdict = "kept"
     age = _age_min(al.get("ts"), now)
     if age is not None and age * 60 > POLICE_STALE_S:
-      continue                                    # too old
-    if _police_dir(al, brg) == "opp":
-      continue                                    # other side of the road -> don't alert
-    if recede.is_passed(al):
-      continue                                    # already drove past this one -> don't resurrect it
-    recede.observe(al, lat, lon, brg)             # update closest-approach; may mark it passed this tick
-    if recede.is_passed(al):
-      continue                                    # just crossed behind us -> drop
-    fresh.append(al)
+      verdict = "stale"                           # too old
+    elif _police_dir(al, brg) == "opp":
+      verdict = "opp"                             # other side of the road -> don't alert
+    elif recede.is_passed(al):
+      verdict = "passed"                          # already drove past this one -> don't resurrect it
+    else:
+      recede.observe(al, lat, lon, brg)           # update closest-approach; may mark it passed this tick
+      if recede.is_passed(al):
+        verdict = "passed_now"                    # just crossed behind us -> drop
+    try:
+      dbg.append({"lat": round(float(al.get("lat", 0)), 5), "lon": round(float(al.get("lon", 0)), 5),
+                  "mi": recede.live_mi(al, lat, lon), "age_min": age, "v": verdict,
+                  "magvar": al.get("magvar"), "uuid": (al.get("uuid") or "")[:8]})
+    except (TypeError, ValueError):
+      pass
+    if verdict == "kept":
+      fresh.append(al)
   poi, _a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
+  _police_debug_log(dbg, poi, lat, lon, brg)
   if poi is None:
     return {"state": "clear"}                     # nothing ahead
   live = recede.live_mi(poi, lat, lon)
