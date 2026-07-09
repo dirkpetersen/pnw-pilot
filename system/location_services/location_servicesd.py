@@ -228,6 +228,10 @@ class StaticData:
       self._rest_sig = sig
       rest = []
       for f in files:
+        # rest2pnw corridor tag (2026-07-09): the corridor lives only in the FILENAME (i5_rest_areas.json
+        # -> refs {"I 5"}). Tag each item so selection can match the live mapd WayRef and skip the fragile
+        # long-range heading-line geometry entirely (see _line_rest_corridor).
+        refs = _REST_FILE_REFS.get(f.split("_rest_areas")[0], ())
         try:
           with open(os.path.join(REST_DIR, f)) as fh:
             items = json.load(fh)
@@ -236,6 +240,7 @@ class StaticData:
               rest.append({"lat": float(it["lat"]), "lon": float(it["lon"]),
                            "name": it.get("display") or it.get("name") or "Rest area",
                            "dir": it.get("dir") or "",
+                           "refs": refs,
                            "town": it.get("town") or it.get("city") or ""})
             except (KeyError, TypeError, ValueError):
               continue
@@ -385,7 +390,12 @@ def _read_mem(mem):
     ctx = ctx.decode() if isinstance(ctx, bytes) else (ctx or "")
   except Exception:
     ctx = ""
-  return lat, lon, brg, path, ctx
+  try:
+    wayref = mem.get("WayRef", return_default=True)
+    wayref = wayref.decode() if isinstance(wayref, bytes) else (wayref or "")
+  except Exception:
+    wayref = ""
+  return lat, lon, brg, path, ctx, wayref
 
 
 def _police_dir(alert, cur_bearing):
@@ -630,6 +640,42 @@ def _nearest_within(items, lat, lon, max_mi):
   return (best, round(best_m / geo.M_PER_MILE, 1)) if best is not None else None
 
 
+# rest2pnw: filename stem -> the mapd WayRef values that corridor's rest file covers.
+_REST_FILE_REFS = {"i5": ("I 5",), "i90": ("I 90",), "i82": ("I 82",), "us12_us95": ("US 12", "US 95")}
+_DIR_BEARING = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}
+
+
+def _line_rest_corridor(items, lat, lon, brg, wayref):
+  """rest2pnw (2026-07-09): corridor-IDENTITY rest-area selection. The 10-mi rest preview flapped
+  in/out on curving I-5 because beyond mapd's ~350 m path, 'ahead' projects onto the straight
+  extrapolated heading line — a genuinely on-corridor rest area drifts past the 1.5 mi perpendicular
+  filter on every bend. But corridor identity makes that geometry unnecessary: we KNOW the road we're
+  on (mapd WayRef, e.g. 'I 5') and each rest item is tagged with its corridor refs + service direction
+  (N/S/E/W). Selection: same corridor + direction within 90 deg of our heading + genuinely ahead
+  (bearing-to-POI within 90 deg of heading; adequate for interstate curvature at <=15 mi) -> nearest
+  straight-line. Cross-corridor leaks are impossible BY IDENTITY (the bug the perp filter was for).
+  Returns (poi, dist_mi) or None. Falls back to None when off-corridor (caller uses the old geometry)."""
+  if not wayref:
+    return None
+  best, best_mi = None, None
+  for it in items:
+    if wayref not in it.get("refs", ()):
+      continue
+    db = _DIR_BEARING.get((it.get("dir") or "").upper())
+    if db is not None and brg is not None and abs(geo.normalize180(db - brg)) > 90.0:
+      continue                                    # serves the other direction of travel
+    if brg is not None and abs(geo.normalize180(geo.bearing_deg(lat, lon, it["lat"], it["lon"]) - brg)) > 90.0:
+      continue                                    # behind us
+    d = geo.haversine_m(lat, lon, it["lat"], it["lon"]) / geo.M_PER_MILE
+    if d > DISPLAY_MAX_DIST_M / geo.M_PER_MILE:
+      continue
+    if best_mi is None or d < best_mi:
+      best, best_mi = it, d
+  if best is None:
+    return None
+  return best, round(best_mi, 1)
+
+
 def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
   kw = {"max_perp_m": max_perp_m}
   if max_dist_m is not None:
@@ -820,7 +866,7 @@ def main():
       is_tesla = _read_is_tesla(params)
       last_car_check = now
 
-    lat, lon, brg, path, ctx = _read_mem(mem)
+    lat, lon, brg, path, ctx, wayref = _read_mem(mem)
     out = {"enabled": True, "ts": int(_now_epoch())}
 
     # Two rules (driver request 2026-06-28):
@@ -844,9 +890,13 @@ def main():
       else:
         out["police"] = {"state": "nodata"}
 
-      # rest area (car-agnostic)
+      # rest area (car-agnostic). rest2pnw (2026-07-09): corridor-identity selection FIRST — stable
+      # 15 mi previews on a known corridor (no heading-line flapping on curves); geometric fallback
+      # only when mapd has no WayRef / we're on an untagged corridor.
       if on_freeway:
-        r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
+        r = _line_rest_corridor(static.rest, lat, lon, brg, wayref)
+        if r is None:
+          r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
       else:
         r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
       r = rest_hold.update(r, now, lat, lon)   # debounce: anti-flicker on curves + drop-when-passed (distance-trend)
