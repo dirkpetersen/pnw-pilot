@@ -1,9 +1,13 @@
 # LEBOWSKI2PNW — port the commaai-master modeld stack + lebowski driving model
 
-**STATUS:** ported on branch **`lebowski2pnw`** (`40cd9cb627`, off `4devpnw @ 19bedc17c5`, pushed
-2026-07-08). Host-side verified only (compile/lint/imports/consumer-field cross-check). **NOT built,
-NOT deployed, NOT driven.** This changes *driving behavior itself* — treat as the highest-risk effort
-in flight and deploy solo, never bundled.
+**STATUS: DEPLOYED 2026-07-09** — merged to `4devpnw`, live on the 3X @ **`09fcf8cf2d`**. On-device
+build succeeded (~4 min scons incl. driving_tinygrad.pkl + dmonitoring pkls), zero errors after boot,
+`DmMode=1` preserved. **NOT yet driven** — the first drive is calibration-grade (CES/VTSC tuned
+against the old model). Post-port fixes found during deploy: UsbGpu params registered (crash-loop),
+tinygrad pin re-recorded (git add had clobbered update-index), SConscript hw.py dep path
+(common/hardware→system/hardware), and OOM during LFS smudge worked around via
+GIT_LFS_SKIP_SMUDGE=1 reset + git lfs pull (runbook updated). Gemini review: its 5 findings were all
+refuted against this tree; the real bugs above were caught by direct verification + the device build.
 
 ## What & why
 
