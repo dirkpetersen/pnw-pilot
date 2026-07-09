@@ -127,6 +127,19 @@ TWISTY_DESCENT_PITCH = -0.035  # rad (~ -2 deg); road pitch below this is treate
 # Tonight's curve: raw ~17.6 m/s -> old cap 71 mph, tiered cap ~58 mph (matches the speed the driver chose).
 MAP_SCALE_MIN     = 1.35  # scale at/below MAP_SCALE_BP[0] raw target (tight curves)
 MAP_SCALE_BP      = (13.4, 29.0)  # m/s raw map target (30 mph .. 65 mph) — interp band for the scale
+
+
+def tiered_map_scale(tv_raw: float) -> float:
+  """sharpcurve2pnw iter2: the effective MTSC scale for a RAW map target speed (m/s). Tight curves get
+  MAP_SCALE_MIN, sweepers get MAP_SPEED_SCALE, linear between. Single source of truth — used by BOTH
+  the VTSC/MTSC fold (vtsc_pnw.most_binding_map_curve) and CES's sharp-curve classification
+  (ces_pnw.decide_active) so cap and trigger always agree on what a map target 'really means'."""
+  lo_bp, hi_bp = MAP_SCALE_BP
+  if tv_raw <= lo_bp:
+    return MAP_SCALE_MIN
+  if tv_raw >= hi_bp:
+    return MAP_SPEED_SCALE
+  return MAP_SCALE_MIN + (MAP_SPEED_SCALE - MAP_SCALE_MIN) * (tv_raw - lo_bp) / (hi_bp - lo_bp)
 MAP_SPEED_SCALE   = 1.8   # >1 = carry more speed through map curves (less conservative MTSC). RAISED
                           #   1.12 -> 1.5 (Snoqualmie I-90 2026-07-01): map safe-speeds came back absurdly low
                           #   (mapV 22-29 mph on curves taken at 60-85), over-capping + forcing throttle

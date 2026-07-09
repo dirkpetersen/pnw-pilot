@@ -157,16 +157,10 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     if tv <= 0.0 or not (0.0 < d <= horizon_m):
       continue
     # sharpcurve2pnw iter2 (2026-07-08): TIERED scale — trust mapd on tight curves (raw target low),
-    # override it on sweepers (raw target high, where mapd runs absurdly conservative). Linear between
-    # the breakpoints; speed_scale (the caller's MAP_SPEED_SCALE) stays the sweeper/top end so the
-    # existing sweeper tune carries over unchanged.
-    lo_bp, hi_bp = C.MAP_SCALE_BP
-    if tv <= lo_bp:
-      scale = C.MAP_SCALE_MIN
-    elif tv >= hi_bp:
-      scale = speed_scale
-    else:
-      scale = C.MAP_SCALE_MIN + (speed_scale - C.MAP_SCALE_MIN) * (tv - lo_bp) / (hi_bp - lo_bp)
+    # override it on sweepers (raw target high, where mapd runs absurdly conservative). The shared
+    # helper keeps this fold and CES's sharp-curve classification in agreement. Tiering engages only
+    # on the production call (speed_scale == MAP_SPEED_SCALE); explicit/test callers keep flat scaling.
+    scale = C.tiered_map_scale(tv) if math.isclose(speed_scale, C.MAP_SPEED_SCALE) else speed_scale
     tv_eff = min(tv * scale, v_cruise_cap)   # MTSC scale + clamp applied before selection
     if tv_eff <= 0.0:
       continue

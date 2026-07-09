@@ -44,7 +44,14 @@ CURVE_HWY_GATE = 55 * CV.MPH_TO_MS  # m/s; spd_lim >= this => hand freeway curve
 # raw safe-speeds run systematically low, and the raw compare tripped Experimental on sweepers driven at
 # 79-86 mph. MAP_SPEED_SCALE is imported from vtsc_constants so MTSC and this exception always agree.
 CURVE_SHARP_MAP_V = 30.0  # m/s (vs scaled map target)
-from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import MAP_SPEED_SCALE  # noqa: E402
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import MAP_SPEED_SCALE, tiered_map_scale  # noqa: E402,F401
+# ces2pnw lead-pacing gate (2026-07-08): a lead within this range that is NOT slower than us (see
+# LEAD_PULLAWAY_MARGIN) suppresses the curve Experimental trip ENTIRELY — including sharp curves, per
+# explicit driver directive ("the lead car cannot pull away"). VTSC (vision) + MTSC (tiered map) with
+# the decel envelope + sharp-curve firmer rate-limit remain the independent physical cap either way.
+# Range kept tight (Gemini review: a far lead may already be EXITING the curve we are entering) so
+# suppression only applies while the lead is genuinely pacing the same road segment.
+CURVE_LEAD_PACE_DREL = 100.0  # m
 
 # --- lead -------------------------------------------------------------------
 SLOW_LEAD_DV   = 5.0          # m/s: lead this much slower than us -> closing -> Experimental

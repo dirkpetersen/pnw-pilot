@@ -140,8 +140,21 @@ def decide_active(s) -> tuple[bool, str]:
   # run systematically low (~1.5-1.8x), so the raw compare tripped Experimental on I-84 sweepers the driver
   # takes at 79-86 mph (raw 24-30 m/s, 2026-07-06 09:42-09:48 cluster). Genuinely sharp curves (scaled
   # target still < CURVE_SHARP_MAP_V) keep the exception and full braking authority.
-  sharp_curve = 0.0 < s["map_target_v"] * C.MAP_SPEED_SCALE < C.CURVE_SHARP_MAP_V
-  if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve):
+  # sharpcurve2pnw iter2: use the TIERED effective scale (shared helper) so this classification and the
+  # MTSC fold agree — a flat 1.8 here would inflate a tight curve's target past CURVE_SHARP_MAP_V and
+  # drop its sharp flag exactly where full braking authority matters most.
+  sharp_curve = 0.0 < s["map_target_v"] * C.tiered_map_scale(s["map_target_v"]) < C.CURVE_SHARP_MAP_V
+  # ces2pnw lead-pacing gate (2026-07-08 02:12:57Z, lebowski first drive): a curve-triggered
+  # Experimental HELD through an extended 100%-map winding stretch while the (faster) lead pulled away
+  # 43->126 m — e2e crawls, and the driver ruled it unacceptable ("the lead car cannot pull away").
+  # When a lead within CURVE_LEAD_PACE_DREL is pacing us (not slower than us minus the margin), the
+  # curve trip is suppressed ENTIRELY — including sharp curves: the pacing lead is live evidence of a
+  # drivable line, and VTSC+MTSC (tiered scale + decel envelope + sharp-curve firmer rate-limit) remain
+  # the independent physical cap either way. A lead that brakes/slows flips to the slowLead trigger
+  # below; a lead beyond the range (or lost) re-arms the curve trip immediately.
+  lead_pacing = (s["has_lead"] and s["lead_drel"] < C.CURVE_LEAD_PACE_DREL
+                 and s["lead_vlead"] >= v - C.LEAD_PULLAWAY_MARGIN)
+  if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve) and not lead_pacing:
     # MAP: pfeiferj MapTargetVelocities gives a safe curve speed ahead. Trip when an upcoming
     # target speed within the lookahead is meaningfully (>MIN_SLOWDOWN) below current speed.
     map_curve = (s["map_target_v"] > 0.0
