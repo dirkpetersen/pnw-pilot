@@ -406,7 +406,12 @@ class SelfdriveD:
 
     # TODO: fix simulator
     if not SIMULATION or REPLAY:
-      if self.sm['modelV2'].frameDropPerc > 1:
+      # lebowski2pnw retune (2026-07-09, live drive): upstream pick 205ca5c36e tightened this 20 -> 1
+      # for comma-four-class headroom; on the 3X + the deep lebowski model a transient stop-and-go
+      # scheduling hiccup can spike past 1% and throw a take-control alert at the driver (observed
+      # ~04:4xZ). 5% still catches real sustained lag (steady-state measured 0.00%) without hair-trigger
+      # alerts on momentary spikes.
+      if self.sm['modelV2'].frameDropPerc > 5:
         self.events.add(EventName.modeldLagging)
 
     # Decrement personality on distance button press
