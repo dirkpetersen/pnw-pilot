@@ -154,7 +154,14 @@ def decide_active(s) -> tuple[bool, str]:
   # below; a lead beyond the range (or lost) re-arms the curve trip immediately.
   lead_pacing = (s["has_lead"] and s["lead_drel"] < C.CURVE_LEAD_PACE_DREL
                  and s["lead_vlead"] >= v - C.LEAD_PULLAWAY_MARGIN)
-  if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve) and not lead_pacing:
+  # ces2pnw accel-zone curve gate (2026-07-09 03:01-03:15Z on-ramp): a highway on-ramp IS a curve, so
+  # the curve trip pinned the merge at 38-39 mph (set 90, no lead, aEgo ~0 for 7 s) while the driver
+  # rode the gas — _accelerate_zone (already gating lowSpeed for exactly this merge case) now gates the
+  # curve trip too. VTSC (vision) + tiered MTSC still cap the curved portion physically; suppressing
+  # only the Experimental e2e layer lets Chill's MPC pull to the merge speed the moment VTSC releases.
+  # Solo-cruising-at-set into a curve (v_set ~ v_ego, e.g. Terwilliger) keeps the trip: az is False there.
+  if t["curves"] and v > C.CRUISING_SPEED and (not freeway_gated or sharp_curve) \
+     and not lead_pacing and not _accelerate_zone(s):
     # MAP: pfeiferj MapTargetVelocities gives a safe curve speed ahead. Trip when an upcoming
     # target speed within the lookahead is meaningfully (>MIN_SLOWDOWN) below current speed.
     map_curve = (s["map_target_v"] > 0.0
