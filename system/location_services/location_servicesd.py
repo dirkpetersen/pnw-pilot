@@ -105,7 +105,10 @@ REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
 DISPLAY_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # all three (police/EV/rest) show a POI starting ~15 mi ahead (driver request)
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
-POLICE_STALE_S = 20 * 60                   # drop crowd reports older than this (fresher-only, driver req 2026-07-01)
+# POLICE freshness (driver decision 2026-07-09, supersedes the 20-min fresher-only rule of 2026-07-01):
+# ALIGN WITH THE WAZE APP — show a report for as long as Waze's own feed still returns it (Waze expires
+# reports server-side; when it drops from the pull, we drop it). The AGE is surfaced instead of filtered:
+# age_min rides in the payload and the UI renders "(NN min)" so the driver can judge staleness themselves.
 POLICE_RECEDE_MI = 0.3                     # once we've receded this far past closest approach to a police report
                                            # we've PASSED it -> clear it (driver req 2026-07-06: "distance
                                            # increasing = moving away -> give it a clear"). Matches POI_RECEDE_MI.
@@ -554,8 +557,8 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
   recede.prune(alerts)                           # bound tracking state to the current Waze pull
-  # Drop STALE reports BEFORE picking the nearest, so a near-but-ancient report can't mask a fresh one
-  # further ahead (Gemini bug #1). A report with no timestamp is kept — we can't age it. Also drop
+  # Waze-app parity (2026-07-09): NO staleness drop — a report displays for as long as the Waze feed
+  # still returns it (server-side expiry), with its age surfaced to the UI instead. Drop
   # OPPOSITE-direction reports ("other side" of the highway) so we don't alert for police on the other
   # carriageway (driver req 2026-07-01); unknown-direction reports (no magvar -> 'none') are KEPT, since
   # we can't tell they're across and dropping them would silently miss most reports (Waze often omits magvar).
@@ -566,9 +569,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   for al in alerts:
     verdict = "kept"
     age = _age_min(al.get("ts"), now)
-    if age is not None and age * 60 > POLICE_STALE_S:
-      verdict = "stale"                           # too old
-    elif _police_dir(al, brg) == "opp":
+    if _police_dir(al, brg) == "opp":
       verdict = "opp"                             # other side of the road -> don't alert
     elif recede.is_passed(al):
       verdict = "passed"                          # already drove past this one -> don't resurrect it

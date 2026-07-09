@@ -105,6 +105,11 @@ class LocationServicesStatusRenderer(Widget):
     s = p.get("state")
     if s == "alert":
       txt = f"Police   {self._dist_text(p.get('dist_mi'))}"
+      # driver req 2026-07-09: age since the last Waze report/confirmation, so a long-lived icon
+      # (we now match the Waze app's display lifetime) can be judged for staleness at a glance.
+      a = p.get("age_min")
+      if a is not None:
+        txt += f" ({int(a)} min)"
       d = p.get("dir")
       if d == "same":
         txt += " - your way"
