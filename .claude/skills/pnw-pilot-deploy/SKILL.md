@@ -23,7 +23,12 @@ Tesla Model S Raven and the Ford F-150 Lightning.
 | **`3testpnw`** | **The FRIENDS' install channel — NEVER experiment on it** (mistake made + reverted 2026-07-09). Promote only truly validated states. |
 | `3pnw` / `pnwprod` | Release; untouched by day-to-day work. |
 
-## Deploy path 1 — AUTO-UPDATE (primary; use unless urgent)
+## Deploy path 1 — AUTO-UPDATE (THE deploy path — including test deploys)
+
+**Driver directive (2026-07-10): ALL deploys — including "just testing" new code on the device — go
+through GitHub (push to `3devpnw`) followed by a reboot.** Do not scp/patch files onto the device to
+try code out; the git checkout must stay == origin/3devpnw so every on-car state is reproducible and
+the updater never fights manual edits. Path 2 below is for RECOVERY, not for shipping.
 
 1. Commit on `3devpnw`, **Gemini-review** (gemini skill, always `gemini-pro-latest`; pipe diffs through
    `sed 's/@/[at]/g'` — the Gemini CLI treats `@token` in prompts as FILE ATTACHMENTS: raw diffs 400 with
