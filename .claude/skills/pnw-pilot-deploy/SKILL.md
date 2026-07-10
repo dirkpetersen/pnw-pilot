@@ -132,6 +132,22 @@ manager/ui/uploader/mapd up with GROWING etimes; zero `UnknownKeyName`; new para
 smoke-test. Parse errors properly — `strings` splits long JSON lines, so grep-count "Traceback" matches
 fragments; pipe through `python3 json.loads` filtering `levelnum>=40` / `exc_info` per daemon instead.
 
+**CAR RECOGNITION — MANDATORY, the deploy is NOT done until it passes (driver directive 2026-07-10):**
+after every deploy+reboot, log back in and verify the car is still detected. With the car powered ON
+(ignition/READY — `card` only fingerprints onroad):
+```bash
+python3 -c "from cereal import car
+cp = car.CarParams.from_bytes(open('/data/params/d/CarParamsPersistent','rb').read())
+with cp as p: print(p.carFingerprint, len(p.carFw))"   # in the device venv, PYTHONPATH set
+```
+Must print the real platform (`TESLA_MODEL_S_HW3` / `FORD_F_150_LIGHTNING_MK1`) with a healthy FW
+count — **`MOCK` = dashcam mode = FAILED; keep fixing until detected.** Known failure mode: a deploy
+reboot while the car sleeps + the driver waking the car mid-boot races the FW query → ~1 FW answer →
+MOCK (happened 2026-07-10). Recovery: car fully awake → cycle ignition so card re-fingerprints (the
+MOCK cache is skipped by `car_helpers`' `brand != "mock"` check; a fresh query runs). The
+never-persist-MOCK fix in `card.py` keeps a flaky read from overwriting the good
+`CarParamsCache`/`CarParamsPersistent`, but the CURRENT session still runs passive until re-fingerprinted.
+
 ## Verification gotchas (each cost real time)
 - **`pgrep -f <pat>` self-matches your SSH command**; use `ps -eo pid,etimes,cmd | grep '[m]apd'`
   (bracketed first char). Processes run as DOTTED MODULES (`system.loggerd.uploader`), not `.py` paths.

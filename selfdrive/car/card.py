@@ -138,16 +138,24 @@ class Car:
         else:
           cloudlog.warning("Saved SecOC key is invalid")
 
-    # Write previous route's CarParams
-    prev_cp = self.params.get("CarParamsPersistent")
-    if prev_cp is not None:
-      self.params.put("CarParamsPrevRoute", prev_cp)
-
-    # Write CarParams for controls and radard
+    # Write CarParams for controls and radard (current session — may be MOCK, which just runs passive)
     cp_bytes = self.CP.to_bytes()
     self.params.put("CarParams", cp_bytes)
-    self.params.put_nonblocking("CarParamsCache", cp_bytes)
-    self.params.put_nonblocking("CarParamsPersistent", cp_bytes)
+
+    # fingerprint2pnw (re-port of the testing-era fingerprint2xnor fix): a MOCK fingerprint is a
+    # flaky / no-car read (e.g. the FW query racing a transitional boot while the car wakes). On this
+    # shared Tesla+Lightning device BOTH cars are supported, so MOCK is never a genuine "unsupported
+    # car" — and letting it overwrite the persistent/cache CarParams makes the OFFROAD UI show
+    # "dashcam" (cached MOCK has dashcamOnly) and strips the FW cache the next boot relies on
+    # (happened 2026-07-10 right after a deploy reboot). Never persist MOCK over a previously-good
+    # fingerprint; a real fingerprint updates everything normally.
+    if self.CP.brand != "mock":
+      # Write previous route's CarParams (only when we have a real new fingerprint)
+      prev_cp = self.params.get("CarParamsPersistent")
+      if prev_cp is not None:
+        self.params.put("CarParamsPrevRoute", prev_cp)
+      self.params.put_nonblocking("CarParamsCache", cp_bytes)
+      self.params.put_nonblocking("CarParamsPersistent", cp_bytes)
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
