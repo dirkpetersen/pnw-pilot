@@ -105,6 +105,52 @@ against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}
   (memory `raven-matched-set-no-panda`). Keep the opendbc and panda pins a **MATCHED SET** — never
   advance one past compatibility with the other (`CAN_PACKET_VERSION_HASH` discipline).
 
+## opendbc/panda pin-bump discipline (born 2026-07-10 — the MG_ZS→MOCK dashcam incident)
+
+A pin bump ships EVERY commit between the pins, not just yours. The audit rule that failed and its
+replacement:
+
+- **"Different brand = inert for our cars" is FALSE.** Brand code (carstate/interface) only runs for
+  the matched car, but several opendbc registries are GLOBAL — every platform in them participates in
+  every car's behavior: **`FW_VERSIONS`** (fingerprint matching — all platforms are candidates for
+  every car), **`opendbc/safety/modes/*`** (compiled into the panda firmware → hash change → reflash),
+  **`torque_data/*.toml`**, shared DBC files. Audit ride-along commits against these, not just
+  against "does it touch tesla/ford dirs".
+- The incident: xnor's `CAR.MG_ZS: {}` — an EMPTY placeholder in `FW_VERSIONS` — had zero ECUs to
+  invalidate it, so it **exact-matched every car on Earth**; every fingerprint became ambiguous
+  (`{MG_ZS, real car}` → no unique match → MOCK/dashcam). Guard added in `2236bcd5` (empty FW record
+  never matches), but the audit rule stands.
+- **MANDATORY pre-reboot smoke test for ANY pin bump that touches opendbc** — run against the STAGED
+  tree, takes 5 s, offline, catches every matcher/DB regression for our fleet:
+  ```bash
+  ssh comma@<ip> 'source /usr/local/venv/bin/activate; F=/data/safe_staging/finalized;
+  PYTHONPATH=$F:$F/opendbc_repo python3 - <<EOF
+  from opendbc.car.structs import CarParams
+  from opendbc.car.fw_versions import match_fw_to_car
+  fw = CarParams.CarFw(ecu=CarParams.Ecu.eps, address=0x730, bus=0,
+                       fwVersion=b"SX_0.0.0 (99),SR013.7", brand="tesla")  # the Raven EPS answer
+  exact, m = match_fw_to_car([fw], "00000000000000000")
+  assert m == {"TESLA_MODEL_S_HW3"} or str(m).find("TESLA_MODEL_S_HW3") >= 0 and len(m) == 1, m
+  print("fingerprint smoke test OK:", m)
+  EOF'
+  ```
+- **Raven fingerprint facts** (so healthy output is recognizable): it matches on a SINGLE ECU —
+  eps `0x730`, `b'SX_0.0.0 (99),SR013.7'` — so `fw: 1` is NORMAL, `carVin` all-zeros is NORMAL,
+  `fingerprintSource: fw` is the good path. `source: can` on a MOCK means FW matching fell through.
+- **The FW cache hides matcher regressions for WEEKS.** Every normal drive fingerprints from
+  `CarParamsCache`, so "it's been detecting fine" is NOT evidence the matcher works — the full query
+  only runs when the cache is lost (which is exactly when you least want a surprise). Hence the
+  offline smoke test above, which exercises the matcher directly.
+- **ECU-wake quirk:** a cold Raven's ECUs may not answer the first query round (it wakes them; the
+  second round answers — `fingerprint.sh` docs). A failed fingerprint costs nothing since the
+  never-persist-MOCK fix — recovery is simply an ignition cycle with the car awake.
+- **Forensics triage for "car not recognized"** (this cracked the incident in minutes): compare the
+  three CarParams snapshots — `CarParams` (this session), `CarParamsPersistent` (what offroad UI
+  shows), `CarParamsPrevRoute` (last good) — print `carFingerprint | fingerprintSource | carVin |
+  len(carFw)` and the raw `carFw` entries. Identical FW bytes between good and failing sessions =
+  matcher regression (test `match_fw_to_car` directly); missing/short FW list = query problem (check
+  pandaStates: both pandas present, `faultStatus: none`, aux `blackPanda` connected).
+
 ## Device access
 - **Find the device FIRST via the CloudWatch locator, don't probe/sweep** (roams WiFi segments; guest
   networks have client isolation): `aws --profile dipeit logs filter-log-events --region us-west-2

@@ -330,3 +330,18 @@ single most expensive trap here.
   the big_ USB-GPU model is irrelevant to both without the GPU accessory; don't download its 1.7 GB.
 - **Upstream cherry-pick boundary**: commaai's 2026-06-20/21 "nested openpilot/" restructure — commits
   after it need path rewrites against our layout; prefer pre-restructure picks or snapshot ports.
+- **The fingerprint DB is GLOBAL — a "different brand" opendbc commit can un-fingerprint OUR cars.**
+  An EMPTY `FW_VERSIONS` platform entry (`CAR.MG_ZS: {}`, an xnor TODO placeholder that rode along in
+  a pin bump) has no ECUs to invalidate it → it exact-matched EVERY car → all fingerprints ambiguous →
+  Raven fell to MOCK/dashcam (2026-07-10). Matcher guard added (`pnw-opendbc 2236bcd5`), but the
+  audit rule stands: for any opendbc pin bump, check ride-along commits against the GLOBAL registries
+  (FW_VERSIONS, safety modes, torque_data, shared DBCs) and run the fingerprint smoke test from the
+  pnw-pilot-deploy skill against the staged tree BEFORE rebooting.
+- **The FW cache masks fingerprint regressions for weeks** — drives fingerprint from CarParamsCache,
+  so the real matcher only runs when the cache is lost. "It's been detecting fine" proves nothing
+  about the matcher; test `match_fw_to_car` directly with the cars' known FW responses (Raven: eps
+  0x730 `b'SX_0.0.0 (99),SR013.7'`, fw count 1 + VIN unknown are NORMAL).
+- **MOCK must never persist over a known-good car** — stock card.py cached a flaky MOCK read, wiping
+  the FW cache + sticking the offroad UI in dashcam. Fixed on 3devpnw (`193e3066fd`): persistent/
+  cache/PrevRoute only update when `CP.brand != "mock"`. A failed fingerprint is now free — recovery
+  is an ignition cycle (cold Raven ECUs may need the first query round just to wake them).
