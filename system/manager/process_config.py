@@ -122,7 +122,11 @@ procs = [
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
-  PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
+  # update2pnw: run the updater onroad too (stock is only_offroad) — downloads/finalize only STAGE
+  # to /data/safe_staging; the swap still happens exclusively at reboot, so driving with a fetch in
+  # progress is install-safe. updated already ionices itself to BE/7. Watch-item: drive-time fetch
+  # IO vs locationd/selfdrived lag (same contention class as the pass-2 upload issue).
+  PythonProcess("updated", "system.updated.updated", always_run, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),
   PythonProcess("statsd", "system.statsd", always_run),
   PythonProcess("feedbackd", "selfdrive.ui.feedback.feedbackd", only_onroad),
