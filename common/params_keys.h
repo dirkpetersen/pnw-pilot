@@ -119,6 +119,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // kept for back-compat. (MapTargetVelocities already registered by mapd2pnw above.)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
+    {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
     {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
     {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor

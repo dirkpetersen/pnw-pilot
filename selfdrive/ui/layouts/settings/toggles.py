@@ -55,6 +55,10 @@ DESCRIPTIONS = {
     "Affects speed/braking only, not steering, and only when openpilot controls longitudinal. NOT a cone/obstacle " +
     "detector and not a substitute for attention — stay ready to brake, especially in construction zones and on curves."
   ),
+  "HideCESDebug": tr_noop(
+    "Hide the CES debug information box (bottom-right while driving: mode/reason, curve %, VTSC state, " +
+    "map status). The box shows by default whenever CES is enabled."
+  ),
   "NudgelessLaneChange": tr_noop(
     "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
     "Hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
@@ -97,6 +101,15 @@ class TogglesLayout(Widget):
       ),
       # light-ces-gentle: CES is the 3-way "CES Mode" selector (Off/Light/Standard) — a multiple_button_item
       # added below like the personality selector, NOT a bool toggle. (Backed by the INT param CESMode.)
+      # ces2pnw (driver req 2026-07-10): Hide CES Debug sits RIGHT BELOW the CES Mode selector — the
+      # selector is inserted after OpenpilotEnabledToggle inside the build loop, so this next def
+      # lands directly under it. Default OFF = debug box visible.
+      "HideCESDebug": (
+        lambda: tr("Hide CES Debug Information"),
+        DESCRIPTIONS["HideCESDebug"],
+        "speed_limit.png",
+        False,
+      ),
       # auto2pnw: nudgeless lane change (Tesla + F-150 Lightning) + no-disengage-on-brake (unsupported, greyed)
       "NudgelessLaneChange": (
         lambda: tr("Nudgeless Lane Change"),

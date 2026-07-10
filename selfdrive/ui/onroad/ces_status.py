@@ -73,6 +73,16 @@ class CesStatusRenderer(Widget):
     # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
     # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
     self._ces_enabled = ces_enabled(read_ces_mode(ui_state.params))
+    # ces2pnw (driver req 2026-07-10): "Hide CES debug information" toggle — default OFF (overlay
+    # shows). Defensive read: on any params/UI mismatch (unregistered key) fall back to SHOWING —
+    # that is the documented default state — and above all never crash the UI (params/UI mismatch
+    # is this fork's documented brick scenario). Gemini flagged the fallback direction; show-by-
+    # default is the deliberate choice.
+    try:
+      if ui_state.params.get_bool("HideCESDebug"):
+        self._ces_enabled = False
+    except Exception:
+      pass
     if not self._ces_enabled or self._mem is None:
       self._st = {}
       self._vtsc = {}

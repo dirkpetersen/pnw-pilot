@@ -74,7 +74,10 @@ class ExpButton(Widget):
     # experimental_white.png is white, chffr_wheel.png is white. So we always tint white (identity
     # for the colored icon) and only vary alpha. The old bug tinted the colored png white -> no-op,
     # so CES-auto always looked orange. When CES is on the 3-state button fully owns the icon:
-    #   CES auto    -> white experimental   (experimental_white.png)
+    #   CES auto    -> LIVE mode (driver req 2026-07-10): bleached/white experimental while CES is
+    #                  resting in temporary chill; ORANGE experimental the moment CES auto-switches
+    #                  to Experimental (selfdriveState.experimentalMode is the effective live mode,
+    #                  so the icon tracks the actual switching in real time)
     #   forced Exp  -> orange experimental  (experimental.png)
     #   forced Chill-> white steering wheel
     if self._ces_master:
@@ -82,8 +85,8 @@ class ExpButton(Widget):
         texture = self._txt_wheel
       elif self._ces_button == _BTN_EXP:
         texture = self._txt_exp
-      else:  # _BTN_CES
-        texture = self._txt_exp_white
+      else:  # _BTN_CES — dynamic: orange while CES has switched us to Experimental, bleached in chill
+        texture = self._txt_exp if self._experimental_mode else self._txt_exp_white
     else:
       # stock 2-state path (CES off): wheel <-> (orange) experimental, unchanged.
       texture = self._txt_exp if (self._held_or_actual_mode() or self._manual_exp) else self._txt_wheel
