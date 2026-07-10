@@ -89,3 +89,8 @@ TASK.md
 
 # mapd2pnw: mapd binary is downloaded at launch (system/mapd/installer.py), never committed
 /selfdrive/mapd
+
+# pnw: the Claude Code skills are versioned WITH the distribution (dev-host ~/.claude/skills symlinks here)
+!.claude/
+.claude/*
+!.claude/skills/
