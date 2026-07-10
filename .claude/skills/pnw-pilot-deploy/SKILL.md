@@ -52,10 +52,11 @@ Tesla Model S Raven and the Ford F-150 Lightning.
    model OOM'd git on the 3X (`fatal: Out of memory, realloc failed`, 2026-07-08) and left a half-reset
    tree + stale submodule pin. `.lfsconfig` fetchexcludes the 1.7 GB `big_driving_supercombo.onnx`
    (USB-GPU-only; `git lfs pull --include big_driving_supercombo.onnx` if ever needed).
-3. **If the delta bumps a submodule pin** (tinygrad_repo/msgq_repo): `git submodule update --init <path>`
-   — `reset --hard` does NOT update submodule content. (Host-side gotcha: `git add <submodule-path>`
-   records the LOCAL worktree's checkout, silently clobbering a `git update-index --cacheinfo` pin —
-   check out the intended commit in the submodule dir first.)
+3. **If the delta bumps a submodule pin** (opendbc_repo/panda/tinygrad_repo/msgq_repo):
+   `git submodule update --init <path>` — `reset --hard` does NOT update submodule content.
+   (Host-side gotcha: `git add <submodule-path>` records the LOCAL worktree's checkout, silently
+   clobbering a `git update-index --cacheinfo` pin — check out the intended commit in the submodule
+   dir first.)
 4. `find /data/openpilot -name '*.pyc' -delete`. If `params_keys.h` changed and you can't wait for
    build-on-boot: `PATH=/usr/local/venv/bin:$PATH scons -j4 common/params_pyx.so` (else the restart's
    boot-build covers it). New key without rebuild → `UnknownKeyName` → UI crash-loop.
@@ -70,6 +71,34 @@ Tesla Model S Raven and the Ford F-150 Lightning.
    the updater re-stages on its next cycle.
 7. Note the device's checked-out branch is **`3devpnw`** — a manual reset to a different branch will be
    "corrected" by the next auto-update unless `UpdaterTargetBranch` is changed too.
+
+## Companion repos — pnw-opendbc / pnw-panda (real submodules, `master-pnw`)
+
+`opendbc_repo` and `panda` are **real git submodules on ALL channel branches** (`3devpnw`, `4devpnw`,
+`3testpnw`, `3pnw` — wiring aligned 2026-07-10), pinned by SHA. `.gitmodules` points at
+`../pnw-opendbc.git` / `../pnw-panda.git` with `branch = master-pnw`; the relative URLs resolve
+against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}`. (The old
+"work branches vendor opendbc/panda inline" claim is obsolete — don't act on it.)
+
+- **The work branch in each companion repo is `master-pnw`** — Tesla-era opendbc/panda modifications
+  land there. Local clones: `~/gh/comma/pnw/pnw-opendbc` and `~/gh/comma/pnw/pnw-panda` (checked out
+  on `master-pnw`). `master-xnor` = xnor upstream mirror; each fork also has a `4devpnw` branch
+  snapshotting the frozen-fallback pins. The pin may deliberately LAG the `master-pnw` tip (frozen
+  validated state) — a pin behind tip is not an error.
+- **Shipping an opendbc/panda change:**
+  1. Commit on `master-pnw` in the companion repo and **`git push origin master-pnw` FIRST**. A pin
+     not reachable from the pushed branch makes the device's `git submodule update --init` fail
+     mid-update.
+  2. Bump the pin in pnw-pilot: `cd opendbc_repo && git fetch origin && git checkout <sha> && cd ..
+     && git add opendbc_repo` (checking out the intended commit first avoids the add-clobbers-pin
+     gotcha above). Commit on `3devpnw`, Gemini-review, push.
+- The updater runs `git submodule sync` + `update --init --recursive` + `foreach reset --hard` on
+  every fetch (`system/updated/updated.py:397`), so URL changes AND pin bumps flow through
+  auto-update with no manual step.
+- **A panda pin bump = a panda FLASH at next start** (pandad reflashes when the FW hash differs).
+  Babysit the first one per era; a bad flash on the Raven is the matched-set/no-panda failure mode
+  (memory `raven-matched-set-no-panda`). Keep the opendbc and panda pins a **MATCHED SET** — never
+  advance one past compatibility with the other (`CAN_PACKET_VERSION_HASH` discipline).
 
 ## Device access
 - **Find the device FIRST via the CloudWatch locator, don't probe/sweep** (roams WiFi segments; guest

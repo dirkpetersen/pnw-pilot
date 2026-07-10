@@ -10,9 +10,19 @@ Source-of-truth documents: `~/gh/comma/CLAUDE.md`, `~/gh/comma/docs/DEVICE-STATE
 
 `~/gh/comma/pnw/pnw-pilot` = `dirkpetersen/pnw-pilot`, fork of xnor-tech/openpilot (which adds Tesla
 HW1/2/3 Raven support to commaai). Public README carries the feature list + installer URLs
-(`installer.comma.ai/dirkpetersen/pnwtest|pnwprod`). Companion forks `pnw-opendbc`/`pnw-panda`
-(vendored inline on work branches). Base version lineage: openpilot 0.11.1-era xnor + heavy
-selective upstream adoption (see below).
+(`installer.comma.ai/dirkpetersen/pnwtest|pnwprod`). Base version lineage: openpilot 0.11.1-era xnor
++ heavy selective upstream adoption (see below).
+
+### Companion repos (2026-07-10 — submodules, NOT vendored)
+
+`opendbc_repo` and `panda` are **real git submodules on every channel branch** (3devpnw, 4devpnw,
+3testpnw, 3pnw), `.gitmodules` → `../pnw-opendbc.git` / `../pnw-panda.git` with
+`branch = master-pnw` (relative URLs resolve against the superproject origin =
+`github.com/dirkpetersen/…`). Any older note saying "work branches vendor opendbc/panda inline" is
+obsolete. **Tesla-era opendbc/panda work happens on `master-pnw`** in
+`~/gh/comma/pnw/pnw-opendbc` + `~/gh/comma/pnw/pnw-panda` (local clones checked out there), then a
+SHA pin bump in pnw-pilot ships it — full workflow, ordering rules (push companion FIRST), and the
+panda-flash / matched-set cautions are in the **pnw-pilot-deploy skill**.
 
 ### Channel map (2026-07-10, driver-defined — memorize)
 - **`3devpnw`** — the car's channel. Device checked out here; auto-update tracks it. All dev lands here.

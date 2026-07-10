@@ -71,8 +71,11 @@ the drift.
 
 6. **Safety is non-negotiable.** Safety-critical code = panda C + `opendbc/safety/`. Never weaken a
    safety check; new toggles default OFF; priority **safety > stability > quality > features**. If a
-   change would touch panda safety, stop and flag it. (Upcoming era: Tesla opendbc/panda
-   modifications — `4devpnw` is the frozen fallback for exactly that.)
+   change would touch panda safety, stop and flag it. (Current era: Tesla opendbc/panda
+   modifications — done in the companion repos `~/gh/comma/pnw/pnw-opendbc` + `pnw-panda` on their
+   **`master-pnw`** branches, consumed by pnw-pilot as real SHA-pinned submodules on all channel
+   branches; `4devpnw` is the frozen fallback for exactly that. Pin-bump workflow lives in the
+   pnw-pilot-deploy skill.)
 
 **Before any non-trivial action, skim `references/pitfalls.md`** — the consolidated traps that have
 actually cost time or nearly bricked hardware (kept additive; newest era at the bottom).
