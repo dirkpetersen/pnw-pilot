@@ -394,6 +394,8 @@ class CESController:
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
     self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
+    self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
+    self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
     self._event_log_ok = False      # persistent "each adoption" trail (CES_EVENT_LOG)
     try:
       os.makedirs(os.path.dirname(CES_EVENT_LOG), exist_ok=True)
@@ -484,6 +486,10 @@ class CESController:
     """True if CES wants Experimental this cycle. Reads params; advances the state machine.
     Safe to call always — returns False whenever CES is disabled (behavior-neutral)."""
     self._read_params()
+    # bsm2pnw: sample the blind-spot booleans every cycle (cheap), so adopt/tick records carry them
+    # even while CES is disabled — the point is drive-log evidence that BSM flips with passing cars.
+    self._bs_l = bool(getattr(car_state, 'leftBlindspot', False))
+    self._bs_r = bool(getattr(car_state, 'rightBlindspot', False))
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -589,6 +595,9 @@ class CESController:
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
       "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
+      # bsm2pnw: Tesla blind-spot booleans (carState.left/rightBlindspot) — liveness evidence for the
+      # lane-change BSM gate; expect these to flip as traffic passes on real drives.
+      "bsL": self._bs_l, "bsR": self._bs_r,
     }
 
   def _append_event(self, rec: dict) -> None:
