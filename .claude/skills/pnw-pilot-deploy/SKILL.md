@@ -132,6 +132,42 @@ against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}
   (memory `raven-matched-set-no-panda`). Keep the opendbc and panda pins a **MATCHED SET** — never
   advance one past compatibility with the other (`CAN_PACKET_VERSION_HASH` discipline).
 
+## Panda SAFETY-C changes (steering/accel limits) — the strictest deploy (fordsafety2pnw, 2026-07-11)
+
+Per-car safety RULES live in **`opendbc/safety/modes/*.h`** (moved out of the panda repo — `pnw-panda`
+needs NO edit for a safety-mode change). But the panda FIRMWARE compiles them: `panda/board/can.h`
+`#include`s `opendbc/safety/`, `panda/SConscript` uses `opendbc.INCLUDE_PATH`, and build-on-boot
+rebuilds the firmware → **pandad reflashes the panda with the new safety at the next boot.** So an
+opendbc-only safety edit still reflashes the panda.
+- **Protocol/matched-set check FIRST:** the CAN version hash keys off `opendbc/safety/can.h`. If you
+  changed ONLY a mode file (e.g. `ford.h`) and not `can.h`, the protocol hash is unchanged → no
+  panda↔pandad matched-set break, contained reflash. If you touched `can.h`/declarations broadly,
+  treat it as a matched-set event.
+- **The controller/safety coupling trap:** if the new controller sends signals the OLD panda safety
+  blocks (e.g. 4-signal lateral's nonzero `curvature_rate`), a pin bump that DOESN'T reflash the panda
+  = lateral goes DEAD (panda TX-block). Verify the reflash actually happened post-boot.
+- **MANDATORY gates before shipping safety C:**
+  1. Compiled safety suite green: `cd pnw-opendbc && uv run python -m pytest opendbc/safety/tests/test_<brand>.py -q` (compiles the C, replays CAN — the real gate). Full suite: `.../tests/ -q`.
+     Note: the MISRA-mutation test is RED on master-pnw baseline (pre-existing tesla_legacy/mg C) — ignore that one, it's not yours; diff against a clean checkout to be sure.
+  2. **Tesla proof:** `git diff master-pnw -- 'opendbc/safety/modes/*tesla*'` must be EMPTY (0 lines).
+  3. Tests must PIN the safety guarantee, not the feature: a hole-closing test asserts the panda
+     BLOCKS the bad case (e.g. `test_reset_latch_blocked_when_disengaged` — arm latch engaged,
+     disengage, prove a nonzero steer command is still blocked). Never write a test that pins a hole
+     ("allowed even with controls_allowed=False") — rewrite the C.
+  4. Gemini adversarial review of the safety diff.
+- **Ported safety is NOT validated safety.** BluePilot's road-validated `ford.h` FAILS its own CI
+  suite and shipped a `controls_allowed` bypass (the reset latch, ~permanently armed when disengaged
+  because openpilot sends neutral frames continuously while off). We hardened it (gate the latch on
+  `controls_allowed`) — feature preserved, hole closed. Audit any ported safety for `violation=false`
+  paths that skip the disengaged-steering / value / controls_allowed checks.
+- **DEPLOY GATE (never auto-flash steering safety):** truck STOPPED + in Park (verify via carState
+  vEgo≈0/gearShifter, not just IsOnroad), engine on, driver in the seat ready to take over, safe
+  low-traffic area. Stage → reboot (parked) → the panda reflashes → **verify BEFORE driving**:
+  `pandaStates` alive, `safetyModel` correct, `faultStatus none`, no blocked-TX flood, fingerprint
+  intact. Then a low-speed controlled first drive. Rollback = restore the pre-safety opendbc pin
+  (`backup-<ts>-working-preFordSafety` / `4devpnw`) + reboot; the panda reflashes back to the old
+  safety.
+
 ## opendbc/panda pin-bump discipline (born 2026-07-10 — the MG_ZS→MOCK dashcam incident)
 
 A pin bump ships EVERY commit between the pins, not just yours. The audit rule that failed and its
