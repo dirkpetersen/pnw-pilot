@@ -653,6 +653,10 @@ class CESController:
     tele["gps"] = self._cur_lat is not None and self._cur_lon is not None  # LastGPSPosition fix present
     # icbm2pnw overlay feed (driver req 2026-07-11): current button-management target + the truck's
     # reported stock set speed, so the debug box can show "ICBM 24>18" while taps are stepping it down.
+    # The shadow flag itself MUST be in the overlay feed too — the renderer keys the grey SHADOW
+    # labels and the ICBM line on it (it was only in the ces_events record; the overlay kept showing
+    # orange EXPERIMENTAL in shadow — driver caught it twice, 2026-07-11).
+    tele["shadow"] = self._shadow
     if self._shadow:
       tele["icbmT"] = self._icbm_last_target
       tele["icbmSet"] = self._stock_set
