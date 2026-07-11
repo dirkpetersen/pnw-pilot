@@ -134,6 +134,18 @@ class CesStatusRenderer(Widget):
       else:
         out.append(("VTSC ready", _C.GREY, self.font))
 
+    # icbm2pnw (driver req 2026-07-11): stock-ACC button management in ONE line — shows when taps
+    # are being issued and how much: "ICBM 24>18" = stepping the stock set speed from 24 toward
+    # 18 mph (ORANGE while actively lowering; grey "@18" once the target is reached/held).
+    it = st.get("icbmT")
+    if it is not None:
+      t_mph = round(float(it) * conv)
+      s_mph = round(float(st.get("icbmSet") or 0.0) * conv)
+      if s_mph > t_mph:
+        out.append((f"ICBM {s_mph}>{t_mph}", _C.ORANGE, self.font_bold))
+      else:
+        out.append((f"ICBM @{t_mph}", _C.GREY, self.font))
+
     reason = st.get("reason", "")
     if is_exp and reason and reason not in ("chill", ""):
       out.append((f"why {reason}", _C.WHITE, self.font))

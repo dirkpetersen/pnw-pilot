@@ -63,6 +63,11 @@ STOPPED_LEAD_V = 1.0         # m/s: lead below this -> stopped
 # stop&go where the lead pulled away leaving a big gap. Only ever REMOVES Experimental (safe: Chill is
 # the baseline). Tune on the drive logs (vSet/dRel/vLead are recorded per event).
 ACCEL_ZONE_DV        = 6.0   # m/s: set speed at least this far above v_ego => we want to accelerate (~13 mph)
+ACCEL_ZONE_MIN_V     = 8.0   # m/s (~18 mph): redlight2pnw — the NO-LEAD accel-zone branch only counts
+                             # above this. Below it a no-lead 'open road + high set' is a red-light /
+                             # near-stop approach, NOT a merge; suppressing the low-speed Experimental
+                             # hold there let Chill accelerate through the light. The on-ramp fix that
+                             # created this gate operated at 38-39 mph, far above this floor.
 GAP_OPEN_M           = 45.0  # m: a lead farther than this (and not slower) is "not blocking" -> open road
 LEAD_PULLAWAY_MARGIN = 1.0   # m/s: lead counts as "not slower than us" if vLead >= vEgo - this
 V_SET_MAX_KPH        = 200.0 # kph: above this, treat vCruise as the unset sentinel (255) -> set speed unknown

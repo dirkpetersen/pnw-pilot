@@ -285,6 +285,22 @@ def test_genuine_city_slow_with_near_lead_still_experimental():
   assert decide_active(s) == (True, "lowSpeed")
 
 
+def test_redlight_approach_no_lead_low_speed_holds_experimental():
+  # SAFETY (driver report 2026-07-11, confirmed live): near-stop, NO lead, high set speed = a red-light
+  # approach, NOT a merge. The no-lead accel-zone must not fire below ACCEL_ZONE_MIN_V, so the low-speed
+  # Experimental hold stays and e2e stops for the light instead of Chill accelerating through it.
+  s = base(v_ego=2.0, has_lead=False, v_set=25 * CV.MPH_TO_MS)   # ~4.5 mph, cruise set 25
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "lowSpeed")
+
+
+def test_model_stop_prediction_defeats_accel_zone():
+  # if the model predicts a stop it is NEVER an accelerate-zone, even at merge-like speed/set (belt).
+  s = base(v_ego=20.0, has_lead=False, v_set=65 * CV.MPH_TO_MS, model_should_stop=True)
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "stop")   # stop fires (model_should_stop + no lead), not chill
+
+
 def test_slow_with_no_set_speed_gap_still_experimental():
   # deliberately cruising slow on open road, set speed barely above -> NOT accelerate-zone
   s = base(v_ego=8.0, has_lead=False, v_set=9.0)
@@ -334,3 +350,35 @@ def test_decision_telemetry_shape_and_consistency():
   assert t["curveSrc"] == "vision"
   # mapDist must be a finite number (never inf) so it JSON-serializes cleanly for the overlay
   assert t["mapDist"] == 0.0
+
+
+# ---- redlight2pnw (SAFETY, 2026-07-11): accel-zone must never fire on a red-light approach ----
+# Replayed from the live incident telemetry (ces_events 07:12-07:15Z): exp->chill at 0-5 mph with
+# az=True, no lead, set 19-25 mph -> Chill's MPC accelerated toward the set speed AT the light.
+def test_redlight_low_speed_no_lead_keeps_experimental():
+  # 4 mph rolling to a red light, no lead, set 19 mph (the 07:12:53 row): below the no-lead floor,
+  # az must be False and the low-speed hold must keep Experimental (which stops for lights).
+  s = base(v_ego=4 * CV.MPH_TO_MS, has_lead=False, v_set=19 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "lowSpeed")
+
+
+def test_model_stop_always_beats_accel_zone():
+  # 25 mph (above the floor), no lead, set 45 -> would be an accel-zone, but the model predicts a
+  # stop (red light ahead): stop intent wins, az must stand down.
+  s = base(v_ego=25 * CV.MPH_TO_MS, has_lead=False, v_set=45 * CV.MPH_TO_MS, model_should_stop=True)
+  assert _accelerate_zone(s) is False
+  assert decide_active(s) == (True, "stop")
+
+
+def test_onramp_merge_above_floor_still_gated():
+  # the original I-90 on-ramp case (38-39 mph, set 90): far above the floor -> gate unchanged.
+  s = base(v_ego=38 * CV.MPH_TO_MS, has_lead=False, v_set=90 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is True
+  assert decide_active(s) == (False, "chill")
+
+
+def test_lead_pullaway_below_floor_still_gated():
+  # the stop&go lead-pull-away case has a LEAD, so the no-lead floor does not apply — preserved.
+  s = base(v_ego=4.0, has_lead=True, lead_drel=60.0, lead_vlead=10.0, v_set=36 * CV.MPH_TO_MS)
+  assert _accelerate_zone(s) is True

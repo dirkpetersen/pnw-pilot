@@ -139,9 +139,24 @@ def _accelerate_zone(s) -> bool:
   e2e acceleration would hurt — keep Chill instead. Covers the two cases:
     - highway on-ramp merge (open road ahead, set speed = highway >> ramp speed)
     - stop&go where the lead has pulled away leaving a big gap (catch back up at Chill briskness)
-  Requires open road ahead AND a set speed meaningfully above current speed. Only gates `lowSpeed`."""
-  open_ahead = (not s["has_lead"]) or (s["lead_drel"] > C.GAP_OPEN_M
-                                       and s["lead_vlead"] >= s["v_ego"] - C.LEAD_PULLAWAY_MARGIN)
+  Requires open road ahead AND a set speed meaningfully above current speed. Only gates `lowSpeed`.
+
+  redlight2pnw (SAFETY, driver report 2026-07-11, confirmed in ces_events — exp->chill at 0-5 mph
+  with az=True): approaching a red light with no lead and a high set speed has the SAME signals as an
+  on-ramp merge (open road + set >> ego), so this gate suppressed the low-speed Experimental hold at
+  the last moment and Chill's MPC accelerated toward the set speed -> lurch through the light. Two
+  fail-safe guards (both only ever KEEP Experimental, which DOES stop for lights):
+    (a) defer to the model's stop prediction — if it says stop, this is never an accelerate-zone;
+    (b) the NO-LEAD branch (pure open road = could be a red light) requires a real merge speed floor;
+        near a stop you are never 'merging onto a highway'. The has-lead-far branch (a genuine lead
+        pull-away, where a lead is present so it can't be a clear red light) is unchanged."""
+  if s.get("model_should_stop"):
+    return False
+  no_lead = not s["has_lead"]
+  if no_lead and s["v_ego"] < C.ACCEL_ZONE_MIN_V:
+    return False
+  open_ahead = no_lead or (s["lead_drel"] > C.GAP_OPEN_M
+                           and s["lead_vlead"] >= s["v_ego"] - C.LEAD_PULLAWAY_MARGIN)
   want_faster = s["v_set"] > 0.0 and (s["v_set"] - s["v_ego"]) > C.ACCEL_ZONE_DV
   return open_ahead and want_faster
 
@@ -634,6 +649,11 @@ class CESController:
     # mapd diagnostics so the overlay can always show what mapd is up to (curve half is map-driven):
     tele["mapPts"] = len(self._map_targets)                       # MapTargetVelocities points cached
     tele["gps"] = self._cur_lat is not None and self._cur_lon is not None  # LastGPSPosition fix present
+    # icbm2pnw overlay feed (driver req 2026-07-11): current button-management target + the truck's
+    # reported stock set speed, so the debug box can show "ICBM 24>18" while taps are stepping it down.
+    if self._shadow:
+      tele["icbmT"] = self._icbm_last_target
+      tele["icbmSet"] = self._stock_set
 
     # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
     if mode != self._last_mode:
