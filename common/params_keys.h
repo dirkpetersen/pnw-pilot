@@ -126,6 +126,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
     {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
+    {"IcbmTarget", {CLEAR_ON_MANAGER_START, JSON}}, // icbm2pnw: stock-ACC set-speed target (ces brain -> ford carcontroller executor), mem-param
     {"VTSCStatus", {CLEAR_ON_MANAGER_START, JSON}}, // vtsc: live status (plannerd -> UI overlay). Gated on the CES toggle.
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
