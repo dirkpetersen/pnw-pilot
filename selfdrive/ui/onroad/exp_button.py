@@ -10,6 +10,10 @@ _BTN_CES, _BTN_CHILL, _BTN_EXP = 0, 1, 2
 # tap cycle order (per spec): CES auto (white exp) -> forced Experimental (orange exp)
 #   -> forced Chill (white wheel) -> back to CES auto
 _CES_CYCLE = (_BTN_CES, _BTN_EXP, _BTN_CHILL)
+# icbm2pnw: without openpilot longitudinal (e.g. the F-150 Lightning on stock ACC + ICBM), forced
+# Experimental is impossible — the planner never owns longitudinal. The button then flips only
+# CES(ICBM) <-> Chill; the orange forced-Exp state is unreachable and its icon never shows.
+_CES_CYCLE_NO_LONG = (_BTN_CES, _BTN_CHILL)
 
 
 class ExpButton(Widget):
@@ -52,10 +56,12 @@ class ExpButton(Widget):
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     if self._ces_master:
-      # ces2xnor: 3-state cycle  CES -> Experimental -> Chill -> CES  (no confirm gate)
+      # ces2xnor: 3-state cycle CES -> Experimental -> Chill -> CES (no confirm gate). icbm2pnw:
+      # with no op-long, drop Experimental from the cycle -> CES(ICBM) <-> Chill only.
+      cycle = _CES_CYCLE if ui_state.has_longitudinal_control else _CES_CYCLE_NO_LONG
       cur = int(self._params.get("CESButtonState", return_default=True) or _BTN_CES)
-      idx = _CES_CYCLE.index(cur) if cur in _CES_CYCLE else 0
-      nxt = _CES_CYCLE[(idx + 1) % len(_CES_CYCLE)]
+      idx = cycle.index(cur) if cur in cycle else 0
+      nxt = cycle[(idx + 1) % len(cycle)]
       # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
       # cast, so put(str) raised TypeError and the tap silently did nothing (button never moved).
       self._params.put("CESButtonState", nxt)
@@ -83,10 +89,12 @@ class ExpButton(Widget):
     if self._ces_master:
       if self._ces_button == _BTN_CHILL:
         texture = self._txt_wheel
-      elif self._ces_button == _BTN_EXP:
+      elif self._ces_button == _BTN_EXP and ui_state.has_longitudinal_control:
         texture = self._txt_exp
-      else:  # _BTN_CES — dynamic: orange while CES has switched us to Experimental, bleached in chill
-        texture = self._txt_exp if self._experimental_mode else self._txt_exp_white
+      else:  # _BTN_CES (or Exp with no op-long, defensive) — dynamic: orange only when the planner
+             # has actually switched us to Experimental (impossible without op-long), else bleached.
+             # On the Lightning/ICBM this stays the bleached "smart mode on" icon.
+        texture = self._txt_exp if (self._experimental_mode and ui_state.has_longitudinal_control) else self._txt_exp_white
     else:
       # stock 2-state path (CES off): wheel <-> (orange) experimental, unchanged.
       texture = self._txt_exp if (self._held_or_actual_mode() or self._manual_exp) else self._txt_wheel

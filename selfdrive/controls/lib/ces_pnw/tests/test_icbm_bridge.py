@@ -62,3 +62,31 @@ def test_uses_ceiling_as_reference_while_capped():
   apex = 40 * MPH
   t, c = icbm_curve_target(41 * MPH, 41 * MPH, apex, 15.0, 60 * MPH, lambda x: 1.0)
   assert t is not None and math.isclose(c, 60 * MPH)
+
+
+def test_icbm_step_gating_chill_vs_ces():
+  """The bridge publishes a curve target only in the CES button state (active=True); forced Chill
+  (active=False) publishes {} and clears the ceiling latch. Direct on the manager method, capnp-free."""
+  import inspect
+  import time as _t
+  from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+
+  cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
+
+  class FakeMem:
+    def put_nonblocking(self, k, v): self.last = v
+
+  class Stub: pass
+  mgr = Stub(); mgr.mem_params = FakeMem(); mgr._icbm_ceiling = None
+  step = cls._icbm_step.__get__(mgr)
+
+  # sharp binding curve, CES active -> real dict target
+  sig = {"v_ego": 20 * MPH, "v_set": 45 * MPH, "map_target_v": 18 * MPH, "map_target_dist": 15.0}
+  mgr._icbm_last_pub = _t.monotonic() - 1.0
+  step(sig, active=True)
+  assert isinstance(mgr.mem_params.last, dict) and mgr.mem_params.last.get("target") is not None
+
+  # forced Chill -> {} + ceiling cleared (executor stops within its stale window)
+  mgr._icbm_last_pub = _t.monotonic() - 1.0
+  step(sig, active=False)
+  assert mgr.mem_params.last == {} and mgr._icbm_ceiling is None

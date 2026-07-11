@@ -576,19 +576,25 @@ class CESController:
     self._publish_status(sig, want)
     # icbm2pnw: in Lightning shadow mode the CES/planner path never actuates, but the ICBM brain
     # publishes a stock-ACC set-speed target the ford carcontroller executor follows (curve
-    # slow-down + restore, reduce-only against the driver's own set — see icbm_curve_target).
-    if self._shadow and sig is not None:
-      self._icbm_step(sig)
+    # slow-down, dec-only against the driver's own set — see icbm_curve_target). ICBM mirrors the
+    # button: ACTIVE only in the CES state, SILENT in forced Chill (the truck's button flips only
+    # CES<->Chill — forced Exp is unreachable there). Publishing empty in Chill stops the executor.
+    if self._shadow:
+      self._icbm_step(sig, active=(sig is not None and self._button == C.BTN_CES))
     return want and self._long_ok
 
-  def _icbm_step(self, sig: dict) -> None:
+  def _icbm_step(self, sig, active: bool) -> None:
     """Publish the IcbmTarget mem-param at ~4 Hz (executor treats >2 s silence as stale-stop).
-    Best-effort: never raises into the control path."""
+    Best-effort: never raises into the control path. `active` False -> publish empty (ICBM off)."""
     now = time.monotonic()
     if now - self._icbm_last_pub < 0.25 or self.mem_params is None:
       return
     self._icbm_last_pub = now
     try:
+      if not active:
+        self._icbm_ceiling = None
+        self.mem_params.put_nonblocking("IcbmTarget", {})
+        return
       target, self._icbm_ceiling = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
         sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale)
