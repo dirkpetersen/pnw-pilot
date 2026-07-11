@@ -1,0 +1,145 @@
+"""dm-variable: JSON-configurable driver-monitoring timeout tiers.
+
+Reads /data/pnw/dm.json (persistent: /data survives the auto-update git-clean) and resolves it to
+either None (= "default" tier: the hardcoded in-code behavior, byte-identical to a tree without
+this file) or an explicit opt-in tier ("highway" / "relaxed") with pose/phone timeouts in seconds.
+
+SAFETY POSTURE
+- This module must NEVER raise out of load_dm_tier(): it runs inside dmonitoringd (a safety
+  process). Any missing / unreadable / malformed / mistyped input degrades to the hardcoded
+  defaults with a warning — never an exception.
+- The hardcoded defaults below live only in this Python source. They do not depend on the JSON
+  file existing. With no file present the resolved tier is None and DM behavior is unchanged.
+- "relaxed" is opt-in only: it applies solely when the JSON carries relaxed.enabled == true
+  (JSON boolean). Anything else (absent, false, "true", 1) means the relaxed tier is UNAVAILABLE
+  and the effective tier falls back to default.
+- Timeouts are clamped to [TIMEOUT_MIN_S, TIMEOUT_MAX_S] so no JSON input can push DM beyond a
+  10 minute timeout.
+
+Config is read once at dmonitoringd process start (DriverMonitoring.__init__). Changing dm.json
+requires a dmonitoringd restart (ignition cycle or pkill) to take effect — documented in
+DM-VARIABLE.md.
+
+stdlib only — also loaded standalone (importlib by path) by the tools/dm CLI.
+"""
+import json
+import math
+import os
+
+DM_CONFIG_PATH = "/data/pnw/dm.json"
+
+# Hardcoded tier defaults (seconds). First value = pose/attention timeout, second = phone timeout.
+# These are the fallbacks whenever the JSON is missing or a field is absent/invalid.
+HIGHWAY_DEFAULT_POSE_S = 30.0
+HIGHWAY_DEFAULT_PHONE_S = 60.0
+RELAXED_DEFAULT_POSE_S = 60.0
+RELAXED_DEFAULT_PHONE_S = 120.0
+
+# Sane bounds: anything outside is clamped (and warned about). The ceiling is the safety cap —
+# no JSON input may configure a timeout longer than this.
+TIMEOUT_MIN_S = 10.0
+TIMEOUT_MAX_S = 600.0
+
+VALID_MODES = ("default", "highway", "relaxed")
+
+TIER_DEFAULTS = {
+  "highway": (HIGHWAY_DEFAULT_POSE_S, HIGHWAY_DEFAULT_PHONE_S),
+  "relaxed": (RELAXED_DEFAULT_POSE_S, RELAXED_DEFAULT_PHONE_S),
+}
+
+
+def _noop_warn(msg: str) -> None:
+  pass
+
+
+def _sanitize_timeout(value, fallback: float, name: str, warn) -> float:
+  """Return a finite float clamped to [TIMEOUT_MIN_S, TIMEOUT_MAX_S]; fallback on any bad type."""
+  if value is None:  # field simply absent -> quiet fallback to the tier default
+    return fallback
+  # bool is an int subclass in Python: reject explicitly (true/false is not a timeout)
+  if isinstance(value, bool) or not isinstance(value, (int, float)):
+    warn(f"dm_config: {name}={value!r} is not a number, using default {fallback:g}s")
+    return fallback
+  v = float(value)
+  if not math.isfinite(v):
+    warn(f"dm_config: {name}={value!r} is not finite, using default {fallback:g}s")
+    return fallback
+  if v < TIMEOUT_MIN_S:
+    warn(f"dm_config: {name}={v:g}s below minimum, clamped to {TIMEOUT_MIN_S:g}s")
+    return TIMEOUT_MIN_S
+  if v > TIMEOUT_MAX_S:
+    warn(f"dm_config: {name}={v:g}s above maximum, clamped to {TIMEOUT_MAX_S:g}s")
+    return TIMEOUT_MAX_S
+  return v
+
+
+def read_raw_config(path: str = DM_CONFIG_PATH, warn=None):
+  """Best-effort read of the JSON file. Returns a dict ({} if missing/unreadable/not-a-dict)."""
+  warn = warn or _noop_warn
+  try:
+    if not os.path.exists(path):
+      return {}
+    with open(path, encoding="utf-8") as f:
+      data = json.load(f)
+  except Exception as e:
+    warn(f"dm_config: cannot read {path} ({e.__class__.__name__}: {e}), using hardcoded defaults")
+    return {}
+  if not isinstance(data, dict):
+    warn(f"dm_config: {path} top level is {type(data).__name__}, expected object; using hardcoded defaults")
+    return {}
+  return data
+
+
+def resolve_tier_timeouts(data: dict, tier: str, warn=None) -> tuple[float, float]:
+  """(pose_s, phone_s) for a tier from an already-read config dict, sanitized and clamped."""
+  warn = warn or _noop_warn
+  d_pose, d_phone = TIER_DEFAULTS[tier]
+  section = data.get(tier)
+  if section is None:
+    section = {}
+  elif not isinstance(section, dict):
+    warn(f"dm_config: '{tier}' section is {type(section).__name__}, expected object; using defaults")
+    section = {}
+  pose_s = _sanitize_timeout(section.get("pose_s"), d_pose, f"{tier}.pose_s", warn)
+  phone_s = _sanitize_timeout(section.get("phone_s"), d_phone, f"{tier}.phone_s", warn)
+  return pose_s, phone_s
+
+
+def relaxed_enabled(data: dict) -> bool:
+  """Strict opt-in: only a JSON boolean true counts."""
+  section = data.get("relaxed")
+  return isinstance(section, dict) and section.get("enabled") is True
+
+
+def load_dm_tier(path: str = DM_CONFIG_PATH, warn=None):
+  """Resolve the effective DM tier from the JSON config.
+
+  Returns None for the default tier (caller must change NOTHING), or a tuple
+  (tier_name, pose_timeout_s, phone_timeout_s) for an explicitly selected tier.
+  Never raises.
+  """
+  warn = warn or _noop_warn
+  try:
+    data = read_raw_config(path, warn)
+    if not data:
+      return None
+
+    mode = data.get("mode", "default")
+    if not isinstance(mode, str) or mode not in VALID_MODES:
+      warn(f"dm_config: mode={mode!r} is not one of {VALID_MODES}, using default tier")
+      return None
+    if mode == "default":
+      return None
+
+    if mode == "relaxed" and not relaxed_enabled(data):
+      warn("dm_config: mode is 'relaxed' but relaxed.enabled is not true — relaxed tier unavailable, using default tier")
+      return None
+
+    pose_s, phone_s = resolve_tier_timeouts(data, mode, warn)
+    return (mode, pose_s, phone_s)
+  except Exception as e:  # belt and braces: a DM process crash is a safety event
+    try:
+      warn(f"dm_config: unexpected error resolving tier ({e.__class__.__name__}: {e}), using default tier")
+    except Exception:
+      pass
+    return None

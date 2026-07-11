@@ -9,6 +9,8 @@ from openpilot.common.realtime import DT_DMON
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.stat_live import RunningStatFilter
+from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.monitoring.dm_config import load_dm_tier
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.hardware import HARDWARE
 
@@ -232,6 +234,18 @@ class DriverMonitoring:
       self._dm_mode = int(self.params.get("DmMode", return_default=True) or 0)
     except (UnknownKeyName, ValueError, TypeError):
       self._dm_mode = 0
+    # dm-variable: optional JSON timeout tiers from /data/pnw/dm.json (see DM-VARIABLE.md).
+    # None = default tier -> the DmMode logic below is untouched (byte-identical to no-file).
+    # ("highway"|"relaxed", pose_s, phone_s) = explicit driver opt-in via the JSON; overrides the
+    # DmMode-derived ACTIVE-mode timeouts. Read once at process start; load_dm_tier never raises,
+    # but a DM crash is a safety event so guard anyway.
+    try:
+      self._dm_tier = load_dm_tier(warn=cloudlog.warning)
+    except Exception:
+      cloudlog.exception("dm-variable: tier config load failed, using default tier")
+      self._dm_tier = None
+    if self._dm_tier is not None:
+      cloudlog.warning(f"dm-variable: JSON tier active: {self._dm_tier[0]} pose={self._dm_tier[1]:g}s phone={self._dm_tier[2]:g}s")
     self._apply_dm_timeouts()
     # End BluePilot
 
@@ -331,7 +345,13 @@ class DriverMonitoring:
     # pre/prompt lead times (green/orange before terminal) are the same for both relaxed regimes
     pose_pre, pose_prompt   = s._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL,  s._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
     phone_pre, phone_prompt = s._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL, s._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
-    if self._dm_mode == 2:                                # Relaxed everywhere (3 h / 1 h)
+    if self._dm_tier is not None:                         # dm-variable: explicit JSON tier opt-in
+      # Fixed everywhere (not road-gated); takes precedence over DmMode. Lead times are capped so
+      # short timeouts keep a sane green/orange progression (pre <= t/2, prompt <= t/4).
+      _, pose_t, phone_t = self._dm_tier
+      pose_pre,  pose_prompt  = min(pose_pre,  pose_t / 2.),  min(pose_prompt,  pose_t / 4.)
+      phone_pre, phone_prompt = min(phone_pre, phone_t / 2.), min(phone_prompt, phone_t / 4.)
+    elif self._dm_mode == 2:                              # Relaxed everywhere (3 h / 1 h)
       pose_t, phone_t = s._POSE_DISTRACTED_TIME, s._PHONE_DISTRACTED_TIME
     elif self._dm_mode == 1 and self._road_relaxed:       # Highway, on a qualifying road (15 min / 30 min)
       pose_t, phone_t = 900., 1800.

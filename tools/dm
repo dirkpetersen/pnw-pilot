@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""dm — configure the dm-variable driver-monitoring timeout tiers (/data/pnw/dm.json).
+
+Usage:
+  dm show                          print raw file + the resolved effective config
+  dm mode <default|highway|relaxed>   select the active tier
+  dm highway <pose_s> <phone_s>    set highway tier timeouts (seconds)
+  dm relaxed <pose_s> <phone_s>    set relaxed tier timeouts (seconds)
+  dm relaxed --enable              opt in to the relaxed tier (required before it applies)
+  dm relaxed --disable             opt out (relaxed falls back to the default tier)
+  dm ... --file PATH               operate on a different file (testing)
+
+First numeric arg = pose/attention timeout, second = phone/distraction timeout.
+Values are clamped to the same bounds dmonitoringd enforces. dmonitoringd reads the file at
+process start only: changes take effect at the next ignition cycle / dmonitoringd restart.
+
+stdlib only; loads dm_config.py by path so it works with any PYTHONPATH.
+"""
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_spec = importlib.util.spec_from_file_location(
+  "dm_config", os.path.join(REPO_ROOT, "selfdrive", "monitoring", "dm_config.py"))
+dm_config = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dm_config)
+
+
+def die(msg: str) -> "None":
+  print(f"dm: error: {msg}", file=sys.stderr)
+  sys.exit(2)
+
+
+def warn(msg: str) -> None:
+  print(f"dm: {msg}", file=sys.stderr)
+
+
+def parse_timeout(raw: str, name: str) -> float:
+  try:
+    v = float(raw)
+  except ValueError:
+    die(f"{name} must be a number, got {raw!r}")
+  if v != v or v in (float("inf"), float("-inf")):
+    die(f"{name} must be finite, got {raw!r}")
+  lo, hi = dm_config.TIMEOUT_MIN_S, dm_config.TIMEOUT_MAX_S
+  if v < lo:
+    warn(f"{name}={v:g}s below minimum, clamping to {lo:g}s")
+    v = lo
+  elif v > hi:
+    warn(f"{name}={v:g}s above maximum, clamping to {hi:g}s")
+    v = hi
+  return v
+
+
+def load_file(path: str) -> dict:
+  data = dm_config.read_raw_config(path, warn)
+  return data if isinstance(data, dict) else {}
+
+
+def save_file(path: str, data: dict) -> None:
+  d = os.path.dirname(path) or "."
+  os.makedirs(d, exist_ok=True)
+  fd, tmp = tempfile.mkstemp(dir=d, prefix=".dm.json.")
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      json.dump(data, f, indent=2, sort_keys=True)
+      f.write("\n")
+    os.replace(tmp, path)
+  except BaseException:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
+    raise
+  print(f"dm: wrote {path}")
+
+
+def cmd_show(path: str) -> None:
+  print(f"config file: {path}")
+  if not os.path.exists(path):
+    print("  (missing — all tiers at hardcoded defaults, effective tier: default)")
+  else:
+    try:
+      with open(path, encoding="utf-8") as f:
+        print("  raw: " + f.read().strip().replace("\n", "\n  "))
+    except OSError as e:
+      print(f"  (unreadable: {e})")
+  data = load_file(path)
+  mode = data.get("mode", "default")
+  if not isinstance(mode, str) or mode not in dm_config.VALID_MODES:
+    mode = f"{mode!r} (invalid -> default)"
+  print(f"mode: {mode}")
+  for tier in ("highway", "relaxed"):
+    pose_s, phone_s = dm_config.resolve_tier_timeouts(data, tier, lambda m: None)
+    extra = ""
+    if tier == "relaxed":
+      extra = "  enabled: " + ("true" if dm_config.relaxed_enabled(data) else "FALSE (tier unavailable)")
+    print(f"{tier}: pose={pose_s:g}s phone={phone_s:g}s{extra}")
+  eff = dm_config.load_dm_tier(path, lambda m: None)
+  if eff is None:
+    print("effective tier for dmonitoringd: default (hardcoded in-code behavior)")
+  else:
+    print(f"effective tier for dmonitoringd: {eff[0]} (pose={eff[1]:g}s phone={eff[2]:g}s)")
+  print("note: dmonitoringd reads this at process start — restart/ignition-cycle to apply changes")
+
+
+def cmd_mode(path: str, tier: str) -> None:
+  if tier not in dm_config.VALID_MODES:
+    die(f"mode must be one of {'/'.join(dm_config.VALID_MODES)}, got {tier!r}")
+  data = load_file(path)
+  data["mode"] = tier
+  save_file(path, data)
+  if tier == "relaxed" and not dm_config.relaxed_enabled(data):
+    warn("mode is 'relaxed' but relaxed is not enabled — dmonitoringd will use the default tier until you run: dm relaxed --enable")
+
+
+def cmd_set_tier(path: str, tier: str, args: list[str]) -> None:
+  enable = None
+  vals = []
+  for a in args:
+    if a == "--enable":
+      enable = True
+    elif a == "--disable":
+      enable = False
+    else:
+      vals.append(a)
+  if tier == "highway" and enable is not None:
+    die("--enable/--disable only apply to the relaxed tier")
+  if len(vals) not in (0, 2):
+    die(f"expected: dm {tier} <pose_s> <phone_s>" + (" [--enable|--disable]" if tier == "relaxed" else ""))
+  if not vals and enable is None:
+    die("nothing to do — give <pose_s> <phone_s>" + (" and/or --enable/--disable" if tier == "relaxed" else ""))
+
+  data = load_file(path)
+  section = data.get(tier)
+  if not isinstance(section, dict):
+    section = {}
+  if vals:
+    section["pose_s"] = parse_timeout(vals[0], f"{tier}.pose_s")
+    section["phone_s"] = parse_timeout(vals[1], f"{tier}.phone_s")
+  if enable is not None:
+    section["enabled"] = enable
+  data[tier] = section
+  save_file(path, data)
+  if tier == "relaxed" and not dm_config.relaxed_enabled(data):
+    warn("relaxed tier is NOT enabled — it stays unavailable until: dm relaxed --enable")
+  if data.get("mode", "default") != tier:
+    warn(f"active mode is {data.get('mode', 'default')!r} — run `dm mode {tier}` to activate this tier")
+
+
+def main(argv: list[str]) -> None:
+  path = dm_config.DM_CONFIG_PATH
+  if "--file" in argv:
+    i = argv.index("--file")
+    if i + 1 >= len(argv):
+      die("--file requires a path")
+    path = argv[i + 1]
+    argv = argv[:i] + argv[i + 2:]
+
+  if not argv or argv[0] in ("-h", "--help", "help"):
+    print(__doc__.strip())
+    sys.exit(0)
+
+  cmd, args = argv[0], argv[1:]
+  if cmd == "show":
+    cmd_show(path)
+  elif cmd == "mode":
+    if len(args) != 1:
+      die("expected: dm mode <default|highway|relaxed>")
+    cmd_mode(path, args[0])
+  elif cmd in ("highway", "relaxed"):
+    cmd_set_tier(path, cmd, args)
+  else:
+    die(f"unknown command {cmd!r} (try: dm --help)")
+
+
+if __name__ == "__main__":
+  main(sys.argv[1:])
