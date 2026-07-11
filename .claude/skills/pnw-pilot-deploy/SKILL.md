@@ -14,6 +14,48 @@ Distribution: `~/gh/comma/pnw/pnw-pilot`. The car runs `/data/openpilot` as a **
 (origin = `dirkpetersen/pnw-pilot`), NOT the classic overlay. Device = one comma 3X moved between the
 Tesla Model S Raven and the Ford F-150 Lightning.
 
+## 🔴 OVERRIDING RULE — PRE-DRIVE SYNC (driver directive 2026-07-11)
+
+**Every time the driver is about to get on the road, the device MUST be running the latest pushed
+state — no version lag, ever.** A drive on stale code is a wasted drive. Before any drive:
+
+1. **Push everything first**: any fix that exists only in a local working tree or as a device
+   hot-patch does NOT count. Companion repo (`pnw-opendbc`/`pnw-panda` on `master-pnw`) pushed
+   FIRST, then the submodule pin bump on `3devpnw`, pushed. GitHub is the single source of truth.
+2. **Install to the latest on the device and VERIFY** `git -C /data/openpilot rev-parse HEAD` ==
+   `origin/3devpnw` (and the opendbc/panda pins match). If the auto-updater hasn't staged it in
+   time, do a **manual git deploy immediately** (see below) — do not make the driver wait for the
+   1.5 h poll or the next reboot cycle.
+3. **Metered connections are NOT a reason to delay a code update.** The metered/WiFi gate exists for
+   VIDEO/drive-data UPLOADS only. A code fetch is a few hundred KB; fetching it over hotspot/LTE is
+   always fine and always wanted. Never let an updater metered-gate (or "waiting for WiFi" logic)
+   block shipping a fix to the car — bypass it with the manual path.
+4. **NEVER hot-patch (scp/cp files onto the device) — not even "urgently", not even "identical
+   content" (driver directive 2026-07-11, after it happened twice that day).** A hot-patch is
+   unverifiable from the driver's seat, blocks later submodule checkouts (dirty-tree "Unable to
+   checkout"), splits running state from git state, and re-litigates every diagnosis ("which code
+   was actually running?"). The urgent path is the SAME SPEED and fully verifiable: commit → push →
+   manual git install of the pushed SHA (step 2 above). If a fix isn't worth a commit, it isn't
+   worth deploying.
+
+**Manual pre-drive install (proven 2026-07-11, safe even while onroad — files only; running
+processes keep their in-memory code until restarted/rebooted):**
+```bash
+ssh comma@$COMMA_IP '
+  cd /data/openpilot &&
+  git -C opendbc_repo checkout -- . &&              # discard any hot-patch so checkout cannot be blocked
+  git fetch origin 3devpnw && git reset --hard origin/3devpnw &&
+  git -C opendbc_repo fetch origin master-pnw &&    # submodule commits are NOT fetched by the parent
+  git submodule update --checkout opendbc_repo &&
+  find . -path "*__pycache__*" -name "*.pyc" -delete
+  git rev-parse --short HEAD && git -C opendbc_repo rev-parse --short HEAD'
+```
+Gotchas hit live: (a) `git submodule update` fails with "Unable to checkout" if the submodule has
+no fetch of the pinned SHA (fetch inside `opendbc_repo` first) or if a dirty file would be
+overwritten (discard hot-patches first); (b) the UI's version label is read once at manager start —
+after a manual install it lags until the next ignition cycle/reboot even though the tree is correct.
+Python-only changes need no rebuild; a reboot (or process restart) makes running code match the tree.
+
 ## ⚡ CHANNEL MAP (2026-07-10 — auto-update is ON and e2e-validated)
 
 | Branch | Role |
