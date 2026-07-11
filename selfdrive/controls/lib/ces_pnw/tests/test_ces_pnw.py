@@ -292,11 +292,15 @@ def test_slow_with_no_set_speed_gap_still_experimental():
   assert decide_active(s) == (True, "lowSpeed")
 
 
-def test_accelerate_zone_does_not_override_a_curve():
-  # even accelerating into open road, a real curve still wins (curve checked before lowSpeed)
+def test_accelerate_zone_suppresses_curve_trip():
+  # driver directive (I-90 on-ramp incident, 2026-07-09): an accelerate-zone (open road, set speed
+  # >= 6 m/s above ego) suppresses curve-Experimental — a ramp IS a curve, and tripping Experimental
+  # there pinned merges at 39 mph. VTSC remains the physical curve-speed backstop. (This test used to
+  # assert the OPPOSITE pre-directive design and went stale when the gate shipped.)
   s = base(v_ego=20.0, has_lead=False, v_set=65 * CV.MPH_TO_MS,
            curve_lat_accel_vision=C.CURVE_LAT_ACCEL_ENTER * 1.5, time_to_curve=2.0)
-  assert decide_active(s) == (True, "curve")
+  assert _accelerate_zone(s) is True
+  assert decide_active(s) == (False, "chill")
 
 
 # ---- de-flap: entry cooldown + exit dwell (state machine) ------------------
