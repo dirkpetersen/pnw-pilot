@@ -280,9 +280,15 @@ class Car:
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
-  car = Car()
-  car.card_thread()
+  # pnw: a card crash is otherwise invisible (manager discards child stderr and does not
+  # restart crashed processes) — record any fatal exception to swaglog before dying.
+  try:
+    config_realtime_process(4, Priority.CTRL_HIGH)
+    car = Car()
+    car.card_thread()
+  except Exception:
+    cloudlog.exception("card: fatal crash")
+    raise
 
 
 if __name__ == "__main__":
