@@ -1,8 +1,15 @@
 # PNW Pilot — openpilot for the Pacific Northwest
 
-**PNW Pilot** is a fork of openpilot tuned for one job: driving in the PNW, especially the 
-**I-5 corridor between Seattle, WA and central-western Oregon**.
+**PNW Pilot** is a personal production distribution of [openpilot](https://github.com/commaai/openpilot),
+built on the [xnor-tech](https://github.com/xnor-tech) fork for its legacy Tesla (Raven) support and
+tuned for one job: driving the PNW, especially the **I-5 corridor between Seattle, WA and
+central-western Oregon**. It serves exactly two cars — a **2021 Tesla Model S (Raven, HW3)** and a
+**2025 Ford F-150 Lightning** — with one comma 3X that is physically moved between them.
 
+> ### Standing on the shoulders of the openpilot community
+> Nearly every mechanism in this fork was invented by someone else first — comma.ai, xnor-tech,
+> sunnypilot, BluePilot, FrogPilot, pfeiferj/mapd, and more. **See [CREDITS.md](CREDITS.md) for the
+> people behind each feature.** If you like something here, they built the idea; we ported and tuned it.
 
 <div align="center"> <img width="512" height="432" alt="image" src="https://github.com/user-attachments/assets/5dca7817-02cc-431b-83e3-d7fec3733ada" /> </div>
 
@@ -29,34 +36,116 @@ commaai/openpilot          upstream
 - **Hardware:** only the **comma 3X** is tested. The **comma four is completely untested and will
   likely not work.**
 
-### Enhancements over upstream / xnor
+## What PNW Pilot adds on top of xnor / upstream
 
-- **Tesla Model S Raven (HW1/HW2/HW3) support** — inherited from the xnor base; the reason PNW
-  forks xnor rather than commaai directly.
-- **Ford F-150 Lightning (2025)** — fingerprint and SecOC support for the Flash truck.
-- **Vision + Map Turn Speed Control (VTSC/MTSC)** — actively caps cruise speed through curves using
-  the model's predicted path curvature **and** OSM map-curve data, so it also slows for sharp curves
-  the camera can't see yet (500 m lookahead, apex-timed so the entrance is the slowest point).
-  Smooth by construction: a gentle regen-style decel envelope that only ever reduces speed. Tuned
-  against the I-5 Terwilliger curve and I-90 Snoqualmie Pass drive logs.
-- **Conditional Experimental Switching (CES)** — chill by default, automatically switches to
-  Experimental mode for curves, low-speed, stop-lights, and slow leads; with a per-car gentle
-  profile and an Off / Light / Standard selector.
+### Speed control
+
+- **CES — Conditional Experimental Switching.** openpilot's relaxed "chill" longitudinal mode stays
+  the default, and the car automatically switches into end-to-end **Experimental mode** only when
+  the situation calls for it: upcoming curves (map + vision), low speeds, stop lights, and slow
+  leads. A three-state selector (Off / Light / Standard) and an on-screen status button control it.
+  Works on both cars whenever openpilot is doing the longitudinal control. Concept from FrogPilot's
+  Conditional Experimental Mode.
+- **VTSC + map curves.** Vision Turn Speed Control caps cruise speed through curves from the
+  model's predicted path curvature, folded together with OSM map-curve data — so it also slows for
+  sharp curves the camera can't see yet (500 m lookahead, apex-timed so the curve entrance is the
+  slowest point). Reduce-only, with a gentle regen-style decel envelope; tuned against I-5
+  Terwilliger and I-90 Snoqualmie Pass drive logs.
+- **ICBM — stock-ACC curve slow-downs (Lightning).** When the truck is on its *stock* adaptive
+  cruise (openpilot longitudinal off), the same VTSC curve math taps the cruise **SET− button** to
+  step the set speed down ahead of curves — decrease-only, no panda change needed. The Alpha
+  Longitudinal toggle acts as the A/B switch between openpilot longitudinal and ICBM. Idea invented
+  by sunnypilot, Ford port by BluePilot.
+- **Red-light guard.** The acceleration-zone logic that keeps CES calm during on-ramp merges is
+  hard-gated so it can never suppress the stop-for-red-light behavior on an intersection approach
+  (root-caused from a live incident, pinned by regression tests).
+
+### Ford F-150 Lightning — lateral (steering)
+
+- **4-signal lateral control** — the BlueCruise-grade curvature command set (ported from
+  BluePilot), giving noticeably stronger, smoother steering than the stock 2-signal path, with a
+  **matching panda safety ruleset** (latch-hardened, written in C, capability-gated to the
+  Lightning so the Tesla is untouched).
+- **Turn-exit predicted-curvature blend** — blends the model's predicted curvature on turn exit so
+  the truck unwinds the wheel like a human instead of overshooting.
+- **Human-turn reset** — when the driver turns the wheel themselves, the controller's state resets
+  cleanly instead of fighting the correction; lane changes get their own command scaling.
+
+### Ford F-150 Lightning — longitudinal
+
+- **LongitudinalExt highway follow control** — BluePilot's lead-follow shaping (classifies the lead
+  as gaining / pacing / trailing and shapes gas and brake per state, with highway speed deadband).
+  Ships in the tree but is **dormant until the Alpha Longitudinal toggle is on**; with it off the
+  truck keeps stock behavior.
+
+### Cluster & HUD
+
+- **BlueCruise cluster display** — the Ford instrument cluster shows the blue BlueCruise engaged
+  state when openpilot is steering, so engagement is readable at a glance in the factory display.
+- **Rich cluster messaging** — openpilot status messages rendered in the Ford cluster (Cancelled,
+  lane departure, and friends). Display-only; no reflash needed.
+- **Confidence ball** — a comma-four-style indicator (ported via sunnypilot) on the comma 3X
+  screen: a small gradient ball on the right edge showing the driving model's own confidence in its
+  current plan (green high, amber mid, red low).
+
+### Tesla Model S (Raven)
+
+- **Native Raven support** — full legacy Tesla HW1/HW2/HW3 support inherited from the xnor-tech
+  base: `tesla_legacy` panda safety, the legacy CAN stack, radar, and ignition detection. This is
+  the reason PNW forks xnor rather than commaai directly.
+- **Blind-spot monitoring** — the car's own blind-spot state read from the Autopilot status CAN
+  message, used to make lane changes safer (and to gate nudgeless lane changes away from an
+  occupied lane).
+
+### Lane changes & engagement (both cars)
+
+- **Nudgeless lane change** — signal, and after a short hold the lane change starts without a
+  steering nudge. **No-disengage-on-brake** — a brake tap doesn't kick you out of engagement. Both
+  default off.
+
+### Maps & location
+
+- **OSM speed limits + curve speeds** — [pfeiferj/mapd](https://github.com/pfeiferj/mapd) provides
+  posted speed limits (with lower-limit warnings on screen) and the map-curvature feed used by the
+  curve slow-down features. Map data for **Washington, Oregon, and Idaho** downloads automatically
+  on first launch.
 - **"Happening Ahead" overlay** — on freeways, a lower-left panel shows the nearest **police
   report** (Waze), **rest area**, and **EV fast charger** ahead along your route (nearest-anything
   within 3 mi on surface streets). Display-only — it never affects steering or speed.
-- **OSM speed-limit display** — shows the current posted limit and warns on lower limits, sourced
-  from the bundled PNW map data (downloaded automatically on first launch).
-- **Tuned highway acceleration** — a brisker ramp to your set cruise speed at freeway speeds,
-  calibrated from real drive logs (straight roads only; curve braking is untouched).
-- **Nudgeless lane change + no-disengage-on-brake** — hands-light lane changes and braking that
-  doesn't kick you out of engagement.
-- **Networking** — tethering/hotspot NAT fix, perpetual tethering, priority-WiFi switching,
-  GPS-gated WiFi scanning with a Set Home Location button, **captive-portal auto-login** for
-  visitor hotspots, and an LTE throttle guard.
-- **Smarter drive upload** — two-pass upload (small files automatically, HD video on real WiFi), an
-  optional **Defer HD Video Upload** toggle for precious WiFi, and a deleter that preserves
-  anything not yet uploaded.
+
+### Networking & uploads
+
+- **Networking** — perpetual tethering with a NAT fix, priority-WiFi switching, GPS-gated WiFi
+  scanning with a Set Home Location button, captive-portal auto-login for visitor hotspots, and an
+  LTE throttle guard.
+- **Smarter drive upload** — two-pass upload (small log files automatically on any network, HD
+  video only on real non-metered WiFi), an optional **Defer HD Video Upload** toggle, and a deleter
+  that never removes anything not yet uploaded.
+
+### Robustness
+
+- **Capability view (`pnw_vehicle`)** — feature code never checks car fingerprints; each car
+  declares its capabilities once, and features consume those. The Tesla can't be impaired by truck
+  work, and vice versa.
+- **Crash logger + auto-restart** — the car-interface process logs fatal crashes before dying and
+  is automatically restarted by the process manager (same policy as the UI).
+- **Stock-fallback armor** — the ported Ford lateral/longitudinal extensions are wrapped so any
+  fault in the extension falls back to stock openpilot behavior instead of crashing the drive.
+- **Engaged-path smoke tests** — the code paths that run while engaged are exercised by tests
+  before anything ships.
+
+### Deployment
+
+- **Auto-update channels** — the device tracks a git branch per channel (dev / test / prod) and
+  installs updates itself at ignition-off; shipping a change is a push.
+- **Pre-drive sync discipline** — the device is verified in sync with its channel before a drive,
+  never mid-drive.
+
+### Safety posture
+
+Every feature above **defaults to stock openpilot behavior**: new toggles default **off**, panda
+safety rules are never weakened, and car-specific code is capability-gated so it is inert on the
+other car. Priority order: safety > stability > quality > features.
 
 ### Installing PNW Pilot
 
@@ -103,8 +192,6 @@ Quick start: `bash <(curl -fsSL openpilot.comma.ai)`
 
 [![openpilot tests](https://github.com/commaai/openpilot/actions/workflows/tests.yaml/badge.svg)](https://github.com/commaai/openpilot/actions/workflows/tests.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-**Credits:** PNW-pilot is built on the inventions of the openpilot community — see [CREDITS.md](CREDITS.md) for feature-by-feature attribution (comma.ai, xnor-tech/@lukasloetkolben, @sunnyhaibin, @alan-polk, @FrogAi, @pfeiferj, and more).
 [![X Follow](https://img.shields.io/twitter/follow/comma_ai)](https://x.com/comma_ai)
 [![Discord](https://img.shields.io/discord/469524606043160576)](https://discord.comma.ai)
 
