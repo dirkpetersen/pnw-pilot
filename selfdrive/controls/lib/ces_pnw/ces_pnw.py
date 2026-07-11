@@ -25,6 +25,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
@@ -433,13 +434,13 @@ class CESController:
       self._event_log_ok = True
     except Exception:
       self._event_log_ok = False
-    # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
-    self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
-    # icbm2pnw: on the F-150 Lightning (stock ACC, no op-long) CES runs in SHADOW — the full decision
-    # pipeline, overlay and ces_events telemetry run, but experimental_request() always returns False
-    # (actuation-neutral). Purpose: (a) the driver can set/see CES Mode on the truck, (b) every truck
-    # drive produces the decision telemetry the upcoming ICBM button bridge will be tuned against.
-    self._shadow = (not self._long_ok) and getattr(CP, 'carFingerprint', '') == "FORD_F_150_LIGHTNING_MK1"
+    # capability view (driver directive 2026-07-11: check CAPABILITIES, never fingerprints here —
+    # pnw_vehicle.PnwVehicle is the one place that maps cars to features):
+    #   _long_ok -> openpilot owns longitudinal (planner actuation)
+    #   _shadow  -> CES runs shadow with ICBM as the actuator (stock-ACC buttons, no op-long)
+    veh = PnwVehicle(CP)
+    self._long_ok = veh.op_long
+    self._shadow = veh.ces_shadow
     # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), a
     # publish throttle for the IcbmTarget mem-param heartbeat, and the last published target +
     # stock-ACC readings for the ces_events closed-loop trace.

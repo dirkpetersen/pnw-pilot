@@ -5,6 +5,7 @@ from openpilot.system.ui.widgets.list_view import multiple_button_item, toggle_i
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -322,13 +323,11 @@ class TogglesLayout(Widget):
     # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
     ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    # light-ces-gentle: the CES Mode selector only applies when openpilot controls longitudinal.
-    # icbm2pnw exception: on the F-150 Lightning CES runs in SHADOW (telemetry/overlay now, ICBM
-    # button actuation coming), so the selector stays usable there — greying it locked the driver out
-    # of CES Mode on the truck entirely (driver report 2026-07-11).
-    ces_shadow_ok = ui_state.CP is not None and getattr(ui_state.CP, "carFingerprint", "") == "FORD_F_150_LIGHTNING_MK1"
+    # light-ces-gentle/icbm2pnw: the CES Mode selector is usable wherever CES can act — planner via
+    # op-long, or ICBM via stock-ACC buttons (capability view, not fingerprint checks — pnw_vehicle).
+    veh = PnwVehicle(ui_state.CP)
     if "CESMode" in self._toggles:
-      self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or ces_shadow_ok)
+      self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or veh.ces_shadow)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
@@ -338,10 +337,9 @@ class TogglesLayout(Widget):
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["GetMapForLocation"].action_item.set_enabled(not covered)
 
-    # auto2pnw: Nudgeless Lane Change applies to Tesla + the F-150 Lightning only — grey out (and force
-    # off) on any other car. No Disengage on Braking is unsupported here on every car — always greyed off.
-    cp = ui_state.CP
-    nudgeless_ok = cp is not None and (cp.brand == "tesla" or cp.carFingerprint == "FORD_F_150_LIGHTNING_MK1")
+    # auto2pnw: Nudgeless Lane Change support comes from the capability view — grey out (and force
+    # off) elsewhere. No Disengage on Braking is unsupported here on every car — always greyed off.
+    nudgeless_ok = veh.nudgeless
     if "NudgelessLaneChange" in self._toggles:
       self._toggles["NudgelessLaneChange"].action_item.set_enabled(nudgeless_ok)
       if not nudgeless_ok:
