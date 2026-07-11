@@ -404,6 +404,11 @@ class CESController:
       self._event_log_ok = False
     # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
+    # icbm2pnw: on the F-150 Lightning (stock ACC, no op-long) CES runs in SHADOW — the full decision
+    # pipeline, overlay and ces_events telemetry run, but experimental_request() always returns False
+    # (actuation-neutral). Purpose: (a) the driver can set/see CES Mode on the truck, (b) every truck
+    # drive produces the decision telemetry the upcoming ICBM button bridge will be tuned against.
+    self._shadow = (not self._long_ok) and getattr(CP, 'carFingerprint', '') == "FORD_F_150_LIGHTNING_MK1"
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -425,8 +430,9 @@ class CESController:
       except Exception:
         mode = C.CES_MODE_OFF
       self._set_mode(mode)
-      # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode).
-      self._enabled = self._long_ok and C.ces_enabled(self._mode)
+      # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode) —
+      # except in Lightning shadow mode, where the pipeline runs for telemetry/display only.
+      self._enabled = (self._long_ok or self._shadow) and C.ces_enabled(self._mode)
       if self._enabled:
         self._toggles = _toggles_from_params(self.params)
         try:
@@ -490,6 +496,10 @@ class CESController:
     # even while CES is disabled — the point is drive-log evidence that BSM flips with passing cars.
     self._bs_l = bool(getattr(car_state, 'leftBlindspot', False))
     self._bs_r = bool(getattr(car_state, 'rightBlindspot', False))
+    # icbm2pnw/lateral telemetry (driver req 2026-07-11 "more good data"): steering angle + driver
+    # override per record — quantifies left-pull, curve-tracking failures and override clusters.
+    self._str_ang = round(float(getattr(car_state, 'steeringAngleDeg', 0.0)), 1)
+    self._str_prs = bool(getattr(car_state, 'steeringPressed', False))
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -529,7 +539,9 @@ class CESController:
       want = False
 
     self._publish_status(sig, want)
-    return want
+    # icbm2pnw: shadow mode (Lightning) never actuates — telemetry/overlay show the would-be decision
+    # above; the planner keeps stock behavior until the ICBM bridge lands.
+    return want and self._long_ok
 
   def _publish_status(self, sig, want: bool) -> None:
     """Log mode transitions and publish a throttled CESStatus snapshot to the in-memory param store
@@ -595,9 +607,12 @@ class CESController:
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
       "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
-      # bsm2pnw: Tesla blind-spot booleans (carState.left/rightBlindspot) — liveness evidence for the
+      # bsm2pnw: blind-spot booleans (carState.left/rightBlindspot) — liveness evidence for the
       # lane-change BSM gate; expect these to flip as traffic passes on real drives.
       "bsL": self._bs_l, "bsR": self._bs_r,
+      # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
+      # marker — True on the Lightning where CES decisions are telemetry-only (no actuation yet).
+      "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
     }
 
   def _append_event(self, rec: dict) -> None:

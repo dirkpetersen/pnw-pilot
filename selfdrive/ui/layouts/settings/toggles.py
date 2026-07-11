@@ -322,11 +322,13 @@ class TogglesLayout(Widget):
     # longitudinal — grey out (and force off) otherwise (symmetric enable/disable).
     ces_long_ok = ui_state.CP is not None and ui_state.has_longitudinal_control
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
-    # light-ces-gentle: the CES Mode selector only applies when openpilot controls longitudinal — grey it
-    # out otherwise. (The ces_pnw logic is itself gated on openpilotLongitudinalControl, so a stale
-    # CESMode>0 stays inert; no value force needed for the multi-button selector.)
+    # light-ces-gentle: the CES Mode selector only applies when openpilot controls longitudinal.
+    # icbm2pnw exception: on the F-150 Lightning CES runs in SHADOW (telemetry/overlay now, ICBM
+    # button actuation coming), so the selector stays usable there — greying it locked the driver out
+    # of CES Mode on the truck entirely (driver report 2026-07-11).
+    ces_shadow_ok = ui_state.CP is not None and getattr(ui_state.CP, "carFingerprint", "") == "FORD_F_150_LIGHTNING_MK1"
     if "CESMode" in self._toggles:
-      self._toggles["CESMode"].action_item.set_enabled(ces_long_ok)
+      self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or ces_shadow_ok)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
