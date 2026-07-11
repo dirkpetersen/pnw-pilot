@@ -124,7 +124,12 @@ class CesStatusRenderer(Widget):
     out.append((btn, _C.WHITE, self.font_bold))
 
     is_exp = st.get("mode") == "experimental"
-    out.append((">> EXPERIMENTAL" if is_exp else ">> CHILL", _C.ORANGE if is_exp else _C.GREY, self.font_bold))
+    # icbm2pnw (driver report 2026-07-11): in SHADOW nothing actuates — orange means "acting", so
+    # shadow shows grey SHADOW-prefixed modes; orange EXPERIMENTAL is reserved for real actuation.
+    if st.get("shadow"):
+      out.append((">> SHADOW EXP" if is_exp else ">> SHADOW CHILL", _C.GREY, self.font_bold))
+    else:
+      out.append((">> EXPERIMENTAL" if is_exp else ">> CHILL", _C.ORANGE if is_exp else _C.GREY, self.font_bold))
 
     # VTSC (curve speed control) — rides the CES toggle; show when slowing for a curve
     vt = self._vtsc
@@ -137,14 +142,23 @@ class CesStatusRenderer(Widget):
     # icbm2pnw (driver req 2026-07-11): stock-ACC button management in ONE line — shows when taps
     # are being issued and how much: "ICBM 24>18" = stepping the stock set speed from 24 toward
     # 18 mph (ORANGE while actively lowering; grey "@18" once the target is reached/held).
-    it = st.get("icbmT")
-    if it is not None:
-      t_mph = round(float(it) * conv)
-      s_mph = round(float(st.get("icbmSet") or 0.0) * conv)
-      if s_mph > t_mph:
-        out.append((f"ICBM {s_mph}>{t_mph}", _C.ORANGE, self.font_bold))
+    # ALWAYS visible in shadow (driver req: "I couldn't see whether it was engaged"):
+    #   ICBM no-ACC  -> armed but the stock cruise is not engaged (engage ACC to give it authority)
+    #   ICBM ready   -> armed, ACC engaged, no binding curve right now
+    #   ICBM 24>18   -> actively stepping the stock set speed down (orange)
+    if st.get("shadow"):
+      it = st.get("icbmT")
+      if it is not None:
+        t_mph = round(float(it) * conv)
+        s_mph = round(float(st.get("icbmSet") or 0.0) * conv)
+        if s_mph > t_mph:
+          out.append((f"ICBM {s_mph}>{t_mph}", _C.ORANGE, self.font_bold))
+        else:
+          out.append((f"ICBM @{t_mph}", _C.GREY, self.font))
+      elif st.get("icbmOn"):
+        out.append(("ICBM ready", _C.GREEN, self.font))
       else:
-        out.append((f"ICBM @{t_mph}", _C.GREY, self.font))
+        out.append(("ICBM no-ACC", _C.GREY, self.font))
 
     reason = st.get("reason", "")
     if is_exp and reason and reason not in ("chill", ""):

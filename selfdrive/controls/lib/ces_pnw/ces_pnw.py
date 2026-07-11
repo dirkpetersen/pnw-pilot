@@ -104,6 +104,8 @@ def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> t
       tv = float(p["velocity"])
     except (KeyError, TypeError, ValueError):
       continue
+    if tv != tv or d != d:   # NaN guard: mapd occasionally emits non-finite velocities (seen live
+      continue               # 2026-07-11) — a NaN silently falsifies every comparison downstream
     if 0.0 < d <= horizon:
       # most-binding = lowest target speed ahead within the horizon
       if best_v == 0.0 or tv < best_v:
@@ -654,6 +656,7 @@ class CESController:
     if self._shadow:
       tele["icbmT"] = self._icbm_last_target
       tele["icbmSet"] = self._stock_set
+      tele["icbmOn"] = self._stock_on
 
     # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
     if mode != self._last_mode:
