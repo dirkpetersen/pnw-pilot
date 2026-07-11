@@ -48,6 +48,37 @@ def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
   return best_acc, max(best_t, 1.0)
 
 
+# icbm2pnw: comfort decel used to decide WHEN a curve starts binding the stock-ACC set speed. The
+# stock ACC does the actual braking to the new set point; this only times the hand-off (gentle,
+# truck-profile). Reduce-only: targets never exceed the driver's own latched set speed.
+ICBM_A_DECEL = 0.8          # m/s^2 comfort approach decel
+ICBM_MARGIN_M = 30.0        # start a little early — button steps + ACC response add latency
+ICBM_MIN_DROP_MS = 1.0      # ignore caps within ~2 mph of the set speed (not worth taps)
+
+
+def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn):
+  """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None).
+
+  ceiling = the driver's own set speed latched when a cap first engages (None when uncapped);
+  while capped, v_set follows the button-lowered stock set, so the latched ceiling is the only
+  memory of what to restore to. Reduce-only: target is never above the ceiling."""
+  if v_set <= 0:
+    return None, None                      # no valid set speed -> hands off
+  if map_v and map_v > 0 and map_dist != float('inf'):
+    apex = scale_fn(map_v) * map_v         # same tiered scaling as VTSC/MTSC
+    ref = ceiling if ceiling is not None else v_set
+    if apex < ref - ICBM_MIN_DROP_MS:
+      # binding curve: engage once inside the comfort-decel envelope
+      brake_dist = max(v_ego * v_ego - apex * apex, 0.0) / (2.0 * ICBM_A_DECEL) + ICBM_MARGIN_M
+      if map_dist <= brake_dist:
+        new_ceiling = ceiling if ceiling is not None else v_set
+        return max(apex, 0.0), new_ceiling
+  # curve cleared (or none): go silent and unlatch immediately. DEC-ONLY design (Gemini-hardened
+  # 2026-07-11): there is no restore path — the executor can only lower the set speed, and the
+  # driver restores it themselves. This kills the restore-vs-driver-intent fight entirely.
+  return None, None
+
+
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
   """Great-circle distance in metres (pure)."""
   import math
@@ -409,6 +440,10 @@ class CESController:
     # (actuation-neutral). Purpose: (a) the driver can set/see CES Mode on the truck, (b) every truck
     # drive produces the decision telemetry the upcoming ICBM button bridge will be tuned against.
     self._shadow = (not self._long_ok) and getattr(CP, 'carFingerprint', '') == "FORD_F_150_LIGHTNING_MK1"
+    # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), and a
+    # publish throttle for the IcbmTarget mem-param heartbeat.
+    self._icbm_ceiling = None
+    self._icbm_last_pub = 0.0
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -539,9 +574,32 @@ class CESController:
       want = False
 
     self._publish_status(sig, want)
-    # icbm2pnw: shadow mode (Lightning) never actuates — telemetry/overlay show the would-be decision
-    # above; the planner keeps stock behavior until the ICBM bridge lands.
+    # icbm2pnw: in Lightning shadow mode the CES/planner path never actuates, but the ICBM brain
+    # publishes a stock-ACC set-speed target the ford carcontroller executor follows (curve
+    # slow-down + restore, reduce-only against the driver's own set — see icbm_curve_target).
+    if self._shadow and sig is not None:
+      self._icbm_step(sig)
     return want and self._long_ok
+
+  def _icbm_step(self, sig: dict) -> None:
+    """Publish the IcbmTarget mem-param at ~4 Hz (executor treats >2 s silence as stale-stop).
+    Best-effort: never raises into the control path."""
+    now = time.monotonic()
+    if now - self._icbm_last_pub < 0.25 or self.mem_params is None:
+      return
+    self._icbm_last_pub = now
+    try:
+      target, self._icbm_ceiling = icbm_curve_target(
+        sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
+        sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale)
+      if target is not None:
+        # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —
+        # Gemini review catch that would have silently killed every publish)
+        self.mem_params.put_nonblocking("IcbmTarget", {"target": round(target, 2), "ceiling": round(self._icbm_ceiling, 2), "ts": time.time()})  # noqa: TID251 -- wall clock heartbeat shared with the executor
+      else:
+        self.mem_params.put_nonblocking("IcbmTarget", {})
+    except Exception:
+      pass
 
   def _publish_status(self, sig, want: bool) -> None:
     """Log mode transitions and publish a throttled CESStatus snapshot to the in-memory param store
