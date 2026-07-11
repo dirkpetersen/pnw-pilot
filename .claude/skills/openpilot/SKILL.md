@@ -91,6 +91,7 @@ actually cost time or nearly bricked hardware (kept additive; newest era at the 
 | panda firmware, flashing, recovery, CAN framing, safety modes, fingerprinting | `references/panda-and-safety.md` |
 | The Lightning or the Raven specifically (CAN topology, `tesla_legacy`, known fixes) | `references/cars.md` |
 | Legacy overlay-era deploys (`patch-*.py`, `/data/dirk`, sentinels) — historical reference only | `references/deploy-toolchain.md` |
+| **Writing/refactoring ANY pnw feature code** — capability-view rule (never fingerprints), cross-car policy, fork patterns | `references/conventions.md` (READ BEFORE CODING) |
 | The trap list | `references/pitfalls.md` |
 
 ## Operating principles (the habits that keep this safe)

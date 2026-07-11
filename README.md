@@ -103,6 +103,8 @@ Quick start: `bash <(curl -fsSL openpilot.comma.ai)`
 
 [![openpilot tests](https://github.com/commaai/openpilot/actions/workflows/tests.yaml/badge.svg)](https://github.com/commaai/openpilot/actions/workflows/tests.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Credits:** PNW-pilot is built on the inventions of the openpilot community — see [CREDITS.md](CREDITS.md) for feature-by-feature attribution (comma.ai, xnor-tech/@lukasloetkolben, @sunnyhaibin, @alan-polk, @FrogAi, @pfeiferj, and more).
 [![X Follow](https://img.shields.io/twitter/follow/comma_ai)](https://x.com/comma_ai)
 [![Discord](https://img.shields.io/discord/469524606043160576)](https://discord.comma.ai)
 
