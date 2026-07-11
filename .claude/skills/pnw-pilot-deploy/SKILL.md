@@ -84,6 +84,10 @@ The PORTING method (snapshot-port of commaai modeld, capnp minimal-delta, param 
 
 1. Model onnx files are **git-LFS pointers**; `.lfsconfig` fetchexcludes the 1.7 GB
    `*big_driving_supercombo.onnx` (USB-GPU only — never needed on the 3X/comma-four class).
+   **Standing rule: any future multi-GB model variant not used on our hardware gets added to
+   `.lfsconfig` `fetchexclude` IN THE SAME COMMIT that introduces it** — otherwise every device
+   (and every friend on 3testpnw) downloads gigabytes it will never load, over whatever network the
+   update catches it on. Escape hatch if ever needed: `git lfs pull --include <file>`.
    A modeld change usually pairs with a **tinygrad_repo pin bump** — same ordering rules as any
    submodule (and the `git add <submodule>` clobber gotcha applies).
 2. **Pre-reboot, verify the STAGED tree has REAL LFS blobs, not pointers**: the main supercombo is
