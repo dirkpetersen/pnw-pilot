@@ -96,7 +96,11 @@ procs = [
   PythonProcess("controlsd", "selfdrive.controls.controlsd", and_(not_joystick, iscar)),
   PythonProcess("joystickd", "tools.joystick.joystickd", or_(joystick, notcar)),
   PythonProcess("selfdrived", "selfdrive.selfdrived.selfdrived", only_onroad),
-  PythonProcess("card", "selfdrive.car.card", only_onroad),
+  # pnw: restart_if_crash — card died at ignition-on twice (2026-07-11) and this manager leaves
+  # crashed processes dead, turning a transient boot-race exception into a whole drive with
+  # processNotRunning/no-engage. A dead car interface is strictly worse than a restarted one
+  # (same policy as ui; selfdrived alerts during the gap and re-entry is normal).
+  PythonProcess("card", "selfdrive.car.card", only_onroad, restart_if_crash=True),
   PythonProcess("deleter", "system.loggerd.deleter", always_run),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC)),
   PythonProcess("qcomgpsd", "system.qcomgpsd.qcomgpsd", qcomgps, enabled=TICI),
