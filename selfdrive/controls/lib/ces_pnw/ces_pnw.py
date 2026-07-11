@@ -440,10 +440,14 @@ class CESController:
     # (actuation-neutral). Purpose: (a) the driver can set/see CES Mode on the truck, (b) every truck
     # drive produces the decision telemetry the upcoming ICBM button bridge will be tuned against.
     self._shadow = (not self._long_ok) and getattr(CP, 'carFingerprint', '') == "FORD_F_150_LIGHTNING_MK1"
-    # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), and a
-    # publish throttle for the IcbmTarget mem-param heartbeat.
+    # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), a
+    # publish throttle for the IcbmTarget mem-param heartbeat, and the last published target +
+    # stock-ACC readings for the ces_events closed-loop trace.
     self._icbm_ceiling = None
     self._icbm_last_pub = 0.0
+    self._icbm_last_target = None
+    self._stock_set = 0.0
+    self._stock_on = False
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -535,6 +539,13 @@ class CESController:
     # override per record — quantifies left-pull, curve-tracking failures and override clusters.
     self._str_ang = round(float(getattr(car_state, 'steeringAngleDeg', 0.0)), 1)
     self._str_prs = bool(getattr(car_state, 'steeringPressed', False))
+    # icbm2pnw closed-loop trace: the STOCK ACC's reported set speed + engagement — with the
+    # published target (icbmT below) this shows every executor tap landing (set stepping down).
+    try:
+      self._stock_set = round(float(car_state.cruiseState.speed), 2)
+      self._stock_on = bool(car_state.cruiseState.enabled)
+    except Exception:
+      self._stock_set, self._stock_on = 0.0, False
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -593,11 +604,13 @@ class CESController:
     try:
       if not active:
         self._icbm_ceiling = None
+        self._icbm_last_target = None
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
       target, self._icbm_ceiling = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
         sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale)
+      self._icbm_last_target = round(target, 2) if target is not None else None
       if target is not None:
         # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —
         # Gemini review catch that would have silently killed every publish)
@@ -675,8 +688,13 @@ class CESController:
       # lane-change BSM gate; expect these to flip as traffic passes on real drives.
       "bsL": self._bs_l, "bsR": self._bs_r,
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
-      # marker — True on the Lightning where CES decisions are telemetry-only (no actuation yet).
+      # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
+      # icbm2pnw closed-loop trace: published curve target (m/s, None = ICBM idle), latched driver
+      # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
+      # in consecutive ticks = executor taps landing.
+      "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling,
+      "stockSet": self._stock_set, "stockOn": self._stock_on,
     }
 
   def _append_event(self, rec: dict) -> None:

@@ -38,6 +38,7 @@ class ExpButton(Widget):
     self._txt_wheel: rl.Texture = gui_app.texture('icons/chffr_wheel.png', icon_size, icon_size)
     self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)        # baked ORANGE
     self._txt_exp_white: rl.Texture = gui_app.texture('icons/experimental_white.png', icon_size, icon_size)  # ces2xnor
+    self._txt_exp_yellow: rl.Texture = gui_app.texture('icons/experimental_yellow.png', icon_size, icon_size)  # icbm2pnw: CES-auto-Experimental (driver req 2026-07-11 — orange is forced-Exp ONLY)
     self._rect = rl.Rectangle(0, 0, button_size, button_size)
 
   def set_rect(self, rect: rl.Rectangle) -> None:
@@ -91,10 +92,11 @@ class ExpButton(Widget):
         texture = self._txt_wheel
       elif self._ces_button == _BTN_EXP and ui_state.has_longitudinal_control:
         texture = self._txt_exp
-      else:  # _BTN_CES (or Exp with no op-long, defensive) — dynamic: orange only when the planner
-             # has actually switched us to Experimental (impossible without op-long), else bleached.
-             # On the Lightning/ICBM this stays the bleached "smart mode on" icon.
-        texture = self._txt_exp if (self._experimental_mode and ui_state.has_longitudinal_control) else self._txt_exp_white
+      else:  # _BTN_CES (or Exp with no op-long, defensive) — dynamic: YELLOW when CES has actually
+             # switched us to Experimental (driver req 2026-07-11: orange is reserved for FORCED Exp
+             # so the button state is never ambiguous), bleached white while CES rests in chill.
+             # On the Lightning/ICBM (no op-long) this stays bleached — Experimental can't happen.
+        texture = self._txt_exp_yellow if (self._experimental_mode and ui_state.has_longitudinal_control) else self._txt_exp_white
     else:
       # stock 2-state path (CES off): wheel <-> (orange) experimental, unchanged.
       texture = self._txt_exp if (self._held_or_actual_mode() or self._manual_exp) else self._txt_wheel
