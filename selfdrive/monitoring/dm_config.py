@@ -25,8 +25,13 @@ stdlib only — also loaded standalone (importlib by path) by the tools/dm CLI.
 import json
 import math
 import os
+import stat
 
 DM_CONFIG_PATH = "/data/pnw/dm.json"
+
+# Refuse to parse anything bigger than this (a sane config is <1 KiB). Guards against OOM from a
+# huge file accidentally landing at the config path (Gemini review finding, 2026-07-11).
+MAX_CONFIG_BYTES = 65536
 
 # Hardcoded tier defaults (seconds). First value = pose/attention timeout, second = phone timeout.
 # These are the fallbacks whenever the JSON is missing or a field is absent/invalid.
@@ -77,7 +82,17 @@ def read_raw_config(path: str = DM_CONFIG_PATH, warn=None):
   """Best-effort read of the JSON file. Returns a dict ({} if missing/unreadable/not-a-dict)."""
   warn = warn or _noop_warn
   try:
-    if not os.path.exists(path):
+    try:
+      st = os.stat(path)
+    except FileNotFoundError:
+      return {}  # missing file is the normal state
+    # Only parse a plain regular file: a FIFO would block open() forever and a character device
+    # (or a huge file) would hang/OOM json.load() — dmonitoringd is a safety process.
+    if not stat.S_ISREG(st.st_mode):
+      warn(f"dm_config: {path} is not a regular file, ignoring it")
+      return {}
+    if st.st_size > MAX_CONFIG_BYTES:
+      warn(f"dm_config: {path} is {st.st_size} bytes (max {MAX_CONFIG_BYTES}), ignoring it")
       return {}
     with open(path, encoding="utf-8") as f:
       data = json.load(f)

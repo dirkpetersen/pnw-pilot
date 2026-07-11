@@ -66,6 +66,18 @@ class TestLoadDmTier:
     assert cfg.load() is None
     assert cfg.warnings
 
+  def test_fifo_at_config_path_is_default_no_hang(self, cfg):
+    # a FIFO would block open() forever — must be rejected on the stat, not opened
+    os.mkfifo(cfg.path)
+    assert cfg.load() is None
+    assert cfg.warnings
+
+  def test_oversized_file_is_default(self, cfg):
+    with open(cfg.path, "w", encoding="utf-8") as f:
+      f.write("[" + "1," * (dm_config.MAX_CONFIG_BYTES // 2) + "1]")
+    assert cfg.load() is None
+    assert any("bytes" in w for w in cfg.warnings)
+
   def test_mode_default_or_absent(self, cfg):
     cfg.write({"mode": "default", "highway": {"pose_s": 45, "phone_s": 90}})
     assert cfg.load() is None

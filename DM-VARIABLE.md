@@ -74,9 +74,12 @@ relaxed not enabled).
 
 ## Safety posture
 
-- **Never crashes dmonitoringd:** `load_dm_tier` never raises (missing/unreadable/malformed/
-  mistyped input → hardcoded defaults + `cloudlog.warning`), and the `helpers.py` call site wraps
-  it in `try/except` anyway — a DM process crash is a safety event.
+- **Never crashes or hangs dmonitoringd:** `load_dm_tier` never raises (missing/unreadable/
+  malformed/mistyped input → hardcoded defaults + `cloudlog.warning`), and the `helpers.py` call
+  site wraps it in `try/except` anyway — a DM process crash is a safety event. Per the Gemini
+  review (gemini-pro-latest, 2026-07-11): only a plain regular file ≤ 64 KiB is ever opened —
+  a FIFO/char-device at the path (would block `open()`/`json.load` forever) or an oversized file
+  (OOM risk) is rejected on the `stat` with a warning.
 - **No file = current behavior, byte-identical.** The hardcoded default tier lives only in the
   Python source.
 - **Relaxed is opt-in only** (`relaxed.enabled: true` required), and even then capped at 600 s —
