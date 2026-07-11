@@ -210,6 +210,46 @@ opendbc-only safety edit still reflashes the panda.
   (`backup-<ts>-working-preFordSafety` / `4devpnw`) + reboot; the panda reflashes back to the old
   safety.
 
+### Python-side lessons from the same deploy (the numpy crash day, 2026-07-11)
+
+- **Fork-lineage type trap (cost 3 crashed drives):** BluePilot's BASE `carcontroller.py` casts
+  `float()` on every capnp actuator assignment (`new_actuators.curvature = float(...)`) because its
+  lateral math returns `numpy.float64`; STOCK openpilot doesn't cast (its math never produces numpy).
+  Porting BP's numpy-producing module into a stock-assignment controller = capnp
+  `KjException: unsupported type numpy.float64` → card dies. **When porting a feature between forks,
+  diff the BASE file lines around the integration point too** (BP is sunnypilot-based which is
+  openpilot-based — each layer may have quietly changed "unrelated" lines the feature depends on).
+- **Crashes gated on MOTION, not engagement:** the 4-signal path computes live curvature every frame
+  even disengaged (bumpless-transfer). At standstill everything is a clean `0.0` — so parked manual
+  runs, desk runs, and `test_car_interfaces` (fuzzes at vEgo=0) all pass while the car crashes the
+  moment it MOVES. Validate motion paths at speed: the engaged-path smoke test
+  (`pnw-opendbc opendbc/car/ford/tests/test_engaged_smoke_pnw.py`) sweeps vEgo × curvature engaged
+  AND asserts the 4-signal path is ACTIVE (`ci.CC._latext is not None`) — without that assert, a
+  cereal/msgq-less environment silently falls back to stock and green-lights untested code. Dev box
+  needs `scons -u msgq/ipc_pyx.so` built in pnw-pilot for the test to exercise the real path.
+  **This test is now a mandatory gate for any Ford carcontroller/lateral change.**
+- **A ported feature must never take down the car interface:** wrap the feature's per-frame update
+  in try/except → `carlog.exception` once → permanently fall back to the STOCK path for the drive
+  (`self._latext = None`). Assist survives, no canError, traceback preserved. PROVE the fallback by
+  fault injection before shipping (inject a raising stub, assert stock path resumes).
+
+### Crash forensics on this fork (why the traceback was lost for 6 hours)
+
+- This xnor-era manager **discards child stderr** and **does not restart crashed processes** (only
+  `restart_if_crash=True` procs — `ui`, and now `card`). A card crash = permanent
+  `processNotRunning` + "Unknown Vehicle Variant" (this fork's wording for the **canError** alert)
+  for the rest of the drive, with NO traceback anywhere.
+- Mitigations now in tree: `card.py` main is wrapped → any fatal exception lands in swaglog as
+  `"card: fatal crash"` (grep that FIRST when card is down: `strings /data/log/swaglog.* | grep -A25
+  "fatal crash"`), and card has `restart_if_crash=True`.
+- The tmux pane is useless for tracebacks: manager prints the full process list EVERY loop, flooding
+  ~7k lines of scrollback in minutes.
+- Symptom cluster during a crash-restart wave: `canError` ("Unknown Vehicle Variant") +
+  `locationdTemporaryError` + `selfdrivedLagging` together usually mean a process died and respawned,
+  NOT a CAN/GPS hardware problem — check `managerState` DOWN list before chasing wiring.
+- `safetyModel=elm327` for the first ~30-60 s after boot/ignition = the FW-query fingerprint phase,
+  flips to the car's safety on its own. Not an error; don't react to it.
+
 ## opendbc/panda pin-bump discipline (born 2026-07-10 — the MG_ZS→MOCK dashcam incident)
 
 A pin bump ships EVERY commit between the pins, not just yours. The audit rule that failed and its
