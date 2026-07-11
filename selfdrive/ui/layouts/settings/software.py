@@ -52,7 +52,10 @@ class SoftwareLayout(Widget):
   def __init__(self):
     super().__init__()
 
-    self._onroad_label = ListItem(lambda: tr("Updates are only downloaded while the car is off."))
+    # update2pnw: the updater now downloads in the background while driving too; only the INSTALL
+    # (overlay swap) waits for the next reboot / ignition-off. (Old text "only downloaded while the
+    # car is off" was stale after update2pnw made `updated` always_run.)
+    self._onroad_label = ListItem(lambda: tr("Updates download in the background; they install when the car is next restarted."))
     self._version_item = text_item(lambda: tr("Current Version"), ui_state.params.get("UpdaterCurrentDescription") or "")
     self._download_btn = button_item(lambda: tr("Download"), lambda: tr("CHECK"), callback=self._on_download_update)
 
