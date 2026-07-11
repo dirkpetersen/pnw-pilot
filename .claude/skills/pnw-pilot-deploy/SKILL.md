@@ -77,6 +77,29 @@ the updater never fights manual edits. Path 2 below is for RECOVERY, not for shi
 7. Note the device's checked-out branch is **`3devpnw`** — a manual reset to a different branch will be
    "corrected" by the next auto-update unless `UpdaterTargetBranch` is changed too.
 
+## Shipping a driving-model update (lebowski-class)
+
+The PORTING method (snapshot-port of commaai modeld, capnp minimal-delta, param audit) is
+`docs/LEBOWSKI2PNW.md` — this section is only the DEPLOY mechanics:
+
+1. Model onnx files are **git-LFS pointers**; `.lfsconfig` fetchexcludes the 1.7 GB
+   `*big_driving_supercombo.onnx` (USB-GPU only — never needed on the 3X/comma-four class).
+   A modeld change usually pairs with a **tinygrad_repo pin bump** — same ordering rules as any
+   submodule (and the `git add <submodule>` clobber gotcha applies).
+2. **Pre-reboot, verify the STAGED tree has REAL LFS blobs, not pointers**: the main supercombo is
+   ~61 MB (`stat -c %s .../finalized/selfdrive/modeld/models/driving_supercombo.onnx` — a pointer
+   file is ~130 bytes). The 2026-07-09 e2e validation confirmed the updater fetches LFS correctly,
+   but an update whose commit CHANGES a model pointer is **still an unverified updater case — babysit
+   the first one** (this check is exactly how).
+3. **Expect a LONG first boot** (~4 min observed for lebowski): build-on-boot runs the tinygrad model
+   compile → pkls. A silent spinner is compiling, not hung — check
+   `ps -eo etimes,pcpu,args | grep -E "[s]cons|[b]uild.py"` before assuming failure.
+4. Manual path (recovery only): `GIT_LFS_SKIP_SMUDGE=1 git reset --hard <sha> && git lfs pull` —
+   smudge-during-checkout OOMs git on the 3X.
+5. First drive after a model change: watch modeld frame drops + execution time (lebowski baseline:
+   ~27 ms, 0% drops) and treat CES/VTSC tuning as suspect until re-validated — the tunes are
+   calibrated against a specific model's behavior.
+
 ## Companion repos — pnw-opendbc / pnw-panda (real submodules, `master-pnw`)
 
 `opendbc_repo` and `panda` are **real git submodules on ALL channel branches** (`3devpnw`, `4devpnw`,
