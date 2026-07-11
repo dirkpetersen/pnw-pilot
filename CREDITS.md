@@ -47,6 +47,13 @@ wherever available.
 - Individual contributions there also from **[@tonesto7](https://github.com/tonesto7)** and
   John Christman.
 
+### Ford longitudinal follow control (`longitudinal_ext`)
+- **[@alan-polk](https://github.com/alan-polk)** (BluePilot) — author of `longitudinal_ext.py`
+  (lead classification gaining/pacing/trailing, per-state gas/accel shaping, split
+  brake/precharge hysteresis, highway speed deadband), ported to PNW as
+  `longitudinal_ext_pnw.py` (fordlong2pnw) with three PNW-specific integration fixes noted
+  in that file.
+
 ### Conditional Experimental Mode (the concept PNW's CES derives from)
 - **[@FrogAi](https://github.com/FrogAi)** (James, "frogsgomoo") — invented Conditional
   Experimental Mode (`frogpilot/controls/lib/conditional_experimental_mode.py` in FrogPilot).
