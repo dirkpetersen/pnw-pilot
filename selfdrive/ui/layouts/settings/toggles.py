@@ -325,7 +325,8 @@ class TogglesLayout(Widget):
     self._long_personality_setting.action_item.set_enabled(ces_long_ok)
     # light-ces-gentle/icbm2pnw: the CES Mode selector is usable wherever CES can act — planner via
     # op-long, or ICBM via stock-ACC buttons (capability view, not fingerprint checks — pnw_vehicle).
-    veh = PnwVehicle(ui_state.CP)
+    # live_op_long: persistent CP lags a session behind the Alpha Long toggle (see pnw_vehicle)
+    veh = PnwVehicle(ui_state.CP, live_op_long=ui_state.has_longitudinal_control)
     if "CESMode" in self._toggles:
       self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or veh.ces_shadow)
 

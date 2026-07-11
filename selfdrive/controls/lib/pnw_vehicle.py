@@ -11,12 +11,20 @@ all-False capabilities), so UI code can call it before a car is fingerprinted.
 
 
 class PnwVehicle:
-  def __init__(self, CP):
+  def __init__(self, CP, live_op_long=None):
+    """live_op_long: UI contexts pass ui_state.has_longitudinal_control here — the PERSISTENT
+    CarParams the UI reads keeps the PREVIOUS session's opLong until the next onroad fingerprint,
+    so after toggling Alpha Long the capability view would lag a full drive behind (greyed the CES
+    selector right after the driver turned alpha off, 2026-07-11). Controller contexts omit it
+    (their CP is fresh at construction)."""
     fp = str(getattr(CP, 'carFingerprint', '') or '') if CP is not None else ''
     brand = str(getattr(CP, 'brand', '') or '') if CP is not None else ''
 
     # openpilot owns gas/brake (op-long / alpha-long active)
-    self.op_long: bool = bool(getattr(CP, 'openpilotLongitudinalControl', False)) if CP is not None else False
+    if live_op_long is not None:
+      self.op_long: bool = bool(live_op_long)
+    else:
+      self.op_long = bool(getattr(CP, 'openpilotLongitudinalControl', False)) if CP is not None else False
 
     # stock-ACC set-speed steering via SET +/- button taps on the SCCM stream (ICBM executor lives
     # in the ford carcontroller; 0x083 is TX-allowlisted). Today: the 2025 F-150 Lightning.
