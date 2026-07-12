@@ -10,6 +10,12 @@ from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
 # Description constants
+try:
+  from openpilot.selfdrive.monitoring.dm_config import HIGHWAY_DEFAULT_POSE_S as _DM_HWY_POSE_S, \
+      HIGHWAY_DEFAULT_PHONE_S as _DM_HWY_PHONE_S
+except Exception:
+  _DM_HWY_POSE_S, _DM_HWY_PHONE_S = 30.0, 60.0
+
 DESCRIPTIONS = {
   "OpenpilotEnabledToggle": tr_noop(
     "Use the openpilot system for adaptive cruise control and lane keep driver assistance. " +
@@ -26,12 +32,13 @@ DESCRIPTIONS = {
     "without a turn signal activated while driving over 31 mph (50 km/h)."
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
+  # dm-variable: numbers below are pulled from the dm_config SOURCE constants so the help text can
+  # never drift from the code. Only Default and Highway are described (driver directive 2026-07-11).
   "DmMode": tr_noop(
-    "How long you may look away / hold a phone before openpilot alerts. Default = standard openpilot " +
-    "monitoring (strict, everywhere). Highway = relaxed only on freeways and divided multi-lane roads " +
-    "(pose 15 min, phone 30 min), standard on surface streets. Relaxed = relaxed everywhere (pose 3 h, " +
-    "phone 1 h). Monitoring is never disabled. Glare handling is unchanged in every mode. Your attention " +
-    "is required at all times regardless of this setting."
+    "How long you may look away before openpilot alerts. Default = standard openpilot monitoring, "
+    "everywhere. Highway = only while a highway is detected, monitoring loosens slightly "
+    f"(attention {_DM_HWY_POSE_S:.0f} s, phone {_DM_HWY_PHONE_S:.0f} s); on all other roads it stays "
+    "at Default. Monitoring is never disabled and your attention is required at all times."
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
