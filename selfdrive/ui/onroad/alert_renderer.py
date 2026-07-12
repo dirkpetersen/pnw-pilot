@@ -37,6 +37,11 @@ ALERT_COLORS = {
   AlertStatus.critical: rl.Color(0xC9, 0x22, 0x31, 0xF1),    # #C92231 with alpha 0xF1
 }
 
+# greenlight2pnw: the green-light ding renders on a GREEN banner — keyed on the alertType string
+# ("greenLight/permanent"), so no new AlertStatus enum value / no schema change. Display only.
+GREEN_LIGHT_ALERT_TYPE = "greenLight"
+GREEN_LIGHT_COLOR = rl.Color(0x1B, 0x84, 0x38, 0xF1)         # traffic-light green, same alpha
+
 
 @dataclass
 class Alert:
@@ -44,6 +49,7 @@ class Alert:
   text2: str = ""
   size: int = 0
   status: int = 0
+  alert_type: str = ""  # greenlight2pnw: selfdriveState.alertType ("<event>/<ET>") for color keying
 
 
 # Pre-defined alert instances
@@ -112,7 +118,8 @@ class AlertRenderer(Widget):
       return None
 
     # Return current alert
-    return Alert(text1=ss.alertText1, text2=ss.alertText2, size=ss.alertSize.raw, status=ss.alertStatus.raw)
+    return Alert(text1=ss.alertText1, text2=ss.alertText2, size=ss.alertSize.raw, status=ss.alertStatus.raw,
+                 alert_type=ss.alertType)  # greenlight2pnw: for the green banner keying
 
   def _render(self, rect: rl.Rectangle):
     alert = self.get_alert(ui_state.sm)
@@ -140,6 +147,8 @@ class AlertRenderer(Widget):
 
   def _draw_background(self, rect: rl.Rectangle, alert: Alert) -> None:
     color = ALERT_COLORS.get(alert.status, ALERT_COLORS[AlertStatus.normal])
+    if alert.alert_type.startswith(GREEN_LIGHT_ALERT_TYPE):   # greenlight2pnw: green ding banner
+      color = GREEN_LIGHT_COLOR
 
     if alert.size != AlertSize.full:
       roundness = ALERT_BORDER_RADIUS / (min(rect.width, rect.height) / 2)
