@@ -1,6 +1,12 @@
 # DM-VARIABLE — JSON-configurable driver-monitoring timeout tiers
 
-**STATUS:** built on branch **`dm-variable`** (off `3devpnw`), NOT deployed. Branch development only.
+**STATUS: MERGED to `3devpnw` 2026-07-12** (`d0cc222be4`) and riding the device's auto-update channel.
+Post-merge additions: the `dm` CLI resolves symlinks so it works from `/usr/local/bin/dm`
+(`e396b8bf9b`); the UI **hides the Relaxed option entirely** unless `relaxed.enabled=true` in
+`/data/pnw/dm.json` (driver directive: relaxed only ever via the `dm` script, never the UI —
+`264124c6cf`, a locked UI also clamps a stale `DmMode=2` back to 0); the DM help text describes
+**Default + Highway only**, numbers printed live from `dm_config` source constants, no mention of
+the third tier or any tooling (`f596d27af7`). As-deployed summary: `docs/DM-CURRENT.md`.
 
 **Philosophy (driver directive 2026-07-11): tight in source, personal values external-only.** The
 repo carries only strict, defensible timeout defaults. Any loosening lives exclusively in the
