@@ -74,6 +74,11 @@ class VTSCController:
     self._last_t = None       # monotonic stamp of last cap() call (real dt)
     self._last_read = -1e9    # monotonic stamp of last param read
     self._tele_last = 0.0     # monotonic stamp of last overlay publish
+    # vtsctele2pnw: penalty components actually applied this cycle, for the VTSCStatus overlay feed
+    # (-> ces_events tick). Display/logging only — never read back into control.
+    self._tele_pen = 0.0      # Lightning curve penalty applied (m/s; 0.0 = none / non-Lightning)
+    self._tele_pitch = None   # road pitch used (rad, carControl.orientationNED[1]; None = no reading)
+    self._tele_dir = ""       # apex turn direction: "L" / "R" / "" (no real bend)
     self._engaged = False     # for engage/clear logging
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
@@ -193,6 +198,10 @@ class VTSCController:
         pitch = float(ned[1])
     except Exception:
       pitch = None
+    # vtsctele2pnw: reset per-cycle telemetry; pitch is recorded whether or not a curve binds
+    self._tele_pen = 0.0
+    self._tele_pitch = pitch
+    self._tele_dir = ""
 
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     sharp_map = False
@@ -216,12 +225,21 @@ class VTSCController:
     # descentcurve2pnw: the penalty now also sees road pitch (descent guard — downhill scales it up)
     # and the apex turn direction (left-curve factor). Both computed ONLY on the Lightning; the Tesla
     # never runs any of this block (behavior + cycle cost identical).
-    if v_curve != float('inf') and self.veh.lightning_curve_slow:
+    # vtsctele2pnw: apex turn direction — telemetry on every car, and the Lightning left-factor
+    # input below. Only computed when a curve candidate exists (zero extra work on straights;
+    # a pure walk of the model-path points when it runs). Superset of the old Lightning-only gate,
+    # so the penalty path sees the identical is_left it always did.
+    turn_dir = 0
+    if d_apex >= 0.0 or v_curve != float('inf'):
       try:
-        is_left = apex_turn_direction(model) > 0
+        turn_dir = apex_turn_direction(model)
       except Exception:
-        is_left = False
+        turn_dir = 0
+      self._tele_dir = "L" if turn_dir > 0 else ("R" if turn_dir < 0 else "")
+    if v_curve != float('inf') and self.veh.lightning_curve_slow:
+      is_left = turn_dir > 0
       penalty = self.veh.curve_speed_penalty_ms(v_curve, pitch_rad=pitch, is_left=is_left)
+      self._tele_pen = float(penalty)
       if penalty > 0.0:
         v_curve = max(v_curve - penalty, C.V_MIN)
 
@@ -344,6 +362,10 @@ class VTSCController:
       self.mem_params.put_nonblocking("VTSCStatus", {
         "enabled": self.msg["enabled"], "engaged": self.msg["active"], "state": self.msg["state"],
         "cap": round(self.msg["vTarget"], 1), "vCruise": round(self.msg["vCruise"], 1),
+        # vtsctele2pnw: penalty components actually applied (ces_events picks these up per tick)
+        "pen": round(float(self._tele_pen), 2),
+        "pitch": round(float(self._tele_pitch), 4) if self._tele_pitch is not None else None,
+        "dir": self._tele_dir,
       })
     except Exception:
       pass

@@ -606,6 +606,17 @@ def curve_closeness(s) -> tuple[float, str]:
   return vis_close, "vision"
 
 
+def lead_metrics(has_lead: bool, d_rel: float, v_lead: float, v_ego: float) -> tuple[float, float]:
+  """PURE (vtsctele2pnw): lead-follow metrics for telemetry — (gap seconds, lead speed delta m/s).
+  gap = dRel/vEgo rounded to 1 decimal (0.0 when no lead or near-stopped, so a logged 0.0 always
+  means 'not following'); delta = vLead - vEgo (positive = lead pulling away, negative = closing).
+  Display/logging only — never gates control."""
+  if not has_lead:
+    return 0.0, 0.0
+  gap = round(float(d_rel) / float(v_ego), 1) if float(v_ego) > 0.5 else 0.0
+  return gap, round(float(v_lead) - float(v_ego), 1)
+
+
 def decision_telemetry(s) -> dict:
   """PURE, display-only: a compact snapshot for the on-screen CES overlay. Reports the binding
   reason, the curve 'closeness' as a 0..100 %, and the upcoming map-curve preview (target speed +
@@ -614,6 +625,7 @@ def decision_telemetry(s) -> dict:
   raw_active, reason = decide_active(s)
   cpct, csrc = curve_closeness(s)
   md = s["map_target_dist"]
+  gap_s, d_v = lead_metrics(s["has_lead"], s["lead_drel"], s["lead_vlead"], s["v_ego"])
   return {
     "rawActive": bool(raw_active),
     "reason": reason,
@@ -628,6 +640,12 @@ def decision_telemetry(s) -> dict:
     "vSet": round(float(s["v_set"]), 1),
     "dRel": round(float(s["lead_drel"]), 0),
     "vLead": round(float(s["lead_vlead"]), 1),
+    # vtsctele2pnw: explicit lead-present bool (radarState.leadOne.status — a logged dRel of 0.0 is
+    # ambiguous: 'no lead' vs 'lead at 0 m'), gap time (s) and lead speed delta (m/s), so
+    # LongitudinalExt / curve-entry forensics stop inferring lead state from dRel>0.
+    "lead": bool(s["has_lead"]),
+    "gapS": gap_s,
+    "dV": d_v,
     "aEgo": round(float(s.get("a_ego", 0.0)), 2),
     "gas": bool(s.get("gas", False)),
   }
@@ -769,6 +787,9 @@ class CESController:
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
     self._cur_lat = self._cur_lon = self._cur_bearing = None
     self._vtsc_cap = self._vtsc_state = None
+    # vtsctele2pnw: VTSC penalty components actually applied (from VTSCStatus) — logging only
+    self._vtsc_pen = self._vtsc_pitch = None
+    self._vtsc_dir = ""
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
@@ -874,8 +895,17 @@ class CESController:
         vt = json.loads(vt)
       self._vtsc_cap = round(float(vt["cap"]), 1) if vt.get("engaged") else None
       self._vtsc_state = vt.get("state")
+      # vtsctele2pnw: penalty components VTSC actually applied this cycle (Lightning hump penalty
+      # m/s, road pitch rad it used, apex turn direction "L"/"R"/"") — so over/under-slow curve
+      # forensics read the real inputs instead of inferring descent/left multipliers after the fact.
+      pen, pitch = vt.get("pen"), vt.get("pitch")
+      self._vtsc_pen = round(float(pen), 2) if pen is not None else None
+      self._vtsc_pitch = round(float(pitch), 4) if pitch is not None else None
+      self._vtsc_dir = str(vt.get("dir") or "")
     except Exception:
       self._vtsc_cap = self._vtsc_state = None
+      self._vtsc_pen = self._vtsc_pitch = None
+      self._vtsc_dir = ""
 
   def enabled(self) -> bool:
     return self._enabled
@@ -1118,11 +1148,17 @@ class CESController:
       "curvePct": tele.get("curvePct"), "curveSrc": tele.get("curveSrc"),
       "mapV": tele.get("mapV"), "mapDist": tele.get("mapDist"), "mapPts": tele.get("mapPts"),
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
+      # vtsctele2pnw: explicit lead-present bool + gap time (s) + lead speed delta (m/s)
+      "lead": tele.get("lead"), "gapS": tele.get("gapS"), "dV": tele.get("dV"),
       "gps": tele.get("gps"), "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
       "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
+      # vtsctele2pnw: the penalty components VTSC actually applied (Lightning penalty m/s, the road
+      # pitch it used, apex turn direction L/R) — 2026-07-12 westbound over-slow forensics needed
+      # these and had to infer them.
+      "vtscPen": self._vtsc_pen, "vtscPitch": self._vtsc_pitch, "vtscDir": self._vtsc_dir,
       # bsm2pnw: blind-spot booleans (carState.left/rightBlindspot) — liveness evidence for the
       # lane-change BSM gate; expect these to flip as traffic passes on real drives.
       "bsL": self._bs_l, "bsR": self._bs_r,
