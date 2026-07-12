@@ -9,6 +9,8 @@ from openpilot.common.realtime import DT_DMON
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.stat_live import RunningStatFilter
+from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.monitoring.dm_config import load_dm_timeouts, TIER_DEFAULTS
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.hardware import HARDWARE
 
@@ -63,7 +65,7 @@ class DRIVER_MONITOR_SETTINGS:
     # PNW glare (2026-07-06, I-82 westbound low sun): side/back sunlight washes the DM image so pose std
     # spikes -> the model is judged "uncertain" -> monitoring drops OUT of the relaxed dual-counter ACTIVE
     # mode into the stock PASSIVE wheel-touch mode within 10 s (the "DM going mad" the driver reports).
-    # The relaxed 3 h/1 h timeouts only apply in active mode, so glare bypasses them entirely. Two knobs
+    # The relaxed tier timeouts only apply in active mode, so glare bypasses them entirely. Two knobs
     # keep it in active mode through a glare burst (docs/GLARE.md Layer C band-aid; safety tradeoff noted
     # there): tolerate noisier pose before counting a frame "high std", and wait 3x longer before the
     # passive fallback. faceProb cutoff (0.7) left alone — lowering it is the riskiest (masks real
@@ -99,11 +101,12 @@ class DRIVER_MONITOR_SETTINGS:
     self._MAX_TERMINAL_DURATION = int(30 / self._DT_DMON)  # not allowed to engage after 30s of terminal alerts
     # End BluePilot
 
-    # PNW: dual-counter relaxed DM — pose 3 h, cell phone 1 h, snap-back recovery
-    self._POSE_DISTRACTED_TIME = 10800.  # pose/blink total timeout (s) = 3 hours
+    # PNW: dual-counter DM (pose + phone counters, snap-back recovery). The TIMEOUT MAGNITUDES do
+    # not live here: strict defaults come from selfdrive/monitoring/dm_config.py and any personal
+    # loosening lives only in the device-local /data/pnw/dm.json (dm-variable; see DM-VARIABLE.md).
+    # Only the pre/prompt lead times and the recovery debounce are in-source:
     self._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL = 60.       # green at 60s before terminal
     self._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL = 30.    # orange at 30s before terminal
-    self._PHONE_DISTRACTED_TIME = 3600.  # cell-phone total timeout (s) = 1 hour
     self._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL = 120.     # green at 120s before terminal
     self._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL = 60.   # orange at 60s before terminal
     self._RECOVERY_DEBOUNCE_FRAMES = int(2.0 / self._DT_DMON)  # 2s of non-distraction → snap to 1.0
@@ -220,8 +223,10 @@ class DriverMonitoring:
     # the pose/phone decay steps + pre/prompt thresholds from the effective timeout; only the ACTIVE
     # dual-counter path consumes them, so passive wheel-touch and every GLARE knob are left untouched.
     #   0=Off      -> stock strict timeouts everywhere (_DISTRACTED_TIME)
-    #   1=Highway  -> 900s pose / 1800s phone on freeway|divided-2-lane, stock strict elsewhere (90 s hold)
-    #   2=Relaxed  -> 10800s pose / 3600s phone everywhere (the prior ungated behavior)
+    #   1=Highway  -> highway tier timeouts on freeway|divided-2-lane, stock strict elsewhere (90 s hold)
+    #   2=Relaxed  -> relaxed tier timeouts everywhere
+    # The tier timeout MAGNITUDES are not in this source: strict defaults live in dm_config.py and
+    # personal values come only from the device-local /data/pnw/dm.json (dm-variable).
     self.mem_params = Params("/dev/shm/params")
     self._ROAD_HOLD_FRAMES = int(90. / self.settings._DT_DMON)   # keep last road verdict 90 s through map dropouts
     self._DM_REFRESH_FRAMES = int(1.0 / self.settings._DT_DMON)  # re-read mode/road ~1 Hz, not every frame
@@ -232,6 +237,22 @@ class DriverMonitoring:
       self._dm_mode = int(self.params.get("DmMode", return_default=True) or 0)
     except (UnknownKeyName, ValueError, TypeError):
       self._dm_mode = 0
+    # dm-variable: timeout tiers from /data/pnw/dm.json (see DM-VARIABLE.md). One read at process
+    # start resolves (a) the JSON 'mode' tier — an explicit opt-in that takes precedence over the
+    # DmMode param, with its highway variant road-gated exactly like DmMode=1 — and (b) the timeout
+    # values every relaxed regime uses (strict dm_config defaults when the file is absent; relaxed
+    # values beyond the defaults require relaxed.enabled). load_dm_timeouts never raises, but a DM
+    # crash is a safety event so guard anyway.
+    try:
+      _dm_cfg = load_dm_timeouts(warn=cloudlog.warning)
+    except Exception:
+      cloudlog.exception("dm-variable: tier config load failed, using strict defaults")
+      _dm_cfg = {"tier": None, "highway": TIER_DEFAULTS["highway"], "relaxed": TIER_DEFAULTS["relaxed"]}
+    self._dm_tier = _dm_cfg["tier"]
+    self._dm_highway_t = _dm_cfg["highway"]
+    self._dm_relaxed_t = _dm_cfg["relaxed"]
+    if self._dm_tier is not None:
+      cloudlog.warning(f"dm-variable: JSON tier active: {self._dm_tier[0]} pose={self._dm_tier[1]:g}s phone={self._dm_tier[2]:g}s")
     self._apply_dm_timeouts()
     # End BluePilot
 
@@ -331,11 +352,25 @@ class DriverMonitoring:
     # pre/prompt lead times (green/orange before terminal) are the same for both relaxed regimes
     pose_pre, pose_prompt   = s._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL,  s._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
     phone_pre, phone_prompt = s._PHONE_DISTRACTED_PRE_TIME_TILL_TERMINAL, s._PHONE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL
-    if self._dm_mode == 2:                                # Relaxed everywhere (3 h / 1 h)
-      pose_t, phone_t = s._POSE_DISTRACTED_TIME, s._PHONE_DISTRACTED_TIME
-    elif self._dm_mode == 1 and self._road_relaxed:       # Highway, on a qualifying road (15 min / 30 min)
-      pose_t, phone_t = 900., 1800.
-    else:                                                 # Off, or Highway off a qualifying road -> stock strict
+    # Effective (pose_t, phone_t): the tier values come from dm_config (strict defaults unless the
+    # device-local dm.json says otherwise). The JSON 'mode' tier takes precedence over DmMode; its
+    # highway variant is road-gated exactly like DmMode=1 (freeway|divided-2-lane, 90 s hold), and
+    # off a qualifying road it falls to stock strict — never through to a looser DmMode regime.
+    tier_t = None
+    if self._dm_tier is not None:                         # dm-variable: explicit JSON tier opt-in
+      name, pose_j, phone_j = self._dm_tier
+      if name == "relaxed" or (name == "highway" and self._road_relaxed):
+        tier_t = (pose_j, phone_j)
+    elif self._dm_mode == 2:                              # Relaxed everywhere
+      tier_t = self._dm_relaxed_t
+    elif self._dm_mode == 1 and self._road_relaxed:       # Highway, on a qualifying road
+      tier_t = self._dm_highway_t
+    if tier_t is not None:
+      pose_t, phone_t = tier_t
+      # lead times capped so short timeouts keep a sane green/orange progression (pre <= t/2, prompt <= t/4)
+      pose_pre,  pose_prompt  = min(pose_pre,  pose_t / 2.),  min(pose_prompt,  pose_t / 4.)
+      phone_pre, phone_prompt = min(phone_pre, phone_t / 2.), min(phone_prompt, phone_t / 4.)
+    else:                                                 # Off / off a qualifying road -> stock strict
       pose_t = phone_t = s._DISTRACTED_TIME
       pose_pre = phone_pre = s._DISTRACTED_PRE_TIME_TILL_TERMINAL
       pose_prompt = phone_prompt = s._DISTRACTED_PROMPT_TIME_TILL_TERMINAL
@@ -361,7 +396,9 @@ class DriverMonitoring:
       mode = 0
 
     road_relaxed = self._road_relaxed
-    if mode == 1:  # road class only matters in Highway mode
+    # road class matters in DmMode Highway AND for the JSON highway tier (same gate for both)
+    json_highway = self._dm_tier is not None and self._dm_tier[0] == "highway"
+    if mode == 1 or json_highway:
       try:
         ctx = self.mem_params.get("RoadContext", return_default=True) or ""
         one_way = (self.mem_params.get("MapOneWay", return_default=True) or "") == "1"
@@ -489,8 +526,8 @@ class DriverMonitoring:
     awareness_prev = self.awareness
 
     # BluePilot: dual-counter active-mode logic ─────────────────────────────────
-    #   pose+blink: 3 h total timeout, snap-back to 1.0 after 2 s clear
-    #   cell phone: 1 h total timeout, snap-back to 1.0 after 2 s clear
+    #   pose+blink: tier pose timeout (dm_config strict default / device-local dm.json), snap-back to 1.0 after 2 s clear
+    #   cell phone: tier phone timeout, snap-back to 1.0 after 2 s clear
     # Active mode = model can see driver. Passive mode (face lost, model uncertain)
     # falls through to the unchanged single-counter wheel-touch logic below.
     if self.active_monitoring_mode:
