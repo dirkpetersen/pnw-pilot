@@ -32,11 +32,26 @@ _CURVE_CONFIG_MAX_BYTES = 64 * 1024
 #   linear between. The three takeovers analyzed had VTSC binding caps 29.1 / 32.1 / 33.0 m/s
 #   (65 / 72 / 74 mph) — high_v_mph=65 puts the full penalty in force across that whole band.
 # Applies ONLY to the Lightning (Tesla path returns 0.0, byte-unchanged).
-_CURVE_DEFAULTS = {"penalty_min_mph": 1.5, "penalty_max_mph": 10.0, "low_v_mph": 30.0, "high_v_mph": 65.0}
+_CURVE_DEFAULTS = {
+  "penalty_min_mph": 1.0,     # slow corners: ample steering authority
+  "penalty_max_mph": 5.0,     # the mid-speed washout zone (driver-approved 2026-07-11 iteration 3)
+  "penalty_taper_mph": 1.5,   # long fast gentle sweepers: carry speed again (iteration 3 feedback)
+  "low_v_mph": 30.0,
+  "peak_lo_v_mph": 45.0,
+  "peak_hi_v_mph": 62.0,
+  "taper_v_mph": 75.0,
+}
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
-_CURVE_BOUNDS = {"penalty_min_mph": (0.0, 15.0), "penalty_max_mph": (0.0, 15.0),
-                 "low_v_mph": (10.0, 80.0), "high_v_mph": (10.0, 80.0)}
+_CURVE_BOUNDS = {
+  "penalty_min_mph": (0.0, 15.0),
+  "penalty_max_mph": (0.0, 15.0),
+  "penalty_taper_mph": (0.0, 15.0),
+  "low_v_mph": (10.0, 80.0),
+  "peak_lo_v_mph": (10.0, 80.0),
+  "peak_hi_v_mph": (10.0, 80.0),
+  "taper_v_mph": (10.0, 90.0),
+}
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -108,26 +123,36 @@ class PnwVehicle:
 
   def curve_speed_penalty_ms(self, v_target_ms: float) -> float:
     """Extra m/s to SUBTRACT from a curve target speed so the Lightning enters curves slower than the
-    Tesla. The penalty grows WITH the target speed (the EPS deficit shows at speed — see the module
-    comment / drives/2026-07-11): fast sweepers get the full ~10 mph, slow tight corners barely any.
-    Returns 0.0 for any non-Lightning (Tesla path untouched). Pure Python (no numpy); never negative
-    (a bad config can't invert this into a speed-up). Linear-interp the penalty in mph over the target:
-      target <= low_v_mph  -> penalty_min_mph   (slow corners, least slowing)
-      target >= high_v_mph -> penalty_max_mph   (fast sweepers, most slowing)
-      linear between."""
+    Tesla. Shape (driver-calibrated on I-90, 2026-07-11 evening — three field iterations):
+    a HUMP, not a ramp. The EPS deficit bites hardest in the MID-speed "tight" highway curves
+    (binding targets ~45-62 mph — the washout zone); slow corners need almost nothing (ample
+    steering authority when slow), and LONG FAST sweepers (high binding targets = gentle curvature)
+    can carry speed again ("towards the end of the drive it was too slow, needs to accelerate
+    more" — driver, on the monotonic ramp). Piecewise-linear over the target speed in mph:
+      <= low_v (30)            -> penalty_min (1.0)
+      peak_lo..peak_hi (45..62)-> penalty_max (5.0)   (the approved tight-curve cut)
+      >= taper_v (75)          -> penalty_taper (1.5) (fast gentle sweepers keep their speed)
+      linear between the knots.
+    Returns 0.0 for any non-Lightning (Tesla path untouched). Pure Python (no numpy); never
+    negative (a bad config can't invert this into a speed-up)."""
     if not self.lightning_curve_slow:
       return 0.0
     cfg = self._curve_cfg
-    low_ms = cfg["low_v_mph"] * _MPH_TO_MS
-    high_ms = cfg["high_v_mph"] * _MPH_TO_MS
-    pen_max = cfg["penalty_max_mph"]
-    pen_min = cfg["penalty_min_mph"]
-    v = float(v_target_ms)
-    if v <= low_ms:                                   # slow corner -> minimum penalty
-      pen_mph = pen_min
-    elif v >= high_ms or high_ms <= low_ms:           # fast sweeper (or degenerate band) -> maximum
-      pen_mph = pen_max
+    v_mph = float(v_target_ms) / _MPH_TO_MS
+    # knots, sanitized: enforce ordering so a bad config degrades to a flat safe shape, never crashes
+    x0 = cfg["low_v_mph"]
+    x1 = max(cfg["peak_lo_v_mph"], x0 + 1.0)
+    x2 = max(cfg["peak_hi_v_mph"], x1)
+    x3 = max(cfg["taper_v_mph"], x2 + 1.0)
+    y0, y1, y3 = cfg["penalty_min_mph"], cfg["penalty_max_mph"], cfg["penalty_taper_mph"]
+    if v_mph <= x0:
+      pen_mph = y0
+    elif v_mph < x1:
+      pen_mph = y0 + (y1 - y0) * (v_mph - x0) / (x1 - x0)
+    elif v_mph <= x2:
+      pen_mph = y1                                   # the peak plateau: the washout zone
+    elif v_mph < x3:
+      pen_mph = y1 + (y3 - y1) * (v_mph - x2) / (x3 - x2)
     else:
-      frac = (v - low_ms) / (high_ms - low_ms)
-      pen_mph = pen_min + (pen_max - pen_min) * frac
+      pen_mph = y3                                   # fast gentle sweepers: nearly free again
     return max(0.0, pen_mph * _MPH_TO_MS)

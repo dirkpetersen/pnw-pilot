@@ -50,46 +50,50 @@ def test_penalty_other_cars_zero():
   assert PnwVehicle(None).curve_speed_penalty_ms(20 * MPH) == 0.0
 
 
-def test_penalty_lightning_ramp_endpoints_and_clamps(tmp_path, monkeypatch):
+def test_penalty_lightning_hump_shape(tmp_path, monkeypatch):
+  """Driver-calibrated 2026-07-11 iteration 3: a HUMP — small penalty on slow corners, full cut in
+  the mid-speed washout zone (45-62), tapering off for long fast gentle sweepers."""
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))  # force defaults
   v = PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=False))
   assert v.lightning_curve_slow
-  # penalty grows WITH target speed: at/above high_v (65 mph) -> ~10 mph; at/below low_v (30) -> ~1.5
-  assert abs(v.curve_speed_penalty_ms(70 * MPH) / MPH - 10.0) < 1e-6    # fast sweeper -> full penalty
-  assert abs(v.curve_speed_penalty_ms(65 * MPH) / MPH - 10.0) < 1e-6
-  assert abs(v.curve_speed_penalty_ms(80 * MPH) / MPH - 10.0) < 1e-6    # above high clamps to max
-  assert abs(v.curve_speed_penalty_ms(30 * MPH) / MPH - 1.5) < 1e-6
-  assert abs(v.curve_speed_penalty_ms(25 * MPH) / MPH - 1.5) < 1e-6     # slow tight corner -> min
-  assert abs(v.curve_speed_penalty_ms(10 * MPH) / MPH - 1.5) < 1e-6     # below low clamps to min
-  # midpoint (47.5 mph) -> ~5.75 mph
-  assert abs(v.curve_speed_penalty_ms(47.5 * MPH) / MPH - 5.75) < 1e-3
+  assert abs(v.curve_speed_penalty_ms(20 * MPH) / MPH - 1.0) < 1e-6     # slow corner -> min
+  assert abs(v.curve_speed_penalty_ms(30 * MPH) / MPH - 1.0) < 1e-6
+  assert abs(v.curve_speed_penalty_ms(45 * MPH) / MPH - 5.0) < 1e-6     # peak plateau start
+  assert abs(v.curve_speed_penalty_ms(55 * MPH) / MPH - 5.0) < 1e-6     # the washout zone
+  assert abs(v.curve_speed_penalty_ms(62 * MPH) / MPH - 5.0) < 1e-6     # peak plateau end
+  assert abs(v.curve_speed_penalty_ms(75 * MPH) / MPH - 1.5) < 1e-6     # fast sweeper -> taper
+  assert abs(v.curve_speed_penalty_ms(85 * MPH) / MPH - 1.5) < 1e-6     # beyond taper stays small
+  # rises between 30 and 45; falls between 62 and 75
+  assert v.curve_speed_penalty_ms(40 * MPH) < v.curve_speed_penalty_ms(45 * MPH)
+  assert v.curve_speed_penalty_ms(68 * MPH) < v.curve_speed_penalty_ms(62 * MPH)
+  assert v.curve_speed_penalty_ms(68 * MPH) > v.curve_speed_penalty_ms(75 * MPH)
 
 
-def test_penalty_lightning_monotonic_and_nonnegative(tmp_path, monkeypatch):
+def test_penalty_lightning_nonnegative_everywhere(tmp_path, monkeypatch):
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
-  prev = -1.0
-  for mph in range(15, 80):
-    p = v.curve_speed_penalty_ms(mph * MPH)
-    assert p >= 0.0                       # never negative -> can never invert to a speed-up
-    assert p >= prev - 1e-9               # faster curve -> >= penalty (monotonic non-decreasing in speed)
-    prev = p
+  for mph in range(5, 100):
+    assert v.curve_speed_penalty_ms(mph * MPH) >= 0.0   # never a speed-up
 
 
 def test_curve_json_override(tmp_path, monkeypatch):
   cfg = tmp_path / "curve.json"
   cfg.write_text(json.dumps({"lightning": {"penalty_min_mph": 3, "penalty_max_mph": 12,
-                                           "low_v_mph": 25, "high_v_mph": 70}}))
+                                           "penalty_taper_mph": 2,
+                                           "low_v_mph": 25, "peak_lo_v_mph": 40,
+                                           "peak_hi_v_mph": 60, "taper_v_mph": 72}}))
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
   assert abs(v.curve_speed_penalty_ms(25 * MPH) / MPH - 3.0) < 1e-6     # at/below low_v -> min
-  assert abs(v.curve_speed_penalty_ms(70 * MPH) / MPH - 12.0) < 1e-6    # at/above high_v -> max
+  assert abs(v.curve_speed_penalty_ms(50 * MPH) / MPH - 12.0) < 1e-6    # in the peak band -> max
+  assert abs(v.curve_speed_penalty_ms(80 * MPH) / MPH - 2.0) < 1e-6     # past taper -> taper value
 
 
 def test_curve_json_out_of_bounds_clamped(tmp_path, monkeypatch):
   cfg = tmp_path / "curve.json"
   cfg.write_text(json.dumps({"lightning": {"penalty_min_mph": -5, "penalty_max_mph": 999,
-                                           "low_v_mph": 2, "high_v_mph": 500}}))
+                                           "penalty_taper_mph": -9,
+                                           "low_v_mph": 2, "taper_v_mph": 500}}))
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
   # penalties clamp to [0,15] -> never a speed-up, never absurd; speeds clamp to [10,80]
@@ -102,8 +106,8 @@ def test_curve_json_malformed_falls_back_to_defaults(tmp_path, monkeypatch):
   cfg.write_text("{ this is not json ")
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
-  assert abs(v.curve_speed_penalty_ms(65 * MPH) / MPH - 10.0) < 1e-6   # default max (fast)
-  assert abs(v.curve_speed_penalty_ms(30 * MPH) / MPH - 1.5) < 1e-6    # default min (slow)
+  assert abs(v.curve_speed_penalty_ms(55 * MPH) / MPH - 5.0) < 1e-6    # default peak (washout zone)
+  assert abs(v.curve_speed_penalty_ms(30 * MPH) / MPH - 1.0) < 1e-6    # default min (slow)
 
 
 def test_curve_json_nan_ignored(tmp_path, monkeypatch):
@@ -111,4 +115,4 @@ def test_curve_json_nan_ignored(tmp_path, monkeypatch):
   cfg.write_text('{"lightning": {"penalty_max_mph": NaN}}')   # json allows NaN; must be rejected
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
-  assert abs(v.curve_speed_penalty_ms(65 * MPH) / MPH - 10.0) < 1e-6   # NaN dropped -> default max
+  assert abs(v.curve_speed_penalty_ms(55 * MPH) / MPH - 5.0) < 1e-6    # NaN dropped -> default peak

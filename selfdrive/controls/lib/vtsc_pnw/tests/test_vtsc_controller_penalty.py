@@ -61,10 +61,10 @@ def _run_once(cp, v_cruise, v_ego, curvature):
 
 
 def test_lightning_curve_cap_lower_than_tesla():
-  # fast highway sweeper (the field-takeover regime): Tesla curve-safe speed ~30 m/s (~67 mph), which
-  # is >= high_v (65 mph) so the Lightning gets the full ~10 mph penalty.
-  k = 2.5 / (30.0 * 30.0)                               # v_safe ~= 30 m/s (~67 mph)
-  v_cruise = v_ego = 33.0                               # ~74 mph set
+  # the MID-SPEED washout zone (hump peak, 45-62 mph targets): Tesla curve-safe speed ~24.6 m/s
+  # (~55 mph) — inside the peak plateau, so the Lightning gets the full ~5 mph penalty.
+  k = 2.5 / (24.6 * 24.6)                               # v_safe ~= 24.6 m/s (~55 mph)
+  v_cruise = v_ego = 29.0                               # ~65 mph set
 
   ctrl_t, _ = _run_once(FakeCP("TESLA_MODEL_S_HW3", "tesla"), v_cruise, v_ego, k)
   ctrl_l, _ = _run_once(FakeCP("FORD_F_150_LIGHTNING_MK1", "ford"), v_cruise, v_ego, k)
@@ -75,11 +75,20 @@ def test_lightning_curve_cap_lower_than_tesla():
   assert 0.0 < vcs_t < v_cruise                          # Tesla curve binds
   # Tesla path unchanged: penalty is provably zero
   assert ctrl_t.veh.curve_speed_penalty_ms(vcs_t) == 0.0
-  assert abs(vcs_t - 30.0) < 0.5                          # ~ the pure v_safe, no penalty applied
-  # Lightning enters the SAME fast sweeper slower — ~the full ~10 mph (4.47 m/s) penalty
+  assert abs(vcs_t - 24.6) < 0.5                          # ~ the pure v_safe, no penalty applied
+  # Lightning enters the SAME curve slower — ~the full ~5 mph (2.24 m/s) peak penalty
   assert vcs_l < vcs_t - 0.5
   pen = ctrl_l.veh.curve_speed_penalty_ms(vcs_t)
-  assert pen > 4.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # full penalty at this speed (~4.47 m/s)
+  assert pen > 2.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # peak penalty at this speed (~2.24 m/s)
+
+
+def test_fast_gentle_sweeper_tapers():
+  """Iteration-3 driver feedback: LONG FAST sweepers must NOT get the full cut — the penalty tapers.
+  A gentle curve binding at ~34 m/s (~76 mph) gets only the ~1.5 mph taper penalty."""
+  k = 2.5 / (34.0 * 34.0)                               # v_safe ~= 34 m/s (~76 mph)
+  ctrl_l, _ = _run_once(FakeCP("FORD_F_150_LIGHTNING_MK1", "ford"), 38.0, 38.0, k)
+  pen = ctrl_l.veh.curve_speed_penalty_ms(34.0)
+  assert pen < 1.0                                       # ~0.67 m/s (1.5 mph) — carries speed again
 
 
 def test_no_curve_no_penalty_applied():
