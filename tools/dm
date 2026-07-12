@@ -29,7 +29,7 @@ import os
 import sys
 import tempfile
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # realpath: survive the /usr/local/bin/dm symlink
 _spec = importlib.util.spec_from_file_location(
   "dm_config", os.path.join(REPO_ROOT, "selfdrive", "monitoring", "dm_config.py"))
 dm_config = importlib.util.module_from_spec(_spec)
