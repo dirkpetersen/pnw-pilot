@@ -17,6 +17,7 @@ effective-experimental computation (selfdrived) only after review + on-road veri
 touches panda safety. The decision core (`decide_active`) takes primitives and is unit-tested.
 """
 import json
+import math
 import os
 import time
 
@@ -26,6 +27,9 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+# curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
+# (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import A_LAT_TARGET as VTSC_A_LAT
 
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
@@ -55,29 +59,74 @@ def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
 ICBM_A_DECEL = 0.8          # m/s^2 comfort approach decel
 ICBM_MARGIN_M = 30.0        # start a little early — button steps + ACC response add latency
 ICBM_MIN_DROP_MS = 1.0      # ignore caps within ~2 mph of the set speed (not worth taps)
+# curveslow-lightning: floor on |predicted lateral accel| before a vision curve is even a candidate
+# (div-by-zero guard + straightaway rejector). Reuses the CES vision-enter threshold so a curve the
+# camera calls "not a curve" for the CES trip is also not one for ICBM.
+ICBM_VISION_ENTER = C.CURVE_LAT_ACCEL_ENTER   # m/s^2 (1.9)
+ICBM_VISION_EPS = 0.05                          # m/s^2 floor inside the sqrt (never divide by ~0)
 
 
-def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn):
-  """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None).
+def icbm_vision_apex(v_ego, curve_lat_accel_vision, time_to_curve, a_lat=VTSC_A_LAT):
+  """curveslow-lightning: turn the model's predicted lateral accel into a vision curve candidate for
+  ICBM, mirroring the VTSC vision path. From lat_accel = v^2 * kappa the safe speed holding a_lat is
+  vis_apex = v_ego*sqrt(a_lat/|lat|); distance = time_to_curve*v_ego. Returns (apex_v m/s, dist m), or
+  (0.0, inf) when it is NOT a candidate (too straight / no speed). Pure; never raises."""
+  try:
+    lat = abs(float(curve_lat_accel_vision))
+    v = float(v_ego)
+    if v <= 0.0 or lat <= ICBM_VISION_ENTER:
+      return 0.0, float('inf')
+    apex = v * math.sqrt(a_lat / max(lat, ICBM_VISION_EPS))
+    dist = max(float(time_to_curve) * v, 0.0)
+    return max(apex, 0.0), dist
+  except (TypeError, ValueError):
+    return 0.0, float('inf')
 
-  ceiling = the driver's own set speed latched when a cap first engages (None when uncapped);
-  while capped, v_set follows the button-lowered stock set, so the latched ceiling is the only
-  memory of what to restore to. Reduce-only: target is never above the ceiling."""
+
+def _icbm_binding_apex(v_ego, ref, apex, dist):
+  """One curve candidate -> the apex speed it commands IF it both (a) is reduce-only (apex sits
+  ICBM_MIN_DROP_MS below the ceiling `ref`) and (b) has entered the comfort-decel brake envelope.
+  Else None. Identical envelope math to the original map-only path. Pure."""
+  if apex is None or dist == float('inf') or apex >= ref - ICBM_MIN_DROP_MS:
+    return None
+  brake_dist = max(v_ego * v_ego - apex * apex, 0.0) / (2.0 * ICBM_A_DECEL) + ICBM_MARGIN_M
+  if dist <= brake_dist:
+    return max(apex, 0.0)
+  return None
+
+
+def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
+                      vis_v=0.0, vis_dist=float('inf')):
+  """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
+  where src is "map" / "vis". Now considers BOTH a MAP candidate (pfeiferj target, tiered-scaled like
+  VTSC/MTSC) and a VISION candidate (from icbm_vision_apex) and returns the BINDING one with the LOWEST
+  target (most slowing). Same DEC-ONLY, reduce-only, ceiling-latch semantics as before — the map path
+  is byte-equivalent to the original when no vision candidate is supplied.
+
+  ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
+  capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
+  what to restore to. Reduce-only: target is never above the ceiling."""
   if v_set <= 0:
-    return None, None                      # no valid set speed -> hands off
+    return None, None, None                # no valid set speed -> hands off
+  ref = ceiling if ceiling is not None else v_set
+  best_apex, best_src = None, None
+  # MAP candidate — same tiered scaling as VTSC/MTSC
   if map_v and map_v > 0 and map_dist != float('inf'):
-    apex = scale_fn(map_v) * map_v         # same tiered scaling as VTSC/MTSC
-    ref = ceiling if ceiling is not None else v_set
-    if apex < ref - ICBM_MIN_DROP_MS:
-      # binding curve: engage once inside the comfort-decel envelope
-      brake_dist = max(v_ego * v_ego - apex * apex, 0.0) / (2.0 * ICBM_A_DECEL) + ICBM_MARGIN_M
-      if map_dist <= brake_dist:
-        new_ceiling = ceiling if ceiling is not None else v_set
-        return max(apex, 0.0), new_ceiling
+    a = _icbm_binding_apex(v_ego, ref, scale_fn(map_v) * map_v, map_dist)
+    if a is not None:
+      best_apex, best_src = a, "map"
+  # VISION candidate — already a safe speed (icbm_vision_apex). Lowest binding target wins (most slowing).
+  if vis_v and vis_v > 0 and vis_dist != float('inf'):
+    a = _icbm_binding_apex(v_ego, ref, vis_v, vis_dist)
+    if a is not None and (best_apex is None or a < best_apex):
+      best_apex, best_src = a, "vis"
+  if best_apex is not None:
+    new_ceiling = ceiling if ceiling is not None else v_set
+    return best_apex, new_ceiling, best_src
   # curve cleared (or none): go silent and unlatch immediately. DEC-ONLY design (Gemini-hardened
   # 2026-07-11): there is no restore path — the executor can only lower the set speed, and the
   # driver restores it themselves. This kills the restore-vs-driver-intent fight entirely.
-  return None, None
+  return None, None, None
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
@@ -456,6 +505,7 @@ class CESController:
     #   _long_ok -> openpilot owns longitudinal (planner actuation)
     #   _shadow  -> CES runs shadow with ICBM as the actuator (stock-ACC buttons, no op-long)
     veh = PnwVehicle(CP)
+    self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
     self._long_ok = veh.op_long
     self._shadow = veh.ces_shadow
     # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), a
@@ -464,6 +514,7 @@ class CESController:
     self._icbm_ceiling = None
     self._icbm_last_pub = 0.0
     self._icbm_last_target = None
+    self._icbm_src = None                  # curveslow-lightning: "map"/"vis"/None for the drive log
     self._stock_set = 0.0
     self._stock_on = False
 
@@ -623,11 +674,21 @@ class CESController:
       if not active:
         self._icbm_ceiling = None
         self._icbm_last_target = None
+        self._icbm_src = None
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
-      target, self._icbm_ceiling = icbm_curve_target(
+      # curveslow-lightning: vision curve candidate (the 493-curve gap: ICBM was MAP-ONLY and blind to
+      # camera-seen curves). icbm_curve_target picks the more-binding of map / vision.
+      vis_v, vis_dist = icbm_vision_apex(sig["v_ego"], sig.get("curve_lat_accel_vision", 0.0),
+                                         sig.get("time_to_curve", float("inf")))
+      target, self._icbm_ceiling, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
-        sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale)
+        sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale,
+        vis_v, vis_dist)
+      # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
+      # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
+      if target is not None:
+        target = max(target - self._veh.curve_speed_penalty_ms(target), 0.0)
       self._icbm_last_target = round(target, 2) if target is not None else None
       if target is not None:
         # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —
@@ -659,6 +720,7 @@ class CESController:
     tele["shadow"] = self._shadow
     if self._shadow:
       tele["icbmT"] = self._icbm_last_target
+      tele["icbmSrc"] = self._icbm_src           # curveslow-lightning: "map"/"vis" source of the target
       tele["icbmSet"] = self._stock_set
       tele["icbmOn"] = self._stock_on
 
@@ -721,7 +783,7 @@ class CESController:
       # icbm2pnw closed-loop trace: published curve target (m/s, None = ICBM idle), latched driver
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.
-      "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling,
+      "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling, "icbmSrc": self._icbm_src,
       "stockSet": self._stock_set, "stockOn": self._stock_on,
     }
 
