@@ -33,6 +33,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   model_curve_state, brake_cap_for_apex, apply_limits,
   most_binding_map_curve, twisty_section_cap, required_decel)   # sharpcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
 
 class VTSCController:
@@ -46,6 +47,8 @@ class VTSCController:
     except Exception:
       self.mem_params = None
     self._long_ok = bool(getattr(CP, 'openpilotLongitudinalControl', False))
+    # curveslow-lightning: per-car curve-speed penalty (Lightning enters curves slower; Tesla -> 0.0)
+    self.veh = PnwVehicle(CP)
     # light-ces-gentle: the tune is now USER-SELECTED via CESMode (1=Light -> GENTLE_PROFILE, soft
     # decel + slow recovery so a series of curves doesn't sawtooth; 2=Standard -> DEFAULT_PROFILE),
     # NOT gated on carFingerprint. _read_enabled() re-selects the tune when the mode changes.
@@ -204,6 +207,15 @@ class VTSCController:
                                       v_cruise, v_ego, horizon_m, pitch)
       except Exception:
         pass
+
+    # curveslow-lightning: per-car curve-speed penalty. v_curve is now the finalized curve-safe speed
+    # (vision, or the more-binding map fold). On the Lightning, lower it (weaker EPS -> enter slower);
+    # Tesla/other cars -> penalty 0.0 -> byte-unchanged. Only when a real curve BINDS (finite v_curve);
+    # the no-curve inf case is left alone. Floored at V_MIN, and it only ever lowers -> stays <= cruise.
+    if v_curve != float('inf') and self.veh.lightning_curve_slow:
+      penalty = self.veh.curve_speed_penalty_ms(v_curve)
+      if penalty > 0.0:
+        v_curve = max(v_curve - penalty, C.V_MIN)
 
     # sharpcurve2pnw: NORMAL commanded decel = EV regen authority -> coast/regen, no friction braking
     # (driver: "on the freeway braking should almost never be required"). A genuinely SHARP map curve that
