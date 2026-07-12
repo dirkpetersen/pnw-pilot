@@ -1,8 +1,13 @@
 """dm-variable: JSON-configurable driver-monitoring timeout tiers.
 
-Reads /data/pnw/dm.json (persistent: /data survives the auto-update git-clean) and resolves it to
-either None (= "default" tier: the hardcoded in-code behavior, byte-identical to a tree without
-this file) or an explicit opt-in tier ("highway" / "relaxed") with pose/phone timeouts in seconds.
+Philosophy: TIGHT IN SOURCE, PERSONAL VALUES EXTERNAL-ONLY. The repo carries only the strict,
+defensible tier defaults below. Any loosening beyond them lives exclusively in /data/pnw/dm.json
+(device-local, persistent — /data survives the auto-update git-clean — and never committed),
+written via the tools/dm CLI. Without the file the device runs the strict defaults, period.
+
+This module resolves the JSON to either None (= "default" tier: strict in-code behavior) or an
+explicit opt-in tier ("highway" / "relaxed") with pose/phone timeouts in seconds, plus the
+per-regime timeout values the DmMode param selector consumes.
 
 SAFETY POSTURE
 - This module must NEVER raise out of load_dm_tier(): it runs inside dmonitoringd (a safety
@@ -13,8 +18,8 @@ SAFETY POSTURE
 - "relaxed" is opt-in only: it applies solely when the JSON carries relaxed.enabled == true
   (JSON boolean). Anything else (absent, false, "true", 1) means the relaxed tier is UNAVAILABLE
   and the effective tier falls back to default.
-- Timeouts are clamped to [TIMEOUT_MIN_S, TIMEOUT_MAX_S] so no JSON input can push DM beyond a
-  10 minute timeout.
+- Timeouts are clamped to [TIMEOUT_MIN_S, TIMEOUT_MAX_S]: no JSON input can push DM beyond the
+  absolute ceiling, and nothing below 10 s.
 
 Config is read once at dmonitoringd process start (DriverMonitoring.__init__). Changing dm.json
 requires a dmonitoringd restart (ignition cycle or pkill) to take effect — documented in
@@ -40,10 +45,11 @@ HIGHWAY_DEFAULT_PHONE_S = 60.0
 RELAXED_DEFAULT_POSE_S = 60.0
 RELAXED_DEFAULT_PHONE_S = 120.0
 
-# Sane bounds: anything outside is clamped (and warned about). The ceiling is the safety cap —
-# no JSON input may configure a timeout longer than this.
+# Sane bounds: anything outside is clamped (and warned about). The ceiling is the absolute cap —
+# no JSON input may configure a timeout longer than this (4 h). It is deliberately wide: the
+# driver's personal values are meant to live ONLY in the device-local JSON, never in this source.
 TIMEOUT_MIN_S = 10.0
-TIMEOUT_MAX_S = 600.0
+TIMEOUT_MAX_S = 14400.0
 
 VALID_MODES = ("default", "highway", "relaxed")
 
@@ -126,35 +132,59 @@ def relaxed_enabled(data: dict) -> bool:
   return isinstance(section, dict) and section.get("enabled") is True
 
 
-def load_dm_tier(path: str = DM_CONFIG_PATH, warn=None):
-  """Resolve the effective DM tier from the JSON config.
+def _resolve_mode(data: dict, warn) -> str:
+  """Validated JSON 'mode' -> one of VALID_MODES ('default' on anything invalid)."""
+  mode = data.get("mode", "default")
+  if not isinstance(mode, str) or mode not in VALID_MODES:
+    warn(f"dm_config: mode={mode!r} is not one of {VALID_MODES}, using default tier")
+    return "default"
+  return mode
 
-  Returns None for the default tier (caller must change NOTHING), or a tuple
-  (tier_name, pose_timeout_s, phone_timeout_s) for an explicitly selected tier.
-  Never raises.
+
+def load_dm_timeouts(path: str = DM_CONFIG_PATH, warn=None) -> dict:
+  """Resolve everything DM needs from the JSON config in one read. Never raises.
+
+  Returns {
+    "tier":    None | (tier_name, pose_s, phone_s),  # JSON 'mode' selection (relaxed opt-in enforced)
+    "highway": (pose_s, phone_s),                    # values for any highway regime (DmMode=1 or JSON)
+    "relaxed": (pose_s, phone_s),                    # values for the DmMode=2 regime; stays at the
+                                                     # STRICT defaults unless relaxed.enabled is true
+  }
+  With no/invalid file everything is the strict hardcoded defaults and tier is None.
   """
   warn = warn or _noop_warn
+  strict = {
+    "tier": None,
+    "highway": TIER_DEFAULTS["highway"],
+    "relaxed": TIER_DEFAULTS["relaxed"],
+  }
   try:
     data = read_raw_config(path, warn)
     if not data:
-      return None
-
-    mode = data.get("mode", "default")
-    if not isinstance(mode, str) or mode not in VALID_MODES:
-      warn(f"dm_config: mode={mode!r} is not one of {VALID_MODES}, using default tier")
-      return None
-    if mode == "default":
-      return None
-
-    if mode == "relaxed" and not relaxed_enabled(data):
-      warn("dm_config: mode is 'relaxed' but relaxed.enabled is not true — relaxed tier unavailable, using default tier")
-      return None
-
-    pose_s, phone_s = resolve_tier_timeouts(data, mode, warn)
-    return (mode, pose_s, phone_s)
+      return strict
+    out = dict(strict)
+    out["highway"] = resolve_tier_timeouts(data, "highway", warn)
+    # relaxed values beyond the strict defaults require the explicit enabled flag, no matter how
+    # the relaxed regime gets selected (JSON mode or the DmMode Settings param)
+    if relaxed_enabled(data):
+      out["relaxed"] = resolve_tier_timeouts(data, "relaxed", warn)
+    mode = _resolve_mode(data, warn)
+    if mode == "highway":
+      out["tier"] = ("highway", *out["highway"])
+    elif mode == "relaxed":
+      if relaxed_enabled(data):
+        out["tier"] = ("relaxed", *out["relaxed"])
+      else:
+        warn("dm_config: mode is 'relaxed' but relaxed.enabled is not true — relaxed tier unavailable, using default tier")
+    return out
   except Exception as e:  # belt and braces: a DM process crash is a safety event
     try:
-      warn(f"dm_config: unexpected error resolving tier ({e.__class__.__name__}: {e}), using default tier")
+      warn(f"dm_config: unexpected error resolving config ({e.__class__.__name__}: {e}), using strict defaults")
     except Exception:
       pass
-    return None
+    return strict
+
+
+def load_dm_tier(path: str = DM_CONFIG_PATH, warn=None):
+  """JSON 'mode' tier only: None for default, else (tier_name, pose_s, phone_s). Never raises."""
+  return load_dm_timeouts(path, warn)["tier"]

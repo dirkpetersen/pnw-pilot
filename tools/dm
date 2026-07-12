@@ -11,8 +11,15 @@ Usage:
   dm ... --file PATH               operate on a different file (testing)
 
 First numeric arg = pose/attention timeout, second = phone/distraction timeout.
-Values are clamped to the same bounds dmonitoringd enforces. dmonitoringd reads the file at
-process start only: changes take effect at the next ignition cycle / dmonitoringd restart.
+
+How this works: the SOURCE TREE carries only strict, defensible tier defaults (see
+selfdrive/monitoring/dm_config.py). Your personal timeout values live ONLY here on the device,
+in /data/pnw/dm.json — never committed to the repo. Without this file (or on any bad value) the
+device runs the strict defaults. `dm show` displays the effective config dmonitoringd will use.
+The highway tier applies on freeways only (same road gate as the Settings Highway mode); the
+relaxed tier applies everywhere but only after `dm relaxed --enable`. Values are clamped to the
+same bounds dmonitoringd enforces. dmonitoringd reads the file at process start only: changes
+take effect at the next ignition cycle / dmonitoringd restart.
 
 stdlib only; loads dm_config.py by path so it works with any PYTHONPATH.
 """

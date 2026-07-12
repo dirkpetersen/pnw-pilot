@@ -5,15 +5,17 @@ where the openpilot deps (cereal/numpy) are unavailable.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
 import pytest
 
 from openpilot.selfdrive.monitoring import dm_config
-from openpilot.selfdrive.monitoring.dm_config import load_dm_tier
+from openpilot.selfdrive.monitoring.dm_config import load_dm_tier, load_dm_timeouts
 
-DM_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "dm")
+MONITORING_DIR = os.path.dirname(os.path.abspath(__file__))
+DM_CLI = os.path.join(MONITORING_DIR, "..", "..", "tools", "dm")
 
 try:
   from openpilot.common.realtime import DT_DMON
@@ -39,10 +41,28 @@ class ConfigCase:
   def load(self):
     return load_dm_tier(self.path, self.warn)
 
+  def load_all(self):
+    return load_dm_timeouts(self.path, self.warn)
+
 
 @pytest.fixture
 def cfg(tmp_path):
   return ConfigCase(tmp_path)
+
+
+class TestSourcePurity:
+  """Pin that the removed long-timeout constants never return to the DM source. The controversial
+  values live exclusively in the device-local /data/pnw/dm.json — never in this repo."""
+
+  BANNED = re.compile(r"\b(10800|3600|1800|900)(\.\d*)?\b")
+  SOURCES = ("helpers.py", "dmonitoringd.py", "dm_config.py")
+
+  @pytest.mark.parametrize("fname", SOURCES)
+  def test_no_long_timeout_constants_in_source(self, fname):
+    with open(os.path.join(MONITORING_DIR, fname), encoding="utf-8") as f:
+      for i, line in enumerate(f, 1):
+        m = self.BANNED.search(line)
+        assert m is None, f"{fname}:{i}: banned long-timeout constant {m.group(0)!r} in: {line.strip()}"
 
 
 class TestLoadDmTier:
@@ -61,7 +81,7 @@ class TestLoadDmTier:
     assert cfg.warnings
 
   def test_unreadable_path_is_default(self, cfg):
-    # a directory at the config path -> IsADirectoryError on open
+    # a directory at the config path -> rejected by the S_ISREG check
     os.mkdir(cfg.path)
     assert cfg.load() is None
     assert cfg.warnings
@@ -113,10 +133,22 @@ class TestLoadDmTier:
 
   def test_out_of_range_clamped(self, cfg):
     cfg.write({"mode": "highway", "highway": {"pose_s": 5, "phone_s": 99999}})
-    assert cfg.load() == ("highway", 10.0, 600.0)
+    assert cfg.load() == ("highway", dm_config.TIMEOUT_MIN_S, dm_config.TIMEOUT_MAX_S)
     assert len(cfg.warnings) == 2
     cfg.write({"mode": "highway", "highway": {"pose_s": -50, "phone_s": 0}})
-    assert cfg.load() == ("highway", 10.0, 10.0)
+    assert cfg.load() == ("highway", dm_config.TIMEOUT_MIN_S, dm_config.TIMEOUT_MIN_S)
+
+  def test_bounds_values(self):
+    # the widened external-only ceiling: personal values up to 4 h via JSON, never below 10 s
+    assert dm_config.TIMEOUT_MIN_S == 10.0
+    assert dm_config.TIMEOUT_MAX_S == 14400.0
+
+  def test_long_personal_values_allowed_via_json_only(self, cfg):
+    # values that must never appear in source are configurable through the file
+    cfg.write({"mode": "highway", "highway": {"pose_s": 3599, "phone_s": 14400}})
+    assert cfg.load() == ("highway", 3599.0, 14400.0)
+    cfg.write({"mode": "highway", "highway": {"pose_s": 14401, "phone_s": 1e12}})
+    assert cfg.load() == ("highway", 14400.0, 14400.0)  # clamped at the ceiling
 
   @pytest.mark.parametrize("enabled", [None, False, "true", 1, "yes"])  # only JSON true counts
   def test_relaxed_not_enabled_is_default(self, cfg, enabled):
@@ -132,8 +164,8 @@ class TestLoadDmTier:
     assert cfg.load() == ("relaxed", 60.0, 120.0)
     cfg.write({"mode": "relaxed", "relaxed": {"enabled": True}})  # values default
     assert cfg.load() == ("relaxed", 60.0, 120.0)
-    cfg.write({"mode": "relaxed", "relaxed": {"enabled": True, "pose_s": 700, "phone_s": 3}})
-    assert cfg.load() == ("relaxed", 600.0, 10.0)  # clamped, never beyond the cap
+    cfg.write({"mode": "relaxed", "relaxed": {"enabled": True, "pose_s": 20000, "phone_s": 3}})
+    assert cfg.load() == ("relaxed", 14400.0, 10.0)  # clamped, never beyond the ceiling
 
   def test_never_raises_even_with_raising_warn(self, cfg):
     def bad_warn(msg):
@@ -142,16 +174,42 @@ class TestLoadDmTier:
     assert load_dm_tier(cfg.path, bad_warn) is None
 
   def test_hardcoded_defaults_do_not_depend_on_file(self, tmp_path):
-    # the constants live in the Python source; nothing here touches any file
+    # the strict constants live in the Python source; nothing here touches any file
     assert dm_config.TIER_DEFAULTS["highway"] == (30.0, 60.0)
     assert dm_config.TIER_DEFAULTS["relaxed"] == (60.0, 120.0)
     assert load_dm_tier(str(tmp_path / "nope" / "dm.json")) is None
 
 
+class TestLoadDmTimeouts:
+  """The one-read table consumed by helpers: tier + per-regime values for the DmMode selector."""
+
+  def test_no_file_is_all_strict(self, cfg):
+    out = cfg.load_all()
+    assert out == {"tier": None, "highway": (30.0, 60.0), "relaxed": (60.0, 120.0)}
+
+  def test_malformed_is_all_strict(self, cfg):
+    cfg.write(None, raw="!!!")
+    assert cfg.load_all() == {"tier": None, "highway": (30.0, 60.0), "relaxed": (60.0, 120.0)}
+
+  def test_highway_values_used_without_mode(self, cfg):
+    # DmMode=1 (Settings) consumes highway values even when the JSON mode stays default
+    cfg.write({"highway": {"pose_s": 300, "phone_s": 500}})
+    out = cfg.load_all()
+    assert out["tier"] is None
+    assert out["highway"] == (300.0, 500.0)
+
+  def test_relaxed_values_require_enabled_even_for_dmmode(self, cfg):
+    # without enabled:true the DmMode=2 regime stays at the strict defaults
+    cfg.write({"relaxed": {"pose_s": 5000, "phone_s": 5000}})
+    assert cfg.load_all()["relaxed"] == (60.0, 120.0)
+    cfg.write({"relaxed": {"enabled": True, "pose_s": 5000, "phone_s": 5000}})
+    assert cfg.load_all()["relaxed"] == (5000.0, 5000.0)
+
+
 @pytest.mark.skipif(not HELPERS_AVAILABLE, reason="openpilot helpers deps unavailable")
 class TestHelpersTierWiring:
-  """The _apply_dm_timeouts override: tier None must be byte-identical to today; a tier must set
-  exactly the tier's steps/thresholds with capped pre/prompt leads."""
+  """_apply_dm_timeouts: strict stock with nothing configured; DmMode regimes use dm_config values;
+  the JSON tier takes precedence, with its highway variant road-gated."""
 
   def setup_method(self):
     self.s = DRIVER_MONITOR_SETTINGS(device_type=HARDWARE.get_device_type())
@@ -165,29 +223,73 @@ class TestHelpersTierWiring:
     assert self.dm._pose_threshold_pre == pytest.approx(self.s._DISTRACTED_PRE_TIME_TILL_TERMINAL / self.s._DISTRACTED_TIME)
     assert self.dm._pose_threshold_prompt == pytest.approx(self.s._DISTRACTED_PROMPT_TIME_TILL_TERMINAL / self.s._DISTRACTED_TIME)
 
-  def test_no_tier_relaxed_dmmode_unchanged(self):
+  def test_dmmode_relaxed_uses_strict_defaults_without_json(self):
     self.dm._dm_tier = None
     self.dm._dm_mode = 2
     self.dm._apply_dm_timeouts()
-    assert self.dm._pose_step == pytest.approx(DT_DMON / self.s._POSE_DISTRACTED_TIME)
-    assert self.dm._phone_step == pytest.approx(DT_DMON / self.s._PHONE_DISTRACTED_TIME)
+    assert self.dm._pose_step == pytest.approx(DT_DMON / 60.0)
+    assert self.dm._phone_step == pytest.approx(DT_DMON / 120.0)
 
-  def test_highway_tier_overrides(self):
+  def test_dmmode_highway_uses_strict_defaults_without_json(self):
+    self.dm._dm_tier = None
+    self.dm._dm_mode = 1
+    self.dm._road_relaxed = True
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / 30.0)
+    assert self.dm._phone_step == pytest.approx(DT_DMON / 60.0)
+
+  def test_dmmode_highway_offroad_is_strict(self):
+    self.dm._dm_tier = None
+    self.dm._dm_mode = 1
+    self.dm._road_relaxed = False
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / self.s._DISTRACTED_TIME)
+
+  def test_dmmode_regimes_use_json_values(self):
+    self.dm._dm_tier = None
+    self.dm._dm_highway_t = (300.0, 500.0)
+    self.dm._dm_relaxed_t = (4000.0, 2000.0)
+    self.dm._dm_mode = 1
+    self.dm._road_relaxed = True
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / 300.0)
+    assert self.dm._phone_step == pytest.approx(DT_DMON / 500.0)
+    self.dm._dm_mode = 2
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / 4000.0)
+    assert self.dm._phone_step == pytest.approx(DT_DMON / 2000.0)
+
+  def test_json_highway_tier_road_gated(self):
     self.dm._dm_tier = ("highway", 30.0, 60.0)
+    self.dm._dm_mode = 0
+    # off-freeway -> strict stock, the tier is inert
+    self.dm._road_relaxed = False
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / self.s._DISTRACTED_TIME)
+    assert self.dm._phone_step == pytest.approx(DT_DMON / self.s._DISTRACTED_TIME)
+    # on-freeway -> tier values
+    self.dm._road_relaxed = True
     self.dm._apply_dm_timeouts()
     assert self.dm._pose_step == pytest.approx(DT_DMON / 30.0)
     assert self.dm._phone_step == pytest.approx(DT_DMON / 60.0)
     # leads capped: pose pre min(60, 15)=15 -> 0.5, prompt min(30, 7.5)=7.5 -> 0.25
     assert self.dm._pose_threshold_pre == pytest.approx(0.5)
     assert self.dm._pose_threshold_prompt == pytest.approx(0.25)
-    # phone pre min(120, 30)=30 -> 0.5, prompt min(60, 15)=15 -> 0.25
     assert self.dm._phone_threshold_pre == pytest.approx(0.5)
     assert self.dm._phone_threshold_prompt == pytest.approx(0.25)
 
-  def test_relaxed_tier_overrides_and_beats_dmmode(self):
+  def test_json_highway_offroad_never_falls_through_to_dmmode(self):
+    # JSON highway off-freeway must land on STRICT even if the Settings param says Relaxed
+    self.dm._dm_tier = ("highway", 100.0, 200.0)
+    self.dm._dm_mode = 2
+    self.dm._road_relaxed = False
+    self.dm._apply_dm_timeouts()
+    assert self.dm._pose_step == pytest.approx(DT_DMON / self.s._DISTRACTED_TIME)
+
+  def test_json_relaxed_tier_everywhere_beats_dmmode(self):
     self.dm._dm_tier = ("relaxed", 60.0, 120.0)
-    self.dm._dm_mode = 1  # any DmMode: the JSON tier takes precedence
-    self.dm._road_relaxed = True
+    self.dm._dm_mode = 1
+    self.dm._road_relaxed = False  # road must not matter for the relaxed tier
     self.dm._apply_dm_timeouts()
     assert self.dm._pose_step == pytest.approx(DT_DMON / 60.0)
     assert self.dm._phone_step == pytest.approx(DT_DMON / 120.0)
@@ -232,13 +334,19 @@ class TestDmCli:
   def test_clamping_and_validation(self):
     self.run_dm("highway", "5", "99999")  # clamps with a warning, still writes
     self.run_dm("mode", "highway")
-    assert load_dm_tier(self.cfg.path) == ("highway", 10.0, 600.0)
+    assert load_dm_tier(self.cfg.path) == ("highway", dm_config.TIMEOUT_MIN_S, dm_config.TIMEOUT_MAX_S)
     self.run_dm("highway", "abc", "60", expect_fail=True)
     self.run_dm("highway", "nan", "60", expect_fail=True)
     self.run_dm("highway", "30", expect_fail=True)      # missing phone_s
     self.run_dm("mode", "turbo", expect_fail=True)
     self.run_dm("highway", "--enable", expect_fail=True)  # enable is relaxed-only
     self.run_dm("bogus", expect_fail=True)
+
+  def test_personal_long_values_settable(self):
+    self.run_dm("relaxed", "7200", "14400")
+    self.run_dm("relaxed", "--enable")
+    self.run_dm("mode", "relaxed")
+    assert load_dm_tier(self.cfg.path) == ("relaxed", 7200.0, 14400.0)
 
   def test_show_runs_on_missing_and_garbage(self):
     r = self.run_dm("show")

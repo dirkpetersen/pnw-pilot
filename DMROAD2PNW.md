@@ -1,5 +1,11 @@
 # DMROAD2PNW — road-gated 3-way driver-monitoring timeout selector
 
+> **⚠️ SUPERSEDED IN PART by `DM-VARIABLE.md` (branch `dm-variable`, 2026-07-11):** the Highway/
+> Relaxed timeout MAGNITUDES quoted in the table below no longer live in source. The `DmMode`
+> selector and its road gate are unchanged, but the regimes now use the strict dm_config defaults
+> (highway 30/60 s, relaxed 60/120 s) unless the driver configures personal values in the
+> device-local `/data/pnw/dm.json` (never committed). See `DM-VARIABLE.md`.
+
 **STATUS:** built on branch **`dmroad2pnw`** (off `4devpnw`), NOT yet deployed. Adds a user-facing
 3-way selector that makes the relaxed DM timeouts **conditional** instead of always-on. The GLARE
 Layer-C knobs are **untouched** — this changes only the pose/phone *timeout magnitudes*.
