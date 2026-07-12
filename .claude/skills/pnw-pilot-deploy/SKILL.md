@@ -14,6 +14,27 @@ Distribution: `~/gh/comma/pnw/pnw-pilot`. The car runs `/data/openpilot` as a **
 (origin = `dirkpetersen/pnw-pilot`), NOT the classic overlay. Device = one comma 3X moved between the
 Tesla Model S Raven and the Ford F-150 Lightning.
 
+## 🔴 CODE vs SETTINGS reload — get this right or mislead the driver (learned 2026-07-11 evening)
+
+This manager **preimports every process module at DEVICE BOOT** and forks children from that
+snapshot. Consequences that MUST drive what you tell the driver:
+- **CODE changes (any .py) need a DEVICE REBOOT.** Truck-off/ignition cycles restart the onroad
+  processes but they resume with boot-time code. Telling the driver "cycle the ignition to get the
+  fix" is WRONG for code — it cost a whole evening leg on stale tuning.
+- **SETTINGS reload on an ignition cycle**: CarParams-affecting toggles (Alpha Long), and
+  construction-time data files (/data/pnw/*.json) ARE re-read when processes restart at ignition-on.
+- The UI version label reads at manager start — after a files-only install it shows the OLD commit
+  until the device reboots. Not a failed deploy; just the label.
+
+**Driver choreography rule (driver directive: "it needs to be automatic, tell me what to do"):**
+the driver must never have to reason about any of this. After ANY change: (1) Claude does the
+reboot HIMSELF the moment the truck is verifiably parked (GPS < 1.5 m/s + touch /tmp/booted) —
+never ask the driver to do ignition dances for code; (2) tell the driver exactly ONE thing in one
+sentence ("stay parked two minutes, I'll say GO"), then verify (version + car recognized + safety
+model + nothing down) and give an explicit **GO**; (3) if something needs a driver action that
+Claude cannot do (e.g. flip a Settings toggle), say the exact button and when. One instruction,
+one confirmation — nothing else.
+
 ## 🔴 OVERRIDING RULE — PRE-DRIVE SYNC (driver directive 2026-07-11)
 
 **Every time the driver is about to get on the road, the device MUST be running the latest pushed
