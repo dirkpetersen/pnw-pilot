@@ -16,9 +16,11 @@ engagement. Reads GPS/path/road from /dev/shm mem params (the mapd_configd bridg
 `LocationServices` JSON mem param for the lower-left UI overlay. Gated by `LocationServicesEnabled`
 (default ON) and, for the lookups, `roadContext == freeway`.
 
-The police proxy key is NOT shipped in-distribution: it is supplied only via the persistent
-/data/pnw/location/police_proxy.json override file (survives reboot / git reset). No key -> "—" (no-data);
-a failed poll also shows "—", never a false "Clear".
+Police source (wazeproxy2pnw): by DEFAULT the device polls our KEYLESS caching edge proxy — no
+API key ever ships to (or needs configuring on) a device; the one shared RapidAPI key lives only in
+the proxy (comma-connect/WAZE-API.md). The legacy per-device direct RapidAPI mode still works: a
+/data/pnw/location/police_proxy.json override file supplying key+url forces direct (existing installs
+unchanged); {"source": "proxy"} forces proxy. A failed poll shows "—", never a false "Clear".
 """
 import json
 import os
@@ -54,15 +56,23 @@ EV_OTHER_URL = "https://raw.githubusercontent.com/dirkpetersen/pnw-pilot/l2-char
 EV_OTHER_TIMEOUT_S = 120
 EV_OTHER_RETRY_S = 300                                                 # min gap between download attempts (no spam on failure)
 
-# Default Waze proxy (RapidAPI). Override-file-only model: NO key ships in the distribution. The key must
-# be supplied at runtime via the PROXY_CFG file (/data/pnw/location/police_proxy.json) — which lives on the
-# device's persistent /data (survives reboot AND git reset/clean, unlike the in-tree code). With no key,
-# police polling stays 'nodata' (no false alerts). This shape only carries the public url/host defaults.
+# wazeproxy2pnw: the DEFAULT police source is now our keyless caching edge proxy (WAZE-API.md in
+# comma-connect). It holds the ONE shared RapidAPI key server-side and dedups the whole fleet onto one
+# upstream Waze call per ~5.5 km cell per TTL window — no per-device key, nothing to configure. The
+# legacy per-device direct RapidAPI mode is kept as an override: a PROXY_CFG file that supplies
+# key+url forces direct (existing installs keep working unchanged); {"source": "proxy"} in the file
+# forces proxy even when a key is present. With neither a proxy_url nor a key, polling stays
+# 'nodata' (no false alerts).
 DEFAULT_PROXY = {
-  "url": "https://waze-api.p.rapidapi.com/alerts",
+  "source": "",                                     # "" = auto (key -> direct, else proxy) | "proxy" | "direct"
+  "proxy_url": "WAZE_PROXY_URL_PLACEHOLDER",        # keyless edge proxy (Cloudflare Worker)
+  "proxy_auth": "",                                 # rotatable x-pnw-auth gate value (guards OUR quota shield,
+                                                    # not the RapidAPI key; fine to ship in-distribution)
+  "url": "https://waze-api.p.rapidapi.com/alerts",  # legacy direct upstream (used only with a key)
   "host": "waze-api.p.rapidapi.com",
   "key": "",                                        # NOT shipped — supplied by the PROXY_CFG override file
 }
+POLICE_PROXY_MAX_AGE_S = 30 * 60                    # ignore a proxy body older than this -> empty (never stale alerts)
 
 TICK_HZ = 1.0
 EV_MAX_PERP_M = 1.0 * geo.M_PER_MILE      # chargers within 1 mi of the highway (driver rule, reaffirmed
@@ -266,8 +276,13 @@ class StaticData:
 
 
 # ----------------------------- police (network, isolated thread) ------------------------------------
+class _ProxyUpstreamErr(Exception):
+  """The edge proxy answered but reported an upstream Waze failure (its `error` tag, e.g.
+  'upstream 429'). Carries the tag through to the UI err line instead of a generic 'bad resp'."""
+
+
 class PoliceUpdater(threading.Thread):
-  """Polls the Waze proxy ≤1/min in its OWN thread and caches raw POLICE alerts. Never does geometry
+  """Polls the Waze source ≤1/min in its OWN thread and caches raw POLICE alerts. Never does geometry
   (the main loop does that against fresh GPS). Defensive: any failure -> state 'nodata' + backoff."""
   def __init__(self):
     super().__init__(daemon=True)
@@ -287,15 +302,29 @@ class PoliceUpdater(threading.Thread):
     self._stop.set()
 
   def _load_cfg(self):
-    # Override file (persistent /data) supplies the key; otherwise DEFAULT_PROXY has none -> nodata.
+    # Merge the override file (persistent /data) ONTO the defaults so a partial file works: a legacy
+    # {key,url} file yields direct mode, {"source":"proxy"} forces proxy, and no/invalid file leaves
+    # the shipped keyless-proxy defaults intact.
+    cfg = dict(DEFAULT_PROXY)
     try:
       with open(PROXY_CFG) as f:
         c = json.load(f)
-      if c.get("key") and c.get("url"):
-        return c
+      if isinstance(c, dict):
+        cfg.update({k: v for k, v in c.items() if v is not None})
     except (OSError, ValueError):
       pass
-    return dict(DEFAULT_PROXY)
+    return cfg
+
+  @staticmethod
+  def _use_proxy(cfg) -> bool:
+    """Source selection: explicit 'source' wins; otherwise a configured key means legacy direct
+    (existing installs unchanged), else proxy. Pure + static for scenario tests."""
+    src = str(cfg.get("source") or "").strip().lower()   # defensive: a non-string in the JSON must not throw
+    if src == "proxy":
+      return bool(cfg.get("proxy_url"))
+    if src == "direct":
+      return False
+    return not cfg.get("key") and bool(cfg.get("proxy_url"))
 
   def _cur_gps(self):
     try:
@@ -331,6 +360,51 @@ class PoliceUpdater(threading.Thread):
         continue
     return out
 
+  def _poll_proxy(self, cfg, lat, lon):
+    # wazeproxy2pnw: keyless GET of the caching edge proxy for the CURRENT position. Returns the
+    # SAME raw-alert shape _poll() returns, so snapshot()/_line_police()/the UI are untouched.
+    q = urllib.parse.urlencode({"lat": f"{lat:.4f}", "lon": f"{lon:.4f}"})
+    headers = {"User-Agent": "pnw-location/1.0"}
+    if cfg.get("proxy_auth"):
+      headers["x-pnw-auth"] = cfg["proxy_auth"]
+    req = urllib.request.Request(f"{cfg['proxy_url']}?{q}", headers=headers)
+    with urllib.request.urlopen(req, timeout=POLICE_TIMEOUT_S) as resp:
+      raw = resp.read()
+    return self._parse_proxy_body(raw)
+
+  @staticmethod
+  def _parse_proxy_body(raw):
+    """Pure transform of a proxy response body -> raw-alert list (static for scenario tests).
+    Proxy `error` tag -> _ProxyUpstreamErr (surfaced on the UI err line, state 'nodata').
+    Stale body (generated_at too old) ALSO raises -> 'nodata', never a false 'Clear' from
+    stale-but-parseable data (Gemini review finding #1)."""
+    data = json.loads(raw)                                  # defensive: HTML-error-200 -> ValueError below
+    if not isinstance(data, dict):
+      raise ValueError("unexpected proxy payload")
+    if data.get("error"):
+      raise _ProxyUpstreamErr(str(data["error"])[:24])
+    try:
+      age_s = _now_epoch() - float(data.get("generated_at") or 0)   # `or 0`: null must not TypeError
+    except (TypeError, ValueError):
+      age_s = float("inf")
+    if age_s > POLICE_PROXY_MAX_AGE_S:
+      raise _ProxyUpstreamErr("stale proxy")
+    alerts = data.get("alerts", [])
+    if not isinstance(alerts, list):
+      raise ValueError("unexpected alerts payload")
+    out = []
+    for a in alerts:
+      if not isinstance(a, dict):
+        continue
+      try:
+        out.append({"lat": float(a["lat"]), "lon": float(a["lon"]),
+                    "magvar": a.get("magvar"), "ts": a.get("ts"),
+                    "uuid": a.get("uuid"), "street": a.get("street") or "",
+                    "town": a.get("town") or ""})
+      except (KeyError, TypeError, ValueError):
+        continue
+    return out
+
   def run(self):
     backoff = POLICE_POLL_S
     while not self._stop.is_set():
@@ -344,11 +418,12 @@ class PoliceUpdater(threading.Thread):
                                                                         # from mem -> always False -> never polled)
         except Exception:
           pass
-        nokey = not (cfg and cfg.get("key"))                   # no key (override file absent) -> nodata, don't poll
-        if cfg is None or nokey or not enabled:
+        use_proxy = self._use_proxy(cfg)                       # keyless edge proxy (default) vs legacy direct
+        nosrc = not (use_proxy or cfg.get("key"))              # neither a proxy_url nor a key -> nodata, don't poll
+        if nosrc or not enabled:
           with self._lock:
             self._alerts, self._state = [], "nodata"
-            self._err = "no key" if (nokey and enabled) else ""   # surface the actionable case; disabled = plain "-"
+            self._err = "no source" if (nosrc and enabled) else ""   # surface the actionable case; disabled = plain "-"
           self._stop.wait(POLICE_POLL_S)
           continue
         gps = self._cur_gps()
@@ -356,15 +431,19 @@ class PoliceUpdater(threading.Thread):
           self._stop.wait(POLICE_POLL_S)
           continue
         try:
-          alerts = self._poll(cfg, gps[0], gps[1])
+          alerts = self._poll_proxy(cfg, gps[0], gps[1]) if use_proxy else self._poll(cfg, gps[0], gps[1])
           with self._lock:
             self._alerts, self._state, self._err = alerts, "ok", ""
-          cloudlog.info("location_services: police poll ok (%d alerts)", len(alerts))   # heartbeat for diagnosis
+          cloudlog.info("location_services: police poll ok (%d alerts, %s)", len(alerts),
+                        "proxy" if use_proxy else "direct")   # heartbeat for diagnosis
           backoff = POLICE_POLL_S                            # success -> reset backoff
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
+                _ProxyUpstreamErr) as e:
           # Surface the real cause on-screen. HTTPError carries the status code (429 = Waze quota exceeded);
           # HTTPError subclasses URLError so it must be checked first. Non-200 status -> "HTTP <code>".
-          if isinstance(e, urllib.error.HTTPError):
+          if isinstance(e, _ProxyUpstreamErr):
+            emsg = str(e)                                    # the proxy's upstream tag, e.g. "upstream 429"
+          elif isinstance(e, urllib.error.HTTPError):
             emsg = "quota (429)" if e.code == 429 else f"HTTP {e.code}"
           elif isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
             emsg = "timeout"                                # urlopen timeouts can arrive wrapped in URLError.reason
