@@ -228,6 +228,55 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
   return 2 * r * math.asin(min(1.0, a ** 0.5))
 
 
+def map_turn_direction(points, cur_lat, cur_lon, target_dist, tol_m: float = 60.0) -> int:
+  """icbmalign2pnw: turn DIRECTION of the map path at ~`target_dist` metres ahead: +1 = LEFT,
+  -1 = right, 0 = straight/unknown. Finds the path point whose distance from the current position
+  is closest to `target_dist` (the ICBM candidate's recorded distance — same haversine metric, so
+  the match is exact for map/far candidates), then sums the signed turn (2-D cross product of
+  successive segment vectors in a local east/north frame) over a small window around it.
+  Sign: with x = east, y = north, cross(v0, v1) > 0 = counterclockwise viewed from above = LEFT —
+  the same left-positive convention as vtsc_pnw.apex_turn_direction / openpilot steering.
+  Ambiguous / too few points / no match within tol_m -> 0 (neutral: the left factor is simply not
+  applied — fail-safe is 'no extra penalty', never a wrong-direction penalty). Pure."""
+  if not points or cur_lat is None or cur_lon is None or target_dist == float('inf'):
+    return 0
+  pts = []
+  for p in points:
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if la != la or lo != lo:                      # NaN guard
+      continue
+    pts.append((la, lo))
+  if len(pts) < 3:
+    return 0
+  # nearest path point to the candidate distance
+  best_i, best_err = -1, float('inf')
+  for i, (la, lo) in enumerate(pts):
+    err = abs(_haversine_m(cur_lat, cur_lon, la, lo) - target_dist)
+    if err < best_err:
+      best_i, best_err = i, err
+  if best_err > tol_m:
+    return 0
+  # signed turn accumulated over up to 2 corners each side of the candidate point (local EN frame;
+  # per-corner cross is normalized = sin(turn angle), so GPS point spacing doesn't bias the sum)
+  coslat = math.cos(math.radians(cur_lat))
+  total = 0.0
+  for j in range(max(1, best_i - 2), min(len(pts) - 1, best_i + 3)):
+    ax = (pts[j][1] - pts[j - 1][1]) * coslat
+    ay = pts[j][0] - pts[j - 1][0]
+    bx = (pts[j + 1][1] - pts[j][1]) * coslat
+    by = pts[j + 1][0] - pts[j][0]
+    na, nb = math.hypot(ax, ay), math.hypot(bx, by)
+    if na <= 0.0 or nb <= 0.0:
+      continue
+    total += (ax * by - ay * bx) / (na * nb)
+  if abs(total) < 0.02:                           # ~1 deg total bend: too straight to call
+    return 0
+  return 1 if total > 0.0 else -1
+
+
 def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> tuple[float, float]:
   """From pfeiferj's MapTargetVelocities (list of {latitude, longitude, velocity}) + current
   position, return (min_target_velocity, distance) of the most-binding upcoming curve within the
@@ -723,6 +772,14 @@ class CESController:
       # Experimental for curves on the truck — removes the chill<->experimental planner-mode flapping.
       toggles = {**self._toggles, "curves": False} if self._gentle else self._toggles
       sig = _signals_from(car_state, lead, model, toggles, mtv, mtd, self._speed_limit)
+      # icbmalign2pnw: road pitch for the ICBM descent guard — the SAME message/field VTSC reads
+      # (carControl.orientationNED[1], rad, < 0 = downhill; selfdrived's SubMaster subscribes
+      # carControl). Own inner try: a carControl hiccup must not cost the whole signals dict.
+      try:
+        ned = sm['carControl'].orientationNED
+        sig["pitch"] = float(ned[1]) if len(ned) == 3 else None
+      except Exception:
+        sig["pitch"] = None
     except Exception:
       sig = None
 
@@ -786,8 +843,29 @@ class CESController:
         far_v=far_v, far_dist=far_dist)
       # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
       # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
+      # icbmalign2pnw: ICBM now applies the SAME descent + left-curve multipliers as VTSC — literally
+      # the same shared function (PnwVehicle.curve_speed_penalty_ms, knobs from /data/pnw/curve.json),
+      # so stock-ACC and op-long behavior stay aligned. Direction per source:
+      #   vis      -> sign of the model's predicted lateral accel (lat = orientationRate.z * v, and
+      #               z > 0 = LEFT — the convention verified for apex_turn_direction);
+      #   map/far  -> map path geometry at the candidate's distance (map_turn_direction, same
+      #               left-positive convention). Unknown direction / no pitch -> neutral (no-op).
+      # Multipliers only ever RAISE the penalty (>= 1, clamped), so the target only moves DOWN:
+      # DEC-only/ceiling semantics untouched.
       if target is not None:
-        target = max(target - self._veh.curve_speed_penalty_ms(target), 0.0)
+        is_left = False
+        try:
+          if self._icbm_src == "vis":
+            is_left = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0) > 0.0
+          elif self._icbm_src == "far":
+            is_left = map_turn_direction(self._map_targets, self._cur_lat, self._cur_lon, far_dist) > 0
+          elif self._icbm_src == "map":
+            is_left = map_turn_direction(self._map_targets, self._cur_lat, self._cur_lon,
+                                         sig.get("map_target_dist", float("inf"))) > 0
+        except Exception:
+          is_left = False
+        target = max(target - self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
+                                                               is_left=is_left), 0.0)
       self._icbm_last_target = round(target, 2) if target is not None else None
       if target is not None:
         # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —

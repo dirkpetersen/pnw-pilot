@@ -264,3 +264,173 @@ def test_near_map_candidate_never_delayed_by_firm_decel():
   base = icbm_curve_target(v, vset, apex, dist, None, lambda x: 1.0)
   firm = icbm_curve_target(v, vset, apex, dist, None, lambda x: 1.0, firm_decel=1.4)
   assert base == firm and base[0] is not None            # binds either way, at the same point
+
+
+# ---- icbmalign2pnw: descent + left factors on the ICBM path (aligned with VTSC) -------------------
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import map_turn_direction
+from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+
+LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
+
+
+class FakeCPA:
+  def __init__(self, fp="", brand="", op_long=False):
+    self.carFingerprint = fp
+    self.brand = brand
+    self.openpilotLongitudinalControl = op_long
+
+
+def _path(cur_lat, cur_lon, bend):
+  """A northbound map path starting ~100 m ahead that bends by `bend` (deg per 30 m step;
+  + = toward west = LEFT for a northbound path)."""
+  pts, heading = [], 0.0
+  lat, lon = cur_lat + 100.0 / 111320.0, cur_lon
+  coslat = math.cos(math.radians(cur_lat))
+  for _ in range(12):
+    pts.append({"latitude": lat, "longitude": lon, "velocity": 20.0})
+    heading += bend
+    step = 30.0 / 111320.0
+    lat += step * math.cos(math.radians(heading))
+    lon -= step * math.sin(math.radians(heading)) / coslat   # +heading = toward west (left)
+  return pts
+
+
+def test_map_turn_direction_left_right_straight():
+  lat, lon = 47.0, -122.0
+  assert map_turn_direction(_path(lat, lon, +4.0), lat, lon, 200.0) == 1     # bends left
+  assert map_turn_direction(_path(lat, lon, -4.0), lat, lon, 200.0) == -1    # bends right
+  assert map_turn_direction(_path(lat, lon, 0.0), lat, lon, 200.0) == 0      # straight
+  assert map_turn_direction([], lat, lon, 200.0) == 0                        # no data
+  assert map_turn_direction(_path(lat, lon, 4.0), None, None, 200.0) == 0    # no GPS
+  assert map_turn_direction(_path(lat, lon, 4.0), lat, lon, float('inf')) == 0
+  # no path point anywhere near the candidate distance -> unknown, not a guess
+  assert map_turn_direction(_path(lat, lon, 4.0), lat, lon, 2000.0) == 0
+  bad = [{"latitude": float('nan'), "longitude": lon, "velocity": 1.0}] * 5
+  assert map_turn_direction(bad, lat, lon, 100.0) == 0
+
+
+def _icbm_stub(veh):
+  """A CESController stand-in exposing exactly what _icbm_step touches (same pattern as the
+  gating test above)."""
+  import inspect
+  from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+  cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
+
+  class FakeMem:
+    def put_nonblocking(self, k, v): self.last = v
+
+  class Stub:
+    pass
+  mgr = Stub()
+  mgr.mem_params = FakeMem()
+  mgr._icbm_ceiling = None
+  mgr._veh = veh
+  mgr._map_targets = []
+  mgr._cur_lat = None
+  mgr._cur_lon = None
+  return mgr, cls._icbm_step.__get__(mgr)
+
+
+def _published_target(step, mgr, sig):
+  import time as _t
+  mgr._icbm_last_pub = _t.monotonic() - 1.0
+  mgr._icbm_ceiling = None
+  step(sig, active=True)
+  return mgr.mem_params.last.get("target")
+
+
+def _vis_sig(v_ego, lat_acc, ttc=1.0, v_set=None, pitch=None):
+  return {"v_ego": v_ego, "v_set": v_set if v_set is not None else v_ego,
+          "map_target_v": 0.0, "map_target_dist": float("inf"),
+          "curve_lat_accel_vision": lat_acc, "time_to_curve": ttc, "pitch": pitch}
+
+
+def test_icbm_descent_lowers_target_like_vtsc(tmp_path, monkeypatch):
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
+  t_flat = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=None))
+  t_down = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=-0.05))
+  assert t_flat is not None and t_down is not None
+  assert t_down < t_flat                          # descent -> enter the curve slower (right curve)
+  # exactly the shared formula: 1.4x the flat penalty at a 5% grade
+  veh = mgr._veh
+  apex = 29.0 * math.sqrt(VTSC_A_LAT / 3.474)
+  assert abs((apex - t_down) - veh.curve_speed_penalty_ms(apex, pitch_rad=-0.05)) < 0.02
+
+
+def test_icbm_left_curve_penalized_more(tmp_path, monkeypatch):
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
+  t_left = _published_target(step, mgr, _vis_sig(29.0, +3.474))    # lat > 0 = LEFT (z*v sign)
+  t_right = _published_target(step, mgr, _vis_sig(29.0, -3.474))
+  assert t_left is not None and t_right is not None
+  assert t_left < t_right                         # adverse crown + weak EPS on lefts
+
+
+def test_icbm_map_source_uses_path_geometry(tmp_path, monkeypatch):
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  lat, lon = 47.0, -122.0
+  mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
+  mgr._cur_lat, mgr._cur_lon = lat, lon
+  results = {}
+  for bend in (+4.0, -4.0):
+    mgr._map_targets = _path(lat, lon, bend)
+    # near-window map candidate at ~205 m (the path's slow point), inside the brake envelope
+    sig = {"v_ego": 26.0, "v_set": 26.0, "map_target_v": 20.0 / 1.35, "map_target_dist": 205.0,
+           "curve_lat_accel_vision": 0.0, "time_to_curve": 10.0, "pitch": None}
+    results[bend] = _published_target(step, mgr, sig)
+  assert results[+4.0] is not None and results[-4.0] is not None
+  assert results[+4.0] < results[-4.0]            # left-bending map path -> lower target
+
+
+def test_icbm_factors_neutral_on_non_lightning(tmp_path, monkeypatch):
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  for cp in (None, FakeCPA("TESLA_MODEL_S_HW3", "tesla", op_long=True)):
+    mgr, step = _icbm_stub(PnwVehicle(cp))
+    t_plain = _published_target(step, mgr, _vis_sig(29.0, +3.474))
+    t_all = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=-0.1))
+    assert t_plain == t_all                       # pitch/left change NOTHING off-Lightning
+    apex = 29.0 * math.sqrt(VTSC_A_LAT / 3.474)
+    assert abs(t_all - apex) < 0.01               # raw apex, zero penalty (pinned via pure path)
+
+
+def test_parity_vtsc_and_icbm_apply_identical_penalty(tmp_path, monkeypatch):
+  """Driver requirement: stock-ACC (ICBM) and op-long (VTSC) 'should be pretty much aligned'.
+  Same curve (apex 24.6 m/s), same descent (5%), same LEFT direction -> both subsystems subtract
+  the IDENTICAL shared penalty (PnwVehicle.curve_speed_penalty_ms), so the adjusted speeds match."""
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
+
+  # --- VTSC side: Lightning, left curve (z > 0), pitch -0.05 ---
+  class _NS:
+    pass
+  vx, k = 29.0, VTSC_A_LAT / (24.6 * 24.6)
+  m = _NS()
+  m.orientationRate = _NS()
+  m.velocity = _NS()
+  m.position = _NS()
+  m.action = _NS()
+  m.orientationRate.z = [k * vx] * 20
+  m.orientationRate.t = [i * 0.25 for i in range(20)]
+  m.velocity.x = [vx] * 20
+  m.position.x = [vx * i * 0.25 for i in range(20)]
+  m.action.shouldStop = False
+  cc = _NS()
+  cc.orientationNED = [0.0, -0.05, 0.0]
+
+  class P:
+    def get(self, k2, return_default=False): return {"CESMode": "2"}.get(k2)
+    def get_bool(self, k2): return False
+    def put_nonblocking(self, k2, v): pass
+  ctrl = VTSCController(FakeCPA(LIGHTNING, "ford", op_long=True), params=P())
+  ctrl.mem_params = None
+  ctrl.cap({"modelV2": m, "carControl": cc}, 29.0, 29.0)
+  vtsc_adjusted = ctrl.msg["vCurveSafe"]
+
+  # --- ICBM side: same apex via vision (29*sqrt(2.5/3.474) = 24.6), same pitch, LEFT ---
+  mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
+  icbm_adjusted = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=-0.05))
+
+  assert icbm_adjusted is not None
+  assert abs(vtsc_adjusted - icbm_adjusted) < 0.02   # literally the same shared penalty function
