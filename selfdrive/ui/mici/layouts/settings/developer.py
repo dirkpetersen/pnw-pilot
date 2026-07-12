@@ -120,7 +120,10 @@ class DeveloperLayoutMici(NavScroller):
       alpha_avail = ui_state.CP.alphaLongitudinalAvailable
       if not alpha_avail or ui_state.is_release:
         self._alpha_long_toggle.set_visible(False)
-        ui_state.params.remove("AlphaLongitudinalEnabled")
+        # fpcache2pnw: only a REAL fingerprint may clear the driver's preference — never a MOCK CP
+        # (see selfdrive/selfdrived/selfdrived.py for the incident rationale).
+        if ui_state.CP.brand != "mock":
+          ui_state.params.remove("AlphaLongitudinalEnabled")
       else:
         self._alpha_long_toggle.set_visible(True)
 

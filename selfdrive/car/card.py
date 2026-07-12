@@ -154,8 +154,16 @@ class Car:
       prev_cp = self.params.get("CarParamsPersistent")
       if prev_cp is not None:
         self.params.put("CarParamsPrevRoute", prev_cp)
-      self.params.put_nonblocking("CarParamsCache", cp_bytes)
       self.params.put_nonblocking("CarParamsPersistent", cp_bytes)
+      # fpcache2pnw (2026-07-11 poisoned-cache incident): a fixed-source fingerprint (the fleet-VIN
+      # fallback) means the FW set we hold ALREADY failed match_fw_to_car — that's the only way the
+      # fallback fires. Caching it poisons the fast-path: a sleepy-bus 10-entry FW set was cached
+      # under a Lightning label, every later card restart re-failed the match on it, and the fleet
+      # fallback is gated `and not cached` (device-swap guard) -> the whole session fell to
+      # MOCK/dashcam even with the truck fully on. Only cache FW/CAN-matched fingerprints;
+      # CarParamsPersistent (UI/display) still updates above.
+      if self.CP.fingerprintSource != structs.CarParams.FingerprintSource.fixed:
+        self.params.put_nonblocking("CarParamsCache", cp_bytes)
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
