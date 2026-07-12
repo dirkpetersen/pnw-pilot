@@ -26,6 +26,14 @@ snapshot. Consequences that MUST drive what you tell the driver:
 - The UI version label reads at manager start — after a files-only install it shows the OLD commit
   until the device reboots. Not a failed deploy; just the label.
 
+**AGGRESSIVE-REBOOT POLICY (driver directive 2026-07-12, after a stale session drove a whole leg
+on the wrong longitudinal authority):** whenever ANY pending state exists — code installed but not
+loaded, a toggle changed after session start, a param restored after boot — REBOOT AUTOMATICALLY at
+the FIRST safe opportunity, unprompted. Safe gate = **gearShifter == park** (never speed-only: a
+red light reads 0 mph). Keep a background watcher after every deploy that fires the reboot the
+moment Park is seen, then verifies and tells the driver GO. Never leave a pending reboot waiting
+for the driver to ask.
+
 **Driver choreography rule (driver directive: "it needs to be automatic, tell me what to do"):**
 the driver must never have to reason about any of this. After ANY change: (1) Claude does the
 reboot HIMSELF the moment the truck is verifiably parked (GPS < 1.5 m/s + touch /tmp/booted) —

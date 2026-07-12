@@ -119,6 +119,18 @@ class CesStatusRenderer(Widget):
     conv = self._conv
     out: list[tuple] = []
 
+    # alphalong-mismatch warning (2026-07-12 stale-session incident): the session's longitudinal
+    # authority is frozen at card start. If the Settings toggle says Alpha-Long ON but the RUNNING
+    # session is on the stock-ACC/shadow path (param flipped after start, or a stale session
+    # survived a param restore), the driver had NO way to see it — they drove a whole leg thinking
+    # VTSC was active while ICBM stepped the set speed down. Say it loudly. Only the dangerous
+    # direction is flagged (toggle ON, session stock) — the reverse is visible as plain no-op-long.
+    try:
+      if st.get("shadow") and ui_state.params.get_bool("AlphaLongitudinalEnabled"):
+        out.append(("LONG MISMATCH - RESTART", _C.RED, self.font_bold))
+    except Exception:
+      pass
+
     button = int(st.get("button", 0))
     btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
     out.append((btn, _C.WHITE, self.font_bold))
