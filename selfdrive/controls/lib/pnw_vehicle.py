@@ -18,7 +18,10 @@ _MPH_TO_MS = 0.44704
 
 # Persistent, outside-git tunable for the Lightning curve-speed penalty (survives auto-update, same
 # discipline as dm_config.py on the dm-variable branch). Missing/malformed -> hardcoded defaults.
-# Schema: {"lightning": {"penalty_min_mph": 1.5, "penalty_max_mph": 10, "low_v_mph": 30, "high_v_mph": 65}}
+# Schema: {"lightning": {<any subset of the _CURVE_DEFAULTS keys below>}} — unknown keys ignored,
+# every known key clamped to _CURVE_BOUNDS. descentcurve2pnw extends the schema with the descent
+# guard / left factor / overspeed margin / ICBM map scale + firm decel; all pre-existing keys keep
+# working unchanged.
 CURVE_CONFIG_PATH = "/data/pnw/curve.json"
 _CURVE_CONFIG_MAX_BYTES = 64 * 1024
 
@@ -40,6 +43,26 @@ _CURVE_DEFAULTS = {
   "peak_lo_v_mph": 45.0,
   "peak_hi_v_mph": 62.0,
   "taper_v_mph": 75.0,
+  # descentcurve2pnw (2026-07-11 evening: two DOWNHILL LEFT-curve washouts under op-long; stock-ACC
+  # 90 mph silent-ICBM run). All Lightning-only via lightning_curve_slow; Tesla path returns 0.0 /
+  # neutral values from every accessor below.
+  "descent_gain": 8.0,          # per rad of downhill pitch: a 5% grade (~0.05 rad) -> +40% penalty.
+                                #   Physics: on a descent gravity eats the regen decel budget, so the
+                                #   truck arrives at/above the cap — enter the curve slower instead.
+  "descent_pitch_cap": 0.12,    # rad (~12% grade); |pitch| beyond this adds no more (IMU-noise bound)
+  "penalty_cap_mph": 15.0,      # hard cap on the TOTAL penalty after all multipliers (never more)
+  "left_factor": 1.15,          # extra multiplier on LEFT curves only: US road crown drains right, so
+                                #   a left curve banks ADVERSELY (negative superelevation) — the same
+                                #   curvature needs more lateral grip + more EPS torque, and the
+                                #   Lightning's weak EPS washes out of lefts first (both 2026-07-11
+                                #   washouts were downhill LEFTS).
+  "overspeed_margin_mph": 2.0,  # VTSC: v_ego above the applied cap by this -> friction-brake escalation
+  "map_scale": 0.92,            # ICBM: scale mapd's suggested speeds DOWN before the binding test —
+                                #   OSM curve speeds (mapV 99-112 mph on the I-90 sweepers) are
+                                #   calibrated for stronger-steering cars; Tesla-appropriate, too
+                                #   generous for the Lightning.
+  "icbm_firm_decel": 1.4,       # m/s^2 assumed approach decel for LARGE speed drops (stock ACC does
+                                #   the actual braking; this only shapes the tap-start envelope)
 }
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
@@ -51,6 +74,17 @@ _CURVE_BOUNDS = {
   "peak_lo_v_mph": (10.0, 80.0),
   "peak_hi_v_mph": (10.0, 80.0),
   "taper_v_mph": (10.0, 90.0),
+  # descentcurve2pnw: every bound chosen so a bad config can only DEGRADE toward neutral, never
+  # invert. descent_gain >= 0 + left_factor >= 1.0 -> the multipliers are always >= 1 (never shrink
+  # the base penalty into a speed-up); map_scale <= 1.0 -> ICBM can never inflate a map speed;
+  # icbm_firm_decel <= 1.5 -> the assumed approach decel stays a gentle-braking assumption.
+  "descent_gain": (0.0, 20.0),
+  "descent_pitch_cap": (0.0, 0.20),
+  "penalty_cap_mph": (0.0, 15.0),
+  "left_factor": (1.0, 1.5),
+  "overspeed_margin_mph": (0.5, 10.0),
+  "map_scale": (0.5, 1.0),
+  "icbm_firm_decel": (0.8, 1.5),
 }
 
 
@@ -121,7 +155,7 @@ class PnwVehicle:
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
-  def curve_speed_penalty_ms(self, v_target_ms: float) -> float:
+  def curve_speed_penalty_ms(self, v_target_ms: float, pitch_rad=None, is_left: bool = False) -> float:
     """Extra m/s to SUBTRACT from a curve target speed so the Lightning enters curves slower than the
     Tesla. Shape (driver-calibrated on I-90, 2026-07-11 evening — three field iterations):
     a HUMP, not a ramp. The EPS deficit bites hardest in the MID-speed "tight" highway curves
@@ -133,6 +167,16 @@ class PnwVehicle:
       peak_lo..peak_hi (45..62)-> penalty_max (5.0)   (the approved tight-curve cut)
       >= taper_v (75)          -> penalty_taper (1.5) (fast gentle sweepers keep their speed)
       linear between the knots.
+
+    descentcurve2pnw multipliers on top of the hump (both optional args -> existing callers are
+    byte-identical):
+      pitch_rad: road pitch (rad, carControl.orientationNED[1]; < 0 = downhill). On a DESCENT the
+        penalty scales UP: pen *= 1 + descent_gain * min(|pitch|, descent_pitch_cap) — gravity eats
+        the regen decel budget, so the truck must enter the curve slower (2026-07-11 washouts at
+        18:12 / 19:17 were "accelerating downhill into the curve"). None / NaN / uphill -> no-op.
+      is_left: LEFT curve -> pen *= left_factor (adverse US road crown + the weak EPS; see the
+        left_factor default comment).
+    The TOTAL is clamped to penalty_cap_mph (<= 15 mph) after all multipliers.
     Returns 0.0 for any non-Lightning (Tesla path untouched). Pure Python (no numpy); never
     negative (a bad config can't invert this into a speed-up)."""
     if not self.lightning_curve_slow:
@@ -155,4 +199,38 @@ class PnwVehicle:
       pen_mph = y1 + (y3 - y1) * (v_mph - x2) / (x3 - x2)
     else:
       pen_mph = y3                                   # fast gentle sweepers: nearly free again
+    # descentcurve2pnw: descent guard — scale the penalty UP with downhill grade. Defensive on the
+    # pitch input (None / non-numeric / NaN -> skip); gain >= 0 and |pitch| clamped >= 0, so the
+    # multiplier is always >= 1 (monotonic in |pitch| up to the cap, never a reduction).
+    if pitch_rad is not None:
+      try:
+        p = float(pitch_rad)
+      except (TypeError, ValueError):
+        p = 0.0
+      if p == p and p < 0.0:                         # finite (NaN != NaN) AND downhill
+        pen_mph *= 1.0 + cfg["descent_gain"] * min(-p, cfg["descent_pitch_cap"])
+    # descentcurve2pnw: left-curve factor (adverse crown + weak EPS) — factor is clamped >= 1.0
+    if is_left:
+      pen_mph *= cfg["left_factor"]
+    pen_mph = min(pen_mph, cfg["penalty_cap_mph"])   # hard total cap after all multipliers
     return max(0.0, pen_mph * _MPH_TO_MS)
+
+  # ---- descentcurve2pnw accessors (all neutral on non-Lightning: 0.0 / 1.0 / 0.0) ----------------
+  @property
+  def overspeed_margin_ms(self) -> float:
+    """VTSC overspeed-into-curve escalation margin (m/s): v_ego above the applied cap by more than
+    this (with a binding curve regen can't make) unlocks the existing SHARP_A_DECEL_MAX friction
+    ceiling. 0.0 on non-Lightning (callers also gate on lightning_curve_slow)."""
+    return self._curve_cfg["overspeed_margin_mph"] * _MPH_TO_MS if self.lightning_curve_slow else 0.0
+
+  @property
+  def icbm_map_scale(self) -> float:
+    """Lightning discount on mapd's suggested curve speeds BEFORE the ICBM binding test (<= 1.0 by
+    the config bounds — can never inflate a map speed). 1.0 (identity) on non-Lightning."""
+    return self._curve_cfg["map_scale"] if self.lightning_curve_slow else 1.0
+
+  @property
+  def icbm_firm_decel(self) -> float:
+    """Assumed approach decel (m/s^2) ICBM may plan with for LARGE speed drops (stock ACC does the
+    actual braking). 0.0 on non-Lightning -> callers fall back to the base comfort decel."""
+    return self._curve_cfg["icbm_firm_decel"] if self.lightning_curve_slow else 0.0

@@ -116,3 +116,95 @@ def test_curve_json_nan_ignored(tmp_path, monkeypatch):
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg))
   v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
   assert abs(v.curve_speed_penalty_ms(55 * MPH) / MPH - 5.0) < 1e-6    # NaN dropped -> default peak
+
+
+# ---- descentcurve2pnw: descent guard / left factor / total cap / new accessors --------------------
+def _lightning(tmp_path, monkeypatch, cfg=None):
+  p = tmp_path / ("curve.json" if cfg is not None else "nope.json")
+  if cfg is not None:
+    p.write_text(json.dumps({"lightning": cfg}))
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(p))
+  return PnwVehicle(FakeCP(LIGHTNING, "ford"))
+
+
+def test_descent_monotonic_in_pitch_and_capped(tmp_path, monkeypatch):
+  v = _lightning(tmp_path, monkeypatch)
+  t = 55 * MPH                                     # peak zone: base 5 mph
+  pens = [v.curve_speed_penalty_ms(t, pitch_rad=-p) for p in (0.0, 0.02, 0.05, 0.08, 0.12, 0.2, 0.5)]
+  for a, b in zip(pens, pens[1:], strict=False):
+    assert b >= a - 1e-9                           # monotonic non-decreasing in |pitch|
+  # 5% grade -> +40% at defaults (descent_gain 8.0)
+  assert abs(v.curve_speed_penalty_ms(t, pitch_rad=-0.05) - v.curve_speed_penalty_ms(t) * 1.4) < 1e-9
+  # capped at descent_pitch_cap (0.12): steeper adds nothing
+  assert abs(pens[-1] - pens[-2]) < 1e-9 and abs(pens[-2] - pens[4]) < 1e-9
+
+
+def test_descent_ignores_uphill_none_and_nan(tmp_path, monkeypatch):
+  v = _lightning(tmp_path, monkeypatch)
+  t = 55 * MPH
+  base = v.curve_speed_penalty_ms(t)
+  assert v.curve_speed_penalty_ms(t, pitch_rad=None) == base      # no pitch data -> no-op
+  assert v.curve_speed_penalty_ms(t, pitch_rad=0.05) == base      # uphill -> no-op
+  assert v.curve_speed_penalty_ms(t, pitch_rad=float('nan')) == base
+  assert v.curve_speed_penalty_ms(t, pitch_rad="junk") == base    # never raises
+
+
+def test_left_factor_only_on_left(tmp_path, monkeypatch):
+  v = _lightning(tmp_path, monkeypatch)
+  t = 55 * MPH
+  assert abs(v.curve_speed_penalty_ms(t, is_left=True) - v.curve_speed_penalty_ms(t) * 1.15) < 1e-9
+  assert v.curve_speed_penalty_ms(t, is_left=False) == v.curve_speed_penalty_ms(t)
+
+
+def test_total_penalty_hard_capped_15mph(tmp_path, monkeypatch):
+  # worst legal config + steep descent + left: the TOTAL can never exceed 15 mph
+  v = _lightning(tmp_path, monkeypatch, {"penalty_max_mph": 15, "descent_gain": 20,
+                                         "descent_pitch_cap": 0.2, "left_factor": 1.5})
+  pen = v.curve_speed_penalty_ms(55 * MPH, pitch_rad=-0.3, is_left=True)
+  assert pen <= 15.0 * MPH + 1e-9
+
+
+def test_tesla_zero_with_all_new_args():
+  v = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  for mph in (30, 55, 75):
+    assert v.curve_speed_penalty_ms(mph * MPH, pitch_rad=-0.1, is_left=True) == 0.0
+  assert v.overspeed_margin_ms == 0.0
+  assert v.icbm_map_scale == 1.0
+  assert v.icbm_firm_decel == 0.0
+  n = PnwVehicle(None)
+  assert n.curve_speed_penalty_ms(20.0, pitch_rad=-0.1, is_left=True) == 0.0
+  assert n.overspeed_margin_ms == 0.0 and n.icbm_map_scale == 1.0 and n.icbm_firm_decel == 0.0
+
+
+def test_new_accessors_lightning_defaults(tmp_path, monkeypatch):
+  v = _lightning(tmp_path, monkeypatch)
+  assert abs(v.overspeed_margin_ms - 2.0 * MPH) < 1e-9
+  assert v.icbm_map_scale == 0.92
+  assert v.icbm_firm_decel == 1.4
+
+
+def test_new_keys_tunable_and_clamped(tmp_path, monkeypatch):
+  v = _lightning(tmp_path, monkeypatch, {"descent_gain": 4.0, "left_factor": 1.3,
+                                         "overspeed_margin_mph": 3.0, "map_scale": 0.85,
+                                         "icbm_firm_decel": 1.2})
+  t = 55 * MPH
+  assert abs(v.curve_speed_penalty_ms(t, pitch_rad=-0.05) - v.curve_speed_penalty_ms(t) * 1.2) < 1e-9
+  assert abs(v.curve_speed_penalty_ms(t, is_left=True) - v.curve_speed_penalty_ms(t) * 1.3) < 1e-9
+  assert abs(v.overspeed_margin_ms - 3.0 * MPH) < 1e-9
+  assert v.icbm_map_scale == 0.85 and v.icbm_firm_decel == 1.2
+  # out-of-bounds values clamp toward NEUTRAL, never invert (a bad config can't cause a speed-up
+  # or an inflated map speed or an aggressive decel)
+  w = _lightning(tmp_path, monkeypatch, {"descent_gain": -5, "left_factor": 0.2,
+                                         "map_scale": 1.8, "icbm_firm_decel": 9.0})
+  assert w.curve_speed_penalty_ms(t, pitch_rad=-0.1) == w.curve_speed_penalty_ms(t)  # gain -> 0
+  assert w.curve_speed_penalty_ms(t, is_left=True) >= w.curve_speed_penalty_ms(t)    # factor -> 1.0
+  assert w.icbm_map_scale <= 1.0
+  assert w.icbm_firm_decel <= 1.5
+
+
+def test_existing_curve_json_keys_still_work_alongside_new(tmp_path, monkeypatch):
+  # extend-the-schema requirement: every pre-descentcurve key keeps working in the same file
+  v = _lightning(tmp_path, monkeypatch, {"penalty_max_mph": 8, "descent_gain": 10.0})
+  t = 55 * MPH
+  assert abs(v.curve_speed_penalty_ms(t) / MPH - 8.0) < 1e-6
+  assert abs(v.curve_speed_penalty_ms(t, pitch_rad=-0.05) / MPH - 8.0 * 1.5) < 1e-6

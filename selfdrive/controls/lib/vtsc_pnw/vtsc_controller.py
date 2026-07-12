@@ -31,7 +31,8 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   model_curve_state, brake_cap_for_apex, apply_limits,
-  most_binding_map_curve, twisty_section_cap, required_decel)   # sharpcurve2pnw
+  most_binding_map_curve, twisty_section_cap, required_decel,   # sharpcurve2pnw
+  apex_turn_direction)                                          # descentcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
@@ -212,8 +213,15 @@ class VTSCController:
     # (vision, or the more-binding map fold). On the Lightning, lower it (weaker EPS -> enter slower);
     # Tesla/other cars -> penalty 0.0 -> byte-unchanged. Only when a real curve BINDS (finite v_curve);
     # the no-curve inf case is left alone. Floored at V_MIN, and it only ever lowers -> stays <= cruise.
+    # descentcurve2pnw: the penalty now also sees road pitch (descent guard — downhill scales it up)
+    # and the apex turn direction (left-curve factor). Both computed ONLY on the Lightning; the Tesla
+    # never runs any of this block (behavior + cycle cost identical).
     if v_curve != float('inf') and self.veh.lightning_curve_slow:
-      penalty = self.veh.curve_speed_penalty_ms(v_curve)
+      try:
+        is_left = apex_turn_direction(model) > 0
+      except Exception:
+        is_left = False
+      penalty = self.veh.curve_speed_penalty_ms(v_curve, pitch_rad=pitch, is_left=is_left)
       if penalty > 0.0:
         v_curve = max(v_curve - penalty, C.V_MIN)
 
@@ -226,6 +234,17 @@ class VTSCController:
     self._a_decel_max = min(self.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)
     d_entrance = max(d_apex - v_ego * C.APEX_FINISH_S, 1.0)
     if sharp_map and d_apex > 0.0 and required_decel(v_ego, v_curve, d_entrance) > C.REGEN_A_DECEL:
+      self._a_decel_max = max(self._a_decel_max, C.SHARP_A_DECEL_MAX)
+    # descentcurve2pnw (Lightning only): overspeed-into-curve escalation. On a descent gravity eats
+    # the regen budget, so the truck can arrive ABOVE the applied cap with the curve entrance closing
+    # (the 2026-07-11 18:12 washout: 77 mph vs cap 71, "accelerating downhill into the curve").
+    # When BOTH (a) v_ego exceeds the applied cap by the overspeed margin AND (b) the binding curve
+    # entrance needs more than regen decel, reuse the EXISTING sharp-curve friction ceiling
+    # (SHARP_A_DECEL_MAX — no new decel ceiling). Tesla: whole clause gated off (byte-unchanged).
+    if (self.veh.lightning_curve_slow and d_apex > 0.0 and v_curve != float('inf')
+        and self._applied is not None
+        and v_ego > min(v_cruise_set, self._applied) + self.veh.overspeed_margin_ms
+        and required_decel(v_ego, v_curve, d_entrance) > C.REGEN_A_DECEL):
       self._a_decel_max = max(self._a_decel_max, C.SHARP_A_DECEL_MAX)
     # ces-i90-2pnw: a curve "counts" if it BINDS (curve-safe speed below cruise -> real braking) OR is a
     # mild bend past CUE_MIN_CURVATURE (~5 deg / R~2300 m). The mild-bend case never needs real slowing, so
