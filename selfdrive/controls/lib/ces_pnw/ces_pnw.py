@@ -29,7 +29,10 @@ from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
-from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import A_LAT_TARGET as VTSC_A_LAT
+# descentcurve2pnw: MAP_SOURCE_HORIZON_M is mapd's hard 500 m path cap — ICBM's full-horizon map scan
+# uses the same constant family as VTSC/MTSC so both scan exactly what mapd publishes.
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARGET as VTSC_A_LAT,
+                                                                      MAP_SOURCE_HORIZON_M)
 
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
@@ -64,6 +67,33 @@ ICBM_MIN_DROP_MS = 1.0      # ignore caps within ~2 mph of the set speed (not wo
 # camera calls "not a curve" for the CES trip is also not one for ICBM.
 ICBM_VISION_ENTER = C.CURVE_LAT_ACCEL_ENTER   # m/s^2 (1.9)
 ICBM_VISION_EPS = 0.05                          # m/s^2 floor inside the sqrt (never divide by ~0)
+# descentcurve2pnw: at 90 mph the drive's map candidate came from a 10 s time window (~400 m) while
+# shedding 25 mph at the 0.8 comfort decel needs ~510 m — the curve became visible already-late.
+# The full-horizon scan (ICBM_MAP_HORIZON_M = mapd's 500 m cap) closes that gap. For very LARGE
+# drops the assumed approach decel firms from ICBM_A_DECEL toward the Lightning's tunable
+# icbm_firm_decel (~1.4; stock ACC does the actual braking — this only shapes the tap-start
+# envelope, and the ramp starts at 30 mph of drop so the field case, a 25 mph drop, still uses the
+# full comfort envelope and binds at first sight).
+ICBM_MAP_HORIZON_M = MAP_SOURCE_HORIZON_M   # m; scan the FULL published map path
+ICBM_FIRM_DROP_LO = 13.4    # m/s (~30 mph) required drop where the approach decel starts firming
+ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the firm ceiling
+
+
+def icbm_approach_decel(v_ego, apex, firm_decel=0.0, a_base=ICBM_A_DECEL,
+                        drop_lo=ICBM_FIRM_DROP_LO, drop_hi=ICBM_FIRM_DROP_HI):
+  """descentcurve2pnw: assumed approach decel for the binding envelope — the base comfort decel for
+  normal drops, ramping linearly toward `firm_decel` for very large (v_ego - apex) drops.
+  firm_decel 0 / None / <= a_base (the non-Lightning default) -> a_base exactly (byte-identical to
+  the pre-descentcurve behavior). Monotonic non-decreasing in the drop; always within
+  [a_base, firm_decel]. Pure."""
+  if not firm_decel or firm_decel <= a_base:
+    return a_base
+  drop = max(float(v_ego) - float(apex), 0.0)
+  if drop <= drop_lo:
+    return a_base
+  if drop >= drop_hi:
+    return firm_decel
+  return a_base + (firm_decel - a_base) * (drop - drop_lo) / (drop_hi - drop_lo)
 
 
 def icbm_vision_apex(v_ego, curve_lat_accel_vision, time_to_curve, a_lat=VTSC_A_LAT):
@@ -83,25 +113,72 @@ def icbm_vision_apex(v_ego, curve_lat_accel_vision, time_to_curve, a_lat=VTSC_A_
     return 0.0, float('inf')
 
 
-def _icbm_binding_apex(v_ego, ref, apex, dist):
+def _icbm_binding_apex(v_ego, ref, apex, dist, a_decel=ICBM_A_DECEL):
   """One curve candidate -> the apex speed it commands IF it both (a) is reduce-only (apex sits
-  ICBM_MIN_DROP_MS below the ceiling `ref`) and (b) has entered the comfort-decel brake envelope.
+  ICBM_MIN_DROP_MS below the ceiling `ref`) and (b) has entered the brake envelope at `a_decel`
+  (default = the comfort decel; descentcurve2pnw passes the drop-scaled icbm_approach_decel).
   Else None. Identical envelope math to the original map-only path. Pure."""
   if apex is None or dist == float('inf') or apex >= ref - ICBM_MIN_DROP_MS:
     return None
-  brake_dist = max(v_ego * v_ego - apex * apex, 0.0) / (2.0 * ICBM_A_DECEL) + ICBM_MARGIN_M
+  brake_dist = max(v_ego * v_ego - apex * apex, 0.0) / (2.0 * a_decel) + ICBM_MARGIN_M
   if dist <= brake_dist:
     return max(apex, 0.0)
   return None
 
 
+def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_scale=1.0,
+                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M):
+  """descentcurve2pnw: FULL-horizon map candidate for ICBM. Scans every mapd path point out to
+  `horizon_m` (mapd's 500 m publish cap — vs the old 10 s time window, ~400 m at 90 mph) and
+  returns (apex_eff m/s, dist m) of the MOST-BINDING candidate — the one whose decel-limited brake
+  cap is lowest right now (same selection idea as VTSC's most_binding_map_curve, so a far sharp
+  curve can't shadow a nearer curve that needs action first). Candidates apply the shared tiered
+  scale (scale_fn) AND the Lightning map-speed discount `map_scale` (<= 1.0, from PnwVehicle — OSM
+  curve speeds are calibrated for stronger-steering cars) BEFORE the reduce-only test, so selection
+  and use can't disagree. The per-point envelope uses the same drop-scaled icbm_approach_decel the
+  downstream binding test uses. Returns (0.0, inf) if none. The actual DEC-only binding decision
+  stays in icbm_curve_target/_icbm_binding_apex. NaN-guarded like upcoming_curve. Pure."""
+  if not points or cur_lat is None or cur_lon is None or ref <= 0.0:
+    return 0.0, float('inf')
+  best_cap = float('inf')
+  best_v, best_d = 0.0, float('inf')
+  for p in points:
+    try:
+      d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
+      tv = float(p["velocity"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if tv != tv or d != d:                      # NaN guard (mapd emits non-finite velocities, seen live)
+      continue
+    if tv <= 0.0 or not (0.0 < d <= horizon_m):
+      continue
+    eff = scale_fn(tv) * tv * map_scale
+    if eff >= ref - ICBM_MIN_DROP_MS:
+      continue                                  # reduce-only: not meaningfully below the ceiling
+    a = icbm_approach_decel(v_ego, eff, firm_decel)
+    cap = math.sqrt(eff * eff + 2.0 * a * max(d - ICBM_MARGIN_M, 0.0))   # decel envelope from here
+    if cap < best_cap:
+      best_cap, best_v, best_d = cap, eff, d
+  return best_v, best_d
+
+
 def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
-                      vis_v=0.0, vis_dist=float('inf')):
+                      vis_v=0.0, vis_dist=float('inf'),
+                      map_scale=1.0, firm_decel=0.0,
+                      far_v=0.0, far_dist=float('inf')):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
-  where src is "map" / "vis". Now considers BOTH a MAP candidate (pfeiferj target, tiered-scaled like
-  VTSC/MTSC) and a VISION candidate (from icbm_vision_apex) and returns the BINDING one with the LOWEST
-  target (most slowing). Same DEC-ONLY, reduce-only, ceiling-latch semantics as before — the map path
-  is byte-equivalent to the original when no vision candidate is supplied.
+  where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
+  VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
+  (full-horizon scan, already effective/scaled — from icbm_far_map_candidate) and returns the BINDING
+  one with the LOWEST target (most slowing). Same DEC-ONLY, reduce-only, ceiling-latch semantics as
+  before — with the descentcurve defaults (map_scale=1.0, firm_decel=0.0, no far candidate) this is
+  byte-equivalent to the original.
+
+  descentcurve2pnw knobs (all neutral by default, Lightning-supplied via PnwVehicle):
+    map_scale  <= 1.0 discount on the map candidate's suggested speed (OSM speeds too generous for
+               the Lightning's weak EPS) — applied BEFORE the reduce-only/binding tests;
+    firm_decel assumed approach decel for very LARGE drops (icbm_approach_decel ramp; stock ACC does
+               the actual braking — this only shapes the tap-start envelope).
 
   ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
   capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
@@ -110,9 +187,15 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
     return None, None, None                # no valid set speed -> hands off
   ref = ceiling if ceiling is not None else v_set
   best_apex, best_src = None, None
-  # MAP candidate — same tiered scaling as VTSC/MTSC
+  # MAP candidate — same tiered scaling as VTSC/MTSC, plus the Lightning map-speed discount.
+  # Deliberately KEEPS the base comfort-decel envelope (NOT the drop-scaled firm decel): a firmer
+  # assumed decel SHRINKS the envelope, i.e. starts taps LATER — inside the near window that would
+  # be an under-brake regression vs pre-descentcurve behavior (Gemini review catch 2026-07-11).
+  # The firm decel applies only to the FAR candidate below, where pre-diff there was NO braking at
+  # all, so it can only ever ADD slowing.
   if map_v and map_v > 0 and map_dist != float('inf'):
-    a = _icbm_binding_apex(v_ego, ref, scale_fn(map_v) * map_v, map_dist)
+    eff = scale_fn(map_v) * map_v * map_scale
+    a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
     if a is not None:
       best_apex, best_src = a, "map"
   # VISION candidate — already a safe speed (icbm_vision_apex). Lowest binding target wins (most slowing).
@@ -120,6 +203,12 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
     a = _icbm_binding_apex(v_ego, ref, vis_v, vis_dist)
     if a is not None and (best_apex is None or a < best_apex):
       best_apex, best_src = a, "vis"
+  # FAR-MAP candidate — full-horizon scan (already effective: tiered scale + map_scale applied inside
+  # icbm_far_map_candidate). Same binding envelope; catches curves beyond the 10 s window at speed.
+  if far_v and far_v > 0 and far_dist != float('inf'):
+    a = _icbm_binding_apex(v_ego, ref, far_v, far_dist, icbm_approach_decel(v_ego, far_v, firm_decel))
+    if a is not None and (best_apex is None or a < best_apex):
+      best_apex, best_src = a, "far"
   if best_apex is not None:
     new_ceiling = ceiling if ceiling is not None else v_set
     return best_apex, new_ceiling, best_src
@@ -678,13 +767,23 @@ class CESController:
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
       # curveslow-lightning: vision curve candidate (the 493-curve gap: ICBM was MAP-ONLY and blind to
-      # camera-seen curves). icbm_curve_target picks the more-binding of map / vision.
+      # camera-seen curves). icbm_curve_target picks the more-binding of map / vision / far-map.
       vis_v, vis_dist = icbm_vision_apex(sig["v_ego"], sig.get("curve_lat_accel_vision", 0.0),
                                          sig.get("time_to_curve", float("inf")))
+      # descentcurve2pnw: full-horizon map candidate — at highway speed the 10 s window (~400 m at
+      # 90 mph) hid curves that need the full 500 m mapd publishes (the 2026-07-11 silent-ICBM run).
+      # Capability-supplied knobs: map_scale (<=1 OSM discount) + firm_decel (large-drop envelope);
+      # both neutral (1.0 / 0.0) on any non-Lightning.
+      ref = self._icbm_ceiling if self._icbm_ceiling is not None else sig["v_set"]
+      far_v, far_dist = icbm_far_map_candidate(self._map_targets, self._cur_lat, self._cur_lon,
+                                               sig["v_ego"], ref, C.tiered_map_scale,
+                                               self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
       target, self._icbm_ceiling, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
         sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale,
-        vis_v, vis_dist)
+        vis_v, vis_dist,
+        map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
+        far_v=far_v, far_dist=far_dist)
       # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
       # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
       if target is not None:

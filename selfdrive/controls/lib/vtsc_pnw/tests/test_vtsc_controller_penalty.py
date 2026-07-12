@@ -76,10 +76,12 @@ def test_lightning_curve_cap_lower_than_tesla():
   # Tesla path unchanged: penalty is provably zero
   assert ctrl_t.veh.curve_speed_penalty_ms(vcs_t) == 0.0
   assert abs(vcs_t - 24.6) < 0.5                          # ~ the pure v_safe, no penalty applied
-  # Lightning enters the SAME curve slower — ~the full ~5 mph (2.24 m/s) peak penalty
+  # Lightning enters the SAME curve slower — ~the full ~5 mph (2.24 m/s) peak penalty.
+  # descentcurve2pnw: the stub model's curve has orientationRate.z > 0 = a LEFT curve, so the
+  # left-curve factor (1.15x) now applies on top of the hump; flat pitch -> no descent term.
   assert vcs_l < vcs_t - 0.5
-  pen = ctrl_l.veh.curve_speed_penalty_ms(vcs_t)
-  assert pen > 2.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # peak penalty at this speed (~2.24 m/s)
+  pen = ctrl_l.veh.curve_speed_penalty_ms(vcs_t, is_left=True)
+  assert pen > 2.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # peak penalty * left factor (~2.57 m/s)
 
 
 def test_fast_gentle_sweeper_tapers():
@@ -95,3 +97,110 @@ def test_no_curve_no_penalty_applied():
   # straight road -> v_curve = inf -> penalty branch skipped (no crash, no cap)
   ctrl_l, cap = _run_once(FakeCP("FORD_F_150_LIGHTNING_MK1", "ford"), 27.0, 27.0, 0.0)
   assert cap == 27.0                                      # no curve -> cruise unchanged
+
+
+# ---- descentcurve2pnw: descent guard + left factor + overspeed escalation ------------------------
+from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
+from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import apex_turn_direction
+
+LIGHTNING = FakeCP("FORD_F_150_LIGHTNING_MK1", "ford")
+TESLA = FakeCP("TESLA_MODEL_S_HW3", "tesla")
+
+
+def _make_model_signed(curvature, vx=27.0, n=20, apex_from=0):
+  """Signed model: orientationRate.z keeps the curvature SIGN (>0 = LEFT, openpilot convention).
+  apex_from > 0 -> straight until that index (puts the apex at a real distance ahead)."""
+  m = _NS()
+  m.orientationRate = _NS()
+  m.velocity = _NS()
+  m.position = _NS()
+  m.action = _NS()
+  m.orientationRate.z = [0.0 if i < apex_from else curvature * vx for i in range(n)]
+  m.orientationRate.t = [i * 0.25 for i in range(n)]
+  m.velocity.x = [vx] * n
+  m.position.x = [max(vx * i * 0.25, 0.0) for i in range(n)]
+  m.action.shouldStop = False
+  return m
+
+
+def _make_sm2(curvature, vx=27.0, pitch=0.0, apex_from=0):
+  cc = _NS()
+  cc.orientationNED = [0.0, pitch, 0.0]
+  return {"modelV2": _make_model_signed(curvature, vx, apex_from=apex_from), "carControl": cc}
+
+
+def _run2(cp, v_cruise, v_ego, curvature, pitch=0.0, apex_from=0, cycles=1):
+  ctrl = VTSCController(cp, params=FakeParams())
+  ctrl.mem_params = None
+  sm = _make_sm2(curvature, vx=v_ego, pitch=pitch, apex_from=apex_from)
+  cap = None
+  for _ in range(cycles):
+    cap = ctrl.cap(sm, v_cruise, v_ego)
+  return ctrl, cap
+
+
+def test_apex_turn_direction_signs():
+  k = 2.5 / (24.0 * 24.0)
+  assert apex_turn_direction(_make_model_signed(k)) == 1          # +z = LEFT
+  assert apex_turn_direction(_make_model_signed(-k)) == -1        # -z = right
+  assert apex_turn_direction(_make_model_signed(0.0)) == 0        # straight
+  assert apex_turn_direction(_NS()) == 0                          # bad data -> unknown, never raises
+
+
+def test_descent_scales_lightning_penalty_up():
+  """A downhill (pitch -0.05 rad ~ 5% grade) must cut the Lightning's curve-safe speed FURTHER than
+  the same curve on the flat (+40% penalty at defaults). Right curve so only the descent term acts."""
+  k = 2.5 / (24.6 * 24.6)                                          # peak-zone curve (~55 mph safe)
+  ctrl_flat, _ = _run2(LIGHTNING, 29.0, 29.0, -k, pitch=0.0)
+  ctrl_down, _ = _run2(LIGHTNING, 29.0, 29.0, -k, pitch=-0.05)
+  vcs_flat, vcs_down = ctrl_flat.msg["vCurveSafe"], ctrl_down.msg["vCurveSafe"]
+  assert vcs_down < vcs_flat - 0.5                                 # meaningfully lower on the descent
+  # ~1.4x the flat penalty: base ~5 mph -> ~7 mph => delta ~0.89 m/s
+  base_pen = ctrl_flat.veh.curve_speed_penalty_ms(24.6)
+  down_pen = ctrl_down.veh.curve_speed_penalty_ms(24.6, pitch_rad=-0.05)
+  assert abs(down_pen - base_pen * 1.4) < 1e-6
+
+
+def test_left_curve_penalized_more_than_right():
+  k = 2.5 / (24.6 * 24.6)
+  ctrl_l, _ = _run2(LIGHTNING, 29.0, 29.0, +k)                     # LEFT (z > 0)
+  ctrl_r, _ = _run2(LIGHTNING, 29.0, 29.0, -k)                     # right
+  assert ctrl_l.msg["vCurveSafe"] < ctrl_r.msg["vCurveSafe"]       # adverse crown + weak EPS
+
+
+def test_tesla_byte_unchanged_with_pitch_and_direction():
+  """The Tesla's cap is IDENTICAL with/without pitch, left/right — the whole descentcurve block is
+  Lightning-gated (hard driver rule)."""
+  k = 2.5 / (24.6 * 24.6)
+  caps = []
+  for kk, pitch in ((+k, 0.0), (+k, -0.08), (-k, -0.08)):
+    ctrl, cap = _run2(TESLA, 29.0, 29.0, kk, pitch=pitch)
+    caps.append((round(cap, 6), round(ctrl.msg["vCurveSafe"], 6)))
+    assert ctrl.veh.curve_speed_penalty_ms(24.6, pitch_rad=pitch, is_left=True) == 0.0
+  assert caps[0] == caps[1] == caps[2]
+
+
+def test_overspeed_escalation_unlocks_sharp_ceiling():
+  """Overspeed into a binding curve (descent signature: regen budget eaten by gravity) -> the
+  rate-limit ceiling escalates to the EXISTING SHARP_A_DECEL_MAX. Two cycles: _applied exists from
+  the first."""
+  k = 2.5 / (20.0 * 20.0)                                          # tight curve, v_safe ~20 m/s
+  ctrl, _ = _run2(LIGHTNING, 29.0, 31.0, -k, apex_from=10, cycles=2)   # v_ego 2 m/s over the set
+  assert ctrl._a_decel_max == C.SHARP_A_DECEL_MAX
+
+
+def test_no_escalation_when_not_overspeed():
+  k = 2.5 / (20.0 * 20.0)
+  ctrl, _ = _run2(LIGHTNING, 29.0, 25.0, -k, apex_from=10, cycles=2)   # under the cap
+  assert ctrl._a_decel_max == min(ctrl.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)
+
+
+def test_no_escalation_when_no_binding_curve():
+  ctrl, _ = _run2(LIGHTNING, 29.0, 32.0, 0.0, cycles=2)            # overspeed but straight road
+  assert ctrl._a_decel_max == min(ctrl.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)
+
+
+def test_no_escalation_on_tesla_same_scenario():
+  k = 2.5 / (20.0 * 20.0)
+  ctrl, _ = _run2(TESLA, 29.0, 31.0, -k, apex_from=10, cycles=2)
+  assert ctrl._a_decel_max == min(ctrl.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)

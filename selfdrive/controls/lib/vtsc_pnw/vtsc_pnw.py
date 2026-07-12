@@ -112,6 +112,34 @@ def curvatures_from_model(model):
   return curvs, dists
 
 
+def apex_turn_direction(model, lookahead_max_s: float = C.LOOKAHEAD_MAX_S) -> int:
+  """descentcurve2pnw: turn DIRECTION of the model path's apex (sharpest upcoming point):
+  +1 = LEFT, -1 = right, 0 = straight/unknown. Sign convention verified in-tree: openpilot is
+  left-positive (latcontrol_torque "left is positive in this convention"; positive steeringAngleDeg
+  and positive desired curvature = left), and modelV2.orientationRate.z is the plan yaw rate with
+  z UP, so orientationRate.z > 0 = turning LEFT. model_curve_state/curvatures_from_model take
+  abs() and LOSE the sign — this walks the same points keeping it. Direction is only claimed for a
+  real bend (apex curvature >= CUE_MIN_CURVATURE, ~R2300 m) so lane noise can't flip it. Pure-ish;
+  bad data -> 0."""
+  try:
+    orz = list(model.orientationRate.z)
+    vx = list(model.velocity.x)
+    tb = list(model.orientationRate.t)
+  except Exception:
+    return 0
+  best_k, best_z = 0.0, 0.0
+  n = min(len(orz), len(vx), len(tb))
+  for i in range(n):
+    if tb[i] > lookahead_max_s:
+      break
+    k = abs(orz[i]) / max(vx[i], 0.1)
+    if k > best_k:
+      best_k, best_z = k, orz[i]
+  if best_k < C.CUE_MIN_CURVATURE or best_z == 0.0:
+    return 0
+  return 1 if best_z > 0.0 else -1
+
+
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
   """Great-circle distance in metres (pure). Local copy so this module stays self-contained/testable."""
   r = 6371000.0
