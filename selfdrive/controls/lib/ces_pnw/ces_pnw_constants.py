@@ -96,6 +96,23 @@ PULLAWAY_JUMP_M       = 10.0  # m: a dRel jump bigger than this between samples 
 PULLAWAY_STOP_CLEAR_S = 2.0   # s: the model must not have wanted to stop for at least this long —
                               #   catches shouldStop flicker/lag while a lead clears a yellow light
 
+# --- stophold2pnw (Tesla red-light lurch 2026-07-12 21:47:08Z; forensics in ---------------------
+# drives/2026-07-12/tesla-redlight/CES_SILENCE_REPORT.md). Stopped behind a stopped lead at a red
+# light, the ONLY active condition was slowLead; the moment the lead crept above STOPPED_LEAD_V it
+# cleared, lowSpeed could not hold (its own 1.0 m/s floor), and the `stop` reason was masked by
+# `not has_lead` — so CES adopted Chill at 0.4 m/s and the Chill MPC launched at up to 1.6 m/s^2
+# toward the set speed (gas=False, strPrs=False: pure machine lurch). Two guards, both fail-safe
+# (they only ever KEEP/ENTER Experimental, which stops for lights; no new acceleration path):
+STOP_HOLD_MAX_V   = 3.0   # m/s (~7 mph): below this, model stop intent counts EVEN WITH a lead
+                          #   present (A1) — at a creep, the LIGHT governs, not the lead. Above it
+                          #   the original `not has_lead` gate stands (lead-following decel at
+                          #   speed must not trip Experimental).
+STANDSTILL_HOLD_V = 1.5   # m/s: below this, Experimental may not exit to Chill until the model's
+                          #   stop intent has been CONTINUOUSLY clear (A2) — "the lead moved" is
+                          #   not evidence of a green light; "the model agrees GO for 2 s" is.
+STOP_CLEAR_HOLD_S = 2.0   # s of continuous shouldStop-clear required by A2 (mirrors
+                          #   PULLAWAY_STOP_CLEAR_S — the same shouldStop flicker/lag envelope).
+
 # --- debounce / dwell (de-flap) ---------------------------------------------
 # Drive log showed heavy flapping in stop&go (median 2.3 s between switches, 30 flips/min). Two
 # asymmetric dwell gates kill the sawtooth: once in Experimental, hold it EXP_MIN before returning to
