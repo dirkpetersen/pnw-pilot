@@ -704,6 +704,13 @@ class Condition:
     self.f.x = 0.0
     self.active = False
 
+  def force(self):
+    """stopintent2pnw: charge the debounce to 'fully active' — used ONLY by the stop-intent fast
+    path so the EXIT side behaves exactly as after a normal entry (the condition must genuinely
+    clear and decay before Chill is considered; the return path keeps its full anti-flap dwell)."""
+    self.f.x = 1.0
+    self.active = True
+
 
 def _accelerate_zone(s) -> bool:
   """PURE: True when we're slow but should be ACCELERATING into open road, so Experimental's timid
@@ -918,6 +925,26 @@ class ConditionalExperimentalSwitching:
     `dt` is the MEASURED loop period (selfdrived runs at 100 Hz) so the dwell/debounce are real
     seconds. Separated from `update(sm)` so it is unit-testable without cereal messages."""
     raw_active, status = decide_active(signals)
+    # stopintent2pnw (driver-approved): ABSOLUTE stop-intent fast path. When the model's stop
+    # intent (model_should_stop — the exact signal the red-light guard keys on) asserts AND the
+    # decision ladder wants Experimental, entering Experimental bypasses EVERYTHING on the entry
+    # side: the CHILL_MIN_DWELL_S re-entry cooldown, the ~1 s condition filter charge, and any
+    # accel-zone adoption (the az is already dead while shouldStop by the existing gate). Churn
+    # TOWARD stopping is the safe direction and is exempt from anti-flap; the RETURN to Chill
+    # keeps the full normal dwell (filter force() + untouched exit path = the asymmetry).
+    # This closes the pullaway2pnw occlusion trap (Gemini STOP, 2026-07-12: a departing lead
+    # occludes a red light; shouldStop asserts only AFTER a pull-away Chill adoption — the 5 s
+    # cooldown then held Chill through the intersection) and the PRE-EXISTING 5 s stop-blind
+    # window after ANY accel-zone adoption. Respects the per-condition "stops" toggle; the
+    # driver's forced-Chill button still wins upstream (it never reaches this state machine).
+    if (not self._is_experimental and raw_active
+        and bool(signals.get("model_should_stop"))
+        and bool(signals.get("toggles", {}).get("stops", True))):
+      self._is_experimental = True
+      self._status = "stopIntent"      # telemetry tag: every fast-path preemption is visible
+      self._dwell = 0.0
+      self._cond.force()               # exit side sees a fully-charged condition (normal semantics)
+      return self.mode()
     cond_active = self._cond.update(raw_active, dt)   # debounced (real-time)
     self._dwell += dt
 
@@ -1371,6 +1398,11 @@ class CESController:
       "reason": "noData", "curvePct": 0, "curveSrc": "", "mapV": 0.0, "mapDist": 0.0, "vEgo": 0.0,
     }
     tele["mode"] = mode
+    # stopintent2pnw: the adopt record must show WHICH entry path fired — decide_active's reason
+    # cannot know the state machine took the fast path, so override from the sm status (it holds
+    # "stopIntent" exactly for the cycle the preemption happened).
+    if mode == "experimental" and self._sm.status() == "stopIntent":
+      tele["reason"] = "stopIntent"
     tele["button"] = int(self._button)
     tele["enabled"] = True
     # mapd diagnostics so the overlay can always show what mapd is up to (curve half is map-driven):
