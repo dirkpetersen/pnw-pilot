@@ -705,7 +705,61 @@ class Condition:
     self.active = False
 
 
-def _accelerate_zone(s) -> bool:
+def _lead_pull_away(s) -> bool:
+  """pullaway2pnw (PURE): evidence-gated pull-away exception BELOW the redlight2pnw floor
+  (ACCEL_ZONE_MIN_V). True only when ALL hold — any failure means the floor stands exactly as
+  before (incident 2026-07-12 ~14:0x PT: ~17 mph behind a pulling-away lead, CES held Experimental
+  and the truck lost the lead; driver rule: "the lead car cannot pull away"):
+    (a) a lead is PRESENT with dRel in the sane 5-60 m band,
+    (b) the lead is genuinely OPENING: at least PULLAWAY_DV faster than ego AND s["lead_opening"]
+        (the PullAwayTracker's 3-spaced-sample monotonic dRel rise, which also enforces the
+        model-stop recency guard — the yellow-light trap),
+    (c) the model does NOT want to stop this cycle (the exact signal the red-light guard keys on),
+    (d) ego is actually moving (>= PULLAWAY_MIN_V, never from standstill) and below the floor
+        (above it, nothing changes — byte-identical).
+  Callers that do not supply "lead_opening" (older pure tests) get False -> today's behavior."""
+  return (bool(s["has_lead"])
+          and not s.get("model_should_stop")
+          and C.PULLAWAY_MIN_V <= s["v_ego"] < C.ACCEL_ZONE_MIN_V
+          and C.PULLAWAY_DREL_LO <= s["lead_drel"] <= C.PULLAWAY_DREL_HI
+          and (s["lead_vlead"] - s["v_ego"]) >= C.PULLAWAY_DV
+          and bool(s.get("lead_opening", False)))
+
+
+class PullAwayTracker:
+  """pullaway2pnw: the STATEFUL evidence half of the pull-away exception (pure, unit-tested;
+  owned by CESController). Produces the s["lead_opening"] bool from per-cycle observations:
+    - dRel must RISE monotonically (>= PULLAWAY_OPEN_EPS per step) across PULLAWAY_SAMPLES
+      samples spaced >= PULLAWAY_SAMPLE_GAP_S apart (a real, sustained opening — not radar noise);
+    - a lead loss, dRel jump (> PULLAWAY_JUMP_M, lead swap / radar reacquire) restarts the
+      evidence from scratch;
+    - the model must not have wanted to stop within PULLAWAY_STOP_CLEAR_S (recency guard: a
+      shouldStop flicker while a lead clears a yellow light must keep blocking after it clears)."""
+
+  def __init__(self):
+    self._hist = []            # [(t, dRel)] newest last, at most PULLAWAY_SAMPLES entries
+    self._last_stop_t = None   # last time the model wanted to stop
+
+  def update(self, now, has_lead, d_rel, model_should_stop) -> bool:
+    if model_should_stop:
+      self._last_stop_t = now
+    if not has_lead or d_rel is None or d_rel <= 0.0:
+      self._hist = []          # no (valid) lead: evidence dies with it
+      return False
+    if self._hist and abs(float(d_rel) - self._hist[-1][1]) > C.PULLAWAY_JUMP_M:
+      self._hist = []          # discontinuity: different lead / radar reacquire
+    if not self._hist or (now - self._hist[-1][0]) >= C.PULLAWAY_SAMPLE_GAP_S:
+      self._hist.append((now, float(d_rel)))
+      self._hist = self._hist[-C.PULLAWAY_SAMPLES:]
+    opening = (len(self._hist) == C.PULLAWAY_SAMPLES
+               and all(self._hist[i + 1][1] - self._hist[i][1] >= C.PULLAWAY_OPEN_EPS
+                       for i in range(C.PULLAWAY_SAMPLES - 1)))
+    stop_recent = (self._last_stop_t is not None
+                   and (now - self._last_stop_t) < C.PULLAWAY_STOP_CLEAR_S)
+    return opening and not stop_recent
+
+
+def _accelerate_zone_base(s) -> bool:
   """PURE: True when we're slow but should be ACCELERATING into open road, so Experimental's timid
   e2e acceleration would hurt — keep Chill instead. Covers the two cases:
     - highway on-ramp merge (open road ahead, set speed = highway >> ramp speed)
@@ -730,6 +784,13 @@ def _accelerate_zone(s) -> bool:
                            and s["lead_vlead"] >= s["v_ego"] - C.LEAD_PULLAWAY_MARGIN)
   want_faster = s["v_set"] > 0.0 and (s["v_set"] - s["v_ego"]) > C.ACCEL_ZONE_DV
   return open_ahead and want_faster
+
+
+def _accelerate_zone(s) -> bool:
+  """pullaway2pnw: the accelerate-zone is the UNCHANGED base (redlight2pnw semantics, floor and
+  all) OR the evidence-gated lead-pull-away exception below the floor. Above the floor and in
+  every no-lead case this is byte-identical to _accelerate_zone_base."""
+  return _accelerate_zone_base(s) or _lead_pull_away(s)
 
 
 def decide_active(s) -> tuple[bool, str]:
@@ -812,6 +873,12 @@ def decide_active(s) -> tuple[bool, str]:
     if (v - s["lead_vlead"]) > C.SLOW_LEAD_DV or s["lead_vlead"] < C.STOPPED_LEAD_V:
       return True, "slowLead"
 
+  # pullaway2pnw telemetry: when the ONLY thing keeping us out of the lowSpeed Experimental hold
+  # is the pull-away exception (base accel-zone would NOT fire), name the reason so field
+  # validation reads straight off ces_events / the overlay `why` line.
+  if (t["low_speed"] and 1.0 <= v < thr and not on_highway
+      and not _accelerate_zone_base(s) and _lead_pull_away(s)):
+    return False, "pullAway"
   return False, "chill"
 
 
@@ -1067,6 +1134,9 @@ class CESController:
     self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
     self._stock_set = 0.0
     self._stock_on = False
+    # pullaway2pnw: stateful evidence for the below-floor lead-pull-away exception (monotonic
+    # dRel rise + model-stop recency). Feeds sig["lead_opening"]; pure logic stays in decide_active.
+    self._pullaway_trk = PullAwayTracker()
     # icbmmapfirst2pnw: start-gate telemetry — WHY a would-be new episode was suppressed this tick
     # ("inCurve" / "visCovered" / "visLate" / None) + the map coverage reach (m; 0 = mapd blind/dead,
     # the mapd-liveness evidence for the field logs). Display/log only — never gates control here.
@@ -1211,6 +1281,14 @@ class CESController:
 
     # measured loop period — selfdrived steps at ~100 Hz; never assume a fixed DT (was the 5x bug)
     now_t = time.monotonic()
+    # pullaway2pnw: advance the pull-away evidence every cycle and inject it into the signals dict
+    # BEFORE the decision (decision_telemetry consumes the same dict, so the overlay/why agrees).
+    if sig is not None:
+      try:
+        sig["lead_opening"] = self._pullaway_trk.update(now_t, sig["has_lead"], sig["lead_drel"],
+                                                        sig["model_should_stop"])
+      except Exception:
+        sig["lead_opening"] = False
     dt = (now_t - self._last_decide_t) if self._last_decide_t is not None else DT_CTRL
     self._last_decide_t = now_t
     dt = min(max(dt, 1e-3), 0.5)           # clamp first call / scheduling hiccups
