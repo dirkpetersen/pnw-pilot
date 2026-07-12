@@ -162,6 +162,56 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   return best_v, best_d
 
 
+def icbm_map_reach(points, cur_lat, cur_lon, horizon_m=ICBM_MAP_HORIZON_M) -> float:
+  """icbmmapfirst2pnw: how far ahead the published mapd path COVERS the road (m) — the farthest
+  valid path point within mapd's horizon. 0.0 = no usable coverage (mapd down / no data / GPS lost /
+  a stale path we have driven > horizon_m away from). Used by the MAP-FIRST start gate: a vision
+  candidate INSIDE this reach is on a stretch the map has judged, so the map verdict (including "no
+  slowdown needed") wins for STARTING episodes. Distances are recomputed from the CURRENT position
+  every call, so a dead mapd's last path decays out of coverage as we drive on (mapd-liveness
+  fallback: vision regains the right to initiate). NaN-guarded like the other scanners. Pure."""
+  if not points or cur_lat is None or cur_lon is None:
+    return 0.0
+  reach = 0.0
+  for p in points:
+    try:
+      d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if d != d:                                    # NaN guard
+      continue
+    if reach < d <= horizon_m:
+      reach = d
+  return reach
+
+
+def icbm_in_curve(lat_accel_now, curve_lat_accel_vision, time_to_curve) -> bool:
+  """icbmmapfirst2pnw (driver rule 2): True when the vehicle is ALREADY loaded in a curve — either
+  the measured-now lateral accel (model yaw_rate*speed at t~0) is above the CES curve-exit
+  hysteresis, or the camera's binding curve is effectively under us (a real vision curve with less
+  than the act-window left). While True, no NEW dec episode may start (hold the current set), a
+  restore may not BEGIN, and a running restore PAUSES. Defensive: bad input -> False (never blocks
+  on garbage — the pre-mapfirst behavior). Pure."""
+  try:
+    if abs(float(lat_accel_now)) >= ICBM_IN_CURVE_LAT:
+      return True
+    return (abs(float(curve_lat_accel_vision)) > ICBM_VISION_ENTER
+            and float(time_to_curve) < ICBM_VIS_MIN_TTC_S)
+  except (TypeError, ValueError):
+    return False
+
+
+def icbm_vision_may_start(vis_dist, time_to_curve, map_reach) -> bool:
+  """icbmmapfirst2pnw (driver rule 1): vision may INITIATE a new slow-down episode only when
+  (a) the map does NOT cover that stretch (candidate beyond the map's coverage reach — includes
+  mapd dead/blind, reach 0.0) AND (b) there is still time to act BEFORE the curve. Running
+  episodes are not gated by this (callers apply it only when starting). Pure."""
+  try:
+    return float(vis_dist) > float(map_reach) and float(time_to_curve) >= ICBM_VIS_MIN_TTC_S
+  except (TypeError, ValueError):
+    return False
+
+
 def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
@@ -224,17 +274,56 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
 ICBM_RESTORE_WINDOW_S = 45.0            # restore may run at most this long after the curve clears
 ICBM_EXEC_STEP_MS = 1.0 * 0.44704       # one executor tap = 1 mph (mirror of ford icbm_pnw.STEP_MS)
 ICBM_RESTORE_DONE_TOL = 0.6 * ICBM_EXEC_STEP_MS   # within this of the ceiling = restored (matches DEADBAND)
-ICBM_DRIVER_LOWER_TOL = 0.6 * ICBM_EXEC_STEP_MS   # stock set below our lowest commanded target by more
+ICBM_DRIVER_LOWER_TOL = 1.7 * ICBM_EXEC_STEP_MS   # stock set below our lowest commanded target by more
                                                   # than this = the DRIVER lowered it -> never restore.
-                                                  # 0.6 steps on purpose (Gemini adversarial catch): the
-                                                  # executor stops pressing at target+DEADBAND, so its own
-                                                  # overshoot below target is < 0.4 steps — anything a full
-                                                  # driver SET- tap below target (~1 step) must abort.
+                                                  # icbmmapfirst2pnw: WIDENED 0.6 -> 1.7 steps on field
+                                                  # forensics (2026-07-12 18:08:26Z, Snoqualmie->Ellensburg):
+                                                  # the truck REPORTS the set speed with ~1 s of lag, so
+                                                  # while chasing a falling vision target the executor lands
+                                                  # one EXTRA tap after the reported set already met the
+                                                  # target (min_target 77.3 mph, own floor 76.0 = 1.3 steps
+                                                  # below). The old 0.6 tol misread our OWN late tap as a
+                                                  # driver SET- and silently killed the restore — the
+                                                  # driver's "no re-acceleration on a straight" complaint
+                                                  # (stuck at 76 vs ceiling 85 for 33 s, manual gas+SET+).
+                                                  # Worst legit self-overshoot = executor DEADBAND (0.6
+                                                  # steps) + ONE report-latency tap (1.0) = 1.6 steps; 1.7
+                                                  # covers it with margin. Residual (documented, mirrors
+                                                  # RestoreGuard's SET+ residual): ONE driver SET- tap
+                                                  # landing inside that band is indistinguishable from our
+                                                  # own latency tap and now restores — still bounded by the
+                                                  # driver's OWN ceiling, and every abort guard (incl. any
+                                                  # set decrease DURING the restore) stays live. Two taps
+                                                  # (>= 2 steps) still abort.
 ICBM_TAP_PERIOD_S = 0.4                 # executor completes at most one tap per this (PRESS+GAP frames)
 ICBM_RESTORE_DELAY_S = 3.0              # the curve must stay CLEAR this long before restore begins —
                                         # flicker-proofing: a 1-tick detection dropout must not start
                                         # pressing SET+ and then re-latch a lower ceiling when the
                                         # curve re-binds (S-curve gaps keep the ORIGINAL ceiling)
+
+# --- icbmmapfirst2pnw (driver-directed rework, drive 2026-07-12 Snoqualmie->Ellensburg) -------------
+# Field verdict: vision initiated 60/72 dec ticks (map 9, far 3), slowed too much and INSIDE curves,
+# and the map's 500 m anticipatory horizon was under-used. New start policy (mirrors the VTSC
+# sharpcurve2pnw shape): MAP-FIRST — with live map coverage over a stretch, the map verdict
+# (including "no slowdown needed") is authoritative for STARTING slow-down episodes; vision may only
+# INITIATE where the map is blind (beyond its coverage reach, or mapd down — the reach is computed
+# from the CURRENT gps distance to the published path points, so a stale path left behind decays out
+# of coverage and vision automatically takes back over) AND while there is still time to act. No new
+# episode may START while the vehicle is already lateral-loaded in a curve — hold the current set. A
+# RUNNING episode is untouched by all of this (it may continue steering the set, any source).
+ICBM_VIS_MIN_TTC_S = 2.75        # s; vision may only START an episode with >= this much time to the
+                                 #    curve (driver spec: 2.5-3.0 s) — never begin taps at/inside it
+ICBM_IN_CURVE_LAT = C.CURVE_LAT_ACCEL_EXIT   # m/s^2 (1.3); measured-now |lat accel| above the CES
+                                             #    curve-exit hysteresis = still loaded in a curve
+ICBM_APEX_PASS_TTA_S = 1.0       # s; the binding candidate cleared within MARGIN + v*this of us =>
+                                 #    we PASSED it (apex behind) — not a detection dropout
+ICBM_RESTORE_DELAY_FAST_S = 1.0  # s; early-restore debounce when the curve is provably behind us
+                                 #    (drive-out promptly instead of the full 3 s silent hold)
+ICBM_HOLD_MAX_S = 10.0           # s; still lateral-loaded this long after the cap cleared with no
+                                 #    re-bind -> give up the restore silently (no stale ceiling latch)
+ICBM_LATE_TAP_GRACE_S = 1.5      # s after going silent in which the executor's final in-flight tap
+                                 #    may still land on the reported set (~1 s report lag + margin)
+ICBM_LATE_TAP_TOL = 1.6 * ICBM_EXEC_STEP_MS  # one full late tap + the executor deadband
 
 
 class IcbmEpisode:
@@ -267,6 +356,13 @@ class IcbmEpisode:
     self._hold_set0 = None              # stock set snapshot at hold entry (movement = human)
     self._last_stock = None
     self._last_t = None
+    # icbmmapfirst2pnw: where the binding candidate was when it last bound — a candidate that clears
+    # while CLOSE to us was PASSED (apex behind -> early restore); one that clears while far ahead
+    # was a detection dropout (keep the full flicker-proof debounce).
+    self._last_cap_dist = None
+    self._last_cap_vego = 0.0
+    self._apex_passed = False
+    self._late_tap_set = None           # the ONE absorbed late-tap baseline (anchored, never walked)
 
   def reset(self) -> None:
     self.phase = "idle"
@@ -277,10 +373,25 @@ class IcbmEpisode:
     self._hold_set0 = None
     self._last_stock = None
     self._last_t = None
+    self._last_cap_dist = None
+    self._last_cap_vego = 0.0
+    self._apex_passed = False
+    self._late_tap_set = None
 
-  def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal):
+  def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
+           cap_dist=None, v_ego=0.0, in_curve=False):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
-    from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None)."""
+    from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
+
+    icbmmapfirst2pnw optional inputs (defaults keep the pre-mapfirst behavior identical):
+      cap_dist  distance (m) of the binding candidate this tick (None/inf = unknown) — feeds the
+                apex-passage detection for the EARLY restore (curve provably behind -> 1 s debounce
+                instead of 3 s);
+      v_ego     current speed (m/s), for the apex-passage window;
+      in_curve  vehicle currently lateral-loaded (icbm_in_curve): a restore may not BEGIN and a
+                running restore PAUSES (silent — executor stale-stops — WITHOUT resetting, so it
+                resumes when the load clears) while True. Never raise the set mid-curve. All abort
+                guards stay live throughout."""
     if v_set is None or v_set <= 0.0:
       self.reset()                      # no valid driver set -> hands off everything
       return None, None
@@ -306,6 +417,15 @@ class IcbmEpisode:
       else:
         self._min_target = float(cap_target) if self._min_target is None else min(self._min_target, float(cap_target))
       self._clear_t0 = None             # curve (re)bound: reset the clear debounce
+      # icbmmapfirst2pnw: remember where the binding candidate sits — used at clear to tell
+      # "passed the curve" (early restore) from "detection dropout" (full debounce).
+      try:
+        self._last_cap_dist = float(cap_dist) if (cap_dist is not None and cap_dist == cap_dist
+                                                  and cap_dist != float('inf')) else None
+        self._last_cap_vego = max(float(v_ego), 0.0)
+      except (TypeError, ValueError):
+        self._last_cap_dist = None
+        self._last_cap_vego = 0.0
       return cap_target, "dec"
 
     if self.phase == "cap":
@@ -315,7 +435,35 @@ class IcbmEpisode:
       if self._clear_t0 is None:
         self._clear_t0 = now
         self._hold_set0 = stock_set     # snapshot: we go SILENT now, so nothing of ours moves the set
-      if (now - self._clear_t0) < self._clear_delay_s:
+        self._late_tap_set = None       # fresh clear window: any previous absorbed tap is void
+        # icbmmapfirst2pnw: apex passage — the binding candidate vanished while within the tap
+        # margin + ~1 s of travel of us => we drove past it (curve behind), not a dropout.
+        self._apex_passed = (self._last_cap_dist is not None
+                             and self._last_cap_dist <= ICBM_MARGIN_M + self._last_cap_vego * ICBM_APEX_PASS_TTA_S)
+      # icbmmapfirst2pnw late-tap absorption (field false positive, 2026-07-12 18:08:26Z): the truck
+      # reports the set with ~1 s lag, so the executor's FINAL in-flight tap can land AFTER we went
+      # silent. Within the grace window, ONE small DOWNWARD move (<= one tap + deadband, measured
+      # from the ORIGINAL snapshot) is our own tap, not a human — record it as an ALTERNATE
+      # baseline. ANCHORED, adopted at most once, never walked (Gemini adversarial catch: walking
+      # the baseline would let a driver's repeated SET- taps be absorbed one step at a time).
+      # Upward movement is never absorbed; a second downward step lands below BOTH baselines and
+      # the movement guard blocks the restore exactly as before.
+      if (stock_set is not None and self._hold_set0 is not None
+          and self._late_tap_set is None
+          and (now - self._clear_t0) <= ICBM_LATE_TAP_GRACE_S
+          and 0.0 < self._hold_set0 - stock_set <= ICBM_LATE_TAP_TOL):
+        self._late_tap_set = stock_set
+      # icbmmapfirst2pnw early restore (driver rule 3): when the curve is provably BEHIND us, begin
+      # the restore after a short drive-out instead of the full flicker-proof hold. A dropout-style
+      # clear (candidate still far ahead) keeps the original 3 s debounce unchanged.
+      delay = min(self._clear_delay_s, ICBM_RESTORE_DELAY_FAST_S) if self._apex_passed else self._clear_delay_s
+      if (now - self._clear_t0) < delay:
+        return None, None
+      if in_curve:
+        # still lateral-loaded (e.g. long curve, or the NEXT bend of an S): hold silently — never
+        # BEGIN raising the set mid-curve. Bounded: loaded too long with no re-bind -> give up.
+        if (now - self._clear_t0) > ICBM_HOLD_MAX_S:
+          self.reset()
         return None, None
       # curve cleared (sustained) -> enter RESTORE only when the episode is cleanly ours:
       eligible = (stock_on and not driver_pedal and self.ceiling is not None
@@ -326,8 +474,12 @@ class IcbmEpisode:
                   # Gemini adversarial catch (the 3 s blind spot): the brain is SILENT through the
                   # hold, so the executor does nothing — ANY set movement across the hold window is
                   # a HUMAN choosing a speed. Movement (either direction) -> no restore at all.
+                  # icbmmapfirst2pnw: the set may alternatively match the ONE absorbed late-tap
+                  # baseline (its own executor tap landing after silence) — nothing else.
                   and self._hold_set0 is not None
-                  and abs(stock_set - self._hold_set0) <= ICBM_RESTORE_DONE_TOL
+                  and (abs(stock_set - self._hold_set0) <= ICBM_RESTORE_DONE_TOL
+                       or (self._late_tap_set is not None
+                           and abs(stock_set - self._late_tap_set) <= ICBM_RESTORE_DONE_TOL))
                   # something to restore (not already at/above the ceiling)
                   and stock_set < self.ceiling - ICBM_RESTORE_DONE_TOL)
       if eligible:
@@ -358,6 +510,11 @@ class IcbmEpisode:
           return None, None
       self._last_stock = stock_set
       self._last_t = now
+      if in_curve:
+        # icbmmapfirst2pnw: PAUSE while lateral-loaded (a late-seen next bend) — go silent so the
+        # executor stale-stops, but keep the episode so the restore resumes once the load clears.
+        # All the aborts above (pedal/ACC/window/decrease/fast-rise) ran this tick and stay live.
+        return None, None
       return self.ceiling, "inc"
 
     return None, None                   # idle, no cap
@@ -735,8 +892,12 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
   try:
     orz = list(model.orientationRate.z); vx = list(model.velocity.x); tb = list(model.orientationRate.t)
     vis_acc, ttc = vision_curve_lat_accel(orz, vx, tb, v_ego)
+    # icbmmapfirst2pnw: lateral accel AT t~0 (yaw_rate*speed at the first model point) — the
+    # "currently loaded in a curve" signal for the ICBM start/restore gates (icbm_in_curve).
+    lat_now = float(orz[0]) * float(vx[0]) if (orz and vx) else 0.0
   except Exception:
     vis_acc, ttc = 0.0, 10.0
+    lat_now = 0.0
   try:
     model_should_stop = bool(model.action.shouldStop)
   except Exception:
@@ -751,6 +912,7 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
     "blinker": bool(car_state.leftBlinker or car_state.rightBlinker),
     "map_target_v": map_target_v, "map_target_dist": map_target_dist,   # map half (MapTargetVelocities)
     "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,            # vision fallback
+    "lat_accel_now": lat_now,                                           # icbmmapfirst2pnw: in-curve gate
     "model_should_stop": model_should_stop, "toggles": toggles,
     "v_set": v_set,                                                     # accelerate-zone (set-speed gap)
     "spd_lim": float(spd_lim),                                         # OSM speed limit (lowSpeed highway gate)
@@ -825,6 +987,11 @@ class CESController:
     self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
     self._stock_set = 0.0
     self._stock_on = False
+    # icbmmapfirst2pnw: start-gate telemetry — WHY a would-be new episode was suppressed this tick
+    # ("inCurve" / "visCovered" / "visLate" / None) + the map coverage reach (m; 0 = mapd blind/dead,
+    # the mapd-liveness evidence for the field logs). Display/log only — never gates control here.
+    self._icbm_gate = None
+    self._icbm_map_reach = None
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -1001,6 +1168,8 @@ class CESController:
         self._icbm_last_target = None
         self._icbm_src = None
         self._icbm_dir = None
+        self._icbm_gate = None          # icbmmapfirst2pnw
+        self._icbm_map_reach = None
         self._icbm_ep.reset()           # icbmrestore2pnw: forced Chill / no data ends any episode
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
@@ -1020,12 +1189,42 @@ class CESController:
       far_v, far_dist = icbm_far_map_candidate(self._map_targets, self._cur_lat, self._cur_lon,
                                                sig["v_ego"], ref, C.tiered_map_scale,
                                                self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
+      # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
+      # START a new episode — a running cap episode (phase 'cap', incl. its S-gap clear debounce)
+      # continues with the full candidate set exactly as before ("an episode may continue").
+      ttc = float(sig.get("time_to_curve", float("inf")) or float("inf"))
+      in_curve = icbm_in_curve(sig.get("lat_accel_now", 0.0), sig.get("curve_lat_accel_vision", 0.0), ttc)
+      starting = self._icbm_ep.phase != "cap"
+      self._icbm_gate = None
+      self._icbm_map_reach = None
+      if starting:
+        map_reach = icbm_map_reach(self._map_targets, self._cur_lat, self._cur_lon)
+        self._icbm_map_reach = round(map_reach, 0)
       target, _, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
         sig.get("map_target_dist", float("inf")), ep_ceiling, C.tiered_map_scale,
         vis_v, vis_dist,
         map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
         far_v=far_v, far_dist=far_dist)
+      if target is not None and starting:
+        if in_curve:
+          # driver rule 2: NEVER begin a new dec episode while already loaded in the curve — hold
+          # the current set (any source: braking mid-curve was the field complaint).
+          self._icbm_gate = "inCurve"
+          target, self._icbm_src = None, None
+        elif self._icbm_src == "vis" and not icbm_vision_may_start(vis_dist, ttc, map_reach):
+          # driver rule 1 (MAP-FIRST): live map coverage over this stretch -> the map verdict
+          # (incl. "no slowdown needed") is authoritative for anticipatory slowing; and a too-late
+          # vision curve must not start taps at the curve. mapd-dead fallback: reach 0.0 -> only
+          # the time gate applies, vision keeps initiating where the map is blind.
+          self._icbm_gate = "visCovered" if vis_dist <= map_reach else "visLate"
+          # a still-binding map/far candidate may start the episode instead of the gated vision one
+          target, _, self._icbm_src = icbm_curve_target(
+            sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
+            sig.get("map_target_dist", float("inf")), ep_ceiling, C.tiered_map_scale,
+            0.0, float("inf"),
+            map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
+            far_v=far_v, far_dist=far_dist)
       # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
       # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
       # icbmalign2pnw: ICBM now applies the SAME descent + left-curve multipliers as VTSC — literally
@@ -1054,8 +1253,13 @@ class CESController:
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
+      # icbmmapfirst2pnw: hand the episode the binding candidate's DISTANCE (apex-passage detection
+      # for the early restore) and the in-curve flag (restore entry deferral / restore pause).
+      src_dist = {"map": sig.get("map_target_dist", float("inf")),
+                  "vis": vis_dist, "far": far_dist}.get(self._icbm_src)
       pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
-                                                 self._stock_set, self._stock_on, driver_pedal)
+                                                 self._stock_set, self._stock_on, driver_pedal,
+                                                 cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
@@ -1102,6 +1306,8 @@ class CESController:
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
       tele["icbmSet"] = self._stock_set
       tele["icbmOn"] = self._stock_on
+      tele["icbmGate"] = self._icbm_gate         # icbmmapfirst2pnw: start suppressed & why (or None)
+      tele["mapReach"] = self._icbm_map_reach    # icbmmapfirst2pnw: map coverage m (0/None = blind)
 
     # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
     if mode != self._last_mode:
@@ -1171,6 +1377,9 @@ class CESController:
       "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling, "icbmSrc": self._icbm_src,
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,
+      # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether
+      # mapd was alive — mapReach 0/None with mapPts 0 = the mapd-outage signature).
+      "icbmGate": self._icbm_gate, "mapReach": self._icbm_map_reach,
     }
 
   def _append_event(self, rec: dict) -> None:
