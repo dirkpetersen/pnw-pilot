@@ -232,13 +232,16 @@ def test_set_movement_during_hold_window_blocks_restore():
     assert out == (None, None) and ep.phase == "idle", moved_mph
 
 
-def test_single_driver_tap_below_target_blocks_restore():
-  """Gemini catch: tolerance must NOT swallow one deliberate SET- tap. Executor overshoot below
-  target is < 0.4 steps; a full driver tap (~1 step below) aborts the restore."""
+def test_driver_two_taps_below_target_blocks_restore():
+  """Driver-lower guard, latency-tolerant edition (icbmmapfirst2pnw): the tolerance now absorbs the
+  executor's own worst-case self-overshoot (DEADBAND 0.6 + ONE report-latency tap = 1.6 steps — the
+  2026-07-12 18:08:26Z field false positive that killed a wanted restore), so a single ambiguous tap
+  restores (documented residual, ceiling-bounded). TWO deliberate SET- taps (>= 2 steps below the
+  lowest commanded target) are beyond anything the executor can self-inflict -> still no restore."""
   ep = IcbmEpisode()
   ep.step(T0, 40 * MPH, 60 * MPH, 60 * MPH, True, False)             # min_target 40
-  ep.step(T0 + 1, None, 60 * MPH, 39 * MPH, True, False)             # driver tapped to 39
-  out = ep.step(T0 + 1 + ICBM_RESTORE_DELAY_S + 0.1, None, 60 * MPH, 39 * MPH, True, False)
+  ep.step(T0 + 1, None, 60 * MPH, 38 * MPH, True, False)             # driver tapped twice to 38
+  out = ep.step(T0 + 1 + ICBM_RESTORE_DELAY_S + 0.1, None, 60 * MPH, 38 * MPH, True, False)
   assert out == (None, None) and ep.phase == "idle"
 
 
@@ -250,3 +253,22 @@ def test_executor_overshoot_below_target_still_restores():
   ep.step(T0 + 1, None, 60 * MPH, stock, True, False)
   tgt, d = ep.step(T0 + 1 + ICBM_RESTORE_DELAY_S + 0.1, None, 60 * MPH, stock, True, False)
   assert d == "inc" and math.isclose(tgt, 60 * MPH)
+
+
+def test_latency_tap_below_target_still_restores_field_18_08():
+  """THE 2026-07-12 18:08:26Z field case, replayed with the real numbers: vis episode, targets
+  81.1/78.9/77.3/77.8 mph, taps walked the set 85->77, then the FINAL in-flight tap landed at 76
+  AFTER the brain went silent (reported-set lag). min_target 77.3, set 76.0 = 1.3 steps below.
+  The old 0.6-step tolerance read that as a driver SET- and never restored (driver sat at 76 vs
+  ceiling 85 for 33 s and had to gas + SET+ manually). Now: the late tap is absorbed and the
+  restore publishes the latched 85 ceiling."""
+  ep = IcbmEpisode()
+  t = T0
+  for tgt_mph, set_mph in ((81.1, 85.0), (78.9, 82.0), (77.3, 80.0), (77.8, 77.0)):
+    out = ep.step(t, tgt_mph * MPH, 85 * MPH, set_mph * MPH, True, False)
+    assert out[1] == "dec"
+    t += 1.0
+  ep.step(t, None, 76 * MPH, 77 * MPH, True, False)                  # clear tick: snapshot 77
+  ep.step(t + 0.5, None, 76 * MPH, 76 * MPH, True, False)            # late tap lands (within grace)
+  tgt, d = ep.step(t + ICBM_RESTORE_DELAY_S + 0.1, None, 76 * MPH, 76 * MPH, True, False)
+  assert d == "inc" and math.isclose(tgt, 85 * MPH), (tgt, d, ep.phase)

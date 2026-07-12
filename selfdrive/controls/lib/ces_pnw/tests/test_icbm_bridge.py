@@ -351,7 +351,11 @@ def _published_target(step, mgr, sig):
   return mgr.mem_params.last.get("target")
 
 
-def _vis_sig(v_ego, lat_acc, ttc=1.0, v_set=None, pitch=None):
+def _vis_sig(v_ego, lat_acc, ttc=4.0, v_set=None, pitch=None):
+  # icbmmapfirst2pnw: default ttc raised 1.0 -> 4.0 s — a NEW vision episode may only START with
+  # >= ICBM_VIS_MIN_TTC_S of warning now (these tests exercise the penalty math, not start policy;
+  # the start gates have their own suite in test_icbm_mapfirst.py). No map data here -> map-blind
+  # fallback path, vision allowed.
   return {"v_ego": v_ego, "v_set": v_set if v_set is not None else v_ego,
           "map_target_v": 0.0, "map_target_dist": float("inf"),
           "curve_lat_accel_vision": lat_acc, "time_to_curve": ttc, "pitch": pitch}
