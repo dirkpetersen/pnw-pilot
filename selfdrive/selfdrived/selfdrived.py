@@ -18,7 +18,7 @@ from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController  # ces2xnor
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -126,7 +126,15 @@ class SelfdriveD:
     self.not_running_prev = None
     self.experimental_mode = False
     self.manual_experimental_mode = False     # ces2xnor: the ExperimentalMode-param baseline
-    self.ces_pnw = CESController(self.CP)     # ces2xnor: default OFF
+    # stophold2pnw (C): construction was UNWRAPPED — a CESController.__init__ raise took down
+    # selfdrived (safety-critical) entirely. Wrap it: any failure -> loud log + inert stub
+    # (experimental_request() always False == stock behavior). The per-cycle call is already
+    # wrapped further down; this closes the remaining constructor gap.
+    try:
+      self.ces_pnw = CESController(self.CP)   # ces2xnor: default OFF
+    except Exception:
+      cloudlog.exception("ces_pnw: CESController construction FAILED -> CES inert (stock behavior)")
+      self.ces_pnw = CESStub()
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.state_machine = StateMachine()

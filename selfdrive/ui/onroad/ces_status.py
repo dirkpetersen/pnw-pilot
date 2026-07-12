@@ -29,6 +29,13 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 
 _REFRESH_S = 0.2     # poll the mem param at ~5 Hz (matches the publisher)
+# stophold2pnw (C): "CES: NO SIGNAL" dead-man — the 2026-07-12 false-silence investigation burned
+# hours because a quiet CES was indistinguishable from a healthy-but-parked one. The publisher now
+# stamps CESStatus with a wall-clock `ts` at ~5 Hz; if the master says CES should be running but
+# the newest CESStatus is older than _STALE_S while onroad, the overlay says so LOUDLY (red).
+_STALE_S = 5.0       # s: CESStatus ts older than this while onroad => publisher silent/dead
+_GRACE_S = 10.0      # s onroad before the dead-man may alarm (selfdrived spawn + first publish;
+                     #   also covers a stale /dev/shm leftover from the previous onroad session)
 _FS = 64             # 2x size (driver feedback: the CES-mode overlay was too small)
 _LINE_H = 80         # 2x line height to match
 _PAD = 24
@@ -54,6 +61,8 @@ class CesStatusRenderer(Widget):
       self._mem = None
     self._last_poll = 0.0
     self._ces_enabled = False
+    self._onroad_t0 = None       # stophold2pnw (C): monotonic stamp of the current onroad session start
+    self._no_signal = False      # stophold2pnw (C): dead-man tripped (CESStatus stale while onroad)
     self._st: dict = {}
     self._vtsc: dict = {}
     self._mapdl: str = ""
@@ -72,7 +81,8 @@ class CesStatusRenderer(Widget):
     self._last_poll = now
     # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
     # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
-    self._ces_enabled = ces_enabled(read_ces_mode(ui_state.params))
+    master_on = ces_enabled(read_ces_mode(ui_state.params))
+    self._ces_enabled = master_on
     # ces2pnw (driver req 2026-07-10): "Hide CES debug information" toggle — default OFF (overlay
     # shows). Defensive read: on any params/UI mismatch (unregistered key) fall back to SHOWING —
     # that is the documented default state — and above all never crash the UI (params/UI mismatch
@@ -83,16 +93,39 @@ class CesStatusRenderer(Widget):
         self._ces_enabled = False
     except Exception:
       pass
-    if not self._ces_enabled or self._mem is None:
+    # stophold2pnw (C): onroad-dwell grace timer for the dead-man. The alarm is keyed on the
+    # MASTER (CES expected to run), not on the debug-hide cosmetic — an alarm is not debug
+    # decoration, so HideCESDebug hides the data lines but never the NO-SIGNAL alarm.
+    if not ui_state.started:
+      self._onroad_t0 = None
+    elif self._onroad_t0 is None:
+      self._onroad_t0 = now
+    grace_over = self._onroad_t0 is not None and (now - self._onroad_t0) > _GRACE_S
+    self._no_signal = False
+    if not master_on or self._mem is None:
       self._st = {}
       self._vtsc = {}
       self._cached_layout = None
+      if master_on and self._mem is None and grace_over:
+        # master says CES should run but the mem-param store is unreachable: that IS a silence
+        self._no_signal = True
+        self._cached_layout = self._alarm_layout()
       return
     try:
       st = self._mem.get("CESStatus", return_default=True)
       self._st = st if isinstance(st, dict) else {}
     except Exception:
       self._st = {}
+    # stophold2pnw (C): staleness — publisher stamps `ts` (wall clock) at ~5 Hz; missing/old means
+    # selfdrived is not publishing (dead, disabled-by-bug, or never constructed). Wall-vs-wall
+    # compare; a post-NTP clock jump can only make a healthy publisher look stale for one 5 Hz
+    # publish cycle (its next stamp uses the same jumped clock).
+    try:
+      ts = float(self._st.get("ts"))
+      stale = (time.time() - ts) > _STALE_S  # noqa: TID251 -- wall-vs-wall compare against the publisher's ts heartbeat
+    except (TypeError, ValueError):
+      stale = True                     # no ts ever published (or garbage) counts as silence
+    self._no_signal = stale and grace_over
     try:
       vt = self._mem.get("VTSCStatus", return_default=True)   # vtsc: rides the CES toggle
       self._vtsc = vt if isinstance(vt, dict) else {}
@@ -106,12 +139,23 @@ class CesStatusRenderer(Widget):
     # Build the line list + box size HERE (5 Hz poll) instead of every render frame (20 Hz): the
     # content only changes when the polled state does.
     self._cached_layout = None
-    if self._st.get("enabled") and int(self._st.get("button", 0)) == 0:
+    if self._no_signal:
+      # stophold2pnw (C): the alarm replaces the data lines entirely — a stale snapshot must not
+      # keep painting plausible-looking (dead) numbers next to the alarm.
+      self._cached_layout = self._alarm_layout()
+    elif self._ces_enabled and self._st.get("enabled") and int(self._st.get("button", 0)) == 0:
       lines = self._lines()
       if lines:
         box_w = max(measure_text_cached(f, t, _FS).x for t, _, f in lines) + _PAD * 2
         box_h = _LINE_H * len(lines) + _PAD * 2
         self._cached_layout = (lines, box_w, box_h)
+
+  def _alarm_layout(self):
+    """stophold2pnw (C): the single red NO-SIGNAL line as a cached layout tuple."""
+    lines = [("CES: NO SIGNAL", _C.RED, self.font_bold)]
+    box_w = measure_text_cached(self.font_bold, lines[0][0], _FS).x + _PAD * 2
+    box_h = _LINE_H * len(lines) + _PAD * 2
+    return (lines, box_w, box_h)
 
   # ---- build the lines -----------------------------------------------------
   def _lines(self) -> list[tuple]:
@@ -234,9 +278,11 @@ class CesStatusRenderer(Widget):
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
-    # visibility gates (enabled, CES-auto button mode only) are applied at poll time in _update_state;
-    # _layout is None whenever the overlay should be hidden
-    if not self._ces_enabled or self._cached_layout is None:
+    # visibility gates (enabled, CES-auto button mode only, NO-SIGNAL alarm) are applied at poll
+    # time in _update_state; _cached_layout is None whenever the overlay should be hidden.
+    # stophold2pnw (C): gate on the layout ALONE — the NO-SIGNAL alarm must render even when
+    # HideCESDebug has turned the data overlay off (an alarm is not debug decoration).
+    if self._cached_layout is None:
       return
     lines, box_w, box_h = self._cached_layout
     bx = rect.x + rect.width - box_w - _MARGIN

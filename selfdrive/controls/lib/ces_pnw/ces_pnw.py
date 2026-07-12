@@ -47,6 +47,19 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 CES_EVENT_LOG = "/data/dirk/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB; one .1 generation kept -> ~40 MB cap
                                              # (was unbounded — 43 MB and growing on a 90%-full disk)
+# stophold2pnw (D): the comma 3X RTC battery is dead (RTC reads 1970) — every cold boot writes
+# event records with a garbage wall clock until NTP/GPS sync (a 2025-11-25-stamped record polluted
+# the 2026-07-12 gap analysis). Records written before the clock is plausibly valid are MARKED
+# (never dropped — the data is still real, only the timestamp is not).
+CLOCK_VALID_EPOCH = 1577836800.0   # 2020-01-01T00:00Z
+
+
+def clock_bad(t_wall: float) -> bool:
+  """True when the wall clock is obviously pre-sync (dead-RTC boot). Pure."""
+  try:
+    return float(t_wall) < CLOCK_VALID_EPOCH
+  except (TypeError, ValueError):
+    return True
 
 
 def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
@@ -866,8 +879,14 @@ def decide_active(s) -> tuple[bool, str]:
     if map_curve or vision_curve:
       return True, "curve"
 
-  # 2) stop light / stop sign — model predicts a stop, not currently following a lead
-  if t["stops"] and s["model_should_stop"] and not s["has_lead"]:
+  # 2) stop light / stop sign — model predicts a stop, not currently following a lead.
+  # stophold2pnw (A1, red-light lurch 2026-07-12 21:47:08Z): below STOP_HOLD_MAX_V the `not
+  # has_lead` mask is LIFTED — stopped/creeping behind a lead at a light, the model's stop intent
+  # must count (the original mask exists so lead-following decel AT SPEED doesn't trip
+  # Experimental; at a creep the LIGHT governs, not the lead). This also re-arms the stopIntent
+  # fast path in exactly the lurch geometry (raw_active becomes True, so a Chill machine re-enters
+  # in one cycle when shouldStop asserts). Fail-safe: only ever KEEPS/ENTERS Experimental.
+  if t["stops"] and s["model_should_stop"] and (not s["has_lead"] or v < C.STOP_HOLD_MAX_V):
     return True, "stop"
 
   # 3) low speed (city / complex / construction) — lead-aware threshold. TWO exceptions, both
@@ -966,6 +985,10 @@ def decision_telemetry(s) -> dict:
     "dV": d_v,
     "aEgo": round(float(s.get("a_ego", 0.0)), 2),
     "gas": bool(s.get("gas", False)),
+    # stophold2pnw (B): the RAW per-cycle model stop intent (modelV2.action.shouldStop), NOT
+    # debounced — this is the exact signal A1/A2/stopIntent/pullaway key on, and its absence from
+    # the breadcrumb is why the 21:47:08Z lurch forensics could not tell red from green.
+    "stp": bool(s.get("model_should_stop", False)),
   }
 
 
@@ -981,12 +1004,16 @@ class ConditionalExperimentalSwitching:
     self._status = "chill"
     self._exp_min = exp_min_dwell   # min dwell in Experimental (gentle profile lengthens this)
     self._chill_min = chill_min_dwell  # min dwell in Chill / re-entry cooldown
+    # stophold2pnw (A2): seconds model_should_stop has been CONTINUOUSLY clear. Initialized to the
+    # hold threshold ("clear long ago") so a fresh machine never spuriously holds.
+    self._stop_clear_s = C.STOP_CLEAR_HOLD_S
 
   def reset(self):
     self._cond.reset()
     self._is_experimental = False
     self._dwell = 0.0
     self._status = "chill"
+    self._stop_clear_s = C.STOP_CLEAR_HOLD_S  # stophold2pnw (A2)
 
   def mode(self) -> str:
     return "experimental" if self._is_experimental else "chill"
@@ -999,6 +1026,13 @@ class ConditionalExperimentalSwitching:
     `dt` is the MEASURED loop period (selfdrived runs at 100 Hz) so the dwell/debounce are real
     seconds. Separated from `update(sm)` so it is unit-testable without cereal messages."""
     raw_active, status = decide_active(signals)
+    # stophold2pnw (A2): track how long the model's stop intent has been continuously clear —
+    # updated FIRST so the timer is correct on every path out of this function (incl. the
+    # stopIntent fast-path early return below). Capped at the threshold (no unbounded float).
+    if bool(signals.get("model_should_stop")):
+      self._stop_clear_s = 0.0
+    else:
+      self._stop_clear_s = min(self._stop_clear_s + dt, C.STOP_CLEAR_HOLD_S)
     # stopintent2pnw (driver-approved): ABSOLUTE stop-intent fast path. When the model's stop
     # intent (model_should_stop — the exact signal the red-light guard keys on) asserts AND the
     # decision ladder wants Experimental, entering Experimental bypasses EVERYTHING on the entry
@@ -1035,9 +1069,20 @@ class ConditionalExperimentalSwitching:
       if status != "chill":
         self._status = status      # keep showing the active reason
       if not cond_active and self._dwell >= self._exp_min:
-        self._is_experimental = False
-        self._status = "chill"
-        self._dwell = 0.0
+        # stophold2pnw (A2): standstill-departure hold. Below STANDSTILL_HOLD_V, "the conditions
+        # cleared" (typically: the lead crept and slowLead dropped) is NOT sufficient to hand the
+        # launch to Chill's MPC — the model must also have agreed GO (shouldStop continuously
+        # clear for STOP_CLEAR_HOLD_S). Respects the per-condition "stops" toggle, like the
+        # stopIntent fast path. Tagged "stopHold" so field logs show every hold explicitly.
+        # Fail-safe direction only: this can never enter Experimental, only delay leaving it.
+        if (float(signals.get("v_ego", 0.0)) < C.STANDSTILL_HOLD_V
+            and self._stop_clear_s < C.STOP_CLEAR_HOLD_S
+            and bool(signals.get("toggles", {}).get("stops", True))):
+          self._status = "stopHold"   # telemetry: the hold is the only thing keeping Experimental
+        else:
+          self._is_experimental = False
+          self._status = "chill"
+          self._dwell = 0.0
     return self.mode()
 
 
@@ -1124,6 +1169,21 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
   }
 
 
+class CESStub:
+  """stophold2pnw (C): inert fallback selfdrived installs when CESController CONSTRUCTION raises —
+  a CES bug must degrade to stock behavior (never Experimental, never publish), never take
+  selfdrived (safety-critical) down. Mirrors the CESController surface selfdrived touches."""
+
+  def experimental_request(self, car_state, sm) -> bool:
+    return False
+
+  def enabled(self) -> bool:
+    return False
+
+  def status(self) -> str:
+    return "chill"
+
+
 class CESController:
   """Live wrapper used by selfdrived. Owns the state machine + ~1 Hz param refresh + the 3-state
   button (CESButtonState: 0=CES, 1=forced Chill, 2=forced Experimental) + the map-curve read.
@@ -1174,11 +1234,15 @@ class CESController:
     self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
     self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
     self._event_log_ok = False      # persistent "each adoption" trail (CES_EVENT_LOG)
+    self._append_fail = 0           # stophold2pnw (C): consecutive _append_event failures (0 = healthy)
     try:
       os.makedirs(os.path.dirname(CES_EVENT_LOG), exist_ok=True)
       self._event_log_ok = True
     except Exception:
       self._event_log_ok = False
+    # stophold2pnw (D): car identity in every record — `shadow` stopped being a car discriminator
+    # the day Alpha-Long became an A/B switch on the Lightning (2026-07-12 session misattribution).
+    self._car = str(getattr(CP, 'carFingerprint', '') or '') if CP is not None else ''
     # capability view (driver directive 2026-07-11: check CAPABILITIES, never fingerprints here —
     # pnw_vehicle.PnwVehicle is the one place that maps cars to features):
     #   _long_ok -> openpilot owns longitudinal (planner actuation)
@@ -1588,6 +1652,7 @@ class CESController:
     mode = "experimental" if want else "chill"
     tele = decision_telemetry(sig) if sig is not None else {
       "reason": "noData", "curvePct": 0, "curveSrc": "", "mapV": 0.0, "mapDist": 0.0, "vEgo": 0.0,
+      "stp": False,   # stophold2pnw (B): keep the key present on the noData path too
     }
     tele["mode"] = mode
     # stopintent2pnw: the adopt record must show WHICH entry path fired — decide_active's reason
@@ -1652,6 +1717,10 @@ class CESController:
       return
     self._tele_last = now
     try:
+      # stophold2pnw (C): wall-clock heartbeat — the overlay's NO-SIGNAL dead-man compares this
+      # against its own clock, so a dead/silent publisher becomes VISIBLE (the driver's "silence
+      # must be loud" rule, born of the 2026-07-12 false-silence investigation).
+      tele["ts"] = round(time.time(), 2)  # noqa: TID251 -- wall clock heartbeat shared with the overlay
       self.mem_params.put_nonblocking("CESStatus", tele)
     except Exception:
       pass
@@ -1663,11 +1732,16 @@ class CESController:
     the curve/map diagnostics — everything needed to verify behavior against the route later."""
     vego = float(tele.get("vEgo") or 0.0)
     hwy = (self._speed_limit >= C.HWY_SPEED_LIMIT) or (vego >= C.HWY_VEGO)  # coarse; authoritative = GPS+OSM+300ft in analysis
-    return {
-      "t": round(time.time(), 1),  # noqa: TID251 -- wall clock, for route/time correlation
+    now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
+    rec = {
+      "t": round(now_wall, 1),
       "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
       "vEgo": tele.get("vEgo"), "vSet": tele.get("vSet"), "aEgo": tele.get("aEgo"), "gas": tele.get("gas"),
       "accelZone": tele.get("accelZone"),
+      # stophold2pnw (B): raw model stop intent — red-vs-green is decidable from the breadcrumb now
+      "stp": tele.get("stp"),
+      # stophold2pnw (D): car identity (shadow is no longer a car discriminator — alpha-long A/B)
+      "car": self._car,
       "curvePct": tele.get("curvePct"), "curveSrc": tele.get("curveSrc"),
       "mapV": tele.get("mapV"), "mapDist": tele.get("mapDist"), "mapPts": tele.get("mapPts"),
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
@@ -1707,10 +1781,17 @@ class CESController:
       # firing itself also gets a dedicated ev="greenLight" record (see _green_light_step).
       "greenLight": self._gl.state,
     }
+    # stophold2pnw (D): mark (never drop) records written before the clock is plausibly synced —
+    # the dead-RTC boot wrote a 2025-11-25-stamped record that corrupted the 07-12 gap analysis.
+    if clock_bad(now_wall):
+      rec["clockBad"] = True
+    return rec
 
   def _append_event(self, rec: dict) -> None:
     """Append one JSON line to the persistent CES_EVENT_LOG (append-only, outside the overlay so it
-    survives reboot + swaglog rotation). Best-effort; never breaks control."""
+    survives reboot + swaglog rotation). Best-effort; never breaks control — but repeated failure
+    is no longer SILENT (stophold2pnw C: the 07-12 investigation burned hours proving a silence
+    that wasn't; a genuinely dying writer must announce itself in swaglog)."""
     if not self._event_log_ok:
       return
     try:
@@ -1721,5 +1802,13 @@ class CESController:
         pass                                                # no file yet / stat race -> just append
       with open(CES_EVENT_LOG, "a") as f:
         f.write(json.dumps(rec) + "\n")
+      self._append_fail = 0
     except Exception:
-      pass
+      # ~1-2 writes/s: warn once at 10 consecutive failures, then re-warn every ~600 (~5-10 min) —
+      # loud enough to see, throttled enough to never flood swaglog. The write stays best-effort.
+      self._append_fail += 1
+      if self._append_fail == 10 or self._append_fail % 600 == 0:
+        try:
+          cloudlog.error(f"ces_pnw: ces_events append FAILING ({self._append_fail} consecutive) — telemetry trail is dark ({CES_EVENT_LOG})")
+        except Exception:
+          pass
