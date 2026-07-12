@@ -32,7 +32,8 @@ from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # descentcurve2pnw: MAP_SOURCE_HORIZON_M is mapd's hard 500 m path cap — ICBM's full-horizon map scan
 # uses the same constant family as VTSC/MTSC so both scan exactly what mapd publishes.
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARGET as VTSC_A_LAT,
-                                                                      MAP_SOURCE_HORIZON_M)
+                                                                      MAP_SOURCE_HORIZON_M,
+                                                                      MAP_SCALE_MIN)
 
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
@@ -215,7 +216,8 @@ def icbm_vision_may_start(vis_dist, time_to_curve, map_reach) -> bool:
 def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
-                      far_v=0.0, far_dist=float('inf')):
+                      far_v=0.0, far_dist=float('inf'),
+                      track=False):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
   where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
   VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
@@ -229,6 +231,10 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                the Lightning's weak EPS) — applied BEFORE the reduce-only/binding tests;
     firm_decel assumed approach decel for very LARGE drops (icbm_approach_decel ramp; stock ACC does
                the actual braking — this only shapes the tap-start envelope).
+
+  icbmtrack2pnw: track=True additionally lets MAP/FAR candidates START via the tracking window
+  (_icbm_track_apex — set walks down early, e.g. while lead-bound) instead of only the v_ego decel
+  envelope. VISION candidates are never tracked. track=False (default) is byte-identical to before.
 
   ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
   capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
@@ -246,6 +252,10 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   if map_v and map_v > 0 and map_dist != float('inf'):
     eff = scale_fn(map_v) * map_v * map_scale
     a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
+    if a is None and track:
+      # icbmtrack2pnw: continuous set-tracking — a binding-RATED map curve within the tracking
+      # window starts the walk-down even before the v_ego decel envelope binds (lead-bound case).
+      a = _icbm_track_apex(v_ego, ref, eff, map_dist)
     if a is not None:
       best_apex, best_src = a, "map"
   # VISION candidate — already a safe speed (icbm_vision_apex). Lowest binding target wins (most slowing).
@@ -257,6 +267,8 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   # icbm_far_map_candidate). Same binding envelope; catches curves beyond the 10 s window at speed.
   if far_v and far_v > 0 and far_dist != float('inf'):
     a = _icbm_binding_apex(v_ego, ref, far_v, far_dist, icbm_approach_decel(v_ego, far_v, firm_decel))
+    if a is None and track:
+      a = _icbm_track_apex(v_ego, ref, far_v, far_dist)   # icbmtrack2pnw (far_v already effective)
     if a is not None and (best_apex is None or a < best_apex):
       best_apex, best_src = a, "far"
   if best_apex is not None:
@@ -324,6 +336,74 @@ ICBM_HOLD_MAX_S = 10.0           # s; still lateral-loaded this long after the c
 ICBM_LATE_TAP_GRACE_S = 1.5      # s after going silent in which the executor's final in-flight tap
                                  #    may still land on the reported set (~1 s report lag + margin)
 ICBM_LATE_TAP_TOL = 1.6 * ICBM_EXEC_STEP_MS  # one full late tap + the executor deadband
+
+# --- icbmtrack2pnw (driver-approved follow-up; field event 2026-07-12 19:58:31-59Z) -----------------
+# Continuous curve-profile SET-TRACKING for MAP candidates. Driver design, verbatim intent: "adjust
+# the target even when I'm behind a slow car; if I'm slower anyway it has no impact; if I go faster
+# it slows me; and it gives great debugging in traffic." The field event: following a lead at ~70
+# with set 90, a rated map curve 300 m ahead; driver changed lanes, the lead vanished and the stock
+# ACC accelerated 72->89 INTO the curve — by then the start was correctly in-curve-suppressed and
+# the driver tapped down manually. With tracking, the set would already have been walked down to the
+# curve apex while still lead-bound, so losing the lead could only accelerate TO THE APEX.
+#   - MAP/FAR candidates: a binding-RATED curve (effective apex < ref - MIN_DROP) starts the cap
+#     episode when within the TRACKING WINDOW even if the v_ego decel envelope does not bind yet
+#     (drop the v_ego brake-distance precondition; the window is sized so the executor can walk the
+#     set down at tap cadence before the curve, computed at the WORST-CASE travel speed = ref, i.e.
+#     the speed the ACC would reach if the lead vanished — exactly the protection case).
+#   - VISION candidates keep ALL existing stricter gates (short horizon; in-curve / too-late / map-
+#     first suppression unchanged). Restore machinery and episode/ceiling semantics unchanged —
+#     this only changes WHEN a map cap may start, not what it does. Cap phases have NO expiry (only
+#     the RESTORE phase carries the 45 s window), so long lead-bound tracking episodes are safe by
+#     construction; the executor governor/stale-stop cadence is episode-length-agnostic.
+ICBM_TRACK_MARGIN_S = 4.0     # s of slack beyond the pure tap-walk time (publish latency + set-report lag)
+ICBM_TRACK_MAX_M = 350.0      # m hard cap on the tracking window — bounds exit/route-divergence
+                              #   tracking (mapd re-matches the path after a divergence and the
+                              #   candidates are re-derived from CURRENT GPS every tick, so a wrong
+                              #   walk-down self-heals: curve clears -> guarded restore to ceiling)
+# 19:58:37Z ROOT CAUSE (the "missing bind"): ICBM map candidates used the raw tiered_map_scale, whose
+# SWEEPER end (raw >= 29 m/s -> x1.8, calibrated for VTSC/MTSC where binding causes real braking)
+# inflated the event's raw 64.9 mph curve to an effective 107 mph — "not binding vs set 90" was
+# computed CORRECTLY on an absurd target, so no cap and no gate ever showed. For ICBM (reduce-only
+# SET-walking, no braking below the walked set) cap the scale at the tiered ramp's TIGHT end
+# (MAP_SCALE_MIN, 1.35): field-calibrated against BOTH 2026-07-12 legs — 19:58 curve raw 64.9 ->
+# eff 80.6 mph (driver manually chose 80-82 there) => binds at set 90; morning sweepers raw 70.9 at
+# set 85 -> eff 88 => still silent (the morning over-slow complaint stays fixed). VTSC/MTSC/CES
+# classification keep the full tiered scale — this cap is ICBM-only.
+ICBM_MAP_EFF_SCALE_CAP = MAP_SCALE_MIN
+
+
+def icbm_map_eff_scale(tv_raw: float) -> float:
+  """icbmtrack2pnw: the ICBM-only effective scale for a RAW map target speed — the shared tiered
+  ramp, capped at its tight-curve end (see ICBM_MAP_EFF_SCALE_CAP root-cause note). Pure."""
+  return min(C.tiered_map_scale(tv_raw), ICBM_MAP_EFF_SCALE_CAP)
+
+
+def icbm_track_window_m(v_ego, ref, apex_eff) -> float:
+  """icbmtrack2pnw: how far ahead a binding-RATED map curve may START the set walk-down. Sized from
+  what the executor physically needs: one tap per ICBM_TAP_PERIOD_S walks the set (ref - apex_eff)
+  down in steps, plus margin — converted to distance at the WORST-CASE travel speed max(ref, v_ego)
+  (after a lead vanishes the ACC accelerates toward ref). Capped at ICBM_TRACK_MAX_M. The window
+  self-scales: small set-to-apex drops or low set speeds give short windows (no premature city
+  tracking); big highway drops use the full cap. Pure; never negative."""
+  try:
+    steps = max((float(ref) - float(apex_eff)) / ICBM_EXEC_STEP_MS, 0.0)
+    t = steps * ICBM_TAP_PERIOD_S + ICBM_TRACK_MARGIN_S
+    return min(max(float(ref), float(v_ego), 0.0) * t, ICBM_TRACK_MAX_M)
+  except (TypeError, ValueError):
+    return 0.0
+
+
+def _icbm_track_apex(v_ego, ref, eff, dist):
+  """icbmtrack2pnw: TRACKING qualification for a MAP candidate that the v_ego decel envelope does
+  not (yet) bind: reduce-only rated (eff meaningfully below ref) AND within the tracking window ->
+  the apex speed to walk the set toward. Else None. Same reduce-only/apex semantics as
+  _icbm_binding_apex — only the start precondition differs. Pure."""
+  if eff is None or dist == float('inf') or eff >= ref - ICBM_MIN_DROP_MS:
+    return None
+  if dist <= icbm_track_window_m(v_ego, ref, eff):
+    return max(eff, 0.0)
+  return None
+
 
 
 class IcbmEpisode:
@@ -1186,8 +1266,10 @@ class CESController:
       # stock set); during restore/idle a fresh cap latches at the current set.
       ep_ceiling = self._icbm_ep.ceiling if self._icbm_ep.phase == "cap" else None
       ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
+      # icbmtrack2pnw: ICBM-only capped scale (19:58:37Z root cause — the tiered sweeper end
+      # inflated a raw 64.9 mph curve to an effective 107 mph, so it never bound vs set 90).
       far_v, far_dist = icbm_far_map_candidate(self._map_targets, self._cur_lat, self._cur_lon,
-                                               sig["v_ego"], ref, C.tiered_map_scale,
+                                               sig["v_ego"], ref, icbm_map_eff_scale,
                                                self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
       # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
       # START a new episode — a running cap episode (phase 'cap', incl. its S-gap clear debounce)
@@ -1202,10 +1284,10 @@ class CESController:
         self._icbm_map_reach = round(map_reach, 0)
       target, _, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
-        sig.get("map_target_dist", float("inf")), ep_ceiling, C.tiered_map_scale,
+        sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
         vis_v, vis_dist,
         map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-        far_v=far_v, far_dist=far_dist)
+        far_v=far_v, far_dist=far_dist, track=True)
       if target is not None and starting:
         if in_curve:
           # driver rule 2: NEVER begin a new dec episode while already loaded in the curve — hold
@@ -1221,10 +1303,10 @@ class CESController:
           # a still-binding map/far candidate may start the episode instead of the gated vision one
           target, _, self._icbm_src = icbm_curve_target(
             sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
-            sig.get("map_target_dist", float("inf")), ep_ceiling, C.tiered_map_scale,
+            sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
             0.0, float("inf"),
             map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-            far_v=far_v, far_dist=far_dist)
+            far_v=far_v, far_dist=far_dist, track=True)
       # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
       # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
       # icbmalign2pnw: ICBM now applies the SAME descent + left-curve multipliers as VTSC — literally
