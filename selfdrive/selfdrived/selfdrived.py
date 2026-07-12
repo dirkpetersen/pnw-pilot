@@ -97,11 +97,17 @@ class SelfdriveD:
 
     car_recognized = self.CP.brand != 'mock'
 
-    # cleanup old params
-    if not self.CP.alphaLongitudinalAvailable:
-      self.params.remove("AlphaLongitudinalEnabled")
-    if not self.CP.openpilotLongitudinalControl:
-      self.params.remove("ExperimentalMode")
+    # cleanup old params — REAL fingerprints only.
+    # fpcache2pnw (2026-07-11 dashcam incident): a MOCK session is a flaky / no-car fingerprint on
+    # this shared two-car device, not evidence the car lacks these capabilities. MOCK has
+    # alphaLongitudinalAvailable=False and openpilotLongitudinalControl=False, so without this guard
+    # a single MOCK session silently erased the driver's AlphaLongitudinalEnabled (the op-long vs
+    # ICBM A/B switch) and ExperimentalMode preferences.
+    if car_recognized:
+      if not self.CP.alphaLongitudinalAvailable:
+        self.params.remove("AlphaLongitudinalEnabled")
+      if not self.CP.openpilotLongitudinalControl:
+        self.params.remove("ExperimentalMode")
 
     self.CS_prev = car.CarState.new_message()
     self.AM = AlertManager()

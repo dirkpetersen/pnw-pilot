@@ -117,7 +117,12 @@ class DeveloperLayout(Widget):
       alpha_avail = ui_state.CP.alphaLongitudinalAvailable
       if not alpha_avail or self._is_release:
         self._alpha_long_toggle.set_visible(False)
-        self._params.remove("AlphaLongitudinalEnabled")
+        # fpcache2pnw: only a REAL fingerprint that lacks alpha-long support may clear the driver's
+        # preference — never a MOCK (flaky/no-car) CP. ui_state.CP comes from CarParamsPersistent,
+        # which never-persist-MOCK keeps non-mock, so this is belt-and-braces (the live deleter was
+        # selfdrived.py — see the matching guard there).
+        if ui_state.CP.brand != "mock":
+          self._params.remove("AlphaLongitudinalEnabled")
       else:
         self._alpha_long_toggle.set_visible(True)
 
