@@ -67,6 +67,17 @@ DESCRIPTIONS = {
     "Hide the CES debug information box (bottom-right while driving: mode/reason, curve %, VTSC state, " +
     "map status). The box shows by default whenever CES is enabled."
   ),
+  "Ces2Core": tr_noop(
+    "CES2 decision core (redesign): graded stop-urgency from the model's trajectory endpoint, " +
+    "stop-evidence-beats-acceleration precedence at any speed, standstill hold at lights, and " +
+    "per-condition debounce. OFF (default) = today's CES decides while CES2 runs shadow-only " +
+    "(logged for A/B comparison). ON = CES2 decides. Leave OFF until shadow drives validate it."
+  ),
+  "CESTurns": tr_noop(
+    "CES2 turn-signal condition: below 55 mph, signaling a turn (blinker on with no lane-change " +
+    "in progress) switches to Experimental Mode for the maneuver. Only used by the CES2 core " +
+    "(shadow or live). Off by default."
+  ),
   "NudgelessLaneChange": tr_noop(
     "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
     "Hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
@@ -115,6 +126,20 @@ class TogglesLayout(Widget):
       "HideCESDebug": (
         lambda: tr("Hide CES Debug Information"),
         DESCRIPTIONS["HideCESDebug"],
+        "speed_limit.png",
+        False,
+      ),
+      # ces2core2pnw: CES2 decision core (CES2-STUDY.md). Default OFF = shadow-only A/B logging;
+      # sits right under the CES group so the whole CES family reads as one block.
+      "Ces2Core": (
+        lambda: tr("CES2 Decision Core (Shadow A/B)"),
+        DESCRIPTIONS["Ces2Core"],
+        "experimental_white.png",
+        False,
+      ),
+      "CESTurns": (
+        lambda: tr("CES2 Turn Signal Condition"),
+        DESCRIPTIONS["CESTurns"],
         "speed_limit.png",
         False,
       ),

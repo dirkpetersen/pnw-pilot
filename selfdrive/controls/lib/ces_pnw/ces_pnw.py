@@ -29,6 +29,9 @@ from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 # greenlight2pnw: pure standstill->release detector (sunnypilot mechanics + FrogPilot arming/lead
 # rules — attribution in green_light.py). Display/sound only; never gates control.
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetector
+# ces2core2pnw: the CES2 decision core (CES2-STUDY.md adoptions) — runs SHADOW every tick, decides
+# live only when the Ces2Core param is set (default OFF => v1 path below is byte-identical).
+from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, DivergenceCounter
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
@@ -1047,13 +1050,17 @@ class ConditionalExperimentalSwitching:
 
 def _toggles_from_params(params) -> dict:
   """Per-condition enables; default ON (the master switch is the real gate)."""
-  def gb(k):
+  def gb(k, default=True):
     try:
       return params.get_bool(k)
     except Exception:
-      return True
+      return default
+  # ces2core2pnw: "turns" (CESTurns) is the CES2 turn-signal condition — default OFF (study §5.2
+  # rule 3: ships dark for the first drives), unlike the four v1 conditions which default ON.
+  # decide_active (v1) ignores the key entirely.
   return {"curves": gb("CESCurves"), "stops": gb("CESStops"),
-          "low_speed": gb("CESLowSpeed"), "lead": gb("CESLead")}
+          "low_speed": gb("CESLowSpeed"), "lead": gb("CESLead"),
+          "turns": gb("CESTurns", default=False)}
 
 
 def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, map_target_dist: float,
@@ -1087,6 +1094,12 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
     model_should_stop = bool(model.action.shouldStop)
   except Exception:
     model_should_stop = False
+  # ces2core2pnw: lane-change intent (modelV2.meta.laneChangeState != off) — the CES2 TURN
+  # condition's "signaling a TURN, not a lane change" test (CEM F2's lane detection, v1 form).
+  try:
+    lane_change_intent = str(model.meta.laneChangeState) != "off"
+  except Exception:
+    lane_change_intent = False
 
   # set speed (openpilot's v_cruise, km/h on carState.vCruise) -> m/s; 255 is the unset sentinel.
   v_set_kph = float(getattr(car_state, 'vCruise', 0.0))
@@ -1105,6 +1118,9 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
     "a_ego": float(getattr(car_state, 'aEgo', 0.0)),                   # logged for verification
     "gas": bool(getattr(car_state, 'gasPressed', False)),             # logged for verification
     "brake": bool(getattr(car_state, 'brakePressed', False)),         # icbmrestore2pnw: episode abort
+    # ces2core2pnw: CES2-only inputs (v1 decide_active ignores both keys)
+    "standstill": bool(getattr(car_state, 'standstill', False)),      # CEM standstill hold
+    "lane_change_intent": lane_change_intent,                         # TURN condition lane test
   }
 
 
@@ -1129,6 +1145,16 @@ class CESController:
     self._mode = C.CES_MODE_OFF
     self._gentle = False
     self._sm = ConditionalExperimentalSwitching()
+    # ces2core2pnw: the CES2 core runs EVERY tick (pure functions on the same sig dict — cheap).
+    # Flag OFF (default): v1 decides, CES2 shadows; its would-be mode/reason/urgency + a cumulative
+    # divergence-edge counter go into every ces_events record (ces2Mode/ces2Reason/ces2Urgency/
+    # ces2Div). Flag ON (Ces2Core=1): CES2 decides and records mark ces2Live=true.
+    self._ces2 = Ces2Core()
+    self._ces2_live = False
+    self._ces2_mode = None
+    self._ces2_reason = None
+    self._ces2_urg = 0.0
+    self._ces2_div = DivergenceCounter()  # cumulative v1-vs-CES2 divergence EDGES this session
     self._enabled = False
     self._button = C.BTN_CES
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
@@ -1196,8 +1222,10 @@ class CESController:
       if gentle != self._gentle:
         if gentle:
           self._sm = ConditionalExperimentalSwitching(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
+          self._ces2 = Ces2Core(C.GENTLE_EXP_MIN_DWELL_S, C.GENTLE_CHILL_MIN_DWELL_S)
         else:
           self._sm = ConditionalExperimentalSwitching()
+          self._ces2 = Ces2Core()
       self._mode = mode
       self._gentle = gentle
 
@@ -1217,6 +1245,11 @@ class CESController:
           self._button = int(self.params.get("CESButtonState", return_default=True) or 0)
         except Exception:
           self._button = C.BTN_CES
+        # ces2core2pnw: CES2 live flag (default OFF = shadow-only; any read failure -> OFF)
+        try:
+          self._ces2_live = bool(self.params.get_bool("Ces2Core"))
+        except Exception:
+          self._ces2_live = False
         self._read_map()
     self._frame += 1
 
@@ -1301,6 +1334,7 @@ class CESController:
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
         self._last_mode = "off"
       self._sm.reset()
+      self._ces2.reset()               # ces2core2pnw: shadow state resets with the live one
       return False
 
     # Build the decision signals every cycle while enabled — even in the forced button modes —
@@ -1340,13 +1374,33 @@ class CESController:
     self._last_decide_t = now_t
     dt = min(max(dt, 1e-3), 0.5)           # clamp first call / scheduling hiccups
 
+    # ces2core2pnw: advance the CES2 core every tick a sig is available — SHADOW when the flag is
+    # OFF (v1 below stays the byte-identical decider), LIVE when Ces2Core=1. Pure functions on the
+    # same dict (Ces2Core copies it, never mutates); any CES2 exception degrades to v1.
+    ces2_want = None
+    if sig is not None and self._button != C.BTN_CHILL:
+      try:
+        ces2_want = self._ces2.update_decision(sig, dt) == "experimental"
+        self._ces2_mode = "experimental" if ces2_want else "chill"
+        self._ces2_reason = self._ces2.status()
+        self._ces2_urg = self._ces2.urgency
+      except Exception:
+        ces2_want = None
+        self._ces2_mode = self._ces2_reason = None
+
     if self._button == C.BTN_CHILL:        # forced Chill
       self._sm.reset()
+      self._ces2.reset()                   # ces2core2pnw: shadow state resets with the live one
+      self._ces2_mode = self._ces2_reason = None
       want = False
     elif self._button == C.BTN_EXP:        # forced full Experimental
       want = True
     elif sig is not None:                  # BTN_CES: condition ladder decides
-      want = self._sm.update_decision(sig, dt) == "experimental"
+      # v1 ALWAYS advances (it is the live decider when the flag is OFF, and the reverse-shadow
+      # divergence reference when the flag is ON).
+      want_v1 = self._sm.update_decision(sig, dt) == "experimental"
+      self._ces2_div.update(want_v1, ces2_want)   # divergence EDGES, not per-tick spam
+      want = ces2_want if (self._ces2_live and ces2_want is not None) else want_v1
     else:
       want = False
 
@@ -1539,8 +1593,19 @@ class CESController:
     # stopintent2pnw: the adopt record must show WHICH entry path fired — decide_active's reason
     # cannot know the state machine took the fast path, so override from the sm status (it holds
     # "stopIntent" exactly for the cycle the preemption happened).
-    if mode == "experimental" and self._sm.status() == "stopIntent":
-      tele["reason"] = "stopIntent"
+    # ces2core2pnw: when CES2 is LIVE, the CES2 core's status is the authoritative reason instead.
+    if mode == "experimental":
+      if self._ces2_live and self._ces2_reason:
+        tele["reason"] = self._ces2_reason
+      elif self._sm.status() == "stopIntent":
+        tele["reason"] = "stopIntent"
+    # ces2core2pnw shadow A/B channel: CES2's would-be decision + graded urgency + the cumulative
+    # divergence-edge counter, on EVERY record (the replay/acceptance dataset).
+    tele["ces2Mode"] = self._ces2_mode
+    tele["ces2Reason"] = self._ces2_reason
+    tele["ces2Urgency"] = round(float(self._ces2_urg), 3)
+    tele["ces2Div"] = self._ces2_div.count
+    tele["ces2Live"] = self._ces2_live
     tele["button"] = int(self._button)
     tele["enabled"] = True
     # mapd diagnostics so the overlay can always show what mapd is up to (curve half is map-driven):
@@ -1624,6 +1689,11 @@ class CESController:
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
       "mdlEndX": round(float(tele.get("mdlEndX") or 0.0), 1),
+      # ces2core2pnw shadow A/B: CES2 would-be mode/reason, graded stop urgency, cumulative
+      # divergence edges vs v1, and whether CES2 was LIVE (deciding) for this record.
+      "ces2Mode": tele.get("ces2Mode"), "ces2Reason": tele.get("ces2Reason"),
+      "ces2Urg": tele.get("ces2Urgency"), "ces2Div": tele.get("ces2Div"),
+      "ces2Live": tele.get("ces2Live"),
       # icbm2pnw closed-loop trace: published curve target (m/s, None = ICBM idle), latched driver
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.

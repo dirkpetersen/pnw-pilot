@@ -124,6 +124,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
     {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor
     {"CESLead", {PERSISTENT, BOOL, "1"}},     // ces2xnor
+    {"CESTurns", {PERSISTENT, BOOL, "0"}},    // ces2core2pnw: CES2 TURN condition (blinker + no lane-change intent < 55 mph, CEM F2). Default OFF for the first drives (study 5.2)
+    {"Ces2Core", {PERSISTENT, BOOL, "0"}},    // ces2core2pnw: CES2 decision core LIVE (1) vs shadow-only (0, DEFAULT: v1 decides byte-identically, CES2 logs ces2* fields to ces_events)
     {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
     {"IcbmTarget", {CLEAR_ON_MANAGER_START, JSON}}, // icbm2pnw: stock-ACC set-speed target (ces brain -> ford carcontroller executor), mem-param
