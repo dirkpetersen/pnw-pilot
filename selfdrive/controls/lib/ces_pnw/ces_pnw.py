@@ -940,6 +940,7 @@ def decision_telemetry(s) -> dict:
   return {
     "rawActive": bool(raw_active),
     "reason": reason,
+    "mdlEndX": round(float(s.get("mdl_end_x", 0.0)), 1),   # ces2-study replay dataset (log-only)
     "curvePct": int(round(cpct * 100)),
     "curveSrc": csrc,
     "mapV": round(float(s["map_target_v"]), 1),
@@ -1065,6 +1066,13 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
 
   try:
     orz = list(model.orientationRate.z); vx = list(model.velocity.x); tb = list(model.orientationRate.t)
+    # ces2-study: the model's trajectory ENDPOINT (position.x[-1], meters ahead) — the signal the
+    # graded stop-urgency in the CES2 design keys on (DEC/CEM both use it). Logged from now so the
+    # replay acceptance dataset accrues with every drive; NOT used in any decision yet.
+    try:
+      mdl_end_x = float(model.position.x[-1]) if len(model.position.x) else 0.0
+    except Exception:
+      mdl_end_x = 0.0
     vis_acc, ttc = vision_curve_lat_accel(orz, vx, tb, v_ego)
     # icbmmapfirst2pnw: lateral accel AT t~0 (yaw_rate*speed at the first model point) — the
     # "currently loaded in a curve" signal for the ICBM start/restore gates (icbm_in_curve).
@@ -1086,6 +1094,7 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
     "blinker": bool(car_state.leftBlinker or car_state.rightBlinker),
     "map_target_v": map_target_v, "map_target_dist": map_target_dist,   # map half (MapTargetVelocities)
     "curve_lat_accel_vision": vis_acc, "time_to_curve": ttc,            # vision fallback
+    "mdl_end_x": mdl_end_x,                                             # ces2-study replay dataset
     "lat_accel_now": lat_now,                                           # icbmmapfirst2pnw: in-curve gate
     "model_should_stop": model_should_stop, "toggles": toggles,
     "v_set": v_set,                                                     # accelerate-zone (set-speed gap)
@@ -1563,6 +1572,7 @@ class CESController:
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
+      "mdlEndX": round(float(tele.get("mdlEndX") or 0.0), 1),
       # icbm2pnw closed-loop trace: published curve target (m/s, None = ICBM idle), latched driver
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.
