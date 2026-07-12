@@ -72,6 +72,30 @@ GAP_OPEN_M           = 45.0  # m: a lead farther than this (and not slower) is "
 LEAD_PULLAWAY_MARGIN = 1.0   # m/s: lead counts as "not slower than us" if vLead >= vEgo - this
 V_SET_MAX_KPH        = 200.0 # kph: above this, treat vCruise as the unset sentinel (255) -> set speed unknown
 
+# --- pullaway2pnw (incident 2026-07-12 ~14:0x PT, city, op-long, Experimental) ------------------
+# At ~17 mph behind a lead that pulled away, CES stayed Experimental (e2e slow to accelerate) and
+# the truck lost the lead. Root cause: the redlight2pnw floor (ACCEL_ZONE_MIN_V, correct for the
+# NO-LEAD red-light approach) also blocked the legitimate lead-pull-away case just below it, and
+# the has-lead-far branch needs dRel > GAP_OPEN_M (45 m) — by which point city radar often drops
+# the lead entirely (-> no-lead floor again). Driver's standing rule: "the lead car cannot pull
+# away, that's unacceptable." The exception below is EVIDENCE-GATED and only ever ADOPTS CHILL
+# below the floor when ALL hold: lead PRESENT in a sane band, lead genuinely OPENING (speed delta
+# AND monotonic dRel rise over 3 spaced samples), the model does NOT want to stop (and has not
+# wanted to stop recently — the yellow-light trap: a lead clearing through while ego must stop),
+# and ego is actually moving. Any condition false -> exactly the redlight2pnw behavior.
+PULLAWAY_MIN_V        = 2.0   # m/s (~4.5 mph): never fire from (near) standstill — a light turning
+                              #   green releases via the existing logic, not this exception
+PULLAWAY_DV           = 1.0   # m/s: lead must be at least this much FASTER than ego (opening now)
+PULLAWAY_DREL_LO      = 5.0   # m: sane lead band — closer is not "pulled away"
+PULLAWAY_DREL_HI      = 60.0  # m: farther city leads are unreliable radar tracks / already gone
+PULLAWAY_SAMPLES      = 3     # monotonic dRel-rise evidence: this many spaced samples
+PULLAWAY_SAMPLE_GAP_S = 0.25  # s min spacing between samples (evidence spans >= 0.5 s)
+PULLAWAY_OPEN_EPS     = 0.3   # m: each sample must exceed the previous by at least this (real rise)
+PULLAWAY_JUMP_M       = 10.0  # m: a dRel jump bigger than this between samples = lead swap /
+                              #   radar reacquire -> evidence restarts from scratch
+PULLAWAY_STOP_CLEAR_S = 2.0   # s: the model must not have wanted to stop for at least this long —
+                              #   catches shouldStop flicker/lag while a lead clears a yellow light
+
 # --- debounce / dwell (de-flap) ---------------------------------------------
 # Drive log showed heavy flapping in stop&go (median 2.3 s between switches, 30 flips/min). Two
 # asymmetric dwell gates kill the sawtooth: once in Experimental, hold it EXP_MIN before returning to
