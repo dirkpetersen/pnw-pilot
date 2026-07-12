@@ -137,6 +137,12 @@ def test_icbm_step_gating_chill_vs_ces():
   mgr._map_targets = []
   mgr._cur_lat = None
   mgr._cur_lon = None
+  # icbmrestore2pnw: the episode machine + stock-ACC readings the step consumes
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode
+  mgr._icbm_ep = IcbmEpisode()
+  mgr._icbm_dir = None
+  mgr._stock_set = 0.0
+  mgr._stock_on = False
   step = cls._icbm_step.__get__(mgr)
 
   # sharp binding curve, CES active -> real dict target
@@ -329,6 +335,11 @@ def _icbm_stub(veh):
   mgr._map_targets = []
   mgr._cur_lat = None
   mgr._cur_lon = None
+  # icbmrestore2pnw: episode machine + stock-ACC readings
+  mgr._icbm_ep = m.IcbmEpisode()
+  mgr._icbm_dir = None
+  mgr._stock_set = 0.0
+  mgr._stock_on = False
   return mgr, cls._icbm_step.__get__(mgr)
 
 

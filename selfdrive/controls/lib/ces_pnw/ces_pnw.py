@@ -212,10 +212,155 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   if best_apex is not None:
     new_ceiling = ceiling if ceiling is not None else v_set
     return best_apex, new_ceiling, best_src
-  # curve cleared (or none): go silent and unlatch immediately. DEC-ONLY design (Gemini-hardened
-  # 2026-07-11): there is no restore path — the executor can only lower the set speed, and the
-  # driver restores it themselves. This kills the restore-vs-driver-intent fight entirely.
+  # curve cleared (or none): go silent and unlatch immediately. Caps remain DEC-ONLY
+  # (Gemini-hardened 2026-07-11); icbmrestore2pnw layers the GUARDED restore as a separate
+  # episode phase in IcbmEpisode below — this function itself never commands an increase.
   return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# icbmrestore2pnw — guarded restore episode (driver-requested 2026-07-12)
+# ---------------------------------------------------------------------------
+ICBM_RESTORE_WINDOW_S = 45.0            # restore may run at most this long after the curve clears
+ICBM_EXEC_STEP_MS = 1.0 * 0.44704       # one executor tap = 1 mph (mirror of ford icbm_pnw.STEP_MS)
+ICBM_RESTORE_DONE_TOL = 0.6 * ICBM_EXEC_STEP_MS   # within this of the ceiling = restored (matches DEADBAND)
+ICBM_DRIVER_LOWER_TOL = 0.6 * ICBM_EXEC_STEP_MS   # stock set below our lowest commanded target by more
+                                                  # than this = the DRIVER lowered it -> never restore.
+                                                  # 0.6 steps on purpose (Gemini adversarial catch): the
+                                                  # executor stops pressing at target+DEADBAND, so its own
+                                                  # overshoot below target is < 0.4 steps — anything a full
+                                                  # driver SET- tap below target (~1 step) must abort.
+ICBM_TAP_PERIOD_S = 0.4                 # executor completes at most one tap per this (PRESS+GAP frames)
+ICBM_RESTORE_DELAY_S = 3.0              # the curve must stay CLEAR this long before restore begins —
+                                        # flicker-proofing: a 1-tick detection dropout must not start
+                                        # pressing SET+ and then re-latch a lower ceiling when the
+                                        # curve re-binds (S-curve gaps keep the ORIGINAL ceiling)
+
+
+class IcbmEpisode:
+  """Cap -> clear -> RESTORE -> done state machine (pure, unit-tested; owned by CESController).
+
+  DEC remains the rule for CAPS. The restore phase ONLY returns the stock set speed to the driver's
+  OWN latched set (the ceiling ICBM itself latched when the first cap of the episode engaged) —
+  restore ONLY what ICBM took, never fight the driver:
+    - the ceiling is latched exclusively by an ICBM cap engaging (a driver-lowered set never arms it)
+    - a restore never publishes a target above the latched ceiling
+    - HARD ABORTS (reset -> silent -> executor stale-stops): driver gas/brake; stock ACC off;
+      window expiry (ICBM_RESTORE_WINDOW_S); reaching the ceiling; the stock set moving in a way
+      our taps can't explain (any decrease, or a rise faster than the executor tap cadence);
+      a NEW cap engaging — DEC ALWAYS WINS: the restore episode is cancelled entirely and a fresh
+      cap episode latches at the CURRENT set (after a partial restore the new ceiling is the
+      partially-restored speed, never the old higher one — conservative on purpose)
+    - if the driver lowered the set below anything we commanded during the cap phase, the episode
+      ends WITHOUT any restore (their intent, not ours).
+  The executor enforces its own independent envelope on top (ceiling clamp, stale heartbeat,
+  cruise/override gates, RestoreGuard human-detection latch)."""
+
+  def __init__(self, window_s: float = ICBM_RESTORE_WINDOW_S, clear_delay_s: float = ICBM_RESTORE_DELAY_S):
+    self._window_s = window_s
+    self._clear_delay_s = clear_delay_s
+    self.phase = "idle"                 # idle | cap | restore
+    self.ceiling = None                 # driver's own set (m/s), latched while an episode is active
+    self._min_target = None             # lowest cap target commanded this episode
+    self._t0 = None                     # restore start (monotonic)
+    self._clear_t0 = None               # first tick the curve was clear while capping (debounce)
+    self._hold_set0 = None              # stock set snapshot at hold entry (movement = human)
+    self._last_stock = None
+    self._last_t = None
+
+  def reset(self) -> None:
+    self.phase = "idle"
+    self.ceiling = None
+    self._min_target = None
+    self._t0 = None
+    self._clear_t0 = None
+    self._hold_set0 = None
+    self._last_stock = None
+    self._last_t = None
+
+  def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal):
+    """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
+    from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None)."""
+    if v_set is None or v_set <= 0.0:
+      self.reset()                      # no valid driver set -> hands off everything
+      return None, None
+    if not stock_on or driver_pedal:
+      # Gemini adversarial catch (ACC off/on survival): ANY pedal press or ACC-off in ANY phase
+      # kills the episode entirely — no episode may exist while the driver is braking/gassing or
+      # the ACC is disengaged. A cap present right now is still FORWARDED (dec-only; the executor
+      # independently gates presses on cruise/pedals), but WITHOUT an episode/latch: when
+      # conditions return, the next cap tick starts a FRESH episode latched at the THEN-current
+      # set — so a post-brake re-engage at a lower set can never be "restored" to the old ceiling.
+      self.reset()
+      if cap_target is not None:
+        return cap_target, "dec"
+      return None, None
+    if cap_target is not None:
+      # DEC ALWAYS WINS. A cap during RESTORE cancels the restore episode entirely and re-latches
+      # at the CURRENT set; a cap during CAP just continues the episode (ceiling untouched).
+      if self.phase != "cap":
+        self.reset()
+        self.phase = "cap"
+        self.ceiling = float(v_set)
+        self._min_target = float(cap_target)
+      else:
+        self._min_target = float(cap_target) if self._min_target is None else min(self._min_target, float(cap_target))
+      self._clear_t0 = None             # curve (re)bound: reset the clear debounce
+      return cap_target, "dec"
+
+    if self.phase == "cap":
+      # clear DEBOUNCE: hold silent (ceiling retained, executor stale-stops within 2 s) until the
+      # curve has stayed clear for clear_delay_s. A detection flicker or an S-curve gap therefore
+      # keeps the ORIGINAL ceiling instead of starting a restore and re-latching lower.
+      if self._clear_t0 is None:
+        self._clear_t0 = now
+        self._hold_set0 = stock_set     # snapshot: we go SILENT now, so nothing of ours moves the set
+      if (now - self._clear_t0) < self._clear_delay_s:
+        return None, None
+      # curve cleared (sustained) -> enter RESTORE only when the episode is cleanly ours:
+      eligible = (stock_on and not driver_pedal and self.ceiling is not None
+                  and stock_set is not None and stock_set > 0.0
+                  # the current set is explainable by OUR taps — if the driver went lower than the
+                  # lowest target we ever commanded, restoring would fight their intent: don't.
+                  and (self._min_target is None or stock_set >= self._min_target - ICBM_DRIVER_LOWER_TOL)
+                  # Gemini adversarial catch (the 3 s blind spot): the brain is SILENT through the
+                  # hold, so the executor does nothing — ANY set movement across the hold window is
+                  # a HUMAN choosing a speed. Movement (either direction) -> no restore at all.
+                  and self._hold_set0 is not None
+                  and abs(stock_set - self._hold_set0) <= ICBM_RESTORE_DONE_TOL
+                  # something to restore (not already at/above the ceiling)
+                  and stock_set < self.ceiling - ICBM_RESTORE_DONE_TOL)
+      if eligible:
+        self.phase = "restore"
+        self._t0 = now
+        self._last_stock = stock_set
+        self._last_t = now
+        return self.ceiling, "inc"
+      self.reset()
+      return None, None
+
+    if self.phase == "restore":
+      # hard aborts / completion — any of these ends the episode entirely (unlatch, go silent)
+      if (not stock_on or driver_pedal or stock_set is None or stock_set <= 0.0
+          or (now - self._t0) > self._window_s
+          or stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL):
+        self.reset()
+        return None, None
+      # brain-side manual-intervention detection (the executor's RestoreGuard is the fine-grained
+      # one; this catches it independently at the 4 Hz brain cadence):
+      if self._last_stock is not None:
+        dt = max(now - (self._last_t if self._last_t is not None else now), 0.0)
+        if stock_set < self._last_stock - ICBM_RESTORE_DONE_TOL:
+          self.reset()                  # set went DOWN: only a human does that during restore
+          return None, None
+        if stock_set > self._last_stock + ICBM_EXEC_STEP_MS * (dt / ICBM_TAP_PERIOD_S + 1.6):
+          self.reset()                  # rose faster than our taps can: driver holding SET+
+          return None, None
+      self._last_stock = stock_set
+      self._last_t = now
+      return self.ceiling, "inc"
+
+    return None, None                   # idle, no cap
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
@@ -593,6 +738,7 @@ def _signals_from(car_state, lead, model, toggles: dict, map_target_v: float, ma
     "spd_lim": float(spd_lim),                                         # OSM speed limit (lowSpeed highway gate)
     "a_ego": float(getattr(car_state, 'aEgo', 0.0)),                   # logged for verification
     "gas": bool(getattr(car_state, 'gasPressed', False)),             # logged for verification
+    "brake": bool(getattr(car_state, 'brakePressed', False)),         # icbmrestore2pnw: episode abort
   }
 
 
@@ -653,6 +799,9 @@ class CESController:
     self._icbm_last_pub = 0.0
     self._icbm_last_target = None
     self._icbm_src = None                  # curveslow-lightning: "map"/"vis"/None for the drive log
+    # icbmrestore2pnw: the cap->clear->restore episode machine + the current direction for telemetry
+    self._icbm_ep = IcbmEpisode()
+    self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
     self._stock_set = 0.0
     self._stock_on = False
 
@@ -821,6 +970,8 @@ class CESController:
         self._icbm_ceiling = None
         self._icbm_last_target = None
         self._icbm_src = None
+        self._icbm_dir = None
+        self._icbm_ep.reset()           # icbmrestore2pnw: forced Chill / no data ends any episode
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
       # curveslow-lightning: vision curve candidate (the 493-curve gap: ICBM was MAP-ONLY and blind to
@@ -831,13 +982,17 @@ class CESController:
       # 90 mph) hid curves that need the full 500 m mapd publishes (the 2026-07-11 silent-ICBM run).
       # Capability-supplied knobs: map_scale (<=1 OSM discount) + firm_decel (large-drop envelope);
       # both neutral (1.0 / 0.0) on any non-Lightning.
-      ref = self._icbm_ceiling if self._icbm_ceiling is not None else sig["v_set"]
+      # icbmrestore2pnw: the episode machine owns the ceiling latch now. While a CAP episode is
+      # active, curve binding is judged against ITS latched ceiling (v_set follows the tapped-down
+      # stock set); during restore/idle a fresh cap latches at the current set.
+      ep_ceiling = self._icbm_ep.ceiling if self._icbm_ep.phase == "cap" else None
+      ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
       far_v, far_dist = icbm_far_map_candidate(self._map_targets, self._cur_lat, self._cur_lon,
                                                sig["v_ego"], ref, C.tiered_map_scale,
                                                self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
-      target, self._icbm_ceiling, self._icbm_src = icbm_curve_target(
+      target, _, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
-        sig.get("map_target_dist", float("inf")), self._icbm_ceiling, C.tiered_map_scale,
+        sig.get("map_target_dist", float("inf")), ep_ceiling, C.tiered_map_scale,
         vis_v, vis_dist,
         map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
         far_v=far_v, far_dist=far_dist)
@@ -866,11 +1021,27 @@ class CESController:
           is_left = False
         target = max(target - self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
                                                                is_left=is_left), 0.0)
-      self._icbm_last_target = round(target, 2) if target is not None else None
-      if target is not None:
+      # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
+      # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
+      driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
+      pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
+                                                 self._stock_set, self._stock_on, driver_pedal)
+      self._icbm_ceiling = self._icbm_ep.ceiling
+      self._icbm_dir = direction
+      if direction == "inc":
+        self._icbm_src = "restore"      # telemetry: the restore phase is its own source label
+      self._icbm_last_target = round(pub_target, 2) if pub_target is not None else None
+      if pub_target is not None:
         # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —
         # Gemini review catch that would have silently killed every publish)
-        self.mem_params.put_nonblocking("IcbmTarget", {"target": round(target, 2), "ceiling": round(self._icbm_ceiling, 2), "ts": time.time()})  # noqa: TID251 -- wall clock heartbeat shared with the executor
+        # ceiling: the episode latch, or — for an episode-less forwarded cap (ACC off / pedal
+        # pressed, episode reset) — the driver's current set: the exact pre-restore reduce-only
+        # semantics. The executor clamps target <= ceiling either way.
+        ceil_pub = self._icbm_ceiling if self._icbm_ceiling is not None else sig["v_set"]
+        payload = {"target": round(pub_target, 2), "ceiling": round(ceil_pub, 2), "ts": time.time()}  # noqa: TID251 -- wall clock heartbeat shared with the executor
+        if direction == "inc":
+          payload["dir"] = "inc"        # explicit marker: executor's inc path is ONLY reachable via this
+        self.mem_params.put_nonblocking("IcbmTarget", payload)
       else:
         self.mem_params.put_nonblocking("IcbmTarget", {})
     except Exception:
@@ -897,7 +1068,8 @@ class CESController:
     tele["shadow"] = self._shadow
     if self._shadow:
       tele["icbmT"] = self._icbm_last_target
-      tele["icbmSrc"] = self._icbm_src           # curveslow-lightning: "map"/"vis" source of the target
+      tele["icbmSrc"] = self._icbm_src           # curveslow-lightning: "map"/"vis"/"restore" source
+      tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
       tele["icbmSet"] = self._stock_set
       tele["icbmOn"] = self._stock_on
 
@@ -961,6 +1133,7 @@ class CESController:
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.
       "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling, "icbmSrc": self._icbm_src,
+      "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,
     }
 
