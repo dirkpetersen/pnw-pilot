@@ -489,6 +489,19 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.HIGHEST, VisualAlert.fcw, AudibleAlert.warningSoft, 2.),
   },
 
+  # greenlight2pnw: always-on green-light ding (detection: ces_pnw/green_light.py — sunnypilot
+  # mechanics + FrogPilot arming/lead rules, see CREDITS.md). ET.PERMANENT so it shows engaged OR
+  # disengaged; Priority.LOW so any real alert wins; AudibleAlert.prompt = the existing single
+  # pleasant chime (no new sound asset). The green background is keyed on this alertType in
+  # selfdrive/ui/onroad/alert_renderer.py. Display/sound only — no control path.
+  EventName.greenLight: {
+    ET.PERMANENT: Alert(
+      "Light is green",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
   EventName.ldw: {
     ET.PERMANENT: Alert(
       "Lane Departure Detected",

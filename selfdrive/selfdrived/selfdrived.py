@@ -179,6 +179,11 @@ class SelfdriveD:
     if self.sm.updated['audioFeedback']:
       self.events.add(EventName.audioFeedback)
 
+    # greenlight2pnw: green-light ding — set by CESController._green_light_step last cycle
+    # (always-on, works with CES off too). Display/sound only; no control path.
+    if self.ces_pnw.green_light:
+      self.events.add(EventName.greenLight)
+
     # Don't add any more events while in dashcam mode
     if self.CP.passive:
       return

@@ -88,6 +88,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     lowMemory @51;
     stockAeb @52;
     stockLkas @98;
+    greenLight @99;  # greenlight2pnw: model released a held standstill (green-light ding) — display/sound only
     ldw @53;
     carUnrecognized @54;
     invalidLkasSetting @55;

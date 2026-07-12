@@ -70,6 +70,19 @@ wherever available.
   **[@tonesto7](https://github.com/tonesto7)** — principal maintainers/contributors of the
   sunnypilot DEC controller.
 
+### Green Light Alert
+- **[@sunnyhaibin](https://github.com/sunnyhaibin)** (Jason Wen) and the **sunnypilot**
+  contributors — the core mechanics PNW-pilot adopted
+  (`sunnypilot/selfdrive/controls/lib/e2e_alerts_helper.py`): the armed/consumed one-ding-per-stop
+  state machine, the model-trajectory-endpoint (>30 m) release trigger, the 0.3 s sustained-trigger
+  debounce, and the 2 s not-recently-moving arming guard.
+- **[@FrogAi](https://github.com/FrogAi)** (James) — FrogPilot's Green Light Alert
+  (`frogpilot/controls/lib/frogpilot_events.py`), from which we adopted stop-context arming (only
+  after the model actually held a stop) and the alert-regardless-of-engagement behavior, and whose
+  lead handling informed our "suppress while a close lead is still stopped, ding once it departs"
+  rule. Implementation: `selfdrive/controls/lib/ces_pnw/green_light.py` (adjudication documented
+  in its docstring).
+
 ### mapd, OSM speed limits, and Vision/Map Turn Speed Control
 - **[@pfeiferj](https://github.com/pfeiferj)** (Jacob Pfeifer) — author of
   [pfeiferj/mapd](https://github.com/pfeiferj/mapd), the Go OSM speed-limit/curvature engine

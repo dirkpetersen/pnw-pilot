@@ -26,6 +26,9 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+# greenlight2pnw: pure standstill->release detector (sunnypilot mechanics + FrogPilot arming/lead
+# rules — attribution in green_light.py). Display/sound only; never gates control.
+from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetector
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
@@ -1173,6 +1176,12 @@ class CESController:
     # pullaway2pnw: stateful evidence for the below-floor lead-pull-away exception (monotonic
     # dRel rise + model-stop recency). Feeds sig["lead_opening"]; pure logic stays in decide_active.
     self._pullaway_trk = PullAwayTracker()
+    # greenlight2pnw: ALWAYS-ON green-light ding (driver decision 2026-07-12: no toggle). Runs
+    # every cycle BEFORE the CES-enabled gate so it works with CESMode off too. selfdrived reads
+    # .green_light (True for exactly one cycle per firing) and raises the alert event.
+    self._gl = GreenLightDetector()
+    self._gl_last_t = None
+    self.green_light = False
     # icbmmapfirst2pnw: start-gate telemetry — WHY a would-be new episode was suppressed this tick
     # ("inCurve" / "visCovered" / "visLate" / None) + the map coverage reach (m; 0 = mapd blind/dead,
     # the mapd-liveness evidence for the field logs). Display/log only — never gates control here.
@@ -1285,6 +1294,8 @@ class CESController:
       self._stock_on = bool(car_state.cruiseState.enabled)
     except Exception:
       self._stock_set, self._stock_on = 0.0, False
+    # greenlight2pnw: always-on (independent of CESMode/_enabled — display/sound only)
+    self._green_light_step(car_state, sm)
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -1348,6 +1359,46 @@ class CESController:
     if self._shadow:
       self._icbm_step(sig, active=(sig is not None and self._button == C.BTN_CES))
     return want and self._long_ok
+
+  def _green_light_step(self, car_state, sm) -> None:
+    """greenlight2pnw: advance the pure GreenLightDetector one cycle and latch .green_light for
+    selfdrived (True for exactly the firing cycle). Best-effort: any message hiccup means 'no
+    ding this cycle', never an exception into selfdrived's control loop. Model-based and
+    car-agnostic — reads only vEgo/gasPressed, modelV2 (endpoint + shouldStop) and
+    radarState.leadOne; no fingerprints, no CAN, no control output."""
+    now = time.monotonic()
+    dt = (now - self._gl_last_t) if self._gl_last_t is not None else DT_CTRL
+    self._gl_last_t = now
+    fired = False
+    try:
+      model = sm['modelV2']
+      lead = sm['radarState'].leadOne
+      try:
+        mdl_end_x = float(model.position.x[-1]) if len(model.position.x) else 0.0
+      except Exception:
+        mdl_end_x = 0.0
+      try:
+        should_stop = bool(model.action.shouldStop)
+      except Exception:
+        should_stop = False
+      has_lead = bool(getattr(lead, 'status', False))
+      fired = self._gl.update(dt, float(car_state.vEgo), bool(getattr(car_state, 'gasPressed', False)),
+                              should_stop, mdl_end_x, has_lead,
+                              float(getattr(lead, 'dRel', 0.0)) if has_lead else 0.0,
+                              float(getattr(lead, 'vLead', 0.0)) if has_lead else 0.0)
+      if fired:
+        cloudlog.info("greenlight2pnw: FIRED mdlEndX=%.1f lead=%s", mdl_end_x, has_lead)
+        # dedicated ces_events record (works even with CES off — log-validation channel)
+        self._append_event({
+          "t": round(time.time(), 1),  # noqa: TID251 -- wall clock, for route/time correlation
+          "ev": "greenLight", "mdlEndX": round(mdl_end_x, 1), "lead": has_lead,
+          "dRel": round(float(getattr(lead, 'dRel', 0.0)), 1) if has_lead else 0.0,
+          "vEgo": round(float(car_state.vEgo), 2),
+          "lat": self._cur_lat, "lon": self._cur_lon,
+        })
+    except Exception:
+      fired = False
+    self.green_light = fired
 
   def _icbm_step(self, sig, active: bool) -> None:
     """Publish the IcbmTarget mem-param at ~4 Hz (executor treats >2 s silence as stale-stop).
@@ -1582,6 +1633,9 @@ class CESController:
       # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether
       # mapd was alive — mapReach 0/None with mapPts 0 = the mapd-outage signature).
       "icbmGate": self._icbm_gate, "mapReach": self._icbm_map_reach,
+      # greenlight2pnw: detector state per tick ("idle"/"armed"/"fired") — the arming trail; the
+      # firing itself also gets a dedicated ev="greenLight" record (see _green_light_step).
+      "greenLight": self._gl.state,
     }
 
   def _append_event(self, rec: dict) -> None:
