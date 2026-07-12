@@ -223,13 +223,35 @@ class TogglesLayout(Widget):
     # strict, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
     # the Always-On DM toggle below. Not longitudinal-gated — always available. ("Default", not "Off" —
     # monitoring is never off; 0 just means no relaxation.)
+    # dm-variable UI gate (driver directive 2026-07-11): the Relaxed option is INVISIBLE unless the
+    # device-local /data/pnw/dm.json carries relaxed.enabled=true (set only via the `dm` CLI — never
+    # from this UI). Without the unlock the selector offers Default/Highway only, and a stale
+    # DmMode=2 is clamped back to 0 so display and behavior agree. Read once at UI start (defensive:
+    # any read failure -> locked). Unlocking via `dm relaxed --enable` shows the option after the
+    # next UI restart / ignition cycle.
+    _dm_relaxed_unlocked = False
+    try:
+      from openpilot.selfdrive.monitoring.dm_config import read_raw_config, relaxed_enabled
+      _dm_relaxed_unlocked = relaxed_enabled(read_raw_config())
+    except Exception:
+      _dm_relaxed_unlocked = False
+    _dm_buttons = [lambda: tr("Default"), lambda: tr("Highway")]
+    if _dm_relaxed_unlocked:
+      _dm_buttons.append(lambda: tr("Relaxed"))
+    _dm_selected = int(self._params.get("DmMode", return_default=True) or 0)
+    if not _dm_relaxed_unlocked and _dm_selected >= 2:
+      _dm_selected = 0
+      try:
+        self._params.put("DmMode", 0)
+      except Exception:
+        pass
     self._dm_mode_setting = multiple_button_item(
       lambda: tr("Driver Monitoring"),
       lambda: tr(DESCRIPTIONS["DmMode"]),
-      buttons=[lambda: tr("Default"), lambda: tr("Highway"), lambda: tr("Relaxed")],
+      buttons=_dm_buttons,
       button_width=255,
       callback=self._set_dm_mode,
-      selected_index=self._params.get("DmMode", return_default=True),
+      selected_index=_dm_selected,
       icon="monitoring.png"
     )
 
