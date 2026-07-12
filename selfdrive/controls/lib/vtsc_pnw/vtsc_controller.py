@@ -289,7 +289,14 @@ class VTSCController:
     # over-slow), which is what makes the lower A_LAT_TARGET safe. Off-highway / no limit data -> no floor
     # (V_MIN still applies). A curve genuinely too tight for the limit is then the driver's to handle.
     if self._is_freeway and self._speed_limit > 0.0:
-      capped = min(v_cruise, max(capped, self._speed_limit))
+      # curveslow-lightning floor fix (2026-07-11 evening passes): the floor was erasing the
+      # Lightning penalty on posted-limit sweepers — caps pinned at exactly the 65 mph limit
+      # (29.1 m/s) through all 13 takeovers while the penalized v_curve sat ~4.5 m/s lower.
+      # The Lightning may trim BELOW the posted limit by its own penalty (weaker EPS needs it);
+      # the Tesla's penalty is 0.0 so its floor stays exactly at the posted limit (driver rule
+      # 2026-07-01 unchanged for the Tesla).
+      floor_v = max(self._speed_limit - self.veh.curve_speed_penalty_ms(self._speed_limit), C.V_MIN)
+      capped = min(v_cruise, max(capped, floor_v))
 
     engaged = capped < v_cruise_set - 0.5
     if engaged != self._engaged:
