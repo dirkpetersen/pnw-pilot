@@ -156,13 +156,15 @@ comma device's setup screen. **Only the comma 3X is tested.**
    fresh device boot).
 2. Connect the device to Wi-Fi.
 3. When asked for the software to install, choose **Custom Software** and enter one of:
-   - **Production (stable):** `installer.comma.ai/dirkpetersen/pnwprod`
-   - **Test / staging:** `installer.comma.ai/dirkpetersen/pnwtest`
+   - **Production (stable):** `installer.comma.ai/dirkpetersen/3pnw`
+   - **Test / staging:** `installer.comma.ai/dirkpetersen/3testpnw`
+   - **Development (not recommended):** `installer.comma.ai/dirkpetersen/3devpnw`
 4. Confirm; the device downloads and installs PNW Pilot, then reboots into it.
 
 These URLs resolve through GitHub's `dirkpetersen/openpilot` → `dirkpetersen/pnw-pilot` redirect, so
 the comma installer (which clones `<user>/openpilot`) finds the PNW fork automatically. Use
-`pnwtest` to validate a build, then `pnwprod` for the stable install.
+`3testpnw` to validate a build, then `3pnw` for the stable install; `3devpnw` is the active
+development channel and can change (or break) daily.
 
 ---
 
