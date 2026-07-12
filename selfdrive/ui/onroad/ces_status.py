@@ -163,7 +163,10 @@ class CesStatusRenderer(Widget):
       if it is not None:
         t_mph = round(float(it) * conv)
         s_mph = round(float(st.get("icbmSet") or 0.0) * conv)
-        if s_mph > t_mph:
+        if st.get("icbmDir") == "inc":
+          # icbmrestore2pnw: restoring the driver's own set after a curve — "ICBM 55>75", calm green
+          out.append((f"ICBM {s_mph}>{t_mph}", _C.GREEN, self.font))
+        elif s_mph > t_mph:
           out.append((f"ICBM {s_mph}>{t_mph}", _C.ORANGE, self.font_bold))
         else:
           out.append((f"ICBM @{t_mph}", _C.GREY, self.font))
