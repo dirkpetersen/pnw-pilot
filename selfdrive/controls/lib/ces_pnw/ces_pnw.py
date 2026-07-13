@@ -1015,6 +1015,14 @@ class ConditionalExperimentalSwitching:
     # stophold2pnw (A2): seconds model_should_stop has been CONTINUOUSLY clear. Initialized to the
     # hold threshold ("clear long ago") so a fresh machine never spuriously holds.
     self._stop_clear_s = C.STOP_CLEAR_HOLD_S
+    # standstill2pnw (see the constants block for the field basis + design):
+    self._ss_lead_s = 0.0        # s of continuous lead presence at standstill (promotion debounce)
+    self._at_standstill = False  # True while Experimental at v < STANDSTILL_LATCH_V (latch active)
+    self._ss_close_lead = False  # a lead was within STANDSTILL_RELEASE_DREL during the standstill
+                                 #   (sticky across radar dropouts — the field flip ticks all show
+                                 #   lead=False; only a SEEN gap > CLEAR_DREL clears it)
+    self._release_hold = False   # armed at the release tick when _ss_close_lead; holds Experimental
+                                 #   until v > STANDSTILL_RELEASE_V or the gap opens past CLEAR_DREL
 
   def reset(self):
     self._cond.reset()
@@ -1022,6 +1030,10 @@ class ConditionalExperimentalSwitching:
     self._dwell = 0.0
     self._status = "chill"
     self._stop_clear_s = C.STOP_CLEAR_HOLD_S  # stophold2pnw (A2)
+    self._ss_lead_s = 0.0                     # standstill2pnw
+    self._at_standstill = False
+    self._ss_close_lead = False
+    self._release_hold = False
 
   def mode(self) -> str:
     return "experimental" if self._is_experimental else "chill"
@@ -1034,6 +1046,9 @@ class ConditionalExperimentalSwitching:
     `dt` is the MEASURED loop period (selfdrived runs at 100 Hz) so the dwell/debounce are real
     seconds. Separated from `update(sm)` so it is unit-testable without cereal messages."""
     raw_active, status = decide_active(signals)
+    v_now = float(signals.get("v_ego", 0.0))
+    has_lead = bool(signals.get("has_lead", False))
+    d_rel = float(signals.get("lead_drel", 0.0) or 0.0)
     # stophold2pnw (A2): track how long the model's stop intent has been continuously clear —
     # updated FIRST so the timer is correct on every path out of this function (incl. the
     # stopIntent fast-path early return below). Capped at the threshold (no unbounded float).
@@ -1041,6 +1056,13 @@ class ConditionalExperimentalSwitching:
       self._stop_clear_s = 0.0
     else:
       self._stop_clear_s = min(self._stop_clear_s + dt, C.STOP_CLEAR_HOLD_S)
+    # standstill2pnw: sustained-lead evidence at standstill (the promotion debounce) — updated
+    # FIRST like _stop_clear_s so it is correct on every path. A lead DROPOUT resets it (strict
+    # continuity: a single-tick radar ghost can never charge it). Capped at the threshold.
+    if v_now < C.STANDSTILL_LATCH_V and has_lead:
+      self._ss_lead_s = min(self._ss_lead_s + dt, C.STANDSTILL_PROMOTE_LEAD_S)
+    else:
+      self._ss_lead_s = 0.0
     # stopintent2pnw (driver-approved): ABSOLUTE stop-intent fast path. When the model's stop
     # intent (model_should_stop — the exact signal the red-light guard keys on) asserts AND the
     # decision ladder wants Experimental, entering Experimental bypasses EVERYTHING on the entry
@@ -1060,6 +1082,28 @@ class ConditionalExperimentalSwitching:
       self._status = "stopIntent"      # telemetry tag: every fast-path preemption is visible
       self._dwell = 0.0
       self._cond.force()               # exit side sees a fully-charged condition (normal semantics)
+      self._at_standstill = v_now < C.STANDSTILL_LATCH_V   # standstill2pnw: latch state from entry
+      self._release_hold = False
+      self._ss_close_lead = False
+      return self.mode()
+    # standstill2pnw PROMOTE: at standstill in Chill with the ladder wanting Experimental (only
+    # slowLead / stop can be raw-active at v~0 — lowSpeed has a 1.0 floor, curve needs
+    # CRUISING_SPEED), enter WITHOUT the CHILL_MIN_DWELL_S cooldown or the ~1 s filter charge —
+    # at 0 mph those anti-flap timers were FIGHTING the trigger (the 11:34-11:38Z flapping), and
+    # Experimental at standstill is strictly safer. Gated on STANDSTILL_PROMOTE_LEAD_S of
+    # CONTINUOUS lead presence instead (radar-ghost debounce); the latch below then makes the
+    # promoted state absorbing at standstill, so chill<->exp oscillation is structurally impossible
+    # there. Exit semantics stay normal (force() = fully-charged condition, full return dwell).
+    if (not self._is_experimental and raw_active
+        and v_now < C.STANDSTILL_LATCH_V
+        and self._ss_lead_s >= C.STANDSTILL_PROMOTE_LEAD_S):
+      self._is_experimental = True
+      self._status = status            # the real trigger (slowLead/stop) — meaningful in the logs
+      self._dwell = 0.0
+      self._cond.force()
+      self._at_standstill = True
+      self._release_hold = False
+      self._ss_close_lead = has_lead and d_rel <= C.STANDSTILL_RELEASE_DREL
       return self.mode()
     cond_active = self._cond.update(raw_active, dt)   # debounced (real-time)
     self._dwell += dt
@@ -1071,26 +1115,64 @@ class ConditionalExperimentalSwitching:
         self._is_experimental = True
         self._status = status
         self._dwell = 0.0
+        self._at_standstill = v_now < C.STANDSTILL_LATCH_V   # standstill2pnw: latch state from entry
+        self._release_hold = False
+        self._ss_close_lead = has_lead and d_rel <= C.STANDSTILL_RELEASE_DREL and self._at_standstill
     else:
+      # standstill2pnw: maintain the latch / release-hold state EVERY Experimental tick (not only
+      # when an exit is eligible — the release tick can land while a condition is still charged).
+      if v_now < C.STANDSTILL_LATCH_V:
+        self._at_standstill = True
+        self._release_hold = False     # moot while stopped — the latch owns standstill
+        if has_lead and d_rel <= C.STANDSTILL_RELEASE_DREL:
+          self._ss_close_lead = True
+        elif has_lead and d_rel > C.STANDSTILL_RELEASE_CLEAR_DREL:
+          self._ss_close_lead = False  # a SEEN open gap clears it; lead-absent ticks keep the last
+                                       # value (radar dropouts at standstill are the field norm —
+                                       # every 11:34-11:38Z flip tick logged lead=False)
+      else:
+        if self._at_standstill:
+          # the RELEASE tick: leaving standstill with a close lead arms the hold — the launch into
+          # a short gap stays model-governed instead of a Chill MPC launch into a 9-14 m gap.
+          self._release_hold = self._ss_close_lead
+          self._at_standstill = False
+          self._ss_close_lead = False
+        if self._release_hold and (v_now > C.STANDSTILL_RELEASE_V
+                                   or (has_lead and d_rel > C.STANDSTILL_RELEASE_CLEAR_DREL)):
+          self._release_hold = False   # launch complete / gap opened: hand back to the ladder.
+                                       # Lead LOSS deliberately does not disarm (a dropout mid-launch
+                                       # must not re-open the jolt); the hold is bounded by v > 5.
       # stay Experimental; return to Chill only when the condition cleared (sustained via filter)
       # AND we've held Experimental at least EXP_MIN_DWELL_S
       if status != "chill":
         self._status = status      # keep showing the active reason
       if not cond_active and self._dwell >= self._exp_min:
+        # standstill2pnw LATCH: at standstill (or during the close-lead release hold) an
+        # Experimental machine may not demote — zero benefit to Chill at 0 mph, and every demotion
+        # there sets up a lurch. A pure demotion GATE: no timer pauses (dwell keeps accumulating,
+        # nothing can leak "frozen"), and it releases the instant v_ego rises / the hold disarms —
+        # both re-checked from live signals every tick. NOT gated on the stops toggle: this is
+        # mode-flap hygiene at 0 mph, not stop machinery. Fail-safe direction only (like A2): it
+        # can never enter Experimental, only delay leaving it.
+        if v_now < C.STANDSTILL_LATCH_V or self._release_hold:
+          self._status = "standstillHold"   # telemetry: the hold is all that keeps Experimental
         # stophold2pnw (A2): standstill-departure hold. Below STANDSTILL_HOLD_V, "the conditions
         # cleared" (typically: the lead crept and slowLead dropped) is NOT sufficient to hand the
         # launch to Chill's MPC — the model must also have agreed GO (shouldStop continuously
         # clear for STOP_CLEAR_HOLD_S). Respects the per-condition "stops" toggle, like the
         # stopIntent fast path. Tagged "stopHold" so field logs show every hold explicitly.
         # Fail-safe direction only: this can never enter Experimental, only delay leaving it.
-        if (float(signals.get("v_ego", 0.0)) < C.STANDSTILL_HOLD_V
-            and self._stop_clear_s < C.STOP_CLEAR_HOLD_S
-            and bool(signals.get("toggles", {}).get("stops", True))):
+        elif (v_now < C.STANDSTILL_HOLD_V
+              and self._stop_clear_s < C.STOP_CLEAR_HOLD_S
+              and bool(signals.get("toggles", {}).get("stops", True))):
           self._status = "stopHold"   # telemetry: the hold is the only thing keeping Experimental
         else:
           self._is_experimental = False
           self._status = "chill"
           self._dwell = 0.0
+          self._at_standstill = False   # standstill2pnw: clean slate for the next episode
+          self._release_hold = False
+          self._ss_close_lead = False
     return self.mode()
 
 
@@ -1694,8 +1776,11 @@ class CESController:
     if mode == "experimental":
       if self._ces2_live and self._ces2_reason:
         tele["reason"] = self._ces2_reason
-      elif self._sm.status() == "stopIntent":
-        tele["reason"] = "stopIntent"
+      # standstill2pnw: the hold tags too — while a hold is the ONLY thing keeping Experimental,
+      # decide_active's reason reads "chill", which made the 11:34 flapping forensics blind to WHY
+      # the mode was held. Overlay/log now shows the state machine's authoritative reason.
+      elif self._sm.status() in ("stopIntent", "stopHold", "standstillHold"):
+        tele["reason"] = self._sm.status()
     # ces2core2pnw shadow A/B channel: CES2's would-be decision + graded urgency + the cumulative
     # divergence-edge counter, on EVERY record (the replay/acceptance dataset).
     tele["ces2Mode"] = self._ces2_mode
