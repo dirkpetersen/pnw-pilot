@@ -65,7 +65,7 @@ EV_OTHER_RETRY_S = 300                                                 # min gap
 # 'nodata' (no false alerts).
 DEFAULT_PROXY = {
   "source": "",                                     # "" = auto (key -> direct, else proxy) | "proxy" | "direct"
-  "proxy_url": "WAZE_PROXY_URL_PLACEHOLDER",        # keyless edge proxy (Cloudflare Worker)
+  "proxy_url": "https://jh69za4byd.execute-api.us-west-2.amazonaws.com/alerts",  # keyless AWS proxy
   "proxy_auth": "",                                 # rotatable x-pnw-auth gate value (guards OUR quota shield,
                                                     # not the RapidAPI key; fine to ship in-distribution)
   "url": "https://waze-api.p.rapidapi.com/alerts",  # legacy direct upstream (used only with a key)
