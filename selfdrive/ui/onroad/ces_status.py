@@ -63,6 +63,23 @@ class _C:
   BG = rl.Color(0, 0, 0, 140)
 
 
+def _f(v, d: float = 0.0) -> float:
+  """Gemini review 2026-07-12: CESStatus is an arbitrary dict off /dev/shm — a key holding an
+  explicit None sails through dict.get(k, default) and int(None)/None*conv would crash-loop the
+  UI (this fork's documented brick scenario). All numeric reads go through these coercers."""
+  try:
+    return float(v)
+  except (TypeError, ValueError):
+    return d
+
+
+def _i(v, d: int = 0) -> int:
+  try:
+    return int(v)
+  except (TypeError, ValueError):
+    return d
+
+
 def _dots_w(fs: float, n: int) -> float:
   """Width the health-dot strip adds after a line's text (lead gap + n dots + gaps between)."""
   if n <= 0:
@@ -171,7 +188,7 @@ class CesStatusRenderer(Widget):
       # stophold2pnw (C): the alarm replaces the data lines entirely — a stale snapshot must not
       # keep painting plausible-looking (dead) numbers next to the alarm.
       self._cached_layout = self._alarm_layout()
-    elif self._ces_enabled and self._st.get("enabled") and int(self._st.get("button", 0)) == 0:
+    elif self._ces_enabled and self._st.get("enabled") and _i(self._st.get("button", 0)) == 0:
       if self._dump:
         entries, fs, line_h = self._lines_full(), _FS_SM, _LINE_H_SM
       else:
@@ -194,7 +211,7 @@ class CesStatusRenderer(Widget):
     """cesui2pnw: 3 dots = map-data / gps / long-channel. Green carries the same information the
     old 'map 24pts gps' + 'map-DB OK' + 'ICBM ready' lines did, in a fraction of the space."""
     st = self._st
-    pts = int(st.get("mapPts", 0))
+    pts = _i(st.get("mapPts", 0))
     mdl = self._mapdl
     if pts > 0:
       map_dot = _C.GREEN
@@ -231,8 +248,8 @@ class CesStatusRenderer(Widget):
     conv = self._conv
     it = st.get("icbmT")
     if it is not None:
-      t_mph = round(float(it) * conv)
-      s_mph = round(float(st.get("icbmSet") or 0.0) * conv)
+      t_mph = round(_f(it) * conv)
+      s_mph = round(_f(st.get("icbmSet")) * conv)
       if st.get("icbmDir") == "inc":
         # icbmrestore2pnw: restoring the driver's own set after a curve — "ICBM 55>75", calm green
         return (f"ICBM {s_mph}>{t_mph}", _C.GREEN, self.font, None)
@@ -258,7 +275,7 @@ class CesStatusRenderer(Widget):
     if mm:
       out.append(mm)
 
-    button = int(st.get("button", 0))
+    button = _i(st.get("button", 0))
     btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
     out.append((btn, _C.WHITE, self.font_bold, self._health_dots()))
 
@@ -268,7 +285,7 @@ class CesStatusRenderer(Widget):
 
     vt = self._vtsc
     if vt.get("enabled") and vt.get("engaged"):
-      out.append((f"VTSC slowing {round(vt.get('cap', 0.0) * conv)}", _C.ORANGE, self.font_bold, None))
+      out.append((f"VTSC slowing {round(_f(vt.get('cap')) * conv)}", _C.ORANGE, self.font_bold, None))
 
     # the ">> EXPERIMENTAL" mode line is gone (top-right icon tracks the live mode) — the why-line
     # alone implies Experimental; grey in shadow where the decision doesn't actuate.
@@ -277,8 +294,8 @@ class CesStatusRenderer(Widget):
       out.append((f"why {reason}", _C.GREY if st.get("shadow") else _C.WHITE, self.font, None))
 
     # next binding map curve — only when it's actually near (within _NEXT_CURVE_S at current speed)
-    mapv = float(st.get("mapV", 0.0))
-    mapd = float(st.get("mapDist", 0.0))
+    mapv = _f(st.get("mapV"))
+    mapd = _f(st.get("mapDist"))
     if 0.0 < mapv < _REAL_CURVE_MS and mapd > 0.0:
       try:
         v_now = max(abs(float(ui_state.sm["carState"].vEgo)), 1.0)
@@ -287,14 +304,14 @@ class CesStatusRenderer(Widget):
       if mapd / v_now < _NEXT_CURVE_S:
         out.append((f"next {round(mapv * conv)} {round(mapd)}m", _C.ORANGE, self.font, None))
 
-    pct = max(0, min(100, int(st.get("curvePct", 0))))
+    pct = max(0, min(100, _i(st.get("curvePct", 0))))
     if pct >= _CURVE_SHOW_PCT:
       src = st.get("curveSrc", "") or "--"
       pct_col = _C.ORANGE if pct < 100 else _C.RED
       out.append((f"curve {pct}% {src}", pct_col, self.font, None))
 
     # a non-green health dot expands into its full text line so a problem is spelled out in words
-    pts = int(st.get("mapPts", 0))
+    pts = _i(st.get("mapPts", 0))
     if pts == 0:
       mdl = self._mapdl
       if mdl.startswith("downloading"):
@@ -324,7 +341,7 @@ class CesStatusRenderer(Widget):
     if mm:
       out.append(mm)
 
-    button = int(st.get("button", 0))
+    button = _i(st.get("button", 0))
     btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
     out.append((btn, _C.WHITE, self.font_bold, self._health_dots()))
 
@@ -341,7 +358,7 @@ class CesStatusRenderer(Widget):
     vt = self._vtsc
     if vt.get("enabled"):
       if vt.get("engaged"):
-        out.append((f"VTSC slowing {round(vt.get('cap', 0.0) * conv)}", _C.ORANGE, self.font_bold, None))
+        out.append((f"VTSC slowing {round(_f(vt.get('cap')) * conv)}", _C.ORANGE, self.font_bold, None))
       else:
         out.append(("VTSC ready", _C.GREY, self.font, None))
 
@@ -360,13 +377,13 @@ class CesStatusRenderer(Widget):
       out.append(("hwy-gate", _C.GREEN, self.font, None))
       out.append(("(no lowSpd)", _C.GREEN, self.font, None))
 
-    pct = max(0, min(100, int(st.get("curvePct", 0))))
+    pct = max(0, min(100, _i(st.get("curvePct", 0))))
     src = st.get("curveSrc", "") or "--"
     pct_col = _C.GREEN if pct < 60 else (_C.ORANGE if pct < 100 else _C.RED)
     out.append((f"curve {pct}% {src}", pct_col, self.font, None))
 
     # mapd liveness
-    pts = int(st.get("mapPts", 0))
+    pts = _i(st.get("mapPts", 0))
     gps = bool(st.get("gps", False))
     if pts == 0:
       out.append(("map no-data", _C.RED, self.font, None))
@@ -390,9 +407,9 @@ class CesStatusRenderer(Widget):
     # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
     # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
     # not clear"). Only call it clear when there's NEITHER an upcoming map curve NOR a tracked lead.
-    mapv = float(st.get("mapV", 0.0))
-    mapd = float(st.get("mapDist", 0.0))
-    drel = float(st.get("dRel", 0.0))
+    mapv = _f(st.get("mapV"))
+    mapd = _f(st.get("mapDist"))
+    drel = _f(st.get("dRel"))
     if 0.0 < mapv < _REAL_CURVE_MS and mapd > 0.0:
       out.append((f"next {round(mapv * conv)} {round(mapd)}m", _C.ORANGE, self.font, None))
     elif drel > 0.0:
