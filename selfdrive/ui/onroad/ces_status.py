@@ -13,8 +13,20 @@ path while moving. Three tiers:
   moving, all quiet (2 lines):    CES AUTO ● ● ●        dots = map / gps / long health (green=OK)
   moving, event live (≤5 lines):  + ICBM 75>62 / VTSC slowing / why <reason> / next 34 140m ...
                                   a non-green dot expands into its full text line (map no-data, ...)
-  standstill (<~1 mph):           the FULL diagnostic dump at a smaller font — you can read at a
-                                  red light; while moving you only glance.
+  standstill (<~1 mph):           the full picture as a GROUPED COCKPIT CARD (dumpui2pnw, driver
+                                  feedback 2026-07-13: the old one-datum-per-line dump "looks a
+                                  little crude"). Structure — alarms (red, full width, on top) /
+                                  a HEADLINE (button identity + the 3 health dots) / the effective
+                                  mode (shadow-aware) / a REASON line (why <trigger/hold>) / a
+                                  fixed-slot 3x2 label:value grid (map,DB,gps | vtsc,long,curve —
+                                  every slot always present, "--" when idle, so the eye learns where
+                                  each datum lives) / an always-present one-line situation strip
+                                  (next-curve | lead | road clear | —) / short active-only tag chips
+                                  (rain / accel-zone / hwy-gate+no-lowSpd / STEER 4-SIG). The card
+                                  WIDTH is fixed (measured once from worst-case exemplars, never from
+                                  live values) so it never dances left/right as numbers change at a
+                                  stop; height changes only when an alarm or flag chip appears —
+                                  itself information. Same data as the old dump, regrouped.
 The ">> CHILL / >> EXPERIMENTAL" effective-mode line is GONE from the moving view (driver: the
 top-right icon already tracks selfdriveState.experimentalMode live — white=CES-chill, yellow=CES-
 exp, orange=forced); it survives only inside the standstill dump (shadow sessions included, where
@@ -49,8 +61,23 @@ _GRACE_S = 10.0      # s onroad before the dead-man may alarm (selfdrived spawn 
                      #   also covers a stale /dev/shm leftover from the previous onroad session)
 _FS = 64             # moving-view font (driver feedback: the original small font was unreadable)
 _LINE_H = 80
-_FS_SM = 48          # standstill-dump font — 1.5x the original size, readable when stopped
+_FS_SM = 48          # standstill-card font — 1.5x the original size, readable when stopped
 _LINE_H_SM = 62
+# dumpui2pnw: standstill grouped-card geometry (all derived from the card font _FS_SM)
+_SEP_H = 22          # height of a thin group-divider row
+_COL_GAP = 44        # horizontal gap between the grid's two columns
+_LBL_GAP = 16        # gap between a grid cell's label and its value
+_DOT_R = _FS_SM * 0.19
+# STABLE WIDTH: the card's width is measured ONCE from fixed worst-case exemplars (with the real
+# font, so it is metric-correct) — NOT from the live values — so it can never dance left/right as
+# numbers change at a stop (Gemini review 2026-07-13). The exemplars below cover every string the
+# card can actually show; live text is left-aligned inside the fixed box.
+_GRID_LABEL_EX = "curve"       # widest grid label
+_GRID_VALUE_EX = "slow 000"    # widest grid value (>= "000% map" / "000>000" / "dl 000%" / "142p")
+_CARD_LINE_EX = (              # widest full-width lines (alarms / headline / mode / reason / strip)
+  "LONG MISMATCH - RESTART", "STEER: NO 4SIG PANDA", ">> SHADOW EXPERIMENTAL",
+  "why standstillHold", "next 000 000m",
+)
 _PAD = 24
 _MARGIN = 40         # gap from the screen's right / bottom edges
 _REAL_CURVE_MS = 40.0  # a map target speed below this (~90 mph) counts as a real curve to preview
@@ -81,6 +108,7 @@ class _C:
   GREEN = rl.Color(90, 205, 115, 240)
   RED = rl.Color(235, 70, 70, 240)
   BG = rl.Color(0, 0, 0, 140)
+  SEP = rl.Color(120, 124, 122, 150)   # dumpui2pnw: dim group-divider line
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -128,6 +156,10 @@ class CesStatusRenderer(Widget):
     self._clean_streak = 0       # fordlatui2pnw: consecutive clean 4-signal-at-speed polls
     self._4sig_ok = False        # fordlatui2pnw: panda proven to accept 4-signal this session (locks off the alarm)
     self._cached_layout = None   # (entries, box_w, box_h, fs, line_h) — rebuilt at poll time (5 Hz)
+    self._card_layout = None     # dumpui2pnw: standstill grouped-card layout (built at poll time);
+                                 #   takes precedence over _cached_layout when non-None
+    self._card_metrics = None    # dumpui2pnw: (box_w_inner, label_w, col_w) — fixed, computed once
+                                 #   from exemplars so the card width never jitters as values change
     # rain2pnw: read the configured rain magnitudes once (mph); defaults 3/5 if unavailable
     self._rain_mph = {1: 3.0, 2: 5.0}
     if _rain_cfg_loader is not None:
@@ -247,20 +279,22 @@ class CesStatusRenderer(Widget):
     # Build the line list + box size HERE (5 Hz poll) instead of every render frame (20 Hz): the
     # content only changes when the polled state does.
     self._cached_layout = None
+    self._card_layout = None      # dumpui2pnw: exactly one of _cached_layout / _card_layout is set
     if self._no_signal:
       # stophold2pnw (C): the alarm replaces the data lines entirely — a stale snapshot must not
       # keep painting plausible-looking (dead) numbers next to the alarm.
       self._cached_layout = self._alarm_layout()
     elif self._ces_enabled and self._st.get("enabled") and _i(self._st.get("button", 0)) == 0:
       if self._dump:
-        entries, fs, line_h = self._lines_full(), _FS_SM, _LINE_H_SM
+        # dumpui2pnw: standstill grouped cockpit card (own layout + renderer)
+        self._card_layout = self._build_card()
       else:
         entries, fs, line_h = self._lines_moving(), _FS, _LINE_H
-      if entries:
-        box_w = max(measure_text_cached(f, t, fs).x + _dots_w(fs, len(d) if d else 0)
-                    for t, _, f, d in entries) + _PAD * 2
-        box_h = line_h * len(entries) + _PAD * 2
-        self._cached_layout = (entries, box_w, box_h, fs, line_h)
+        if entries:
+          box_w = max(measure_text_cached(f, t, fs).x + _dots_w(fs, len(d) if d else 0)
+                      for t, _, f, d in entries) + _PAD * 2
+          box_h = line_h * len(entries) + _PAD * 2
+          self._cached_layout = (entries, box_w, box_h, fs, line_h)
 
   def _alarm_layout(self):
     """stophold2pnw (C): the single red NO-SIGNAL line as a cached layout tuple."""
@@ -451,110 +485,183 @@ class CesStatusRenderer(Widget):
 
     return out[:_MAX_LINES_MOVING]
 
-  # ---- standstill view: the full diagnostic dump ------------------------------
-  def _lines_full(self) -> list[tuple]:
-    """Everything, small font — readable at a red light, which is exactly when you debug."""
+  # ---- standstill view: the grouped cockpit card (dumpui2pnw) ------------------
+  # The card is a list of tagged ROWS, laid out by _render_card:
+  #   ("full", text, color, font, dots|None)   full-width left-aligned line (+ optional right dots)
+  #   ("sep",)                                  a thin group divider
+  #   ("kv", left_cell, right_cell)             two label:value cells; cell = (label,value,color)|None
+  #   ("tags", [(text,color), ...])             a row of short active-only chips
+  def _grid_cells(self):
+    """The fixed 3x2 grid, ALWAYS six cells (idle -> '--'), so the card holds one stable shape.
+    Left column = mapd/OSM group (map / DB / gps); right = control group (vtsc / long / curve)."""
     st = self._st
     conv = self._conv
-    out: list[tuple] = []
-
-    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
-      if line:
-        out.append(line)
-
-    button = _i(st.get("button", 0))
-    btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
-    out.append((btn, _C.WHITE, self.font_bold, self._health_dots()))
-
-    # dump-only green confirmation that the 4-signal path IS live (moving view stays dark when healthy)
-    try:
-      if str(self._fordlat.get("mode") or "") == "4sig" and (time.time() - float(self._fordlat.get("ts"))) <= _FORDLAT_STALE_S:  # noqa: TID251
-        out.append(("STEER 4-SIG", _C.GREEN, self.font, None))
-    except (TypeError, ValueError):
-      pass
-
-    rain = self._rain_line()
-    if rain:
-      out.append(rain)
-
-    is_exp = st.get("mode") == "experimental"
-    # icbm2pnw (driver report 2026-07-11): in SHADOW nothing actuates — orange means "acting", so
-    # shadow shows grey SHADOW-prefixed modes; orange EXPERIMENTAL is reserved for real actuation.
-    # (Moving view drops this line — the top-right icon is live — but the dump keeps it: in shadow
-    # the icon can't show the shadow decision, and the dump is the full picture by contract.)
-    if st.get("shadow"):
-      out.append((">> SHADOW EXP" if is_exp else ">> SHADOW CHILL", _C.GREY, self.font_bold, None))
+    # --- left: map points, OSM DB, gps fix ---
+    pts = _i(st.get("mapPts", 0))
+    map_cell = ("map", f"{pts}p" if pts > 0 else "0", _C.GREEN if pts > 0 else _C.RED)
+    mdl = self._mapdl
+    if not mdl:
+      db_cell = ("DB", "--", _C.GREY)
     else:
-      out.append((">> EXPERIMENTAL" if is_exp else ">> CHILL", _C.ORANGE if is_exp else _C.GREY, self.font_bold, None))
-
+      col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
+      disp = mdl.replace("downloading", "dl")
+      if len(disp) > 7:
+        disp = disp[:6] + "…"                 # visible ellipsis, never a silent mid-word chop
+      db_cell = ("DB", disp, col)
+    gps = bool(st.get("gps", False))
+    gps_cell = ("gps", "ok" if gps else "no", _C.GREEN if gps else _C.ORANGE)
+    # --- right: VTSC, longitudinal authority, curve closeness ---
     vt = self._vtsc
-    if vt.get("enabled"):
-      if vt.get("engaged"):
-        out.append((f"VTSC slowing {round(_f(vt.get('cap')) * conv)}", _C.ORANGE, self.font_bold, None))
-      else:
-        out.append(("VTSC ready", _C.GREY, self.font, None))
-
-    if st.get("shadow"):
-      icbm = self._icbm_line(active_only=False)
-      if icbm:
-        out.append(icbm)
-
-    reason = st.get("reason", "")
-    if is_exp and reason and reason not in ("chill", ""):
-      out.append((f"why {reason}", _C.WHITE, self.font, None))
-
-    if st.get("accelZone"):
-      out.append(("accel-zone open", _C.GREEN, self.font, None))
-    if st.get("hwyGate"):
-      out.append(("hwy-gate", _C.GREEN, self.font, None))
-      out.append(("(no lowSpd)", _C.GREEN, self.font, None))
-
+    if vt.get("enabled") and vt.get("engaged"):
+      vtsc_cell = ("vtsc", f"slow {round(_f(vt.get('cap')) * conv)}", _C.ORANGE)
+    elif vt.get("enabled"):
+      vtsc_cell = ("vtsc", "ready", _C.GREY)
+    else:
+      vtsc_cell = ("vtsc", "--", _C.GREY)
+    long_cell = self._long_cell()
     pct = max(0, min(100, _i(st.get("curvePct", 0))))
     src = st.get("curveSrc", "") or "--"
     pct_col = _C.GREEN if pct < 60 else (_C.ORANGE if pct < 100 else _C.RED)
-    out.append((f"curve {pct}% {src}", pct_col, self.font, None))
+    curve_cell = ("curve", f"{pct}% {src}", pct_col)
+    return [(map_cell, vtsc_cell), (db_cell, long_cell), (gps_cell, curve_cell)]
 
-    # mapd liveness
-    pts = _i(st.get("mapPts", 0))
-    gps = bool(st.get("gps", False))
-    if pts == 0:
-      out.append(("map no-data", _C.RED, self.font, None))
-    elif not gps:
-      out.append((f"map {pts}p no-gps", _C.ORANGE, self.font, None))   # "p" not "pts": width budget
+  def _long_cell(self):
+    """Grid 'long' cell = longitudinal authority state. Shadow -> the ICBM stock-ACC button manager
+    (target vs set); non-shadow -> openpilot longitudinal 'op' when VTSC (the CES-side long) is live."""
+    st = self._st
+    conv = self._conv
+    if st.get("shadow"):
+      it = st.get("icbmT")
+      if it is not None:
+        t_mph = round(_f(it) * conv)
+        s_mph = round(_f(st.get("icbmSet")) * conv)
+        if st.get("icbmDir") == "inc":
+          return ("long", f"{s_mph}>{t_mph}", _C.GREEN)   # icbmrestore2pnw: restoring driver's set
+        if s_mph > t_mph:
+          return ("long", f"{s_mph}>{t_mph}", _C.ORANGE)  # capping the set down for a curve
+        return ("long", f"@{t_mph}", _C.GREY)
+      return ("long", "ready" if st.get("icbmOn") else "no-ACC",
+              _C.GREEN if st.get("icbmOn") else _C.GREY)
+    return ("long", "op" if self._vtsc.get("enabled") else "--",
+            _C.GREEN if self._vtsc.get("enabled") else _C.GREY)
+
+  def _build_card(self):
+    """Assemble the grouped standstill card + measure its box. Returns
+    (rows, box_w, box_h, label_w, col_w) or None when there is nothing to show."""
+    st = self._st
+    conv = self._conv
+    fs = _FS_SM
+    rows: list[tuple] = []
+
+    # (1) alarms — red/orange, on top, never grouped away (same three as the moving view)
+    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
+      if line:
+        rows.append(("full", line[0], line[1], line[2], None))
+
+    # (2) headline: button identity + the 3 health dots (map / gps / long)
+    button = _i(st.get("button", 0))
+    btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
+    rows.append(("full", btn, _C.WHITE, self.font_bold, self._health_dots()))
+
+    # (3) effective mode — shadow-aware (orange EXPERIMENTAL is reserved for real actuation; in
+    # shadow nothing actuates so it reads grey; the top-right icon can't show the shadow decision,
+    # which is exactly why the card keeps this line).
+    is_exp = st.get("mode") == "experimental"
+    if st.get("shadow"):
+      rows.append(("full", ">> SHADOW EXP" if is_exp else ">> SHADOW CHILL", _C.GREY, self.font_bold, None))
     else:
-      out.append((f"map {pts}pts gps", _C.GREEN, self.font, None))
+      rows.append(("full", ">> EXPERIMENTAL" if is_exp else ">> CHILL",
+                   _C.ORANGE if is_exp else _C.GREY, self.font_bold, None))
 
-    # SEPARATE from the live map-data line above: is the OSM map DB actually downloaded? (driver asked for
-    # this so "map no-data" isn't conflated with "maps not installed".) green=OK, orange=downloading, red=not.
-    mdl = self._mapdl
-    if mdl:
-      col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
-      # keep within the width budget: "downloading 42%" -> "dl 42%"; long/error strings get a
-      # visible ellipsis instead of a silent mid-word chop (Gemini: "unreachable" -> "unreacha")
-      disp = mdl.replace("downloading", "dl")
-      if len(disp) > 8:
-        disp = disp[:7] + "…"
-      out.append((f"map-DB {disp}", col, self.font, None))
+    # (4) why <reason> — the binding trigger / hold (stopHold, standstillHold, slowLead, ...). Shown
+    # whenever meaningful, in either mode, so the standstill holds are visible right where you debug.
+    reason = st.get("reason", "")
+    if reason and reason not in ("chill", ""):
+      rows.append(("full", f"why {reason}", _C.WHITE, self.font, None))
 
-    # next binding map curve (a real slowdown ahead) -> else the lead gap if one is tracked -> else clear.
-    # ces-i90-2pnw: "road clear" used to show even with a car right in front (5/12 drive: "road obviously
-    # not clear"). Only call it clear when there's NEITHER an upcoming map curve NOR a tracked lead.
+    # (5) the fixed 3x2 diagnostics grid
+    rows.append(("sep",))
+    cells = self._grid_cells()
+    for left, right in cells:
+      rows.append(("kv", left, right))
+
+    # (6) situation strip — next binding map curve -> else the tracked lead gap -> else road clear.
+    # ces-i90-2pnw: only "road clear" when there is NEITHER an upcoming curve NOR a tracked lead.
+    rows.append(("sep",))
     mapv = _f(st.get("mapV"))
     mapd = _f(st.get("mapDist"))
     drel = _f(st.get("dRel"))
+    pts = _i(st.get("mapPts", 0))
+    gps = bool(st.get("gps", False))
+    # ALWAYS emit exactly one situation line (a "—" fallback), so the common stopped-behind-a-lead
+    # case (lead <-> clear, dRel ticking) never adds/removes a row — the card height stays put.
     if 0.0 < mapv < _REAL_CURVE_MS and mapd > 0.0:
-      out.append((f"next {round(mapv * conv)} {round(mapd)}m", _C.ORANGE, self.font, None))
+      rows.append(("full", f"next {round(mapv * conv)} {round(mapd)}m", _C.ORANGE, self.font, None))
     elif drel > 0.0:
-      out.append((f"lead {round(drel)}m", _C.GREY, self.font, None))
+      rows.append(("full", f"lead {round(drel)}m", _C.GREY, self.font, None))
     elif pts > 0 and gps:
-      out.append(("road clear", _C.GREEN, self.font, None))
+      rows.append(("full", "road clear", _C.GREEN, self.font, None))
+    else:
+      rows.append(("full", "—", _C.GREY, self.font, None))
 
-    return out
+    if not rows:
+      return None
+
+    # --- FIXED metrics (computed once from exemplars — never from live text — so the card width is
+    # stable across the 5 Hz rebuilds; live numbers are left-aligned inside the fixed box). Width is
+    # driven by the grid + the widest full line only; the chip row wraps to fit it (below). ---
+    if self._card_metrics is None:
+      label_w = measure_text_cached(self.font, _GRID_LABEL_EX, fs).x
+      val_w = measure_text_cached(self.font, _GRID_VALUE_EX, fs).x
+      col_w = label_w + _LBL_GAP + val_w
+      grid_w = 2 * col_w + _COL_GAP
+      line_w = max(measure_text_cached(self.font_bold, s, fs).x for s in _CARD_LINE_EX)
+      line_w = max(line_w, measure_text_cached(self.font_bold, "CES AUTO", fs).x + _dots_w(fs, 3))
+      self._card_metrics = (max(grid_w, line_w), label_w, col_w)
+    box_w_inner, label_w, col_w = self._card_metrics
+
+    # (7) active-only tag chips — rain / accel-zone / hwy-gate + no-lowSpd / 4-signal-live. One
+    # compact chip row instead of four separate lines (the crudeness the driver flagged); it WRAPS
+    # to the fixed card width so a rare all-flags-on stop adds a chip row rather than widening.
+    chips: list[tuple] = []
+    rain = self._rain_line()
+    if rain:
+      chips.append((rain[0], rain[1]))                 # "RAIN -3", grey
+    if st.get("accelZone"):
+      chips.append(("accel-zone", _C.GREEN))
+    if st.get("hwyGate"):
+      chips.append(("hwy-gate", _C.GREEN))
+      chips.append(("no-lowSpd", _C.GREY))             # the old dump's "(no lowSpd)" note, preserved
+    try:
+      if str(self._fordlat.get("mode") or "") == "4sig" and (time.time() - float(self._fordlat.get("ts"))) <= _FORDLAT_STALE_S:  # noqa: TID251
+        chips.append(("STEER 4-SIG", _C.GREEN))        # dump-only green confirm the 4-sig path is live
+    except (TypeError, ValueError):
+      pass
+    line, used = [], 0.0
+    for chip in chips:
+      w = measure_text_cached(self.font, chip[0], fs).x + _COL_GAP
+      if line and used + w > box_w_inner:              # would overflow the fixed width -> wrap
+        rows.append(("tags", line))
+        line, used = [], 0.0
+      line.append(chip)
+      used += w
+    if line:
+      rows.append(("tags", line))
+
+    box_w = box_w_inner + _PAD * 2
+    box_h = _PAD * 2
+    for tag, *_rest in rows:
+      box_h += _SEP_H if tag == "sep" else _LINE_H_SM
+    return (rows, box_w, box_h, label_w, col_w)
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
     # visibility gates (enabled, CES-auto button mode only, NO-SIGNAL alarm) are applied at poll
-    # time in _update_state; _cached_layout is None whenever the overlay should be hidden.
+    # time in _update_state; both layouts are None whenever the overlay should be hidden.
+    # dumpui2pnw: the standstill grouped card has its own layout + renderer (takes precedence).
+    if self._card_layout is not None:
+      self._render_card(rect)
+      return
     # stophold2pnw (C): gate on the layout ALONE — the NO-SIGNAL alarm must render even when
     # HideCESDebug has turned the data overlay off (an alarm is not debug decoration).
     if self._cached_layout is None:
@@ -579,3 +686,54 @@ class CesStatusRenderer(Widget):
           rl.draw_circle(int(cx), int(cy), r, dc)
           cx += 2 * r + fs * 0.22
       y += line_h
+
+  def _render_card(self, rect: rl.Rectangle):
+    """dumpui2pnw: render the grouped standstill card. Content is LEFT-aligned (instrument-panel
+    feel); the box stays anchored bottom-right. Full rows draw their optional health dots against
+    the right edge; kv rows draw two aligned label:value cells; sep rows draw a dim divider."""
+    layout = self._card_layout
+    if layout is None:
+      return
+    rows, box_w, box_h, label_w, col_w = layout
+    fs = _FS_SM
+    bx = rect.x + rect.width - box_w - _MARGIN
+    by = rect.y + rect.height - box_h - _MARGIN
+    rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), 0.10, 8, _C.BG)
+    x0 = bx + _PAD
+    right = bx + box_w - _PAD
+    y = by + _PAD
+    for tag, *rest in rows:
+      if tag == "sep":
+        ly = int(y + _SEP_H * 0.5)
+        rl.draw_line_ex(rl.Vector2(x0, ly), rl.Vector2(right, ly), 2.0, _C.SEP)
+        y += _SEP_H
+        continue
+      if tag == "full":
+        text, color, font, dots = rest
+        rl.draw_text_ex(font, text, rl.Vector2(x0, y), fs, 0, color)
+        if dots:
+          tw = measure_text_cached(font, text, fs).x
+          r = _DOT_R
+          # dots hug the right edge so the identity line reads "CES AUTO ........ ● ● ●"
+          n = len(dots)
+          strip_w = n * 2 * r + (n - 1) * fs * 0.22
+          cx = max(x0 + tw + fs * 0.4 + r, right - strip_w + r)
+          cy = y + fs * 0.55
+          for dc in dots:
+            rl.draw_circle(int(cx), int(cy), r, dc)
+            cx += 2 * r + fs * 0.22
+      elif tag == "kv":
+        left, rightc = rest
+        for i, cell in enumerate((left, rightc)):
+          if not cell:
+            continue
+          cx = x0 + i * (col_w + _COL_GAP)
+          rl.draw_text_ex(self.font, cell[0], rl.Vector2(cx, y), fs, 0, _C.GREY)      # label
+          rl.draw_text_ex(self.font, cell[1], rl.Vector2(cx + label_w + _LBL_GAP, y), fs, 0, cell[2])  # value
+      elif tag == "tags":
+        chips = rest[0]
+        cx = x0
+        for text, color in chips:
+          rl.draw_text_ex(self.font, text, rl.Vector2(cx, y), fs, 0, color)
+          cx += measure_text_cached(self.font, text, fs).x + _COL_GAP
+      y += _LINE_H_SM
