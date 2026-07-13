@@ -7,9 +7,45 @@ from pathlib import Path
 from openpilot.system.hardware.hw import Paths
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.loggerd.uploader import main, UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE
+from openpilot.system.loggerd.uploader import main, pass2_allowed, PASS2_NETWORK_TYPES, UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE
+from cereal import log
 
 from openpilot.system.loggerd.tests.loggerd_tests_common import UploaderTestCase
+
+WIFI = next(iter(PASS2_NETWORK_TYPES))
+CELL = int(log.DeviceState.NetworkType.cell4G)
+
+
+class TestPass2Gate:
+  """firehose2pnw: the pass-2 (rlog/HD) eligibility gate. Base rule is WiFi + not-metered; the onroad
+  block is relaxed at a priority (home) network (pure location override) or, on any other WiFi, while
+  standstill — so an EV charging at home (ignitionLine on -> onroad) still uploads, but a 75 MB burst
+  can never fire mid-maneuver on a random WiFi."""
+
+  def test_offroad_wifi_allows(self):
+    assert pass2_allowed(WIFI, metered=False, onroad=False)
+
+  def test_metered_always_blocks(self):
+    # metered is an absolute block on every axis — even parked, even at a priority network
+    assert not pass2_allowed(WIFI, metered=True, onroad=False)
+    assert not pass2_allowed(WIFI, metered=True, onroad=True, at_home=True, standstill=True)
+
+  def test_non_wifi_always_blocks(self):
+    assert not pass2_allowed(CELL, metered=False, onroad=False)
+    assert not pass2_allowed(CELL, metered=False, onroad=True, at_home=True, standstill=True)
+
+  def test_onroad_plain_blocks(self):
+    # driving on a non-priority WiFi, moving -> the original onroad protection still holds
+    assert not pass2_allowed(WIFI, metered=False, onroad=True, at_home=False, standstill=False)
+
+  def test_onroad_at_home_overrides(self):
+    # EV charging at home keeps ignition on (onroad) but must still upload — location override,
+    # no standstill requirement
+    assert pass2_allowed(WIFI, metered=False, onroad=True, at_home=True, standstill=False)
+
+  def test_onroad_standstill_other_wifi_allows(self):
+    # any other WiFi: onroad pass-2 only while stopped (the standstill guard)
+    assert pass2_allowed(WIFI, metered=False, onroad=True, at_home=False, standstill=True)
 
 
 class FakeLogHandler(logging.Handler):
@@ -104,24 +140,33 @@ class TestUploader(UploaderTestCase):
 
     assert log_handler.upload_order == exp_order, "Files uploaded in wrong order"
 
-  def test_upload_ignored(self):
+  def test_upload_412_never_marks_and_retries(self):
+    # firehose2pnw (driver req: never lose data): a 412 ("already there"/backend-declined — and, on the
+    # broken-API_HOST footgun, a file that did NOT reach OUR S3) must NEVER xattr-mark the file done.
+    # It stays un-marked and is retried on every eligible window until it truly uploads (2xx) or the
+    # deleter reclaims it while driving. Previously 412 counted as success and marked the file, which
+    # was the silent-data-loss bug.
     self.set_ignore()
     self.gen_files(lock=False)
 
     self.start_thread()
-    # allow enough time that files could upload twice if there is a bug in the logic
+    # allow enough time that a marked-done bug would let the loop "finish" and stop ignoring
     time.sleep(1)
     self.join_thread()
 
     exp_order = self.gen_order([self.seg_num], [])
 
-    assert len(log_handler.upload_order) == 0, "Some files were not ignored"
-    assert not len(log_handler.upload_ignored) < len(exp_order), "Some files failed to ignore"
-    assert not len(log_handler.upload_ignored) > len(exp_order), "Some files were ignored twice"
+    # core contract: nothing succeeded (no 2xx), the file(s) were attempted, and NOTHING got
+    # xattr-marked done -> every 412 file remains pending and will retry (after its cooldown).
+    assert len(log_handler.upload_order) == 0, "A 412 must not count as an upload success"
+    assert len(log_handler.upload_ignored) >= 1, "The 412 file was never attempted"
     for f_path in exp_order:
-      assert os.getxattr((Path(Paths.log_root()) / f_path).with_suffix(""), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, "All files not ignored"
-
-    assert log_handler.upload_ignored == exp_order, "Files ignored in wrong order"
+      p = (Path(Paths.log_root()) / f_path).with_suffix("")
+      try:
+        marked = os.getxattr(p, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE
+      except OSError:
+        marked = False
+      assert not marked, "A 412 file must NOT be marked uploaded (it must retry)"
 
   def test_upload_files_in_create_order(self):
     seg1_nums = [0, 1, 2, 10, 20]
