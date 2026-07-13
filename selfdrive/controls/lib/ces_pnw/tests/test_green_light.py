@@ -15,7 +15,7 @@ Contract under test (the driver-facing behavior, field split request 2026-07-13)
 Run:  pytest selfdrive/controls/lib/ces_pnw/tests/test_green_light.py
 """
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import (
-  GreenLightDetector, GL_IDLE, GL_ARMED, GL_FIRED,
+  GreenLightDetector, attentive_now, GL_IDLE, GL_ARMED, GL_FIRED,
   GL_EV_GREEN, GL_EV_LEAD, GL_EV_LEAD_MOVING,
   GL_MIN_STOP_S, GL_RELEASE_S, GL_X_GO_M, GL_NO_LEAD_S, GL_LEAD_FORGET_S, GL_LEAD_COOLDOWN_S,
 )
@@ -259,3 +259,34 @@ def test_rearms_at_next_stop():
   step(gl, 5.0, v_ego=15.0, end_x=100.0)
   settle_at_red(gl)
   assert step(gl, GL_RELEASE_S + 0.1, should_stop=False, end_x=60.0) == [GL_EV_GREEN]
+
+
+# --- dmgate2pnw: attention gate for the LEAD-departure ding -------------------------------------
+# selfdrived suppresses the leadDeparting alert when attentive_now() is True (an attentive driver
+# sees the car ahead leave and goes on their own); the greenLight alert is never gated on this.
+
+def test_attentive_only_when_active_face_and_not_distracted():
+  # the one True case: DM active mode + a face this frame + not distracted -> suppress the lead ding
+  assert attentive_now(True, True, False) is True
+
+
+def test_not_attentive_when_distracted():
+  # watching away / phone / eyes closed -> DM says distracted -> NOT attentive -> the ding fires
+  assert attentive_now(True, True, True) is False
+
+
+def test_not_attentive_when_no_face():
+  # no face this frame -> not confident -> ding fires (safe default)
+  assert attentive_now(True, False, False) is False
+
+
+def test_not_attentive_when_dm_passive():
+  # DM not in active mode (face lost / model uncertain) -> not confident -> ding fires
+  assert attentive_now(False, True, False) is False
+
+
+def test_safe_default_on_all_false():
+  # a missing/blank driverMonitoringState message reads all-False -> never suppresses (ding fires)
+  assert attentive_now(False, False, False) is False
+  # even a "not distracted" blank must not read as attentive (no active mode, no face)
+  assert attentive_now(False, False, True) is False

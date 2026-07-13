@@ -73,6 +73,21 @@ GL_EV_LEAD = "lead"              # stopped lead departs from OUR standstill -> l
 GL_EV_LEAD_MOVING = "leadMoving"  # lead departs while we already roll -> telemetry only, NO alert
 
 
+def attentive_now(is_active_mode: bool, face_detected: bool, is_distracted: bool) -> bool:
+  """dmgate2pnw (driver directive 2026-07-13): True only when driver monitoring CONFIDENTLY sees an
+  attentive driver right now — DM active mode (a good face read + a certain pose model), a face this
+  frame, and not distracted. Used to SUPPRESS the LEAD-departure ding (an attentive driver already
+  sees the car ahead leave and pulls away on their own); the GREEN-light ding is never gated on this.
+
+  Safe by construction: any uncertainty -> False -> the ding still fires. isActiveMode is False when
+  the face is lost or the pose model is uncertain, and a missing/blank driverMonitoringState message
+  reads all-False, so we only ever suppress when we are genuinely sure the driver is watching.
+  Crucially isActiveMode is gated on the DM model's READ QUALITY, not on vehicle speed, so it is
+  meaningful at the standstill where lead departures happen (verified against
+  monitoring/helpers.py: active_monitoring_mode = face_detected_deb and not model-uncertain). Pure."""
+  return bool(is_active_mode) and bool(face_detected) and not bool(is_distracted)
+
+
 class GreenLightDetector:
   """Pure per-tick state machine. update() returns a classification token (GL_EV_*) for exactly
   the one tick something happened, else None. No cereal, no params, no side effects — fully
