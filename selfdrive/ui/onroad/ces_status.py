@@ -23,10 +23,18 @@ the icon can't show the shadow decision).
 import time
 import pyray as rl
 
+from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, read_ces_mode
 from openpilot.selfdrive.ui.ui_state import ui_state
+
+# rain2pnw: magnitudes for the "RAIN armed" indicator, from the same source the controllers use
+# (defaults 3/5 mph; /data/pnw/rain.json can retune). Never fatal if the import is unavailable.
+try:
+  from openpilot.selfdrive.controls.lib.pnw_vehicle import _load_rain_config as _rain_cfg_loader
+except Exception:
+  _rain_cfg_loader = None
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
@@ -49,6 +57,18 @@ _REAL_CURVE_MS = 40.0  # a map target speed below this (~90 mph) counts as a rea
 _MAX_LINES_MOVING = 5  # hard cap while moving — the box must never stack into the road path
 _CURVE_SHOW_PCT = 40   # moving view: curve% below this is noise, dot/nothing instead
 _NEXT_CURVE_S = 20.0   # moving view: preview the next map curve only within this many seconds
+_FORDLAT_STALE_S = 5.0  # fordlatui2pnw: FordLatStatus older than this => not a live Ford session (Tesla)
+_STEERFAULT_TRIP = 20   # fordlatui2pnw: leaky-bucket level (~4 s of predominantly-faulting at 5 Hz)
+                        #   while sending 4-signal => the panda is rejecting it (stock safety, flash
+                        #   reverted). Leaky bucket (+1 on fault, -2 on clean) tolerates CAN/1-frame
+                        #   jitter yet still fills on a true continuous reject (Gemini 2026-07-13).
+_STEERFAULT_LEAK = 2    # bucket drain per clean poll
+_4SIG_CLEAN_LOCK = 50   # ~10 s of clean 4-signal-at-speed => the panda flash is PROVEN good this
+                        #   session (panda safety is fixed at boot, can't revert mid-drive), so a
+                        #   later transient EPS fault (the known "steering unavailable >20mph" quirk)
+                        #   can NEVER false-fire the panda-mismatch alarm afterwards.
+_MPH_TO_MS = 0.44704    # rain2pnw: rain.json magnitudes are in mph
+_CAL_STATUS = log.LiveCalibrationData.Status
 # standstill hysteresis (m/s): crawl speeds must not flicker dump<->tiered every frame
 _DUMP_ENTER_V = 0.5
 _DUMP_EXIT_V = 1.5
@@ -103,7 +123,19 @@ class CesStatusRenderer(Widget):
     self._st: dict = {}
     self._vtsc: dict = {}
     self._mapdl: str = ""
+    self._fordlat: dict = {}     # fordlatui2pnw: {"mode","ts"} published by the Ford carcontroller
+    self._steerfault_n = 0       # fordlatui2pnw: leaky-bucket level of steer faults while sending 4-signal
+    self._clean_streak = 0       # fordlatui2pnw: consecutive clean 4-signal-at-speed polls
+    self._4sig_ok = False        # fordlatui2pnw: panda proven to accept 4-signal this session (locks off the alarm)
     self._cached_layout = None   # (entries, box_w, box_h, fs, line_h) — rebuilt at poll time (5 Hz)
+    # rain2pnw: read the configured rain magnitudes once (mph); defaults 3/5 if unavailable
+    self._rain_mph = {1: 3.0, 2: 5.0}
+    if _rain_cfg_loader is not None:
+      try:
+        cfg = _rain_cfg_loader()
+        self._rain_mph = {1: float(cfg["light_mph"]), 2: float(cfg["heavy_mph"])}
+      except Exception:
+        pass
     self.font = gui_app.font(FontWeight.MEDIUM)
     self.font_bold = gui_app.font(FontWeight.BOLD)
 
@@ -173,6 +205,37 @@ class CesStatusRenderer(Widget):
       self._mapdl = mdl.decode() if isinstance(mdl, bytes) else (mdl or "")
     except Exception:
       self._mapdl = ""
+    try:
+      fl = self._mem.get("FordLatStatus", return_default=True)  # fordlatui2pnw: which lateral path is live
+      self._fordlat = fl if isinstance(fl, dict) else {}
+    except Exception:
+      self._fordlat = {}
+    # fordlatui2pnw (driver req 2026-07-13): the PANDA-mismatch case. When we ARE sending 4-signal
+    # (mode=="4sig") but the panda is on STOCK ford safety, it BLOCKS the nonzero curvature_rate and
+    # lateral goes DEAD -> a SUSTAINED steer fault at speed. Leaky bucket (fills on fault, drains on
+    # clean) tolerates CAN jitter yet fills on a true continuous reject; a clean streak locks the
+    # alarm off for the session (panda safety is set at boot, can't revert mid-drive — so if 4-signal
+    # drove clean early, a later transient EPS fault is definitely NOT a mismatch). NOTE (limitation,
+    # Gemini): relies on carState.steerFault as the reject proxy — an EPS that silently falls back to
+    # stock LKAS without a fault flag would go unwarned; catching that would need pandaState txRejects.
+    try:
+      cs = ui_state.sm["carState"]
+      moving = abs(float(cs.vEgo)) > 5.0
+      sending_4sig = str(self._fordlat.get("mode") or "") == "4sig"
+      faulting = bool(cs.steerFaultTemporary or cs.steerFaultPermanent)
+      if sending_4sig and moving:
+        if faulting:
+          self._steerfault_n = min(self._steerfault_n + 1, _STEERFAULT_TRIP)
+          self._clean_streak = 0
+        else:
+          self._steerfault_n = max(self._steerfault_n - _STEERFAULT_LEAK, 0)
+          self._clean_streak += 1
+          if self._clean_streak >= _4SIG_CLEAN_LOCK:
+            self._4sig_ok = True          # panda proven to accept 4-signal — lock the alarm off
+      else:
+        self._steerfault_n = 0            # not sending/at speed: no basis to judge (keep the lock)
+    except Exception:
+      self._steerfault_n = 0
     # cesui2pnw: standstill detection with hysteresis (enter <0.5 m/s, exit >1.5 m/s) so crawl
     # speeds don't flicker between the dump and the tiered view. Defensive: a dead carState
     # (dashcam session) reads as 0 -> dump, which is the harmless direction when not moving.
@@ -241,6 +304,58 @@ class CesStatusRenderer(Widget):
       pass
     return None
 
+  def _calib_line(self):
+    """suggestion #1: calibration status. openpilot won't engage until calibrated — after the auto
+    car-swap reset (calswap2pnw) this is exactly what tells the driver WHY it won't turn on. Shows a
+    counting-up % while (re)calibrating; silent once calibrated. Fully defensive."""
+    try:
+      cal = ui_state.sm["liveCalibration"]
+      status = cal.calStatus
+      pct = max(0, min(100, int(cal.calPerc)))
+    except Exception:
+      return None
+    if status == _CAL_STATUS.calibrated:
+      return None
+    if status == _CAL_STATUS.invalid:
+      return ("CALIB INVALID", _C.RED, self.font_bold, None)
+    return (f"CALIBRATING {pct}%", _C.ORANGE, self.font_bold, None)   # uncalibrated / recalibrating
+
+  def _steer_line(self):
+    """suggestion #2 (+ driver req 2026-07-13): the alan-polk 4-signal lateral tell, BOTH failure
+    modes. The Ford carcontroller publishes FordLatStatus.mode ('4sig'/'pc'/'stock'). Fresh + not
+    '4sig' => the SOFTWARE fell back to stock (LateralCurvExt didn't construct): `STEER: STOCK`.
+    Fresh + '4sig' but a SUSTAINED steer fault at speed => the PANDA is rejecting the 4-signal
+    (flashed with stock ford safety, so nonzero curvature_rate is blocked and lateral is dead):
+    `STEER: NO 4SIG PANDA` — the panda/openpilot mismatch that can't be seen any other way while
+    driving. Stale/absent = Tesla/no-Ford -> nothing. Green confirm is dump-only."""
+    try:
+      ts = float(self._fordlat.get("ts"))
+      if (time.time() - ts) > _FORDLAT_STALE_S:  # noqa: TID251 -- wall-vs-wall vs the publisher heartbeat
+        return None
+      mode = str(self._fordlat.get("mode") or "")
+    except (TypeError, ValueError):
+      return None
+    if not mode:
+      return None
+    if mode != "4sig":
+      return ("STEER: STOCK", _C.RED, self.font_bold, None)      # software fallback
+    if self._steerfault_n >= _STEERFAULT_TRIP and not self._4sig_ok:
+      return ("STEER: NO 4SIG PANDA", _C.RED, self.font_bold, None)  # panda rejecting 4-signal (flash reverted)
+    return None   # healthy 4-signal: dark in the moving view (dump adds a green confirm separately)
+
+  def _rain_line(self):
+    """suggestion #3: 'RAIN armed' indicator. Rain slowdown only bites inside curves, so a persistent
+    small tag confirms the driver actually left it on. Silent when None. Reduction shown in the
+    driver's speed unit."""
+    try:
+      tier = int(ui_state.params.get("RainMode", return_default=True) or 0)
+    except Exception:
+      return None
+    if tier not in (1, 2):
+      return None
+    red = round(self._rain_mph.get(tier, 0.0) * _MPH_TO_MS * self._conv)
+    return (f"RAIN -{red}", _C.GREY, self.font, None)
+
   def _icbm_line(self, active_only: bool):
     """One-line stock-ACC button management state. active_only (moving view) returns None for the
     idle states — the long health dot covers them; the dump shows them spelled out."""
@@ -271,13 +386,19 @@ class CesStatusRenderer(Widget):
     conv = self._conv
     out: list[tuple] = []
 
-    mm = self._mismatch_line()
-    if mm:
-      out.append(mm)
+    # highest priority — abnormal states that must never be dropped by the cap (all appended before
+    # the events below): long-mismatch (red), 4-signal fell to stock (red), (re)calibrating (orange).
+    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
+      if line:
+        out.append(line)
 
     button = _i(st.get("button", 0))
     btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
     out.append((btn, _C.WHITE, self.font_bold, self._health_dots()))
+
+    rain = self._rain_line()   # armed-indicator, right under the identity line
+    if rain:
+      out.append(rain)
 
     icbm = self._icbm_line(active_only=True)
     if icbm:
@@ -337,13 +458,24 @@ class CesStatusRenderer(Widget):
     conv = self._conv
     out: list[tuple] = []
 
-    mm = self._mismatch_line()
-    if mm:
-      out.append(mm)
+    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
+      if line:
+        out.append(line)
 
     button = _i(st.get("button", 0))
     btn = {0: "CES AUTO", 1: "CES CHILL*", 2: "CES EXP*"}.get(button, "CES AUTO")
     out.append((btn, _C.WHITE, self.font_bold, self._health_dots()))
+
+    # dump-only green confirmation that the 4-signal path IS live (moving view stays dark when healthy)
+    try:
+      if str(self._fordlat.get("mode") or "") == "4sig" and (time.time() - float(self._fordlat.get("ts"))) <= _FORDLAT_STALE_S:  # noqa: TID251
+        out.append(("STEER 4-SIG", _C.GREEN, self.font, None))
+    except (TypeError, ValueError):
+      pass
+
+    rain = self._rain_line()
+    if rain:
+      out.append(rain)
 
     is_exp = st.get("mode") == "experimental"
     # icbm2pnw (driver report 2026-07-11): in SHADOW nothing actuates — orange means "acting", so
