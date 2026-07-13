@@ -19,6 +19,7 @@ from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
+from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -193,9 +194,23 @@ class SelfdriveD:
     # were behind pulled away. Mutually exclusive by construction (one classification per tick);
     # a lead departing while we are already MOVING raises NEITHER (telemetry only, driver rule).
     if self.ces_pnw.green_light:
-      self.events.add(EventName.greenLight)
+      self.events.add(EventName.greenLight)          # ALWAYS — the traffic-light nudge is never
+                                                     # gated on attention (driver directive 2026-07-13)
     if self.ces_pnw.lead_departing:
-      self.events.add(EventName.leadDeparting)
+      # dmgate2pnw (driver directive 2026-07-13): the LEAD-departure nudge is suppressed when driver
+      # monitoring CONFIDENTLY sees an attentive driver — if you are watching, you see the car ahead
+      # leave and pull away on your own, so the ding is just noise. Only ping when the driver is NOT
+      # confidently attentive (looking away / on phone / face lost / DM uncertain / message missing).
+      # attentive_now() defaults to False on any uncertainty, so the safe direction is to still ding.
+      # isActiveMode is gated on the DM model's read quality, NOT vehicle speed, so this is valid at
+      # the standstill where lead departures happen. The greenLight nudge above is unaffected.
+      try:
+        dm = self.sm['driverMonitoringState']
+        attentive = attentive_now(dm.isActiveMode, dm.faceDetected, dm.isDistracted)
+      except Exception:
+        attentive = False
+      if not attentive:
+        self.events.add(EventName.leadDeparting)
 
     # Don't add any more events while in dashcam mode
     if self.CP.passive:
