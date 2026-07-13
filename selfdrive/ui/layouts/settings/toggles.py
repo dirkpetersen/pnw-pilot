@@ -16,6 +16,14 @@ try:
 except Exception:
   _DM_HWY_POSE_S, _DM_HWY_PHONE_S = 30.0, 60.0
 
+# rain2pnw: the help text quotes the SOURCE default magnitudes so it can never drift from the code
+# (same discipline as DmMode). The device-local /data/pnw/rain.json can retune the actual values.
+try:
+  from openpilot.selfdrive.controls.lib.pnw_vehicle import _RAIN_DEFAULTS as _RAIN
+  _RAIN_LIGHT_MPH, _RAIN_HEAVY_MPH = _RAIN["light_mph"], _RAIN["heavy_mph"]
+except Exception:
+  _RAIN_LIGHT_MPH, _RAIN_HEAVY_MPH = 3.0, 5.0
+
 DESCRIPTIONS = {
   "OpenpilotEnabledToggle": tr_noop(
     "Use the openpilot system for adaptive cruise control and lane keep driver assistance. " +
@@ -39,6 +47,12 @@ DESCRIPTIONS = {
     "everywhere. Highway = only while a highway is detected, monitoring loosens slightly "
     f"(attention {_DM_HWY_POSE_S:.0f} s, phone {_DM_HWY_PHONE_S:.0f} s); on all other roads it stays "
     "at Default. Monitoring is never disabled and your attention is required at all times."
+  ),
+  # rain2pnw: driver-selected wet-weather curve margin. Numbers pulled from the source defaults above.
+  "RainMode": tr_noop(
+    "Slow down extra in curves when it's raining. None = no change. Light = about " +
+    f"{_RAIN_LIGHT_MPH:.0f} mph slower through curves. Heavy = about {_RAIN_HEAVY_MPH:.0f} mph slower. " +
+    "Applies to both cars. Set it when the roads are wet; return it to None when they dry out."
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
@@ -251,6 +265,23 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # rain2pnw: "Rain slowdown" selector backed by the INT param RainMode (0=None, 1=Light, 2=Heavy).
+    # Applies to BOTH cars (same reduction), so it is NOT car-gated. Defensive selected_index read
+    # (any failure -> None) so a params/UI mismatch hides gracefully instead of bricking the UI.
+    try:
+      _rain_selected = int(self._params.get("RainMode", return_default=True) or 0)
+    except Exception:
+      _rain_selected = 0
+    self._rain_mode_setting = multiple_button_item(
+      lambda: tr("Rain slowdown"),
+      lambda: tr(DESCRIPTIONS["RainMode"]),
+      buttons=[lambda: tr("None"), lambda: tr("Light"), lambda: tr("Heavy")],
+      button_width=255,
+      callback=self._set_rain_mode,
+      selected_index=_rain_selected,
+      icon="speed_limit.png"
+    )
+
     # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Default stock
     # strict, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
     # the Always-On DM toggle below. Not longitudinal-gated — always available. ("Default", not "Off" —
@@ -333,6 +364,8 @@ class TogglesLayout(Widget):
       # light-ces-gentle: insert the CES Mode selector right after the main enable toggle
       if param == "OpenpilotEnabledToggle":
         self._toggles["CESMode"] = self._ces_mode_setting
+        # rain2pnw: the Rain slowdown selector sits right under CES Mode (same longitudinal group).
+        self._toggles["RainMode"] = self._rain_mode_setting
 
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
@@ -415,6 +448,11 @@ class TogglesLayout(Widget):
 
   def _set_longitudinal_personality(self, button_index: int):
     self._params.put("LongitudinalPersonality", button_index)
+
+  def _set_rain_mode(self, button_index: int):
+    # rain2pnw: 0=None, 1=Light, 2=Heavy. Read live by the VTSC/ICBM controllers each ~1 Hz via
+    # PnwVehicle.set_rain_tier — no restart needed (a mid-drive change takes effect within ~1 s).
+    self._params.put("RainMode", button_index)
 
   def _set_dm_mode(self, button_index: int):
     # dmroad2pnw: 0=Off (stock strict), 1=Highway (relaxed on freeway/divided-2-lane), 2=Relaxed (everywhere).

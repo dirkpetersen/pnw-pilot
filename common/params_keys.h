@@ -120,6 +120,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
+    {"RainMode", {PERSISTENT, INT, "0"}},  // rain2pnw (driver req 2026-07-12): 3-way wet-weather curve-slowdown selector. 0=None, 1=Light (3 mph slower in curves by default), 2=Heavy (5 mph). Applies to BOTH cars, same reduction. Magnitudes tunable in /data/pnw/rain.json. Default None.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
     {"CESStops", {PERSISTENT, BOOL, "1"}},    // ces2xnor
     {"CESLowSpeed", {PERSISTENT, BOOL, "1"}}, // ces2xnor
