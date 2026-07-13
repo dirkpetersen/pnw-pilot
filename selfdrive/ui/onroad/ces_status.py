@@ -23,10 +23,20 @@ path while moving. Three tiers:
                                   each datum lives) / an always-present one-line situation strip
                                   (next-curve | lead | road clear | —) / short active-only tag chips
                                   (rain / accel-zone / hwy-gate+no-lowSpd / STEER 4-SIG). The card
-                                  WIDTH is fixed (measured once from worst-case exemplars, never from
-                                  live values) so it never dances left/right as numbers change at a
-                                  stop; height changes only when an alarm or flag chip appears —
-                                  itself information. Same data as the old dump, regrouped.
+                                  WIDTH for the everything-OK case is fixed (grid + normal lines,
+                                  measured once from PER-COLUMN worst-case exemplars, never from live
+                                  values) so it never dances left/right as numbers change at a stop.
+                                  dumpnarrow2pnw (driver feedback 2026-07-13: "too wide, dead gap
+                                  between the columns"): the two grid columns are now sized
+                                  INDEPENDENTLY — the left (map/DB/gps: short, "142p"/"dl 00%"/"ok")
+                                  is far narrower than the right (vtsc/long/curve: "slow 000"/
+                                  "000>000"/"000% map"), so the right column slides left and the dead
+                                  gap closes. A rare RED alarm ("LONG MISMATCH - RESTART" / "STEER: NO
+                                  4SIG PANDA") may WIDEN the card only when it actually appears (a big,
+                                  rare event, measured so it never clips) — that is NOT the per-value
+                                  jitter Gemini flagged; the OK card stays put. Height changes only
+                                  when an alarm or flag chip appears — itself information. Same data
+                                  as the old dump, regrouped.
 The ">> CHILL / >> EXPERIMENTAL" effective-mode line is GONE from the moving view (driver: the
 top-right icon already tracks selfdriveState.experimentalMode live — white=CES-chill, yellow=CES-
 exp, orange=forced); it survives only inside the standstill dump (shadow sessions included, where
@@ -65,18 +75,30 @@ _FS_SM = 48          # standstill-card font — 1.5x the original size, readable
 _LINE_H_SM = 62
 # dumpui2pnw: standstill grouped-card geometry (all derived from the card font _FS_SM)
 _SEP_H = 22          # height of a thin group-divider row
-_COL_GAP = 44        # horizontal gap between the grid's two columns
+_COL_GAP = 30        # horizontal gap between the grid's two columns (dumpnarrow2pnw: 44->30, tighter)
 _LBL_GAP = 16        # gap between a grid cell's label and its value
 _DOT_R = _FS_SM * 0.19
-# STABLE WIDTH: the card's width is measured ONCE from fixed worst-case exemplars (with the real
-# font, so it is metric-correct) — NOT from the live values — so it can never dance left/right as
-# numbers change at a stop (Gemini review 2026-07-13). The exemplars below cover every string the
-# card can actually show; live text is left-aligned inside the fixed box.
-_GRID_LABEL_EX = "curve"       # widest grid label
-_GRID_VALUE_EX = "slow 000"    # widest grid value (>= "000% map" / "000>000" / "dl 000%" / "142p")
-_CARD_LINE_EX = (              # widest full-width lines (alarms / headline / mode / reason / strip)
-  "LONG MISMATCH - RESTART", "STEER: NO 4SIG PANDA", ">> SHADOW EXPERIMENTAL",
-  "why standstillHold", "next 000 000m",
+# STABLE WIDTH: the card's resting (everything-OK) width is measured ONCE from fixed worst-case
+# exemplars (with the real font, so it is metric-correct) — NOT from the live values — so it can never
+# dance left/right as numbers change at a stop (Gemini review 2026-07-13). The exemplars below cover
+# every NORMAL string the card can show; live text is left-aligned inside the fixed box.
+# dumpnarrow2pnw: the two grid columns are sized INDEPENDENTLY, each from its own side's worst-case
+# values. The left side (map/DB/gps) is short ("142p"/"dl 000%"/"ok"); the right side (vtsc/long/
+# curve) is wide ("slow 000"/"000>000"/"000% map"). Sizing BOTH from the right's generous exemplar
+# (the old single _GRID_VALUE_EX) left a big dead gap between the columns — the driver's complaint.
+_GRID_L_LABELS = ("map", "DB", "gps")                  # left-column labels
+_GRID_L_VALUES = ("dl 000%", "0000p")                  # widest left values (DB download / map points)
+_GRID_R_LABELS = ("vtsc", "long", "curve")             # right-column labels
+_GRID_R_VALUES = ("slow 000", "000>000", "000% map")   # widest right values
+# widest NORMAL (non-alarm) full-width lines — effective-mode / why-reason / situation-strip. The rare
+# RED alarm lines are deliberately NOT here (dumpnarrow2pnw option b): they are measured per-build in
+# _build_card so an APPEARING alarm may widen the card (and never clip) instead of inflating the
+# everything-OK width. ">> SHADOW EXPERIMENTAL" (the old 21-char exemplar) is not a string the card
+# can emit — the mode row shows at most ">> SHADOW CHILL" / ">> EXPERIMENTAL" (15 chars).
+_CARD_LINE_EX = (
+  ">> SHADOW CHILL", ">> EXPERIMENTAL",    # widest effective-mode strings (">> SHADOW EXP"/">> CHILL" shorter)
+  "why standstillHold",                     # widest why-reason
+  "next 000 000m",                          # widest situation strip
 )
 _PAD = 24
 _MARGIN = 40         # gap from the screen's right / bottom edges
@@ -547,16 +569,23 @@ class CesStatusRenderer(Widget):
 
   def _build_card(self):
     """Assemble the grouped standstill card + measure its box. Returns
-    (rows, box_w, box_h, label_w, col_w) or None when there is nothing to show."""
+    (rows, box_w, box_h, l_label_w, l_col_w, r_label_w, r_col_w) — per-column label/column widths so
+    the render can place the narrow left column and the wide right column independently — or None."""
     st = self._st
     conv = self._conv
     fs = _FS_SM
     rows: list[tuple] = []
 
-    # (1) alarms — red/orange, on top, never grouped away (same three as the moving view)
+    # (1) alarms — red/orange, on top, never grouped away (same three as the moving view). Measured
+    # here (dumpnarrow2pnw option b) so an APPEARING alarm may widen the card rather than clip: this
+    # is a max over the FIXED alarm strings actually present this poll — never a live grid/situation
+    # value — so the everything-OK width never jitters. (The only alarm carrying a live number,
+    # "CALIBRATING NN%", is far narrower than the grid so it can't drive the box width anyway.)
+    alarm_w = 0.0
     for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
       if line:
         rows.append(("full", line[0], line[1], line[2], None))
+        alarm_w = max(alarm_w, measure_text_cached(line[2], line[0], fs).x)
 
     # (2) headline: button identity + the 3 health dots (map / gps / long)
     button = _i(st.get("button", 0))
@@ -609,16 +638,23 @@ class CesStatusRenderer(Widget):
 
     # --- FIXED metrics (computed once from exemplars — never from live text — so the card width is
     # stable across the 5 Hz rebuilds; live numbers are left-aligned inside the fixed box). Width is
-    # driven by the grid + the widest full line only; the chip row wraps to fit it (below). ---
+    # driven by the grid + the widest normal full line only; the chip row wraps to fit it (below). The
+    # two grid columns are sized INDEPENDENTLY from their own side's exemplars (dumpnarrow2pnw) so the
+    # short left column (map/DB/gps) no longer inherits the wide right column's width and leave a gap. ---
     if self._card_metrics is None:
-      label_w = measure_text_cached(self.font, _GRID_LABEL_EX, fs).x
-      val_w = measure_text_cached(self.font, _GRID_VALUE_EX, fs).x
-      col_w = label_w + _LBL_GAP + val_w
-      grid_w = 2 * col_w + _COL_GAP
+      l_label_w = max(measure_text_cached(self.font, s, fs).x for s in _GRID_L_LABELS)
+      l_val_w = max(measure_text_cached(self.font, s, fs).x for s in _GRID_L_VALUES)
+      l_col_w = l_label_w + _LBL_GAP + l_val_w
+      r_label_w = max(measure_text_cached(self.font, s, fs).x for s in _GRID_R_LABELS)
+      r_val_w = max(measure_text_cached(self.font, s, fs).x for s in _GRID_R_VALUES)
+      r_col_w = r_label_w + _LBL_GAP + r_val_w
+      grid_w = l_col_w + _COL_GAP + r_col_w
       line_w = max(measure_text_cached(self.font_bold, s, fs).x for s in _CARD_LINE_EX)
       line_w = max(line_w, measure_text_cached(self.font_bold, "CES AUTO", fs).x + _dots_w(fs, 3))
-      self._card_metrics = (max(grid_w, line_w), label_w, col_w)
-    box_w_inner, label_w, col_w = self._card_metrics
+      self._card_metrics = (max(grid_w, line_w), l_label_w, l_col_w, r_label_w, r_col_w)
+    box_w_inner, l_label_w, l_col_w, r_label_w, r_col_w = self._card_metrics
+    # option b: an appearing RED alarm (rare, big event) may widen the resting box so it never clips.
+    box_w_inner = max(box_w_inner, alarm_w)
 
     # (7) active-only tag chips — rain / accel-zone / hwy-gate + no-lowSpd / 4-signal-live. One
     # compact chip row instead of four separate lines (the crudeness the driver flagged); it WRAPS
@@ -652,7 +688,7 @@ class CesStatusRenderer(Widget):
     box_h = _PAD * 2
     for tag, *_rest in rows:
       box_h += _SEP_H if tag == "sep" else _LINE_H_SM
-    return (rows, box_w, box_h, label_w, col_w)
+    return (rows, box_w, box_h, l_label_w, l_col_w, r_label_w, r_col_w)
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
@@ -694,7 +730,7 @@ class CesStatusRenderer(Widget):
     layout = self._card_layout
     if layout is None:
       return
-    rows, box_w, box_h, label_w, col_w = layout
+    rows, box_w, box_h, l_label_w, l_col_w, r_label_w, r_col_w = layout
     fs = _FS_SM
     bx = rect.x + rect.width - box_w - _MARGIN
     by = rect.y + rect.height - box_h - _MARGIN
@@ -723,13 +759,15 @@ class CesStatusRenderer(Widget):
             rl.draw_circle(int(cx), int(cy), r, dc)
             cx += 2 * r + fs * 0.22
       elif tag == "kv":
+        # dumpnarrow2pnw: left cell at x0 (narrow left label width); right cell placed just past the
+        # NARROW left column (x0 + l_col_w + _COL_GAP) with its own label width — closing the old gap.
         left, rightc = rest
-        for i, cell in enumerate((left, rightc)):
+        for cell, cx, clab_w in ((left, x0, l_label_w),
+                                 (rightc, x0 + l_col_w + _COL_GAP, r_label_w)):
           if not cell:
             continue
-          cx = x0 + i * (col_w + _COL_GAP)
           rl.draw_text_ex(self.font, cell[0], rl.Vector2(cx, y), fs, 0, _C.GREY)      # label
-          rl.draw_text_ex(self.font, cell[1], rl.Vector2(cx + label_w + _LBL_GAP, y), fs, 0, cell[2])  # value
+          rl.draw_text_ex(self.font, cell[1], rl.Vector2(cx + clab_w + _LBL_GAP, y), fs, 0, cell[2])  # value
       elif tag == "tags":
         chips = rest[0]
         cx = x0
