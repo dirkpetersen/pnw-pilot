@@ -10,7 +10,7 @@ import traceback
 import datetime
 from collections.abc import Iterator
 
-from cereal import log
+from cereal import car, log
 import cereal.messaging as messaging
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
@@ -92,8 +92,18 @@ MAX_UPLOAD_SIZES = {
 RETRY_COOLDOWN_S = 300.0
 
 
+def _is_parked(sm) -> bool:
+  # isparked2pnw: gear in PARK == "not drivable right now" (charging / parked), the root signal that an
+  # EV keeping ignitionLine on while charging is NOT actually being driven. Unlike `standstill` (which
+  # also matches stopped-at-a-red-light, where a 75 MB pass-2 burst would continue into motion), Park
+  # cannot be true mid-maneuver. Fail-safe: False whenever carState is missing/invalid, so a car that is
+  # actually being DRIVEN can never be mistaken for parked.
+  cs = sm['carState']
+  return bool(sm.valid['carState']) and cs.gearShifter == car.CarState.GearShifter.park and cs.vEgo < 0.5
+
+
 def pass2_allowed(network_type: int, metered: bool, onroad: bool = False,
-                  at_home: bool = False, standstill: bool = False) -> bool:
+                  at_home: bool = False, parked: bool = False) -> bool:
   # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on real external WiFi
   # (NetworkType.wifi). Never on LTE, never on the hotspot.
   # connect2pnw: ...and never when the active connection is flagged METERED (e.g. a phone hotspot the
@@ -106,13 +116,14 @@ def pass2_allowed(network_type: int, metered: bool, onroad: bool = False,
   # (qlog/qcam, tiny) still flows onroad so the dashboard stays live; the HD bulk uploads when parked.
   # firehose2pnw: the onroad block is right while DRIVING, but an EV (F-150 Lightning / Tesla Raven)
   # parked and CHARGING keeps ignitionLine on -> onroad True, wrongly forbidding the best upload window
-  # (parked for hours on home WiFi). So relax the onroad block by location:
+  # (parked for hours on home WiFi). So relax the onroad block:
   #   - AT a priority (home / geo-gated) WiFi network -> onroad never blocks (pure location override);
-  #   - on any OTHER WiFi -> allow onroad pass-2 only while STANDSTILL, so a 75 MB burst can never fire
-  #     mid-maneuver (the exact selfdrivedLagging / locationdTemporaryError risk the gate guards).
+  #   - on any OTHER WiFi -> allow onroad pass-2 only while PARKED (gear in Park). isparked2pnw upgraded
+  #     this from `standstill`: Park cannot be true mid-maneuver, so a 75 MB burst can never start at a
+  #     red light and continue into motion (the exact selfdrivedLagging / locationd risk the gate guards).
   if network_type not in PASS2_NETWORK_TYPES or metered:
     return False
-  if onroad and not (at_home or standstill):
+  if onroad and not (at_home or parked):
     return False
   return True
 
@@ -478,10 +489,10 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
       ds = sm['deviceState']
       onroad = ds.started   # onroad gate: clear the indicator too when a drive starts mid-transfer
       # firehose2pnw: mirror the main loop's relaxed gate so a legitimate onroad-at-home (EV charging)
-      # or onroad-standstill pass-2 transfer isn't falsely cleared by this guard.
+      # or onroad-parked pass-2 transfer isn't falsely cleared by this guard.
       at_home = uploader.params.get_bool("OnPriorityNetwork")
-      standstill = sm.valid['carState'] and bool(sm['carState'].standstill)
-      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad, at_home, standstill) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      parked = _is_parked(sm)
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad, at_home, parked) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
         uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
@@ -507,7 +518,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     cloudlog.info("uploader missing dongle_id")
     raise Exception("uploader can't start without dongle id")
 
-  sm = messaging.SubMaster(['deviceState', 'carState'])   # firehose2pnw: carState for the standstill gate
+  sm = messaging.SubMaster(['deviceState', 'carState'])   # firehose2pnw: carState for the parked gate
   uploader = Uploader(dongle_id, Paths.log_root())
 
   # connect2pnw: clear the firehose ("uploading") indicator promptly when WiFi drops mid-transfer.
@@ -522,11 +533,11 @@ def main(exit_event: threading.Event | None = None) -> None:
     offroad = params.get_bool("IsOffroad")
     onroad = not offroad   # connect2pnw onroad gate: pass 2 (75 MB bursts) only while parked
     # firehose2pnw: at a priority (home / geo-gated) WiFi, onroad no longer blocks pass 2 (EV charging
-    # keeps ignitionLine on -> onroad); on any other WiFi, onroad pass-2 is allowed only at standstill.
-    # Require a VALID carState for standstill -> if we can't confirm the car is stopped, don't allow the
-    # onroad-other-WiFi burst (fail safe toward the original onroad block).
+    # keeps ignitionLine on -> onroad); on any other WiFi, onroad pass-2 is allowed only while PARKED
+    # (gear in Park). _is_parked() fails safe to False on missing/invalid carState, so a car actually
+    # being driven can never open the onroad-other-WiFi burst window.
     at_home = params.get_bool("OnPriorityNetwork")
-    standstill = sm.valid['carState'] and bool(sm['carState'].standstill)
+    parked = _is_parked(sm)
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
     if network_type == NetworkType.none:
       if allow_sleep:
@@ -551,7 +562,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
     # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
     p2 = None
-    if pass2_allowed(network_type_raw, metered, onroad, at_home, standstill) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, onroad, at_home, parked) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 
