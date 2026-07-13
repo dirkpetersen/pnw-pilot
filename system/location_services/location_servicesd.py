@@ -317,14 +317,22 @@ class PoliceUpdater(threading.Thread):
 
   @staticmethod
   def _use_proxy(cfg) -> bool:
-    """Source selection: explicit 'source' wins; otherwise a configured key means legacy direct
-    (existing installs unchanged), else proxy. Pure + static for scenario tests."""
+    """Source selection: explicit 'source' wins; otherwise the keyless proxy is PRIMARY whenever a
+    proxy_url is configured (rollout phase 1, owner decision 2026-07-12) — a configured key then
+    serves as the automatic fallback (see _fallback_allowed), and phase 2 is deleting the key.
+    Pure + static for scenario tests."""
     src = str(cfg.get("source") or "").strip().lower()   # defensive: a non-string in the JSON must not throw
     if src == "proxy":
       return bool(cfg.get("proxy_url"))
     if src == "direct":
       return False
-    return not cfg.get("key") and bool(cfg.get("proxy_url"))
+    return bool(cfg.get("proxy_url"))
+
+  @staticmethod
+  def _fallback_allowed(cfg) -> bool:
+    """Direct-RapidAPI fallback after a failed proxy poll: only in auto mode (an explicit
+    'source' pin means the operator chose exactly one path) and only with a key to fall back on."""
+    return not str(cfg.get("source") or "").strip().lower() and bool(cfg.get("key"))
 
   def _cur_gps(self):
     try:
@@ -431,11 +439,26 @@ class PoliceUpdater(threading.Thread):
           self._stop.wait(POLICE_POLL_S)
           continue
         try:
-          alerts = self._poll_proxy(cfg, gps[0], gps[1]) if use_proxy else self._poll(cfg, gps[0], gps[1])
+          src_used = "proxy" if use_proxy else "direct"
+          if use_proxy:
+            try:
+              alerts = self._poll_proxy(cfg, gps[0], gps[1])
+            except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
+                    _ProxyUpstreamErr) as pe:
+              if not self._fallback_allowed(cfg):
+                raise
+              # phase-1 resilience: the proxy (website) being down must not lose the police feed
+              # while a direct key is still configured. Phase 2 removes the key -> proxy-only.
+              cloudlog.warning("location_services: police proxy failed (%s: %s); falling back to direct",
+                               type(pe).__name__, pe)
+              alerts = self._poll(cfg, gps[0], gps[1])
+              src_used = "direct-fallback"
+          else:
+            alerts = self._poll(cfg, gps[0], gps[1])
           with self._lock:
             self._alerts, self._state, self._err = alerts, "ok", ""
           cloudlog.info("location_services: police poll ok (%d alerts, %s)", len(alerts),
-                        "proxy" if use_proxy else "direct")   # heartbeat for diagnosis
+                        src_used)   # heartbeat for diagnosis
           backoff = POLICE_POLL_S                            # success -> reset backoff
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
                 _ProxyUpstreamErr) as e:

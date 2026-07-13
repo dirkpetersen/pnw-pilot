@@ -27,15 +27,25 @@ class TestSourceSelection:
     # fresh install: no override file -> shipped defaults -> keyless proxy
     assert PoliceUpdater._use_proxy(_cfg()) is True
 
-  def test_legacy_key_forces_direct(self):
-    # existing installs (key+url in the override file) keep polling RapidAPI directly
-    assert PoliceUpdater._use_proxy(_cfg(key="k" * 20)) is False
+  def test_key_present_still_proxy_primary_with_fallback(self):
+    # rollout phase 1 (owner decision 2026-07-12): proxy is PRIMARY even with a key configured;
+    # the key becomes the automatic fallback for when the proxy/website is down
+    cfg = _cfg(key="k" * 20)
+    assert PoliceUpdater._use_proxy(cfg) is True
+    assert PoliceUpdater._fallback_allowed(cfg) is True
 
-  def test_explicit_proxy_wins_over_key(self):
-    assert PoliceUpdater._use_proxy(_cfg(key="k" * 20, source="proxy")) is True
+  def test_no_key_means_no_fallback(self):
+    assert PoliceUpdater._fallback_allowed(_cfg()) is False
+
+  def test_explicit_proxy_wins_over_key_and_disables_fallback(self):
+    cfg = _cfg(key="k" * 20, source="proxy")
+    assert PoliceUpdater._use_proxy(cfg) is True
+    assert PoliceUpdater._fallback_allowed(cfg) is False   # explicit pin = exactly one path
 
   def test_explicit_direct(self):
-    assert PoliceUpdater._use_proxy(_cfg(source="direct")) is False
+    cfg = _cfg(source="direct", key="k" * 20)
+    assert PoliceUpdater._use_proxy(cfg) is False
+    assert PoliceUpdater._fallback_allowed(cfg) is False
 
   def test_proxy_needs_url(self):
     assert PoliceUpdater._use_proxy(_cfg(proxy_url="")) is False
@@ -62,7 +72,8 @@ class TestLoadCfgMerge:
     monkeypatch.setattr(lsd, "PROXY_CFG", str(p))
     cfg = PoliceUpdater._load_cfg(PoliceUpdater.__new__(PoliceUpdater))
     assert cfg["key"] == "SECRET" and cfg["proxy_url"]          # merge keeps the proxy defaults around
-    assert PoliceUpdater._use_proxy(cfg) is False               # ...but the key selects direct
+    assert PoliceUpdater._use_proxy(cfg) is True                # proxy primary...
+    assert PoliceUpdater._fallback_allowed(cfg) is True         # ...key = automatic fallback
 
   def test_corrupt_file_falls_back(self, monkeypatch, tmp_path):
     p = tmp_path / "police_proxy.json"
