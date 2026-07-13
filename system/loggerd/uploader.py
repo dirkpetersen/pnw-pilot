@@ -84,8 +84,16 @@ MAX_UPLOAD_SIZES = {
   "qcam": 5*1e6,
 }
 
+# firehose2pnw: after a hard failure (non-2xx / network error), a file is NOT marked done so it will
+# retry -- but it must not be re-picked every loop (that would livelock the whole uploader on the oldest
+# failing file, starving every other file, and on metered it would re-PUT the payload each cycle). So a
+# failed file is skipped for this cooldown, letting the uploader advance to the next file and come back
+# later. Retry is still effectively forever (the entry clears once the cooldown lapses), just round-robin.
+RETRY_COOLDOWN_S = 300.0
 
-def pass2_allowed(network_type: int, metered: bool, onroad: bool = False) -> bool:
+
+def pass2_allowed(network_type: int, metered: bool, onroad: bool = False,
+                  at_home: bool = False, standstill: bool = False) -> bool:
   # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on real external WiFi
   # (NetworkType.wifi). Never on LTE, never on the hotspot.
   # connect2pnw: ...and never when the active connection is flagged METERED (e.g. a phone hotspot the
@@ -96,7 +104,17 @@ def pass2_allowed(network_type: int, metered: bool, onroad: bool = False) -> boo
   # segment rotation caused transient CPU/IO stalls that surfaced as selfdrivedLagging ('System
   # Lagging') and locationdTemporaryError (inputsOK false ~0.4 s: late camOdo frames) alerts. Pass 1
   # (qlog/qcam, tiny) still flows onroad so the dashboard stays live; the HD bulk uploads when parked.
-  return network_type in PASS2_NETWORK_TYPES and not metered and not onroad
+  # firehose2pnw: the onroad block is right while DRIVING, but an EV (F-150 Lightning / Tesla Raven)
+  # parked and CHARGING keeps ignitionLine on -> onroad True, wrongly forbidding the best upload window
+  # (parked for hours on home WiFi). So relax the onroad block by location:
+  #   - AT a priority (home / geo-gated) WiFi network -> onroad never blocks (pure location override);
+  #   - on any OTHER WiFi -> allow onroad pass-2 only while STANDSTILL, so a 75 MB burst can never fire
+  #     mid-maneuver (the exact selfdrivedLagging / locationdTemporaryError risk the gate guards).
+  if network_type not in PASS2_NETWORK_TYPES or metered:
+    return False
+  if onroad and not (at_home or standstill):
+    return False
+  return True
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -157,6 +175,15 @@ class Uploader:
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
+    self._upload_err_n = 0   # firehose2pnw: consecutive hard-failure count for the LastUploadError tag
+    self._retry_after: dict[str, float] = {}   # firehose2pnw: fn -> monotonic time it may be re-tried
+
+    # firehose2pnw: a hard-failure UI tag from a previous process run is stale on restart -> clear it so
+    # the CES overlay never shows a frozen 'UP ERR' after the uploader (or manager) restarts.
+    try:
+      self.params.remove("LastUploadError")
+    except Exception:
+      cloudlog.exception("failed to clear stale upload error")
 
     # connect2xnor: clear the firehose indicator on startup so a stale param
     # from a crash doesn't leave the UI showing "uploading" forever.
@@ -185,6 +212,30 @@ class Uploader:
     except Exception:
       cloudlog.exception("failed to set firehose active param")
 
+  def _record_upload_error(self, code: int | None, last_exc) -> None:
+    # firehose2pnw: publish a compact last-error string for the CES debug overlay, with a running
+    # consecutive-failure count so a persistent problem is visibly stuck. Best-effort; never raises.
+    try:
+      if code is not None:
+        desc = f"HTTP {code}"
+      elif last_exc is not None:
+        desc = type(last_exc[0]).__name__
+      else:
+        desc = "error"
+      self._upload_err_n += 1
+      self.params.put("LastUploadError", f"{desc} x{self._upload_err_n}")
+    except Exception:
+      cloudlog.exception("failed to record upload error")
+
+  def _clear_upload_error(self) -> None:
+    # firehose2pnw: a real 2xx clears the stuck-upload tag (only when one is currently shown).
+    try:
+      if self._upload_err_n:
+        self._upload_err_n = 0
+        self.params.remove("LastUploadError")
+    except Exception:
+      cloudlog.exception("failed to clear upload error")
+
   def _set_firehose_speed(self, mbps: float) -> None:
     # connect2pnw: publish the just-finished pass-2 file's speed (Mbps) so the sidebar can show
     # "CONNECT <n> Mbps". Written once per completed HD file (~1/min) -- negligible overhead.
@@ -200,6 +251,12 @@ class Uploader:
       self._defer_hd = self.params.get_bool(DEFER_HD_PARAM)   # refresh once per listing
     except Exception:
       self._defer_hd = False
+
+    # firehose2pnw: drop lapsed retry-cooldowns (so those files become eligible again) and keep the map
+    # bounded to files that failed within the last RETRY_COOLDOWN_S.
+    now = time.monotonic()
+    if self._retry_after:
+      self._retry_after = {f: t for f, t in self._retry_after.items() if t > now}
 
     for logdir in listdir_by_creation(self.root):
       path = os.path.join(self.root, logdir)
@@ -223,6 +280,11 @@ class Uploader:
           # deleter could have deleted, so skip
           continue
         if is_uploaded:
+          continue
+
+        # firehose2pnw: a file that just hard-failed is on cooldown -> skip it (advance to the next
+        # file) so one persistently-failing file can't livelock the whole uploader / re-burn metered.
+        if self._retry_after.get(fn, 0.0) > now:
           continue
 
         # connect2xnor: split the two passes. Pass 1 (default) handles the small
@@ -324,21 +386,38 @@ class Uploader:
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
-      if stat is not None and stat.status_code in (200, 201, 401, 403, 412):
+      # firehose2pnw (driver req: NEVER lose data): only a real 2xx marks a file done. 412
+      # ("already in S3" / backend-declined), 401/403 (rejected or expired presigned S3 PUT, or a bad
+      # auth token — e.g. right after boot before the clock/token is valid) and network errors are NOT
+      # success -> the file stays un-xattr-marked and retries on every eligible window until it truly
+      # uploads or the deleter reclaims it. Previously 401/403/412 counted as success, xattr-marking the
+      # file done even though nothing reached S3 (silent data loss). Retrying forever is cheap and safe:
+      # a 412 returns from the upload_url GET before any bytes move, and the oldest un-uploaded files are
+      # deleted as the disk fills while driving, so nothing accumulates unbounded.
+      code = stat.status_code if stat is not None else None
+      if code in (200, 201):
         self.last_filename = fn
         dt = time.monotonic() - start_time
-        if stat.status_code == 412:
-          cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
-        else:
-          content_length = int(stat.request.headers.get("Content-Length", 0))
-          speed = (content_length / 1e6) / dt
-          self.last_upload_mbps = speed * 8.0   # connect2pnw: MB/s -> Mbps for the sidebar indicator
-          cloudlog.event("upload_success", key=key, fn=fn, sz=sz, content_length=content_length,
-                         network_type=network_type, metered=metered, speed=speed)
+        content_length = int(stat.request.headers.get("Content-Length", 0))
+        speed = (content_length / 1e6) / dt
+        self.last_upload_mbps = speed * 8.0   # connect2pnw: MB/s -> Mbps for the sidebar indicator
+        cloudlog.event("upload_success", key=key, fn=fn, sz=sz, content_length=content_length,
+                       network_type=network_type, metered=metered, speed=speed)
         success = True
+        self._retry_after.pop(fn, None)
+        self._clear_upload_error()
       else:
         success = False
-        cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        # firehose2pnw: NOT marked done (so it retries), but put it on cooldown so it isn't re-picked
+        # every loop -> the uploader advances to other files instead of livelocking on this one, and on
+        # metered it can't re-PUT the payload every cycle.
+        self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S
+        if code == 412:
+          # benign: the gateway already has it (or declined) -> retry after cooldown, don't surface
+          cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        else:
+          cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+          self._record_upload_error(code, last_exc)
 
     if success:
       # tag file as uploaded
@@ -388,7 +467,7 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
   # the uploader still sets it True only under pass2_allowed (real, non-metered WiFi).
   if force_wifi:
     return
-  sm = messaging.SubMaster(['deviceState'])
+  sm = messaging.SubMaster(['deviceState', 'carState'])
   while not exit_event.is_set():
     # a raised exception here would silently kill this daemon and revert to the stale-indicator bug
     # for the rest of the process, so swallow + back off (mirrors _set_firehose_active's safety).
@@ -398,7 +477,11 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
         continue
       ds = sm['deviceState']
       onroad = ds.started   # onroad gate: clear the indicator too when a drive starts mid-transfer
-      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      # firehose2pnw: mirror the main loop's relaxed gate so a legitimate onroad-at-home (EV charging)
+      # or onroad-standstill pass-2 transfer isn't falsely cleared by this guard.
+      at_home = uploader.params.get_bool("OnPriorityNetwork")
+      standstill = sm.valid['carState'] and bool(sm['carState'].standstill)
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad, at_home, standstill) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
         uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
@@ -424,7 +507,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     cloudlog.info("uploader missing dongle_id")
     raise Exception("uploader can't start without dongle id")
 
-  sm = messaging.SubMaster(['deviceState'])
+  sm = messaging.SubMaster(['deviceState', 'carState'])   # firehose2pnw: carState for the standstill gate
   uploader = Uploader(dongle_id, Paths.log_root())
 
   # connect2pnw: clear the firehose ("uploading") indicator promptly when WiFi drops mid-transfer.
@@ -438,6 +521,12 @@ def main(exit_event: threading.Event | None = None) -> None:
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
     onroad = not offroad   # connect2pnw onroad gate: pass 2 (75 MB bursts) only while parked
+    # firehose2pnw: at a priority (home / geo-gated) WiFi, onroad no longer blocks pass 2 (EV charging
+    # keeps ignitionLine on -> onroad); on any other WiFi, onroad pass-2 is allowed only at standstill.
+    # Require a VALID carState for standstill -> if we can't confirm the car is stopped, don't allow the
+    # onroad-other-WiFi burst (fail safe toward the original onroad block).
+    at_home = params.get_bool("OnPriorityNetwork")
+    standstill = sm.valid['carState'] and bool(sm['carState'].standstill)
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
     if network_type == NetworkType.none:
       if allow_sleep:
@@ -462,7 +551,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
     # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
     p2 = None
-    if pass2_allowed(network_type_raw, metered, onroad) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, onroad, at_home, standstill) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 
