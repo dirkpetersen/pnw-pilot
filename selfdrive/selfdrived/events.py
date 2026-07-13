@@ -502,6 +502,19 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
   },
 
+  # greenlead2pnw: the sibling ding — the stopped car we were waiting behind pulled away while we
+  # sit at a standstill (driver split request 2026-07-13: greenLight now fires ONLY with no lead;
+  # a lead departing while we already roll raises neither). Same style on purpose: ET.PERMANENT,
+  # Priority.LOW, AudibleAlert.prompt, green banner keyed on the alertType in alert_renderer.py.
+  # Display/sound only — no control path.
+  EventName.leadDeparting: {
+    ET.PERMANENT: Alert(
+      "Car ahead is leaving",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
   EventName.ldw: {
     ET.PERMANENT: Alert(
       "Lane Departure Detected",

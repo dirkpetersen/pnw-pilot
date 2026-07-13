@@ -187,10 +187,15 @@ class SelfdriveD:
     if self.sm.updated['audioFeedback']:
       self.events.add(EventName.audioFeedback)
 
-    # greenlight2pnw: green-light ding — set by CESController._green_light_step last cycle
-    # (always-on, works with CES off too). Display/sound only; no control path.
+    # greenlight2pnw/greenlead2pnw: standstill dings — set by CESController._green_light_step last
+    # cycle (always-on, works with CES off too). Display/sound only; no control path.
+    # green_light = stopped with NO lead and the path opened; lead_departing = the stopped car we
+    # were behind pulled away. Mutually exclusive by construction (one classification per tick);
+    # a lead departing while we are already MOVING raises NEITHER (telemetry only, driver rule).
     if self.ces_pnw.green_light:
       self.events.add(EventName.greenLight)
+    if self.ces_pnw.lead_departing:
+      self.events.add(EventName.leadDeparting)
 
     # Don't add any more events while in dashcam mode
     if self.CP.passive:

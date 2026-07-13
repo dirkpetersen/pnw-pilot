@@ -37,9 +37,10 @@ ALERT_COLORS = {
   AlertStatus.critical: rl.Color(0xC9, 0x22, 0x31, 0xF1),    # #C92231 with alpha 0xF1
 }
 
-# greenlight2pnw: the green-light ding renders on a GREEN banner — keyed on the alertType string
-# ("greenLight/permanent"), so no new AlertStatus enum value / no schema change. Display only.
-GREEN_LIGHT_ALERT_TYPE = "greenLight"
+# greenlight2pnw/greenlead2pnw: the two "go" dings render on a GREEN banner — keyed on the
+# alertType string ("greenLight/permanent", "leadDeparting/permanent"), so no new AlertStatus
+# enum value / no schema change. Display only. (startswith() accepts the tuple.)
+GREEN_LIGHT_ALERT_TYPES = ("greenLight", "leadDeparting")
 GREEN_LIGHT_COLOR = rl.Color(0x1B, 0x84, 0x38, 0xF1)         # traffic-light green, same alpha
 
 
@@ -147,7 +148,7 @@ class AlertRenderer(Widget):
 
   def _draw_background(self, rect: rl.Rectangle, alert: Alert) -> None:
     color = ALERT_COLORS.get(alert.status, ALERT_COLORS[AlertStatus.normal])
-    if alert.alert_type.startswith(GREEN_LIGHT_ALERT_TYPE):   # greenlight2pnw: green ding banner
+    if alert.alert_type.startswith(GREEN_LIGHT_ALERT_TYPES):  # greenlight2pnw/greenlead2pnw: green "go" banner
       color = GREEN_LIGHT_COLOR
 
     if alert.size != AlertSize.full:

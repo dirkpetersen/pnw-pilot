@@ -26,9 +26,10 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
-# greenlight2pnw: pure standstill->release detector (sunnypilot mechanics + FrogPilot arming/lead
-# rules — attribution in green_light.py). Display/sound only; never gates control.
-from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetector
+# greenlight2pnw/greenlead2pnw: pure standstill->release detector + release-cause classifier
+# (sunnypilot mechanics + FrogPilot arming/lead rules — attribution in green_light.py).
+# Display/sound only; never gates control.
+from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetector, GL_EV_GREEN, GL_EV_LEAD
 # ces2core2pnw: the CES2 decision core (CES2-STUDY.md adoptions) — runs SHADOW every tick, decides
 # live only when the Ces2Core param is set (default OFF => v1 path below is byte-identical).
 from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, DivergenceCounter
@@ -985,6 +986,13 @@ def decision_telemetry(s) -> dict:
     "dV": d_v,
     "aEgo": round(float(s.get("a_ego", 0.0)), 2),
     "gas": bool(s.get("gas", False)),
+    # lowspeedcurve2pnw telemetry-first discovery (Hwy 99 2026-07-13 field issue #5: curvePct
+    # stuck at 0 all drive): the RAW vision-curve inputs, so the next city drive shows WHICH gate
+    # held it — weak predicted lat-accel (visLat vs CURVE_LAT_ACCEL_ENTER), the lookahead window
+    # (visTtc vs CURVE_VISION_LOOKAHEAD_S), or blinker suppression (blnk True on signaled turns).
+    "visLat": round(float(s.get("curve_lat_accel_vision", 0.0) or 0.0), 2),
+    "visTtc": round(float(s.get("time_to_curve", 0.0) or 0.0), 1),
+    "blnk": bool(s.get("blinker", False)),
     # stophold2pnw (B): the RAW per-cycle model stop intent (modelV2.action.shouldStop), NOT
     # debounced — this is the exact signal A1/A2/stopIntent/pullaway key on, and its absence from
     # the breadcrumb is why the 21:47:08Z lurch forensics could not tell red from green.
@@ -1174,6 +1182,11 @@ class CESStub:
   a CES bug must degrade to stock behavior (never Experimental, never publish), never take
   selfdrived (safety-critical) down. Mirrors the CESController surface selfdrived touches."""
 
+  # greenlead2pnw: selfdrived reads these UNCONDITIONALLY every cycle — without them the stub
+  # itself would crash selfdrived with AttributeError (latent since greenlight2pnw shipped).
+  green_light = False
+  lead_departing = False
+
   def experimental_request(self, car_state, sm) -> bool:
     return False
 
@@ -1266,12 +1279,17 @@ class CESController:
     # pullaway2pnw: stateful evidence for the below-floor lead-pull-away exception (monotonic
     # dRel rise + model-stop recency). Feeds sig["lead_opening"]; pure logic stays in decide_active.
     self._pullaway_trk = PullAwayTracker()
-    # greenlight2pnw: ALWAYS-ON green-light ding (driver decision 2026-07-12: no toggle). Runs
-    # every cycle BEFORE the CES-enabled gate so it works with CESMode off too. selfdrived reads
-    # .green_light (True for exactly one cycle per firing) and raises the alert event.
+    # greenlight2pnw/greenlead2pnw: ALWAYS-ON standstill dings (driver decision 2026-07-12: no
+    # toggle). Runs every cycle BEFORE the CES-enabled gate so it works with CESMode off too.
+    # selfdrived reads .green_light / .lead_departing (each True for exactly one cycle per firing)
+    # and raises the matching alert event. _gl_ev_pending is the one-shot "glEv" marker the next
+    # ces_events record consumes (records are ~1 Hz, firings are one 100 Hz tick — a latch, not a
+    # per-tick flag, or every event would be invisible in the breadcrumb).
     self._gl = GreenLightDetector()
     self._gl_last_t = None
     self.green_light = False
+    self.lead_departing = False
+    self._gl_ev_pending = None
     # icbmmapfirst2pnw: start-gate telemetry — WHY a would-be new episode was suppressed this tick
     # ("inCurve" / "visCovered" / "visLate" / None) + the map coverage reach (m; 0 = mapd blind/dead,
     # the mapd-liveness evidence for the field logs). Display/log only — never gates control here.
@@ -1485,15 +1503,19 @@ class CESController:
     return want and self._long_ok
 
   def _green_light_step(self, car_state, sm) -> None:
-    """greenlight2pnw: advance the pure GreenLightDetector one cycle and latch .green_light for
-    selfdrived (True for exactly the firing cycle). Best-effort: any message hiccup means 'no
-    ding this cycle', never an exception into selfdrived's control loop. Model-based and
-    car-agnostic — reads only vEgo/gasPressed, modelV2 (endpoint + shouldStop) and
-    radarState.leadOne; no fingerprints, no CAN, no control output."""
+    """greenlight2pnw/greenlead2pnw: advance the pure GreenLightDetector one cycle and latch the
+    per-cause alert flags for selfdrived (each True for exactly the firing cycle):
+      "green"      -> .green_light    (no lead, path opens: the greenLight alert)
+      "lead"       -> .lead_departing (stopped lead pulls away from OUR standstill: leadDeparting)
+      "leadMoving" -> telemetry record only, NO alert (driver rule #3: never ding while rolling)
+    Best-effort: any message hiccup means 'no ding this cycle', never an exception into
+    selfdrived's control loop. Model-based and car-agnostic — reads only vEgo/gasPressed,
+    modelV2 (endpoint + shouldStop) and radarState.leadOne; no fingerprints, no CAN, no control
+    output."""
     now = time.monotonic()
     dt = (now - self._gl_last_t) if self._gl_last_t is not None else DT_CTRL
     self._gl_last_t = now
-    fired = False
+    ev = None
     try:
       model = sm['modelV2']
       lead = sm['radarState'].leadOne
@@ -1506,23 +1528,25 @@ class CESController:
       except Exception:
         should_stop = False
       has_lead = bool(getattr(lead, 'status', False))
-      fired = self._gl.update(dt, float(car_state.vEgo), bool(getattr(car_state, 'gasPressed', False)),
-                              should_stop, mdl_end_x, has_lead,
-                              float(getattr(lead, 'dRel', 0.0)) if has_lead else 0.0,
-                              float(getattr(lead, 'vLead', 0.0)) if has_lead else 0.0)
-      if fired:
-        cloudlog.info("greenlight2pnw: FIRED mdlEndX=%.1f lead=%s", mdl_end_x, has_lead)
+      ev = self._gl.update(dt, float(car_state.vEgo), bool(getattr(car_state, 'gasPressed', False)),
+                           should_stop, mdl_end_x, has_lead,
+                           float(getattr(lead, 'dRel', 0.0)) if has_lead else 0.0,
+                           float(getattr(lead, 'vLead', 0.0)) if has_lead else 0.0)
+      if ev is not None:
+        cloudlog.info("greenlead2pnw: %s mdlEndX=%.1f lead=%s", ev, mdl_end_x, has_lead)
+        self._gl_ev_pending = ev   # one-shot marker for the next ces_events record ("glEv")
         # dedicated ces_events record (works even with CES off — log-validation channel)
         self._append_event({
           "t": round(time.time(), 1),  # noqa: TID251 -- wall clock, for route/time correlation
-          "ev": "greenLight", "mdlEndX": round(mdl_end_x, 1), "lead": has_lead,
+          "ev": "greenLight", "cls": ev, "mdlEndX": round(mdl_end_x, 1), "lead": has_lead,
           "dRel": round(float(getattr(lead, 'dRel', 0.0)), 1) if has_lead else 0.0,
           "vEgo": round(float(car_state.vEgo), 2),
           "lat": self._cur_lat, "lon": self._cur_lon,
         })
     except Exception:
-      fired = False
-    self.green_light = fired
+      ev = None
+    self.green_light = ev == GL_EV_GREEN
+    self.lead_departing = ev == GL_EV_LEAD
 
   def _icbm_step(self, sig, active: bool) -> None:
     """Publish the IcbmTarget mem-param at ~4 Hz (executor treats >2 s silence as stale-stop).
@@ -1751,6 +1775,9 @@ class CESController:
       # stophold2pnw (D): car identity (shadow is no longer a car discriminator — alpha-long A/B)
       "car": self._car,
       "curvePct": tele.get("curvePct"), "curveSrc": tele.get("curveSrc"),
+      # lowspeedcurve2pnw: raw vision-curve trigger inputs (why did curvePct stay 0? — Hwy 99
+      # 2026-07-13). None on the noData path, same as every other tele passthrough.
+      "visLat": tele.get("visLat"), "visTtc": tele.get("visTtc"), "blnk": tele.get("blnk"),
       "mapV": tele.get("mapV"), "mapDist": tele.get("mapDist"), "mapPts": tele.get("mapPts"),
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
       # vtsctele2pnw: explicit lead-present bool + gap time (s) + lead speed delta (m/s)
@@ -1785,10 +1812,15 @@ class CESController:
       # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether
       # mapd was alive — mapReach 0/None with mapPts 0 = the mapd-outage signature).
       "icbmGate": self._icbm_gate, "mapReach": self._icbm_map_reach,
-      # greenlight2pnw: detector state per tick ("idle"/"armed"/"fired") — the arming trail; the
-      # firing itself also gets a dedicated ev="greenLight" record (see _green_light_step).
-      "greenLight": self._gl.state,
+      # greenlead2pnw: detector state per record ("idle"/"armed"/"fired" — the arming trail) plus
+      # a ONE-SHOT event marker ("green"/"lead"/"leadMoving") on the record that follows an actual
+      # firing, else None. Replaces the old "greenLight" field, which logged the (always-truthy)
+      # state and read as true in 13,427/13,433 records on the 2026-07-13 drive — the arming trail
+      # and the event are now separate, meaningful channels.
+      "glSt": self._gl.state,
+      "glEv": self._gl_ev_pending,
     }
+    self._gl_ev_pending = None   # consumed by exactly one record (adopt or tick, whichever is next)
     # stophold2pnw (D): mark (never drop) records written before the clock is plausibly synced —
     # the dead-RTC boot wrote a 2025-11-25-stamped record that corrupted the 07-12 gap analysis.
     if clock_bad(now_wall):
