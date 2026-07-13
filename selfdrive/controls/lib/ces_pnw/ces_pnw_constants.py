@@ -113,6 +113,50 @@ STANDSTILL_HOLD_V = 1.5   # m/s: below this, Experimental may not exit to Chill 
 STOP_CLEAR_HOLD_S = 2.0   # s of continuous shouldStop-clear required by A2 (mirrors
                           #   PULLAWAY_STOP_CLEAR_S — the same shouldStop flicker/lag envelope).
 
+# --- standstill2pnw (hwy99 stop-and-go 2026-07-13; drives/2026-07-13/lightning-hwy99) ------------
+# Field evidence, ces_events 11:34-11:38Z: chill<->experimental flapping every ~10-20 s at vEgo=0.0
+# behind a lead at dRel 16-19 m — slowLead fires -> Experimental -> a radar lead DROPOUT at
+# standstill decays the condition filter -> dwell expires -> Chill -> lead reacquired -> re-fires.
+# Every flip changes the accel profile ("horse bucking"). And 9 of 14 standstill releases that
+# drive launched in CHILL with a lead at only 9-14 m (aMax 1.6-2.6 m/s^2 within 3 s — the red-light
+# "jolt"): records show stp (model shouldStop) is FALSE at standstill behind a lead, so the
+# stophold2pnw A2 machinery (which arms off shouldStop) never engaged, the dwell expired to Chill
+# while stationary, and the release was a hard Chill launch into a 9 m gap.
+#
+# The fundamental fix (driver-approved, car-agnostic — the same bug exists identically on every
+# car with CES active, shadow mode included): a STANDSTILL LATCH in the decision core.
+#   LATCH   below STANDSTILL_LATCH_V, an Experimental machine may NOT demote to Chill — there is
+#           zero benefit to Chill at 0 mph and every demotion there sets up a lurch. Implemented as
+#           a DEMOTION GATE (a pure per-tick predicate on v_ego), NOT a timer pause: no timer is
+#           ever frozen (nothing to leak), the dwell keeps accumulating, and the latch releases the
+#           instant v_ego rises — the no-lead release path is byte-identical to stophold2pnw.
+#   HOLD    on release from standstill WITH a close lead (dRel <= STANDSTILL_RELEASE_DREL seen at
+#           standstill), Experimental is held until v_ego > STANDSTILL_RELEASE_V OR the gap opens
+#           past STANDSTILL_RELEASE_CLEAR_DREL — the launch into a short gap stays model-governed
+#           (smooth) instead of a Chill MPC launch (jolt). Generalizes the A2 departure hold (which
+#           only arms off model shouldStop) to the stopped-behind-lead case where stp stays False.
+#   PROMOTE at standstill in CHILL with the ladder wanting Experimental (only slowLead/stop can be
+#           raw-active at 0), entry bypasses the CHILL_MIN_DWELL_S cooldown and the ~1 s filter
+#           charge (both were fighting the trigger at 0 mph — the 11:34 flapping), gated instead on
+#           STANDSTILL_PROMOTE_LEAD_S of SUSTAINED lead presence (radar-ghost debounce: a 1-tick
+#           dRel flicker cannot promote). Being in Experimental at standstill is strictly safer,
+#           and the latch makes the promoted state absorbing — no reverse oscillation is possible.
+# PRECEDENCE vs pullaway2pnw (documented, tested): at standstill the latch always wins — pullaway
+# is dead there anyway by its own PULLAWAY_MIN_V (2.0) floor. During the release hold (a deliberate
+# below-floor exception window), the hold wins while the gap is short; the moment the gap opens
+# past STANDSTILL_RELEASE_CLEAR_DREL (or v_ego > STANDSTILL_RELEASE_V) the hold disarms and the
+# pullaway/accel-zone Chill adoption proceeds exactly as shipped — pullaway matters once moving.
+STANDSTILL_LATCH_V            = 0.5   # m/s: below this the car is "at standstill" — demotion gated.
+                                      #   Deliberately BELOW creep speed: the 21:47 lurch replay's
+                                      #   0.4 m/s creep is standstill; A2 (1.5) covers 0.5..1.5.
+STANDSTILL_RELEASE_V          = 5.0   # m/s (~11 mph): the launch is done — hand back to the ladder
+STANDSTILL_RELEASE_DREL       = 20.0  # m: lead within this at standstill arms the release hold
+                                      #   (field: flapping at 16-19 m, jolt launches into 9-14 m)
+STANDSTILL_RELEASE_CLEAR_DREL = 25.0  # m: gap opened past this disarms the hold (hysteresis vs
+                                      #   ARM so radar dRel jitter at the edge can't flap the hold)
+STANDSTILL_PROMOTE_LEAD_S     = 0.5   # s of continuous lead presence at standstill required by the
+                                      #   no-cooldown promotion (single-tick radar ghosts excluded)
+
 # --- debounce / dwell (de-flap) ---------------------------------------------
 # Drive log showed heavy flapping in stop&go (median 2.3 s between switches, 30 flips/min). Two
 # asymmetric dwell gates kill the sawtooth: once in Experimental, hold it EXP_MIN before returning to
