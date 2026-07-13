@@ -208,3 +208,66 @@ def test_existing_curve_json_keys_still_work_alongside_new(tmp_path, monkeypatch
   t = 55 * MPH
   assert abs(v.curve_speed_penalty_ms(t) / MPH - 8.0) < 1e-6
   assert abs(v.curve_speed_penalty_ms(t, pitch_rad=-0.05) / MPH - 8.0 * 1.5) < 1e-6
+
+
+# ---- rain2pnw: wet-weather curve margin (applies to BOTH cars, same reduction) --------------------
+def test_rain_default_off_no_reduction():
+  for v in (PnwVehicle(FakeCP(LIGHTNING, "ford")),
+            PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))):
+    assert v.rain_penalty_ms() == 0.0                 # tier defaults to None
+
+
+def test_rain_tiers_both_cars_same_reduction(tmp_path, monkeypatch):
+  # no rain.json -> hardcoded 3/5 mph defaults; the SAME reduction on Tesla and Lightning.
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "none.json"))
+  light = PnwVehicle(FakeCP(LIGHTNING, "ford"))
+  tesla = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  for v in (light, tesla):
+    v.set_rain_tier(1)
+    assert abs(v.rain_penalty_ms() / MPH - 3.0) < 1e-6
+    v.set_rain_tier(2)
+    assert abs(v.rain_penalty_ms() / MPH - 5.0) < 1e-6
+    v.set_rain_tier(0)
+    assert v.rain_penalty_ms() == 0.0
+
+
+def test_rain_set_tier_accepts_bytes_str_int_and_junk():
+  v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
+  v.set_rain_tier(b"2")
+  assert v._rain_tier == 2      # Params.get yields bytes
+  v.set_rain_tier("1")
+  assert v._rain_tier == 1
+  v.set_rain_tier(2)
+  assert v._rain_tier == 2
+  for junk in (None, "x", b"", 3, -1, 99):
+    v.set_rain_tier(junk)
+    assert v._rain_tier == 0    # anything not 1/2 -> off
+
+
+def test_rain_config_override_and_clamp(tmp_path, monkeypatch):
+  cfg = tmp_path / "rain.json"
+  cfg.write_text(json.dumps({"light_mph": 4.5, "heavy_mph": 99.0}))   # heavy clamps to 15
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(cfg))
+  v = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  v.set_rain_tier(1)
+  assert abs(v.rain_penalty_ms() / MPH - 4.5) < 1e-6
+  v.set_rain_tier(2)
+  assert abs(v.rain_penalty_ms() / MPH - 15.0) < 1e-6
+
+
+def test_rain_config_malformed_falls_back(tmp_path, monkeypatch):
+  cfg = tmp_path / "rain.json"
+  cfg.write_text("{ not json")
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(cfg))
+  v = PnwVehicle(FakeCP(LIGHTNING, "ford"))
+  v.set_rain_tier(2)
+  assert abs(v.rain_penalty_ms() / MPH - 5.0) < 1e-6   # default heavy
+
+
+def test_rain_is_separate_from_lightning_curve_penalty(tmp_path, monkeypatch):
+  # rain does NOT touch curve_speed_penalty_ms (still Lightning-only + Tesla-zero); it is additive & separate.
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "none.json"))
+  tesla = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  tesla.set_rain_tier(2)
+  assert tesla.curve_speed_penalty_ms(55 * MPH) == 0.0     # base curve penalty still zero on Tesla
+  assert tesla.rain_penalty_ms() > 0.0                     # rain margin is delivered separately

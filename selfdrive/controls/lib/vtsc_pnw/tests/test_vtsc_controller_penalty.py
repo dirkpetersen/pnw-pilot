@@ -204,3 +204,47 @@ def test_no_escalation_on_tesla_same_scenario():
   k = 2.5 / (20.0 * 20.0)
   ctrl, _ = _run2(TESLA, 29.0, 31.0, -k, apex_from=10, cycles=2)
   assert ctrl._a_decel_max == min(ctrl.tune['A_DECEL_MAX'], C.REGEN_A_DECEL)
+
+
+# ---- rain2pnw: wet-weather margin reaches the curve pipeline + lowers the freeway floor -----------
+class _FakeMem:
+  """mem params supplying the freeway floor inputs (MapSpeedLimit + RoadContext)."""
+  def __init__(self, limit_ms, ctx):
+    self.d = {"MapSpeedLimit": limit_ms, "RoadContext": ctx}
+  def get(self, k, return_default=False):
+    return self.d.get(k)
+
+
+def _run_rain(cp, tier, v_cruise, v_ego, curvature):
+  ctrl = VTSCController(cp, params=FakeParams({"CESMode": "2", "RainMode": str(tier)}))
+  ctrl.mem_params = None
+  cap = ctrl.cap(_make_sm(curvature, vx=v_ego), v_cruise, v_ego)
+  return ctrl, cap
+
+
+def test_rain_lowers_curve_safe_speed_both_cars():
+  # rain subtracts its margin from the finalized curve-safe speed (vCurveSafe) on BOTH cars.
+  k = 2.5 / (24.6 * 24.6)                                 # binds at ~24.6 m/s (~55 mph)
+  for fp, brand in (("TESLA_MODEL_S_HW3", "tesla"), ("FORD_F_150_LIGHTNING_MK1", "ford")):
+    dry, _ = _run_rain(FakeCP(fp, brand), 0, 29.0, 29.0, k)
+    wet, _ = _run_rain(FakeCP(fp, brand), 2, 29.0, 29.0, k)
+    drop = dry.msg["vCurveSafe"] - wet.msg["vCurveSafe"]
+    assert abs(drop - 5.0 * MPH) < 1e-2                   # exactly the 5 mph heavy margin, every car
+
+
+def test_rain_lowers_freeway_floor_below_limit():
+  # Gemini 2026-07-12: the freeway speed-limit floor must ALSO drop by the rain margin, or a curve at
+  # the limit snaps back up and the setting is erased. Pre-engage a low cap (simulating mid-curve
+  # braking) so the floor is the binding term, then confirm the floored result honours rain.
+  def floored_cap(tier):
+    ctrl = VTSCController(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True),
+                          params=FakeParams({"CESMode": "2", "RainMode": str(tier)}))
+    ctrl.mem_params = _FakeMem(29.06, "freeway")          # 65 mph freeway
+    ctrl._state = "hold"
+    ctrl._applied = 20.0                                  # already braked well below the floor
+    return ctrl.cap(_make_sm(0.0, vx=29.06), 32.0, 29.06)  # straight road -> floor is the only bound
+  dry = floored_cap(0)
+  wet = floored_cap(2)
+  assert abs(dry - 29.06) < 1e-6                          # dry Tesla floor = the posted limit
+  assert abs((dry - wet) - 5.0 * MPH) < 1e-6             # heavy rain lowers the floor by 5 mph
+  assert wet < 29.06                                     # ... so the car may now trim below the limit

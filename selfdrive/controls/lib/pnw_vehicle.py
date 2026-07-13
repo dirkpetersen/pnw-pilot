@@ -88,8 +88,46 @@ _CURVE_BOUNDS = {
 }
 
 
+# rain2pnw: driver-selected wet-weather curve margin — an ADDITIVE speed reduction applied in curves,
+# on TOP of each car's base curve behavior. UNLIKE the Lightning EPS penalty below, rain reduces grip
+# on EVERY car, so it applies to BOTH the Tesla and the Lightning with the SAME reduction (driver
+# directive 2026-07-12: "they can have the same rain reduction for now"; the cars' DRY curve tuning
+# stays separate and untouched — this is purely a driver-opted margin the driver dials in when it
+# rains). Live tier = UI param RainMode (0=None, 1=Light, 2=Heavy); the magnitudes are the device-
+# local tunable below (defaults 3 / 5 mph), same discipline as curve.json / dm.json.
+RAIN_CONFIG_PATH = "/data/pnw/rain.json"
+_RAIN_CONFIG_MAX_BYTES = 64 * 1024
+_RAIN_DEFAULTS = {"light_mph": 3.0, "heavy_mph": 5.0}
+# clamp [0,15] mph: a bad config can only ever be a small reduction — never a speed-up, never a huge brake.
+_RAIN_BOUNDS = {"light_mph": (0.0, 15.0), "heavy_mph": (0.0, 15.0)}
+
+
 def _clamp(x: float, lo: float, hi: float) -> float:
   return lo if x < lo else (hi if x > hi else x)
+
+
+def _load_rain_config() -> dict:
+  """Read /data/pnw/rain.json defensively (mirror of _load_curve_config): a flat
+  {"light_mph": .., "heavy_mph": ..}, unknown keys ignored, each clamped to [0,15] mph. NEVER raises
+  (runs in control code) — missing/malformed -> the hardcoded 3/5 mph defaults."""
+  cfg = dict(_RAIN_DEFAULTS)
+  try:
+    st = os.stat(RAIN_CONFIG_PATH)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > _RAIN_CONFIG_MAX_BYTES:
+      return cfg
+    with open(RAIN_CONFIG_PATH) as f:
+      data = json.load(f)
+    if isinstance(data, dict):
+      for k in cfg:
+        if k in data:
+          v = float(data[k])
+          if v == v:                          # NaN guard (NaN != NaN)
+            cfg[k] = v
+  except Exception:
+    return dict(_RAIN_DEFAULTS)                # any failure -> defaults, never raise
+  for k, (lo, hi) in _RAIN_BOUNDS.items():
+    cfg[k] = _clamp(cfg[k], lo, hi)
+  return cfg
 
 
 def _load_curve_config() -> dict:
@@ -154,6 +192,35 @@ class PnwVehicle:
     self.lightning_curve_slow: bool = fp == "FORD_F_150_LIGHTNING_MK1"
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
+
+    # rain2pnw: wet-weather curve margin — applies to BOTH cars, SAME reduction (not the Lightning-only
+    # curve penalty). Magnitudes from the device-local tunable (defaults 3/5 mph, read once here); the
+    # live tier is pushed in by the controllers each ~1 Hz via set_rain_tier so a mid-drive change (it
+    # starts raining) takes effect with no restart.
+    self._rain_cfg = _load_rain_config()
+    self._rain_tier = 0
+
+  def set_rain_tier(self, tier) -> None:
+    """rain2pnw: set the live wet-weather tier (0=None, 1=Light, 2=Heavy). Controllers push the
+    RainMode param here each ~1 Hz. Defensive: accepts int / str / bytes (Params.get yields bytes);
+    anything that isn't 1 or 2 -> 0 (off)."""
+    try:
+      if isinstance(tier, bytes):
+        tier = tier.decode()
+      t = int(tier)
+    except (TypeError, ValueError):
+      t = 0
+    self._rain_tier = t if t in (1, 2) else 0
+
+  def rain_penalty_ms(self) -> float:
+    """rain2pnw: extra m/s to SUBTRACT from a curve target speed for the current rain tier — the SAME
+    reduction on every car (each car's dry curve tuning is separate and untouched; this is a driver-
+    opted additive margin only). 0.0 when the tier is None. Reduce-only, bounded by the config."""
+    if self._rain_tier == 1:
+      return self._rain_cfg["light_mph"] * _MPH_TO_MS
+    if self._rain_tier == 2:
+      return self._rain_cfg["heavy_mph"] * _MPH_TO_MS
+    return 0.0
 
   def curve_speed_penalty_ms(self, v_target_ms: float, pitch_rad=None, is_left: bool = False) -> float:
     """Extra m/s to SUBTRACT from a curve target speed so the Lightning enters curves slower than the

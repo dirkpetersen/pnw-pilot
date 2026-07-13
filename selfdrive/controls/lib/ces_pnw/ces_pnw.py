@@ -1300,6 +1300,12 @@ class CESController:
       except Exception:
         mode = C.CES_MODE_OFF
       self._set_mode(mode)
+      # rain2pnw: push the live wet-weather tier into the capability view (used by the ICBM curve
+      # target below; applies in shadow too). Defensive — never let a param hiccup break _read_params.
+      try:
+        self._veh.set_rain_tier(self.params.get("RainMode", return_default=True))
+      except Exception:
+        pass
       # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode) —
       # except in Lightning shadow mode, where the pipeline runs for telemetry/display only.
       self._enabled = (self._long_ok or self._shadow) and C.ces_enabled(self._mode)
@@ -1615,6 +1621,8 @@ class CESController:
           is_left = False
         target = max(target - self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
                                                                is_left=is_left), 0.0)
+        # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
+        target = max(target - self._veh.rain_penalty_ms(), 0.0)
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))

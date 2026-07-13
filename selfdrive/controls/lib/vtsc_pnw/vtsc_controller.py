@@ -94,6 +94,13 @@ class VTSCController:
         # VTSC rides the CES master selector (CESMode): non-Off -> VTSC on. The mode also picks the
         # tune: Light -> GENTLE_PROFILE (anti-sawtooth), Standard -> DEFAULT_PROFILE. On ANY car.
         self._mode = CES.read_ces_mode(self.params)
+        # rain2pnw: push the live wet-weather tier into the capability view (applies on EVERY car).
+        # Isolated try — a RainMode read hiccup must NEVER fall through to the outer except that
+        # disables VTSC (curve control is not rain's dependant); worst case rain stays at its last tier.
+        try:
+          self.veh.set_rain_tier(self.params.get("RainMode", return_default=True))
+        except Exception:
+          pass
         self._enabled = self._long_ok and CES.ces_enabled(self._mode)
         self.tune = dict(C.GENTLE_PROFILE) if CES.ces_is_gentle(self._mode) else dict(C.DEFAULT_PROFILE)
         # ces-i90-2pnw (MTSC): fold map curves only when VTSC is enabled AND opted-in via the param
@@ -243,6 +250,15 @@ class VTSCController:
       if penalty > 0.0:
         v_curve = max(v_curve - penalty, C.V_MIN)
 
+    # rain2pnw: driver-selected wet-weather curve margin. UNLIKE the Lightning EPS penalty above, rain
+    # cuts grip on EVERY car, so this applies to BOTH the Tesla and the Lightning (same reduction —
+    # driver directive 2026-07-12). Additive on top of each car's base curve-safe speed; only when a
+    # real curve binds (finite v_curve); reduce-only, floored at V_MIN so it can never invert.
+    if v_curve != float('inf'):
+      rain_pen = self.veh.rain_penalty_ms()
+      if rain_pen > 0.0:
+        v_curve = max(v_curve - rain_pen, C.V_MIN)
+
     # sharpcurve2pnw: NORMAL commanded decel = EV regen authority -> coast/regen, no friction braking
     # (driver: "on the freeway braking should almost never be required"). A genuinely SHARP map curve that
     # regen alone can't reach before its ENTRANCE (apex minus the finish lead) raises the ceiling to
@@ -330,9 +346,15 @@ class VTSCController:
       # Lightning penalty on posted-limit sweepers — caps pinned at exactly the 65 mph limit
       # (29.1 m/s) through all 13 takeovers while the penalized v_curve sat ~4.5 m/s lower.
       # The Lightning may trim BELOW the posted limit by its own penalty (weaker EPS needs it);
-      # the Tesla's penalty is 0.0 so its floor stays exactly at the posted limit (driver rule
+      # the Tesla's penalty is 0.0 so its DRY floor stays exactly at the posted limit (driver rule
       # 2026-07-01 unchanged for the Tesla).
-      floor_v = max(self._speed_limit - self.veh.curve_speed_penalty_ms(self._speed_limit), C.V_MIN)
+      # rain2pnw (Gemini review 2026-07-12): the rain margin must ALSO lower this floor, or a curve
+      # posted at/near the limit snaps right back up to the limit and the driver's wet-weather
+      # setting is silently erased on freeways (worst on the Tesla, whose base penalty is 0). rain
+      # is car-agnostic, so both cars may trim below the limit by the selected rain margin (only
+      # when a curve is actually pulling the cap down — straight-line cruise stays at the limit).
+      floor_v = max(self._speed_limit - self.veh.curve_speed_penalty_ms(self._speed_limit)
+                    - self.veh.rain_penalty_ms(), C.V_MIN)
       capped = min(v_cruise, max(capped, floor_v))
 
     engaged = capped < v_cruise_set - 0.5
