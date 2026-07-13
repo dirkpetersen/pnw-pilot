@@ -103,7 +103,7 @@ class DRIVER_MONITOR_SETTINGS:
 
     # PNW: dual-counter DM (pose + phone counters, snap-back recovery). The TIMEOUT MAGNITUDES do
     # not live here: strict defaults come from selfdrive/monitoring/dm_config.py and any personal
-    # loosening lives only in the device-local /data/pnw/dm.json (dm-variable; see DM-VARIABLE.md).
+    # loosening lives only in the device-local /data/pnw/dm.json (dm-variable; see docs/pnw/DM-VARIABLE.md).
     # Only the pre/prompt lead times and the recovery debounce are in-source:
     self._POSE_DISTRACTED_PRE_TIME_TILL_TERMINAL = 60.       # green at 60s before terminal
     self._POSE_DISTRACTED_PROMPT_TIME_TILL_TERMINAL = 30.    # orange at 30s before terminal
@@ -237,7 +237,7 @@ class DriverMonitoring:
       self._dm_mode = int(self.params.get("DmMode", return_default=True) or 0)
     except (UnknownKeyName, ValueError, TypeError):
       self._dm_mode = 0
-    # dm-variable: timeout tiers from /data/pnw/dm.json (see DM-VARIABLE.md). One read at process
+    # dm-variable: timeout tiers from /data/pnw/dm.json (see docs/pnw/DM-VARIABLE.md). One read at process
     # start resolves (a) the JSON 'mode' tier — an explicit opt-in that takes precedence over the
     # DmMode param, with its highway variant road-gated exactly like DmMode=1 — and (b) the timeout
     # values every relaxed regime uses (strict dm_config defaults when the file is absent; relaxed

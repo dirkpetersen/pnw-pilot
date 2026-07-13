@@ -23,7 +23,7 @@ SAFETY POSTURE
 
 Config is read once at dmonitoringd process start (DriverMonitoring.__init__). Changing dm.json
 requires a dmonitoringd restart (ignition cycle or pkill) to take effect — documented in
-DM-VARIABLE.md.
+docs/pnw/DM-VARIABLE.md.
 
 stdlib only — also loaded standalone (importlib by path) by the tools/dm CLI.
 """
