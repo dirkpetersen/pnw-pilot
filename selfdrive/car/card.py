@@ -57,6 +57,31 @@ def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket
   return can_recv, can_send
 
 
+# calswap2pnw: the 5 learned, CAR-SPECIFIC params the manual "Reset Calibration" button clears
+# (device.py). Camera extrinsics + learned steering/torque/vehicle geometry — all wrong after the
+# device moves to a different car, which drives "weird" until openpilot slowly re-learns.
+_CALIBRATION_PARAMS = ("CalibrationParams", "LiveTorqueParameters", "LiveParameters",
+                       "LiveParametersV2", "LiveDelay")
+
+
+def car_changed_for_recal(stored_car: str, cur_car: str, brand: str, fp_fixed: bool) -> bool:
+  """calswap2pnw: True iff we should force a full recalibration — a real, RELIABLE fingerprint that
+  differs from the car the current calibration was recorded for. Never on mock / empty / fixed-source
+  (the unreliable fleet-VIN fallback — a bad one must not wipe a good calibration, per the poisoned-
+  cache incident) / an empty stored tag (first boot or same car). Pure — unit-tested.
+
+  Discriminator = carFingerprint (the car MODEL), chosen deliberately over carVin (Gemini 2026-07-13
+  flagged that VIN uniquely IDs the physical car). This device's fleet is exactly one Tesla Raven +
+  one Ford Lightning — DIFFERENT models, so the fingerprint distinguishes them perfectly, and VIN is
+  rejected precisely because its sporadic empty/flaky reads would spuriously wipe calibration on the
+  SAME car every reboot (the exact churn the driver said they do NOT want). Two cars of the SAME
+  model are intentionally treated as one: identical mounting geometry means one calibration is
+  correct for both, so not distinguishing them is RIGHT, not a gap (driver 2026-07-13)."""
+  if brand == "mock" or not cur_car or fp_fixed:
+    return False
+  return bool(stored_car) and stored_car != cur_car
+
+
 class Car:
   CI: CarInterfaceBase
   RI: RadarInterfaceBase
@@ -138,6 +163,13 @@ class Car:
         else:
           cloudlog.warning("Saved SecOC key is invalid")
 
+    # calswap2pnw: force a full recalibration when the device is moved to a DIFFERENT car (driver
+    # report 2026-07-13: the truck drove weird after a Tesla->Lightning swap until a manual Reset
+    # Calibration). MUST run BEFORE the CarParams put below: calibrationd / paramsd / torqued block
+    # on CarParams, so clearing the learned params here means they unblock and read the fresh (clean)
+    # state with NO restart — race-free. Mirrors the manual Reset button exactly.
+    self._maybe_reset_calibration_on_car_change()
+
     # Write CarParams for controls and radard (current session — may be MOCK, which just runs passive)
     cp_bytes = self.CP.to_bytes()
     self.params.put("CarParams", cp_bytes)
@@ -172,6 +204,34 @@ class Car:
 
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
+
+  def _maybe_reset_calibration_on_car_change(self) -> None:
+    """calswap2pnw: if this real fingerprint differs from the car the current calibration belongs to,
+    clear the learned car-specific params so openpilot recalibrates cleanly on the new car. Also
+    records the current car tag (seeds it on first boot without resetting). Fully defensive — a
+    param hiccup here must never break card startup."""
+    cur_car = str(getattr(self.CP, 'carFingerprint', '') or '')
+    fp_fixed = self.CP.fingerprintSource == structs.CarParams.FingerprintSource.fixed
+    try:
+      stored = self.params.get("CalibrationCar")
+      stored_car = stored.decode() if isinstance(stored, bytes) else (stored or "")
+    except Exception:
+      stored_car = ""
+    if car_changed_for_recal(stored_car, cur_car, str(self.CP.brand or ''), fp_fixed):
+      cloudlog.warning(f"card: car changed {stored_car!r} -> {cur_car!r} — forcing recalibration")
+      for k in _CALIBRATION_PARAMS:
+        try:
+          self.params.remove(k)
+        except Exception:
+          pass
+    # tag the car this calibration now belongs to — but only on a real, reliable fingerprint, and
+    # only when it changed (avoids churning the param every boot). First boot: stored empty -> no
+    # reset above, just record the current car so the NEXT swap is detected.
+    if self.CP.brand != "mock" and cur_car and not fp_fixed and stored_car != cur_car:
+      try:
+        self.params.put_nonblocking("CalibrationCar", cur_car)
+      except Exception:
+        pass
 
   def state_update(self) -> tuple[car.CarState, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
