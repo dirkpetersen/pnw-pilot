@@ -35,7 +35,8 @@ class PairingDialog(Widget):
     except Exception:
       cloudlog.exception("Failed to get pairing token")
       token = ""
-    return f"https://connect.comma.ai/?pair={token}"
+    # pnw: self-hosted comma-connect endpoint (replaces connect.comma.ai)
+    return f"https://comma-connect.aws.internetchen.de/?pair={token}"
 
   def _generate_qr_code(self) -> None:
     try:
@@ -114,9 +115,9 @@ class PairingDialog(Widget):
 
   def _render_instructions(self, rect: rl.Rectangle) -> None:
     instructions = [
-      tr("Go to https://connect.comma.ai on your phone"),
+      tr("Go to https://comma-connect.aws.internetchen.de on your phone"),
       tr("Click \"add new device\" and scan the QR code on the right"),
-      tr("Bookmark connect.comma.ai to your home screen to use it like an app"),
+      tr("Bookmark comma-connect.aws.internetchen.de to your home screen to use it like an app"),
     ]
 
     font = gui_app.font(FontWeight.BOLD)
