@@ -12,6 +12,7 @@ stops. Speed-limit DISPLAY works as soon as the maps are present; the user opts 
 CONTROL later via MapdSettings — this daemon never enables control.
 """
 import json
+import math
 import os
 import cereal.messaging as messaging
 from cereal import log
@@ -50,6 +51,7 @@ def main():
   if params.get_bool("MapdPnwMapsRequested"):
     cloudlog.info("mapd_configd: PNW maps already requested; idle (re-checks the param each loop)")
   last_covered = None
+  mapd_down = 0            # consecutive loops mapd (mapdExtendedOut) has been silent — debounces "down"
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -80,19 +82,31 @@ def main():
         mem.put_nonblocking("MapLanes", str(int(mo.lanes)))
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
-        # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s).
-        mem.put_nonblocking("MapTargetVelocities", [
-          {"latitude": float(p.latitude), "longitude": float(p.longitude), "velocity": float(p.targetVelocity)}
-          for p in sm['mapdExtendedOut'].path])
+        # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point
+        # with a non-finite (NaN/inf) velocity or position: upstream mapd computes curvature via Heron's
+        # formula (math/curvature.go), which returns NaN on near-collinear OSM nodes -> NaN targetVelocity.
+        # Downstream VTSC/CES already ignore NaN (all IEEE comparisons are False), but filtering HERE keeps
+        # MapTargetVelocities clean so mapPts — and any future consumer that isn't NaN-safe — only ever
+        # see real targets. It also makes mapPts a truthful "live forward path present" readiness signal.
+        pts = []
+        for p in sm['mapdExtendedOut'].path:
+          la, lo, tv = float(p.latitude), float(p.longitude), float(p.targetVelocity)
+          if math.isfinite(la) and math.isfinite(lo) and math.isfinite(tv):
+            pts.append({"latitude": la, "longitude": lo, "velocity": tv})
+        mem.put_nonblocking("MapTargetVelocities", pts)
     except Exception:
       cloudlog.exception("mapd_configd: mapd->CES bridge write failed")
 
     # mapd2pnw/debug: publish a SEPARATE "is the OSM DB downloaded?" status, distinct from the live
-    # "is there map data for my current spot" line (mapPts). OK = tiles on disk and no pull in flight;
-    # downloading/incomplete while a pull is active or stopped short; none = nothing downloaded yet.
+    # "is there map data for my current spot" line (mapPts). States: "OK" = mapd ALIVE + tiles on disk +
+    # no pull in flight; "downloading"/"incomplete" = a pull is active or stopped short; "down" = tiles
+    # exist but mapd itself is NOT publishing (crashed / binary wiped / not started); "none" = nothing
+    # downloaded. "OK" now strictly implies mapd is alive, so the overlay can tell a fresh-ignition WARMUP
+    # (pts==0 while "OK") apart from a dead mapd (pts==0 while "down") — the former is ORANGE, the latter RED.
     try:
       mdl = "none"
       if sm.alive['mapdExtendedOut']:
+        mapd_down = 0
         dp = sm['mapdExtendedOut'].downloadProgress
         if dp.active:
           mdl = f"downloading {dp.downloadedFiles}/{dp.totalFiles}"
@@ -101,7 +115,10 @@ def main():
         elif _maps_on_disk():
           mdl = "OK"
       elif _maps_on_disk():
-        mdl = "OK"          # post-reboot: no active pull this session, but tiles are present
+        # tiles present but mapd is silent. Debounce brief 1 Hz gaps (~5 loops) before declaring "down" so
+        # a single late mapdExtendedOut doesn't flicker the health dot RED; sustained silence -> "down".
+        mapd_down += 1
+        mdl = "down" if mapd_down >= 5 else "OK"
       mem.put_nonblocking("MapDownloadStatus", mdl)
     except Exception:
       pass

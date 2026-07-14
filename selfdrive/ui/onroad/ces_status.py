@@ -333,11 +333,15 @@ class CesStatusRenderer(Widget):
     pts = _i(st.get("mapPts", 0))
     mdl = self._mapdl
     if pts > 0:
-      map_dot = _C.GREEN
-    elif mdl.startswith("downloading"):
+      map_dot = _C.GREEN                               # live forward path -> map curve-braking ARMED
+    elif mdl.startswith(("downloading", "incomplete")) or mdl == "OK":
+      # ORANGE = "coming, not armed yet": either the OSM DB is still downloading, OR the DB is present
+      # ("OK") but mapd has no live matched forward path yet — the ~30-60 s WARMING window after a fresh
+      # ignition (GPS lock + way-match pending). Distinct from RED so a "100% downloaded" DB is never
+      # misread as "curve-braking is armed" (the Terwilliger fresh-ignition surprise).
       map_dot = _C.ORANGE
     else:
-      map_dot = _C.RED
+      map_dot = _C.RED                                 # no maps / mapd down -> no map curve capability
     gps_dot = _C.GREEN if bool(st.get("gps", False)) else _C.ORANGE
     if st.get("shadow"):
       # grey = idle-by-design (stock cruise not engaged), NOT a fault — grey never expands
@@ -534,8 +538,15 @@ class CesStatusRenderer(Widget):
     conv = self._conv
     # --- left: map points, OSM DB, gps fix ---
     pts = _i(st.get("mapPts", 0))
-    map_cell = ("map", f"{pts}p" if pts > 0 else "0", _C.GREEN if pts > 0 else _C.RED)
     mdl = self._mapdl
+    # "warm" = DB present/coming but no live forward path yet (fresh-ignition warmup) — distinct from a
+    # RED "0" (genuinely no map curve capability), so a downloaded DB isn't misread as curve-braking armed.
+    if pts > 0:
+      map_cell = ("map", f"{pts}p", _C.GREEN)
+    elif mdl.startswith(("downloading", "incomplete")) or mdl == "OK":
+      map_cell = ("map", "warm", _C.ORANGE)
+    else:
+      map_cell = ("map", "0", _C.RED)
     if not mdl:
       db_cell = ("DB", "--", _C.GREY)
     else:
