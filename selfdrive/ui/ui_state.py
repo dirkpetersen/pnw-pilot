@@ -83,6 +83,8 @@ class UIState:
     self.CP: car.CarParams | None = None
     self.light_sensor: float = -1.0
     self._param_update_time: float = 0.0
+    self._fast_param_time: float = 0.0   # uicpu2pnw (T1): last 2 Hz read of the small per-frame bools
+    self._record_audio_param: bool = False   # cached RecordAudio (ANDed with live self.started)
 
     # Callbacks
     self._offroad_transition_callbacks: list[Callable[[], None]] = []
@@ -139,11 +141,17 @@ class UIState:
     # Update started state
     self.started = self.sm["deviceState"].started and self.ignition
 
-    # Update recording audio state
-    self.recording_audio = self.params.get_bool("RecordAudio") and self.started
-
-    self.is_metric = self.params.get_bool("IsMetric")
-    self.always_on_dm = self.params.get_bool("AlwaysOnDM")
+    # uicpu2pnw (T1): RecordAudio / IsMetric / AlwaysOnDM are settings-toggle params that change only
+    # on a driver action — reading three /data/params files EVERY frame (60 Hz) is IO waste. Re-read
+    # at ~2 Hz. The live `and self.started` gate on recording_audio still updates every frame (only
+    # the cached bool is throttled), so onroad/offroad transitions are not delayed.
+    now = time.monotonic()
+    if now - self._fast_param_time >= 0.5:
+      self._fast_param_time = now
+      self._record_audio_param = self.params.get_bool("RecordAudio")
+      self.is_metric = self.params.get_bool("IsMetric")
+      self.always_on_dm = self.params.get_bool("AlwaysOnDM")
+    self.recording_audio = self._record_audio_param and self.started
 
   def _update_status(self) -> None:
     if self.started and self.sm.updated["selfdriveState"]:

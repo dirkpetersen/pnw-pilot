@@ -56,12 +56,12 @@ the drift.
    **`3testpnw` = the FRIENDS' install channel — never experiment on it**; `3pnw`/`pnwprod` =
    release. **All deploy mechanics live in the `pnw-pilot-deploy` skill — load it for any deploy.**
 
-3. **The device runs the LEBOWSKI driving model** (commaai-master snapshot port, `LEBOWSKI2PNW.md`)
+3. **The device runs the LEBOWSKI driving model** (commaai-master snapshot port, `docs/pnw/LEBOWSKI2PNW.md`)
    — combined `driving_supercombo.onnx`, models as git-LFS pointers, tinygrad-compiled at build time,
    ~27 ms inference on the 3X. CES/VTSC tunes are calibrated against it from live drives.
 
 4. **Work = feature branches + in-tree docs.** Every effort has a branch and a doc committed on it
-   (`DMROAD2PNW.md`, `LEBOWSKI2PNW.md`, `UPSTREAM2PNW.md`, …), mirrored under `~/gh/comma/docs/`
+   (`docs/pnw/DMROAD2PNW.md`, `docs/pnw/LEBOWSKI2PNW.md`, `docs/pnw/UPSTREAM2PNW.md`, …), mirrored under `~/gh/comma/docs/`
    with `docs/INDEX.md` as the complete catalog. **Read the effort's doc before touching it.**
 
 5. **Port features INTO the base — never port Tesla Raven support out.** The most expensive lesson
