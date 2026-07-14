@@ -232,13 +232,17 @@ class Uploader:
     # the description differs from what's shown) so a bad-network drive can't spam param writes — that
     # per-failure churn was part of the 2026-07-13 chattiness. No count (a count would change every
     # failure and defeat change-only).
+    #
+    # actionable-only (driver 2026-07-14): ONLY show an error the driver could actually act on — an HTTP
+    # status FROM the server (e.g. 412 = the silent-data-loss footgun, 40x = auth). A code of None means
+    # the request never reached the server (connection reset / timeout / DNS) — a transient network drop,
+    # nothing to do about it while on the road — so it is NOT surfaced. The file is still preserved and
+    # gently retried; a genuine server-side problem still shows. This kills the "UP ERR Connection error"
+    # that lingered on flaky links with no actionable cause.
     try:
-      if code is not None:
-        desc = f"HTTP {code}"
-      elif last_exc is not None:
-        desc = type(last_exc[0]).__name__
-      else:
-        desc = "error"
+      if code is None:
+        return                                 # transient network failure -> no actionable UP ERR
+      desc = f"HTTP {code}"
       if desc != self._upload_err_desc:
         self._upload_err_desc = desc
         self.params.put("LastUploadError", desc)
