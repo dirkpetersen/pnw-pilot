@@ -66,7 +66,23 @@ def _sha256(path: str) -> str:
   return h.hexdigest()
 
 
+# mapdpin2pnw (driver req 2026-07-13): manual-override flag OUTSIDE the git tree. When a custom/test
+# mapd binary is deliberately installed (e.g. the gomsgq-fix test build), `touch /data/mapd/.override`
+# makes the installer treat ANY executable /data/mapd/mapd as installed — no sha check against
+# mapd_release.json, no re-download — across reboots AND git updates. (The earlier testbuild deploy
+# pinned its sha by editing mapd_release.json IN-TREE, which the next `git reset --hard`/auto-update
+# reverted, silently re-downloading the official binary — the 2026-07-13 12:38 incident.) Remove the
+# flag file (`rm /data/mapd/.override`) to return to pinned-release behavior.
+MAPD_OVERRIDE_FLAG = os.path.join(MAPD_PERSIST_DIR, ".override")
+
+
+def override_active() -> bool:
+  return os.path.exists(MAPD_OVERRIDE_FLAG) and os.path.exists(MAPD_BINARY) and os.access(MAPD_BINARY, os.X_OK)
+
+
 def is_installed(rel: dict | None = None) -> bool:
+  if override_active():
+    return True
   rel = rel or load_release()
   dest = MAPD_BINARY
   if not os.path.exists(dest) or not os.access(dest, os.X_OK):
