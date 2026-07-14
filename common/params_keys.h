@@ -123,6 +123,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // kept for back-compat. (MapTargetVelocities already registered by mapd2pnw above.)
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
+    {"AutoSpeedReduce", {PERSISTENT, INT, "0"}},  // speedadjust2pnw: 3-way auto cruise-speed reduction 0=Off 1=Police(ease to limit+5 ~30s ahead) 2=Police+Limits(also cap proportionally on a posted-limit drop). Reduce-only, op-long only, default OFF.
     {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
     {"RainMode", {PERSISTENT, INT, "0"}},  // rain2pnw (driver req 2026-07-12): 3-way wet-weather curve-slowdown selector. 0=None, 1=Light (3 mph slower in curves by default), 2=Heavy (5 mph). Applies to BOTH cars, same reduction. Magnitudes tunable in /data/pnw/rain.json. Default None.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable

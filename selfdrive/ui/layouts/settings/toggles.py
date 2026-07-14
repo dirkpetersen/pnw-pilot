@@ -54,6 +54,14 @@ DESCRIPTIONS = {
     f"{_RAIN_LIGHT_MPH:.0f} mph slower through curves. Heavy = about {_RAIN_HEAVY_MPH:.0f} mph slower. " +
     "Applies to both cars. Set it when the roads are wet; return it to None when they dry out."
   ),
+  # speedadjust2pnw: auto cruise-speed reduction. Only lowers speed, never raises it; needs openpilot
+  # longitudinal control (op-long) to act.
+  "AutoSpeedReduce": tr_noop(
+    "Automatically reduce your cruise speed. Off = no change. Police = when a police report is about " +
+    "30 seconds ahead, ease down to the speed limit + 5 mph, then return to your set speed once past. " +
+    "Police + Limits = also lower your speed by the same percentage the posted limit drops (and restore " +
+    "it when the limit rises). Only reduces speed, never raises it; requires openpilot longitudinal."
+  ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -282,6 +290,23 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    # speedadjust2pnw: "Auto speed reduce" selector backed by the INT param AutoSpeedReduce
+    # (0=Off, 1=Police, 2=Police+Limits). Reduce-only cruise cap; greyed when openpilot doesn't control
+    # longitudinal. Defensive selected_index read (any failure -> 0) so a params/UI mismatch hides gracefully.
+    try:
+      _sa_selected = int(self._params.get("AutoSpeedReduce", return_default=True) or 0)
+    except Exception:
+      _sa_selected = 0
+    self._speedadjust_mode_setting = multiple_button_item(
+      lambda: tr("Auto speed reduce"),
+      lambda: tr(DESCRIPTIONS["AutoSpeedReduce"]),
+      buttons=[lambda: tr("Off"), lambda: tr("Police"), lambda: tr("Police+Limits")],
+      button_width=255,
+      callback=self._set_speedadjust_mode,
+      selected_index=_sa_selected,
+      icon="speed_limit.png"
+    )
+
     # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Default stock
     # strict, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
     # the Always-On DM toggle below. Not longitudinal-gated — always available. ("Default", not "Off" —
@@ -366,6 +391,8 @@ class TogglesLayout(Widget):
         self._toggles["CESMode"] = self._ces_mode_setting
         # rain2pnw: the Rain slowdown selector sits right under CES Mode (same longitudinal group).
         self._toggles["RainMode"] = self._rain_mode_setting
+        # speedadjust2pnw: "Auto speed reduce" selector, same longitudinal group.
+        self._toggles["AutoSpeedReduce"] = self._speedadjust_mode_setting
 
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
@@ -416,6 +443,10 @@ class TogglesLayout(Widget):
     veh = PnwVehicle(ui_state.CP, live_op_long=ui_state.has_longitudinal_control)
     if "CESMode" in self._toggles:
       self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or veh.ces_shadow)
+    # speedadjust2pnw: acts via the longitudinal planner cap, so it needs op-long (unlike CES it has no
+    # stock-ACC/ICBM path yet) — grey it out where openpilot doesn't control longitudinal.
+    if "AutoSpeedReduce" in self._toggles:
+      self._toggles["AutoSpeedReduce"].action_item.set_enabled(ces_long_ok)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
@@ -453,6 +484,11 @@ class TogglesLayout(Widget):
     # rain2pnw: 0=None, 1=Light, 2=Heavy. Read live by the VTSC/ICBM controllers each ~1 Hz via
     # PnwVehicle.set_rain_tier — no restart needed (a mid-drive change takes effect within ~1 s).
     self._params.put("RainMode", button_index)
+
+  def _set_speedadjust_mode(self, button_index: int):
+    # speedadjust2pnw: 0=Off, 1=Police, 2=Police+Limits. Read live by SpeedAdjustController in the
+    # longitudinal planner each ~1 Hz — no restart needed (a mid-drive change takes effect within ~1 s).
+    self._params.put("AutoSpeedReduce", button_index)
 
   def _set_dm_mode(self, button_index: int):
     # dmroad2pnw: 0=Off (stock strict), 1=Highway (relaxed on freeway/divided-2-lane), 2=Relaxed (everywhere).

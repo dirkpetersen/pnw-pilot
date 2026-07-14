@@ -13,6 +13,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController  # vtsc
+from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import SpeedAdjustController  # speedadjust2pnw
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -72,6 +73,7 @@ class LongitudinalPlanner:
     self.dt = dt
     self.allow_throttle = True
     self.vtsc = VTSCController(CP)   # vtsc: curve speed control, default OFF (behavior-neutral)
+    self.speedadjust = SpeedAdjustController(CP)   # speedadjust2pnw: limit-drop + police cruise cap, default OFF
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -121,6 +123,13 @@ class LongitudinalPlanner:
     cap_v = self.vtsc.cap(sm, v_cruise, v_ego)
     if cap_v is not None and not math.isnan(cap_v):
       v_cruise = max(0.0, min(v_cruise, float(cap_v)))
+
+    # speedadjust2pnw: auto speed reduction for a lower posted limit / police ahead (default OFF ->
+    # returns v_cruise unchanged). SAME wiring-enforced REDUCE-ONLY + NaN guard as VTSC above — never
+    # trust the core's contract: a bad cap must not accelerate the car or inject NaN into the MPC.
+    cap_sa = self.speedadjust.cap(sm, v_cruise, v_ego)
+    if cap_sa is not None and not math.isnan(cap_sa):
+      v_cruise = max(0.0, min(v_cruise, float(cap_sa)))
 
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
