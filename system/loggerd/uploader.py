@@ -56,6 +56,12 @@ FIREHOSE_SPEED_PARAM = "FirehoseSpeed"
 # still get priority (pass 1 runs every loop); this just guarantees HD makes steady progress.
 PASS2_INTERLEAVE = 4
 
+# uploadretry2pnw: GENTLE retry cooldown. On a hard failure a file is NOT marked done (no silent data
+# loss) but goes on this long per-file cooldown so it isn't re-picked every loop — no chatter, no
+# livelock, no metered re-burn. 15 min is deliberately gentle; retries are effectively forever (the
+# entry clears when the cooldown lapses) but spaced far apart.
+RETRY_COOLDOWN_S = 900.0
+
 # connect2pnw device-locator (2026-07-08): the device roams WiFi segments and its LAN IP keeps
 # changing, defeating SSH. AWS only ever sees the public NAT address, so the uploader self-reports
 # its LAN IP as a `local_ip` query param on every upload_url request; the comma-uploader-api Lambda
@@ -178,6 +184,13 @@ class Uploader:
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
+    self._retry_after: dict[str, float] = {}   # uploadretry2pnw: fn -> monotonic time it may retry
+    self._upload_err_desc: str | None = None   # uploadretry2pnw: last LastUploadError we wrote (change-only)
+    # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
+    try:
+      self.params.remove("LastUploadError")
+    except Exception:
+      cloudlog.exception("failed to clear stale upload error")
 
     # connect2xnor: clear the firehose indicator on startup so a stale param
     # from a crash doesn't leave the UI showing "uploading" forever.
@@ -214,6 +227,33 @@ class Uploader:
     except Exception:
       cloudlog.exception("failed to set firehose speed param")
 
+  def _record_upload_error(self, code: int | None, last_exc) -> None:
+    # uploadretry2pnw: surface a compact last-error for the CES overlay, CHANGE-ONLY (write only when
+    # the description differs from what's shown) so a bad-network drive can't spam param writes — that
+    # per-failure churn was part of the 2026-07-13 chattiness. No count (a count would change every
+    # failure and defeat change-only).
+    try:
+      if code is not None:
+        desc = f"HTTP {code}"
+      elif last_exc is not None:
+        desc = type(last_exc[0]).__name__
+      else:
+        desc = "error"
+      if desc != self._upload_err_desc:
+        self._upload_err_desc = desc
+        self.params.put("LastUploadError", desc)
+    except Exception:
+      cloudlog.exception("failed to record upload error")
+
+  def _clear_upload_error(self) -> None:
+    # uploadretry2pnw: a real 2xx clears the tag — change-only (only touch the param when one is shown).
+    try:
+      if self._upload_err_desc is not None:
+        self._upload_err_desc = None
+        self.params.remove("LastUploadError")
+    except Exception:
+      cloudlog.exception("failed to clear upload error")
+
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
@@ -221,6 +261,12 @@ class Uploader:
       self._defer_hd = self.params.get_bool(DEFER_HD_PARAM)   # refresh once per listing
     except Exception:
       self._defer_hd = False
+
+    # uploadretry2pnw: drop lapsed retry-cooldowns (those files become eligible again) — keeps the map
+    # bounded to files that failed within the last RETRY_COOLDOWN_S.
+    now = time.monotonic()
+    if self._retry_after:
+      self._retry_after = {f: t for f, t in self._retry_after.items() if t > now}
 
     for logdir in listdir_by_creation(self.root):
       path = os.path.join(self.root, logdir)
@@ -244,6 +290,11 @@ class Uploader:
           # deleter could have deleted, so skip
           continue
         if is_uploaded:
+          continue
+
+        # uploadretry2pnw: a just-failed file is on cooldown -> skip it (advance to the next file) so
+        # one persistently-failing file can't livelock the uploader or re-burn a connection.
+        if self._retry_after.get(fn, 0.0) > now:
           continue
 
         # connect2xnor: split the two passes. Pass 1 (default) handles the small
@@ -345,21 +396,34 @@ class Uploader:
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
-      if stat is not None and stat.status_code in (200, 201, 401, 403, 412):
+      # uploadretry2pnw (driver req: never lose data): ONLY a real 2xx marks a file uploaded. 412
+      # ("already in S3"/backend-declined), 401/403 (rejected/expired presigned PUT or bad token) and
+      # network errors are NOT success -> the file stays un-xattr-marked and retries later (never
+      # marked done without reaching S3). Retries are GENTLE: a failed file goes on a long per-file
+      # cooldown so it isn't re-picked every loop (no livelock, no chatter) and the LastUploadError UI
+      # tag is written CHANGE-ONLY (once when a new error appears, once when it clears — never per
+      # failure; per-failure param writes were part of the 2026-07-13 chattiness we removed).
+      code = stat.status_code if stat is not None else None
+      if code in (200, 201):
         self.last_filename = fn
         dt = time.monotonic() - start_time
-        if stat.status_code == 412:
-          cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
-        else:
-          content_length = int(stat.request.headers.get("Content-Length", 0))
-          speed = (content_length / 1e6) / dt
-          self.last_upload_mbps = speed * 8.0   # connect2pnw: MB/s -> Mbps for the sidebar indicator
-          cloudlog.event("upload_success", key=key, fn=fn, sz=sz, content_length=content_length,
-                         network_type=network_type, metered=metered, speed=speed)
+        content_length = int(stat.request.headers.get("Content-Length", 0))
+        speed = (content_length / 1e6) / dt
+        self.last_upload_mbps = speed * 8.0   # connect2pnw: MB/s -> Mbps for the sidebar indicator
+        cloudlog.event("upload_success", key=key, fn=fn, sz=sz, content_length=content_length,
+                       network_type=network_type, metered=metered, speed=speed)
         success = True
+        self._retry_after.pop(fn, None)
+        self._clear_upload_error()
       else:
         success = False
-        cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S   # gentle: back off this file
+        if code == 412:
+          # benign (gateway already has it / declined) -> retry after cooldown; not a surfaced error
+          cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        else:
+          cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+          self._record_upload_error(code, last_exc)
 
     if success:
       # tag file as uploaded

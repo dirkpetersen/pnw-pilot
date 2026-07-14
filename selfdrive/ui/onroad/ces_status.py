@@ -412,6 +412,20 @@ class CesStatusRenderer(Widget):
     red = round(self._rain_mph.get(tier, 0.0) * _MPH_TO_MS * self._conv)
     return (f"RAIN -{red}", _C.GREY, self.font, None)
 
+  def _upload_err_line(self):
+    """uploadretry2pnw: surface the uploader's last HARD upload failure so a stuck upload is visible.
+    Silent when clear (the uploader removes LastUploadError on the next success + on startup, and
+    writes it change-only). 412 'already there' is never recorded, so this only lights on real errors."""
+    try:
+      err = ui_state.params.get("LastUploadError")
+    except Exception:
+      return None
+    if not err:
+      return None
+    if isinstance(err, bytes):
+      err = err.decode("utf-8", "replace")
+    return (f"UP ERR {err}", _C.RED, self.font, None)
+
   def _icbm_line(self, active_only: bool):
     """One-line stock-ACC button management state. active_only (moving view) returns None for the
     idle states — the long health dot covers them; the dump shows them spelled out."""
@@ -444,7 +458,7 @@ class CesStatusRenderer(Widget):
 
     # highest priority — abnormal states that must never be dropped by the cap (all appended before
     # the events below): long-mismatch (red), 4-signal fell to stock (red), (re)calibrating (orange).
-    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
+    for line in (self._mismatch_line(), self._steer_line(), self._calib_line(), self._upload_err_line()):
       if line:
         out.append(line)
 
@@ -582,7 +596,7 @@ class CesStatusRenderer(Widget):
     # value — so the everything-OK width never jitters. (The only alarm carrying a live number,
     # "CALIBRATING NN%", is far narrower than the grid so it can't drive the box width anyway.)
     alarm_w = 0.0
-    for line in (self._mismatch_line(), self._steer_line(), self._calib_line()):
+    for line in (self._mismatch_line(), self._steer_line(), self._calib_line(), self._upload_err_line()):
       if line:
         rows.append(("full", line[0], line[1], line[2], None))
         alarm_w = max(alarm_w, measure_text_cached(line[2], line[0], fs).x)

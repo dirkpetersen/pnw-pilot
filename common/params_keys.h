@@ -113,6 +113,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
     {"OnPriorityNetwork", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: network_arbiterd sets True while joined to a priority (home) SSID; pass-2 (rlog/HD) uploads run ONLY there (driver spec 2026-07-13)
     {"GearPark", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: card's change-only "gear is in Park" flag; lets background procs gate on parked WITHOUT a 100Hz carState msgq sub (2026-07-13 commIssue lesson)
+    {"LastUploadError", {CLEAR_ON_MANAGER_START, STRING}},  // uploadretry2pnw: last hard upload failure (HTTP status/exc) for the CES overlay, change-only; removed on next success + on startup
     {"DmMode", {PERSISTENT, INT, "0"}},  // dmroad2pnw: 3-way driver-monitoring timeout selector. 0=Off (stock strict everywhere), 1=Highway (900s pose/1800s phone on freeway or divided-2-lane, stock elsewhere), 2=Relaxed (10800s/3600s everywhere). Default OFF. Does NOT touch the glare knobs.
     // lebowski2pnw: used by the master-snapshot modeld (usbgpu state); registration verbatim from commaai/master.
     // Without these, modeld crash-loops with UnknownKeyName at startup (caught in the port review).
