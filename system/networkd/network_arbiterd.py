@@ -374,6 +374,7 @@ def main() -> NoReturn:
   portal_tries: dict[str, int] = {}    # ssid -> accept() attempts this session (bounded by PORTAL_MAX_TRIES)
   portal_result: dict[str, bool] = {}  # ssid -> last accept() online result (set by the worker thread)
   portal_thread: threading.Thread | None = None  # captive-portal accept() runs here so it NEVER blocks this loop
+  prev_on_priority: bool | None = None  # firehose2pnw: change-only publish of OnPriorityNetwork (flash-wear guard)
 
   while True:
     try:
@@ -427,6 +428,16 @@ def main() -> NoReturn:
             break
       if active_entry is not None and active_entry["ssid"] not in scan:
         scan = [*scan, active_entry["ssid"]]
+
+      # firehose2pnw: expose "connected to a priority (home / geo-gated) WiFi" so the uploader can run
+      # pass-2 (rlog/HD) even while onroad. An EV (Lightning / Tesla) parked and CHARGING keeps
+      # ignitionLine on -> onroad True, which would otherwise forbid the best upload window (parked for
+      # hours on home WiFi). active_entry is non-None only when we're actually joined to one of our
+      # priority SSIDs, so this is a strong SSID-match signal (no GPS-cold-start dependency).
+      on_priority = active_entry is not None
+      if on_priority != prev_on_priority:
+        params.put_bool("OnPriorityNetwork", on_priority)
+        prev_on_priority = on_priority
 
       # pick the first configured network that is both in range and has a saved NM connection.
       chosen = pn.select_available(nets, scan, _saved_connections(), priority_connection_id)

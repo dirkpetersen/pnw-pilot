@@ -170,6 +170,12 @@ class Car:
     # state with NO restart — race-free. Mirrors the manual Reset button exactly.
     self._maybe_reset_calibration_on_car_change()
 
+    # uploadgate2pnw: GearPark change-only publisher state. Seed the param False at startup so a
+    # stale True from a previous session (e.g. hard power cut while parked) can't leave the uploader
+    # gate open during a drive that never touches Park.
+    self._gear_park_last = False
+    self.params.put_bool_nonblocking("GearPark", False)
+
     # Write CarParams for controls and radard (current session — may be MOCK, which just runs passive)
     cp_bytes = self.CP.to_bytes()
     self.params.put("CarParams", cp_bytes)
@@ -290,6 +296,17 @@ class Car:
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
+
+    # uploadgate2pnw: publish "gear is in Park" as a tiny CHANGE-ONLY param so background processes
+    # (uploader) can gate on it WITHOUT subscribing to the 100 Hz carState stream (lesson 2026-07-13:
+    # extra msgq readers in the uploader caused a commIssue cascade). ~2-4 writes per drive. Only a
+    # VALID read may flip it; an invalid/no-CAN tick keeps the last known value (no flapping).
+    # Car-agnostic (gearShifter is a standard CarState field on every brand).
+    if CS.canValid:
+      parked = CS.gearShifter == car.CarState.GearShifter.park
+      if parked != self._gear_park_last:
+        self._gear_park_last = parked
+        self.params.put_bool_nonblocking("GearPark", parked)
 
     if RD is not None:
       tracks_msg = messaging.new_message('liveTracks')

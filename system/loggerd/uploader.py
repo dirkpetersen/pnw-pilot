@@ -85,18 +85,39 @@ MAX_UPLOAD_SIZES = {
 }
 
 
-def pass2_allowed(network_type: int, metered: bool, onroad: bool = False) -> bool:
-  # connect2xnor: strict gate -- proactive large-file uploads happen ONLY on real external WiFi
-  # (NetworkType.wifi). Never on LTE, never on the hotspot.
-  # connect2pnw: ...and never when the active connection is flagged METERED (e.g. a phone hotspot the
-  # user marked metered -> deviceState.networkMetered True). HD video/rlog must not burn metered data
-  # (pass 1 small files still run, throttled). FirehoseActive is only set during a pass-2 transfer, so
-  # gating pass 2 here also keeps the green "uploading" indicator off on metered connections.
-  # connect2pnw ONROAD gate (2026-07-09 night drive): ...and never while DRIVING. 75 MB pass-2 bursts +
-  # segment rotation caused transient CPU/IO stalls that surfaced as selfdrivedLagging ('System
-  # Lagging') and locationdTemporaryError (inputsOK false ~0.4 s: late camOdo frames) alerts. Pass 1
-  # (qlog/qcam, tiny) still flows onroad so the dashboard stays live; the HD bulk uploads when parked.
-  return network_type in PASS2_NETWORK_TYPES and not metered and not onroad
+def pass1_allowed(metered: bool) -> bool:
+  # uploadgate2pnw (driver spec 2026-07-13): METERED -> no drive-FILE uploads at all, not even the
+  # small pass-1 files (stock uploads them throttled on metered; the driver wants zero metered file
+  # traffic). Unmetered (WiFi or LTE) -> pass 1 (qlog/qcam) flows. Location services are NOT gated by
+  # this (driver qualification): the CloudWatch device locator gets its own tiny heartbeat below
+  # (LOCATOR_PING_S) that runs on ANY connection, so the device stays findable on metered too.
+  return not metered
+
+
+# uploadgate2pnw: device-locator heartbeat period. On a connection where file uploads are blocked
+# (metered) no upload_url requests happen, which used to silence the CloudWatch CLIENT_IP locator.
+# This standalone ping (~1 KB request, no file transferred) keeps the locator alive everywhere.
+LOCATOR_PING_S = 300.0
+
+
+def pass2_allowed(network_type: int, metered: bool, at_home: bool, onroad: bool, parked: bool) -> bool:
+  # uploadgate2pnw (driver spec 2026-07-13, replacing the firehose2pnw gate that caused the commIssue
+  # cascade): the FIRST check is the priority (GPS-gated home) WiFi. Pass 2 (rlog + HD video, 75 MB
+  # bursts) runs ONLY when connected to one of the driver's priority networks — NEVER anywhere else,
+  # no matter how unmetered the connection is. Rationale: an on-the-road hotspot may report unmetered,
+  # but background 75 MB uploads saturate it and break the driver's own connectivity.
+  #   at_home  = OnPriorityNetwork param (network_arbiterd, change-only write on SSID match)
+  #   parked   = GearPark param (card, change-only write on gear transitions) — no msgq subscription
+  #              in this process (lesson 2026-07-13: uploader carState subs caused the cascade).
+  # The onroad block stays for the driving case; Park (or offroad) opens it so an EV charging at home
+  # (ignition line on -> onroad True) still uploads. Metered blocks everything, everywhere.
+  if network_type not in PASS2_NETWORK_TYPES or metered:
+    return False
+  if not at_home:
+    return False
+  if onroad and not parked:
+    return False
+  return True
 
 allow_sleep = bool(int(os.getenv("UPLOADER_SLEEP", "1")))
 force_wifi = os.getenv("FORCEWIFI") is not None
@@ -398,7 +419,11 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
         continue
       ds = sm['deviceState']
       onroad = ds.started   # onroad gate: clear the indicator too when a drive starts mid-transfer
-      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, onroad) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      # uploadgate2pnw: gate inputs from PARAMS only (change-only writers elsewhere) — this guard
+      # thread deliberately subscribes to nothing beyond the 2 Hz deviceState.
+      at_home = uploader.params.get_bool("OnPriorityNetwork")
+      parked = uploader.params.get_bool("GearPark")
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, at_home, onroad, parked) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
         uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
@@ -434,35 +459,53 @@ def main(exit_event: threading.Event | None = None) -> None:
 
   backoff = 0.1
   pass1_run = 0   # consecutive successful small (pass-1) uploads since the last HD (pass-2) upload
+  last_locator_ping = 0.0   # uploadgate2pnw: standalone CloudWatch locator heartbeat (any connection)
   while not exit_event.is_set():
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
-    onroad = not offroad   # connect2pnw onroad gate: pass 2 (75 MB bursts) only while parked
+    onroad = not offroad   # connect2pnw onroad gate: pass 2 (75 MB bursts) only while parked/at home
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
     if network_type == NetworkType.none:
       if allow_sleep:
         time.sleep(60 if offroad else 5)
       continue
 
+    # uploadgate2pnw: keep the CloudWatch device locator alive on EVERY connection, incl. metered
+    # (driver: location services are never gated). A bare upload_url GET (~1 KB, no file follows)
+    # carries the local_ip param the Lambda logs. Best-effort; never blocks the loop on failure.
+    if time.monotonic() - last_locator_ping >= LOCATOR_PING_S:
+      last_locator_ping = time.monotonic()
+      try:
+        uploader.api.get("v1.4/" + dongle_id + "/upload_url/", timeout=5, path="locator/ping",
+                         local_ip=_get_local_ip(), access_token=uploader.api.get_token())
+      except Exception:
+        cloudlog.event("locator_ping_failed")
+
     # connect2xnor: honor force_wifi (test/debug) for the raw value too.
     network_type_raw = int(NetworkType.wifi) if force_wifi else sm['deviceState'].networkType.raw
     metered = sm['deviceState'].networkMetered
-    p1 = uploader.step(network_type_raw, metered)               # pass 1 (small files)
+
+    # uploadgate2pnw (driver spec): metered -> NO file uploads at all (pass 1 previously ran throttled
+    # on metered; now it needs an unmetered connection — WiFi or LTE both fine).
+    p1 = None
+    if pass1_allowed(metered):
+      p1 = uploader.step(network_type_raw, metered)             # pass 1 (small files)
     uploader.set_pass1_active(p1 is True)   # sidebar GREEN while pass-1 progresses (change-only write)
     if p1 is None:
       pass1_run = 0
     elif p1:
       pass1_run += 1
 
-    # connect2pnw: PASS 2 (large "firehose" files: rlog + HD video), ONLY on real external WiFi that
-    # is NOT flagged metered (networkType==wifi is never true on the hotspot or LTE, and a WiFi the
-    # user marked metered is excluded too, so this can't burn cellular or metered data).
+    # uploadgate2pnw: PASS 2 (rlog + HD video) ONLY at a priority (home) network — never on other
+    # WiFi/hotspots however unmetered (a background 75 MB burst kills an on-the-road hotspot), never
+    # metered, and only offroad-or-parked (GearPark param from card; no msgq subs in this process).
     # HD-interleave: run pass 2 when pass 1 has nothing left (p1 is None) OR after every
     # PASS2_INTERLEAVE successful small uploads, so HD video makes steady progress instead of being
-    # starved behind a long backlog of small files (e.g. right after a multi-segment drive). Small
-    # files keep priority (pass 1 runs every iteration); HD just never waits indefinitely.
+    # starved behind a long backlog of small files. Small files keep priority.
+    at_home = params.get_bool("OnPriorityNetwork")
+    parked = params.get_bool("GearPark")
     p2 = None
-    if pass2_allowed(network_type_raw, metered, onroad) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, at_home, onroad, parked) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 
