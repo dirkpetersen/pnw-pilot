@@ -7,9 +7,50 @@ from pathlib import Path
 from openpilot.system.hardware.hw import Paths
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.loggerd.uploader import main, UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE
+from openpilot.system.loggerd.uploader import main, pass1_allowed, pass2_allowed, PASS2_NETWORK_TYPES, UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE
+from cereal import log
 
 from openpilot.system.loggerd.tests.loggerd_tests_common import UploaderTestCase
+
+WIFI = next(iter(PASS2_NETWORK_TYPES))
+CELL = int(log.DeviceState.NetworkType.cell4G)
+
+
+class TestUploadGate:
+  """uploadgate2pnw (driver spec 2026-07-13): pass 2 (rlog/HD) ONLY at a priority/home network —
+  never on other WiFi however unmetered (a 75 MB background burst kills an on-the-road hotspot);
+  metered blocks ALL file uploads (pass 1 included); onroad needs Park (GearPark param, no msgq)."""
+
+  # -- pass 1: metered blocks everything; unmetered (wifi or LTE) flows --
+  def test_pass1_metered_blocks(self):
+    assert not pass1_allowed(metered=True)
+
+  def test_pass1_unmetered_allows(self):
+    assert pass1_allowed(metered=False)
+
+  # -- pass 2: home-first --
+  def test_pass2_home_offroad_allows(self):
+    assert pass2_allowed(WIFI, metered=False, at_home=True, onroad=False, parked=False)
+
+  def test_pass2_home_onroad_parked_allows(self):
+    # EV charging at home: ignition on -> onroad, gear in Park -> allowed
+    assert pass2_allowed(WIFI, metered=False, at_home=True, onroad=True, parked=True)
+
+  def test_pass2_home_onroad_driving_blocks(self):
+    # driving away while still in home WiFi range: no burst mid-drive
+    assert not pass2_allowed(WIFI, metered=False, at_home=True, onroad=True, parked=False)
+
+  def test_pass2_not_home_never_allows(self):
+    # the driver's core rule: unmetered on-the-road hotspot/WiFi is NOT enough — never pass 2 away
+    # from a priority network, even offroad, even parked
+    assert not pass2_allowed(WIFI, metered=False, at_home=False, onroad=False, parked=False)
+    assert not pass2_allowed(WIFI, metered=False, at_home=False, onroad=True, parked=True)
+
+  def test_pass2_metered_blocks_even_at_home(self):
+    assert not pass2_allowed(WIFI, metered=True, at_home=True, onroad=False, parked=True)
+
+  def test_pass2_non_wifi_blocks_even_at_home(self):
+    assert not pass2_allowed(CELL, metered=False, at_home=True, onroad=False, parked=True)
 
 
 class FakeLogHandler(logging.Handler):

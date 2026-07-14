@@ -111,6 +111,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
+    {"OnPriorityNetwork", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: network_arbiterd sets True while joined to a priority (home) SSID; pass-2 (rlog/HD) uploads run ONLY there (driver spec 2026-07-13)
+    {"GearPark", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: card's change-only "gear is in Park" flag; lets background procs gate on parked WITHOUT a 100Hz carState msgq sub (2026-07-13 commIssue lesson)
     {"DmMode", {PERSISTENT, INT, "0"}},  // dmroad2pnw: 3-way driver-monitoring timeout selector. 0=Off (stock strict everywhere), 1=Highway (900s pose/1800s phone on freeway or divided-2-lane, stock elsewhere), 2=Relaxed (10800s/3600s everywhere). Default OFF. Does NOT touch the glare knobs.
     // lebowski2pnw: used by the master-snapshot modeld (usbgpu state); registration verbatim from commaai/master.
     // Without these, modeld crash-loops with UnknownKeyName at startup (caught in the port review).
