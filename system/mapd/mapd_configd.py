@@ -14,17 +14,38 @@ CONTROL later via MapdSettings — this daemon never enables control.
 import json
 import math
 import os
+import subprocess
 import cereal.messaging as messaging
 from cereal import log
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.system.mapd.installer import MAPD_BINARY   # mapdheal2pnw: self-heal relaunch path
 
 # Download-menu paths are period-delimited keys from mapd's download_menu.json. The US states
 # table is "us_state" (SINGULAR), e.g. "us_state.WA". Comma-join multiple areas.
 PNW_DOWNLOAD = "us_state.WA,us_state.OR,us_state.ID"
 NetworkType = log.DeviceState.NetworkType
 OSM_OFFLINE_DIR = "/data/media/0/osm/offline"   # where mapd stores downloaded region tiles
+MAPD_WATCHDOG_LOOPS = 45   # mapdheal2pnw: loops (~s) mapd may be silent before we self-heal relaunch it
+
+
+def _mapd_process_alive() -> bool:
+  """True if a process named 'mapd' exists — so the watchdog never double-launches one manager already
+  has. Cheap /proc scan (only called when mapd has been silent a while). Never raises."""
+  try:
+    for pid in os.listdir("/proc"):
+      if not pid.isdigit():
+        continue
+      try:
+        with open(f"/proc/{pid}/comm") as f:
+          if f.read().strip() == "mapd":
+            return True
+      except OSError:
+        continue
+  except OSError:
+    pass
+  return False
 
 
 def _maps_on_disk() -> bool:
@@ -122,6 +143,26 @@ def main():
       mem.put_nonblocking("MapDownloadStatus", mdl)
     except Exception:
       pass
+
+    # mapdheal2pnw: self-heal watchdog. mapd is a manager NativeProcess (gate = binary exists), so manager
+    # SHOULD relaunch it if it dies — but a death-with-no-restart has been seen live (map went "no data"
+    # mid-trip; recovered only by a manual `setsid ./mapd`). If mapd stays silent well past manager's
+    # restart window (~45 loops @ ~1 Hz) while its binary exists AND no 'mapd' process is running, relaunch
+    # it here with the SAME env manager uses (USE_MSGQ_PREFIX=true — else it hits the unprefixed boot-race).
+    # The 45-loop gate makes a double-launch effectively impossible: if manager were going to restart it,
+    # sm.alive would recover within seconds and reset mapd_down long before 45. Rate-limited to one relaunch
+    # per down-episode (reset the counter after firing; it re-trips in ~45 s if still down).
+    # TRADEOFF (Gemini): start_new_session detaches the child so it survives the drive, so on car-off it
+    # won't catch manager's SIGTERM and orphans until the SOM sleeps — accepted vs "no map data mid-drive",
+    # and only in the rare death-with-no-manager-restart case that trips this at all.
+    if mapd_down >= MAPD_WATCHDOG_LOOPS and os.path.exists(MAPD_BINARY) and not _mapd_process_alive():
+      try:
+        subprocess.Popen(["/usr/bin/env", "USE_MSGQ_PREFIX=true", MAPD_BINARY],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cloudlog.error(f"mapd_configd: mapd silent ~{mapd_down}s with no process -> self-heal relaunch")
+      except Exception:
+        cloudlog.exception("mapd_configd: self-heal relaunch failed")
+      mapd_down = 0
 
     # mapd2pnw: drive the "Get map for this location" toggle grey-out (param MapForLocationCovered).
     # The toggle should be GREYED (covered) unless we KNOW we're somewhere with no downloaded map.

@@ -15,6 +15,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController  # vtsc
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import SpeedAdjustController  # speedadjust2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # standstillsoft2pnw
+from openpilot.selfdrive.controls.lib.leadloss_pnw import LeadLossHoldShadow  # leadloss2pnw (shadow)
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -76,6 +77,7 @@ class LongitudinalPlanner:
     self.vtsc = VTSCController(CP)   # vtsc: curve speed control, default OFF (behavior-neutral)
     self.speedadjust = SpeedAdjustController(CP)   # speedadjust2pnw: limit-drop + police cruise cap, default OFF
     self.veh = PnwVehicle(CP)   # standstillsoft2pnw: Lightning gentle standstill-launch accel cap (Tesla -> inf)
+    self.leadloss = LeadLossHoldShadow()   # leadloss2pnw: SHADOW-only lead-dropout detector (logs, never actuates)
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -114,6 +116,15 @@ class LongitudinalPlanner:
       accel_coast = ACCEL_MAX
 
     v_ego = sm['carState'].vEgo
+
+    # leadloss2pnw: SHADOW lead-dropout detector — logs a `lead_loss_hold_shadow` event when a close,
+    # closing, confident lead suddenly vanishes (the radar-less-Lightning-in-a-curve dropout). Log-only,
+    # never touches control; wrapped so it can NEVER affect the planner even on a bad message.
+    try:
+      self.leadloss.update(sm['radarState'].leadOne, v_ego, sm['carState'].aEgo)
+    except Exception:
+      pass
+
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
