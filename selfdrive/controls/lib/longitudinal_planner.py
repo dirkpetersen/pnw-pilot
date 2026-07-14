@@ -14,6 +14,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController  # vtsc
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import SpeedAdjustController  # speedadjust2pnw
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # standstillsoft2pnw
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -74,6 +75,7 @@ class LongitudinalPlanner:
     self.allow_throttle = True
     self.vtsc = VTSCController(CP)   # vtsc: curve speed control, default OFF (behavior-neutral)
     self.speedadjust = SpeedAdjustController(CP)   # speedadjust2pnw: limit-drop + police cruise cap, default OFF
+    self.veh = PnwVehicle(CP)   # standstillsoft2pnw: Lightning gentle standstill-launch accel cap (Tesla -> inf)
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -145,6 +147,12 @@ class LongitudinalPlanner:
     accel_clip = [ACCEL_MIN, get_max_accel(v_ego)]
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
     accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
+
+    # standstillsoft2pnw: gentle the accel CEILING out of a standstill so a follow-launch behind a
+    # departing lead is a soft ramp, not a ~2.0 m/s^2 lurch (the red-light "lurch forward" fix). REDUCE-
+    # ONLY on the ceiling (min) so it can never raise the accel limit / speed the car up; braking bound
+    # accel_clip[0] is untouched. Lightning-only — the Tesla path returns +inf (min leaves it unchanged).
+    accel_clip[1] = min(accel_clip[1], self.veh.gentle_launch_accel(v_ego))
 
     if reset_state:
       self.v_desired_filter.x = v_ego

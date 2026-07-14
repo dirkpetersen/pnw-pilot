@@ -1,5 +1,6 @@
 """Capability-view tests — PnwVehicle maps cars to features (no fingerprint checks in feature code)."""
 import json
+import math
 
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
@@ -271,3 +272,27 @@ def test_rain_is_separate_from_lightning_curve_penalty(tmp_path, monkeypatch):
   tesla.set_rain_tier(2)
   assert tesla.curve_speed_penalty_ms(55 * MPH) == 0.0     # base curve penalty still zero on Tesla
   assert tesla.rain_penalty_ms() > 0.0                     # rain margin is delivered separately
+
+
+# ---- standstillsoft2pnw: gentle standstill-launch accel cap ---------------------------------------
+def test_gentle_launch_lightning_ramp():
+  v = PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=True))
+  assert v.gentle_launch
+  assert abs(v.gentle_launch_accel(0.0) - 0.6) < 1e-6            # soft floor at a dead stop
+  v_lift = 9.0 * MPH
+  assert math.isinf(v.gentle_launch_accel(v_lift))              # lifted by launch_v
+  assert math.isinf(v.gentle_launch_accel(20.0))               # no cap at speed
+  ramp = [v.gentle_launch_accel(x) for x in (0.0, 1.0, 2.0, 3.0)]
+  assert all(ramp[i] <= ramp[i + 1] + 1e-9 for i in range(len(ramp) - 1))   # non-decreasing
+
+
+def test_gentle_launch_tesla_uncapped():
+  t = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  assert not t.gentle_launch
+  assert math.isinf(t.gentle_launch_accel(0.0)) and math.isinf(t.gentle_launch_accel(2.0))
+
+
+def test_gentle_launch_reduce_only():
+  # min(stock_max, cap) must never exceed the stock max -> can only soften, never speed up
+  v = PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=True))
+  assert all(min(2.0, v.gentle_launch_accel(x * 0.2)) <= 2.0 + 1e-9 for x in range(30))

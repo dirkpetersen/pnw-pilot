@@ -16,6 +16,10 @@ import stat
 # crash-looped card, 2026-07-11).
 _MPH_TO_MS = 0.44704
 
+# standstillsoft2pnw: the launch accel ramp rises to this ceiling by launch_v (slightly above the stock
+# ~2.0 m/s^2 max so the cap never binds the normal accel envelope at/after launch_v).
+_LAUNCH_TOP = 2.5
+
 # Persistent, outside-git tunable for the Lightning curve-speed penalty (survives auto-update, same
 # discipline as dm_config.py on the dm-variable branch). Missing/malformed -> hardcoded defaults.
 # Schema: {"lightning": {<any subset of the _CURVE_DEFAULTS keys below>}} — unknown keys ignored,
@@ -63,6 +67,11 @@ _CURVE_DEFAULTS = {
                                 #   generous for the Lightning.
   "icbm_firm_decel": 1.4,       # m/s^2 assumed approach decel for LARGE speed drops (stock ACC does
                                 #   the actual braking; this only shapes the tap-start envelope)
+  # standstillsoft2pnw (2026-07-14): gentle standstill LAUNCH accel ramp — the red-light follow-launch
+  # "lurch" fix. Cap the accel out of a dead stop to launch_accel, ramping to the normal envelope by
+  # launch_v. (Root cause: a lead crept forward at a red, op-long launched to follow at ~2.0 m/s^2.)
+  "launch_accel": 0.6,          # m/s^2 accel ceiling at a dead stop (soft; stock jumped to ~2.0 = lurch)
+  "launch_v_mph": 9.0,          # by this speed the launch cap has lifted to the normal accel envelope
 }
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
@@ -85,6 +94,10 @@ _CURVE_BOUNDS = {
   "overspeed_margin_mph": (0.5, 10.0),
   "map_scale": (0.5, 1.0),
   "icbm_firm_decel": (0.8, 1.5),
+  # launch_accel in [0.2, 2.0]: never so low the truck can't move, never above the stock ~2.0 max ->
+  # this cap can only ever SOFTEN a launch, never make it harsher. launch_v [3, 25] mph.
+  "launch_accel": (0.2, 2.0),
+  "launch_v_mph": (3.0, 25.0),
 }
 
 
@@ -190,6 +203,10 @@ class PnwVehicle:
     # config choice, so it applies in BOTH op-long (VTSC) and stock-ACC (ICBM) — both produce a curve
     # target SPEED that curve_speed_penalty_ms() lowers. Tesla (and every other car) -> False -> 0.0.
     self.lightning_curve_slow: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+    # standstillsoft2pnw: the Lightning's EV torque + pure-integrator longitudinal makes a launch out of
+    # a stop (following a lead that pulled away at a red) a hard LURCH; gentle the launch accel. The
+    # Tesla launches smoothly and is NOT affected (capability, not a fingerprint check in feature code).
+    self.gentle_launch: bool = fp == "FORD_F_150_LIGHTNING_MK1"
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
@@ -301,3 +318,19 @@ class PnwVehicle:
     """Assumed approach decel (m/s^2) ICBM may plan with for LARGE speed drops (stock ACC does the
     actual braking). 0.0 on non-Lightning -> callers fall back to the base comfort decel."""
     return self._curve_cfg["icbm_firm_decel"] if self.lightning_curve_slow else 0.0
+
+  def gentle_launch_accel(self, v_ego: float) -> float:
+    """standstillsoft2pnw: a soft accel CEILING (m/s^2) out of a standstill so a follow-launch behind a
+    departing lead is a smooth ramp, not a ~2.0 m/s^2 lurch. Ramps linearly from launch_accel at v=0 up
+    to _LAUNCH_TOP (just above the stock max, so it stops binding) by launch_v; +inf above launch_v and
+    on every non-Lightning car -> NO cap there. The caller applies it REDUCE-ONLY to the accel ceiling
+    (min), so this can never RAISE the accel limit / speed the car up — it can only soften the launch.
+    Only the positive-accel ceiling is touched; braking authority (accel_clip[0]) is untouched."""
+    if not self.gentle_launch:
+      return float('inf')
+    v_lift = self._curve_cfg["launch_v_mph"] * _MPH_TO_MS
+    if v_lift <= 0.0 or v_ego >= v_lift:
+      return float('inf')
+    a0 = self._curve_cfg["launch_accel"]
+    frac = _clamp(v_ego / v_lift, 0.0, 1.0)
+    return a0 + frac * (_LAUNCH_TOP - a0)
