@@ -973,8 +973,11 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.canBusMissing: {
     ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("CAN Bus Disconnected"),
+    # canoff2pnw: reworded from "Likely Faulty Cable" — on the Lightning (ignition sensed via CAN, no 12V
+    # line) the CAN bus goes quiet on a NORMAL power-off exactly like a cable fault, so "faulty cable"
+    # falsely scared the driver every shutdown. The honest wording covers both (vehicle off OR wiring).
     ET.PERMANENT: Alert(
-      "CAN Bus Disconnected: Likely Faulty Cable",
+      "CAN Bus Disconnected — Vehicle Off or Check Wiring",
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 1., creation_delay=1.),
