@@ -128,9 +128,14 @@ class SpeedAdjustController:
     return self._police_anchor - POLICE_NO_LIMIT_TRIM
 
   def _limit_drop_cap(self, v_cruise: float):
-    """Hold the driver's over-limit RATIO as the posted limit drops: cap = SL × (v_set/SL_ref), with the
+    """Trim the driver's OVER-limit excess as the posted limit drops: cap = SL × (v_set/SL_ref), with the
     ratio ANCHORED when last uncapped (not live v_cruise → no double-reduction if the set is re-scrolled).
-    Persistent while below the baseline; releases (re-anchors) when the limit rises back. m/s or None."""
+    Persistent while below the baseline; releases (re-anchors) when the limit rises back. m/s or None.
+
+    Two guards (Corvallis city fix 2026-07-14): (1) only trim a driver who was ABOVE the baseline limit
+    (ratio >= 1) — a limit drop must NOT slow a law-abiding driver (set 30 in a 45 -> ratio 0.65 -> a drop
+    to 25 wrongly scaled them to 16 mph); (2) NEVER cap below the posted limit (max floor). So this is a
+    'trim your speeding when the limit falls' feature, not a 'slow everyone proportionally' one."""
     sl = self._sl
     if sl <= 0.0:
       return None                            # unknown limit → no cap, preserve the baseline + ratio
@@ -138,9 +143,11 @@ class SpeedAdjustController:
       self._sl_ref = sl                      # at/above baseline → uncapped; track baseline up and
       self._ratio = v_cruise / sl            #   anchor the over-limit ratio HERE (v_set/limit)
       return None
+    if self._ratio < 1.0:
+      return None                            # driver was at/UNDER the limit → a drop shouldn't slow them
     if sl / self._sl_ref > MIN_DROP_FRAC:    # < 5% drop → noise
       return None
-    return sl * self._ratio                  # = v_set_at_baseline × SL/SL_ref
+    return max(sl, sl * self._ratio)         # proportional trim, but NEVER below the posted limit
 
   # ---- the cap the planner folds (reduce-only) ------------------------------
   def cap(self, sm, v_cruise: float, v_ego: float) -> float:

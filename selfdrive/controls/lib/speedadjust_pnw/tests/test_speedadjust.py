@@ -65,6 +65,23 @@ def test_limit_drop_no_double_reduction():
   assert abs(out - 50 * MPH) < 1e-6
 
 
+def test_limit_drop_under_limit_no_slow():
+  # Corvallis city bug: driver set 30 in a 45 zone (ratio 0.67, UNDER the limit); limit drops to 25.
+  # Must NOT slow them (was wrongly capping to ~16 mph). ratio < 1 -> no cap.
+  V30 = 30 * MPH
+  V25 = 25 * MPH
+  c = _ctrl(mode=2, sl_ref=V45, ratio=V30 / V45, sl=V25)
+  assert _cap(c, V30, V25) == V30
+
+
+def test_limit_drop_never_below_limit():
+  # even at ratio just over 1, the cap floors at the posted limit — never slows below it
+  V25 = 25 * MPH
+  c = _ctrl(mode=2, sl_ref=V60, ratio=1.02, sl=V25)   # was barely over a 60 baseline
+  out = _cap(c, V75, V25)
+  assert out >= V25 - 1e-9                              # never below the 25 mph posted limit
+
+
 def test_limit_rise_releases():
   c = _ctrl(mode=2, sl_ref=V45, ratio=V75 / V45, sl=V60)   # limit rose above baseline
   assert _cap(c, V75, V60) == V75
