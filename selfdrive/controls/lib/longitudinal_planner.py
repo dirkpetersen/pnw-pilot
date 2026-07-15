@@ -231,6 +231,14 @@ class LongitudinalPlanner:
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
+    # standstillsoft2pnw: the accel_clip[1] jerk-limiter (±0.05/cycle, loop above) lags during a ROLLING
+    # near-stop -> launch — the truck crawls to ~1-2 mph and op-long launches before the ceiling has
+    # ramped down from its cruising value, letting a firm ~1.3-1.7 m/s^2 launch slip through (the red-
+    # light "jolt forward" the driver had to brake to stop; rlog seg 0000014e--...--80). The line-166
+    # cap on accel_clip[1] only bites from a *dead* stop (where it converged to launch_accel). Re-apply
+    # the gentle launch ceiling DIRECTLY on the output so it binds on the first cycle. Reduce-only (min);
+    # the ceiling is always >= launch_accel (0.6) so braking is never touched; Tesla path returns +inf.
+    self.output_a_target = min(self.output_a_target, self.veh.gentle_launch_accel(v_ego))
     self.prev_accel_clip = accel_clip
 
   def publish(self, sm, pm):
