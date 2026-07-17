@@ -355,6 +355,6 @@ class PnwVehicle:
     t_follow_override; None there means "use the shared get_T_FOLLOW(personality) as before"."""
     if not self.tight_aggressive_follow:
       return None
-    if int(personality) != int(log.LongitudinalPersonality.aggressive):
+    if personality != log.LongitudinalPersonality.aggressive:
       return None
     return _TIGHT_AGGRESSIVE_T_FOLLOW
