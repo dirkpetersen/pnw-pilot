@@ -213,13 +213,17 @@ class PnwVehicle:
     # a stop (following a lead that pulled away at a red) a hard LURCH; gentle the launch accel. The
     # Tesla launches smoothly and is NOT affected (capability, not a fingerprint check in feature code).
     self.gentle_launch: bool = fp == "FORD_F_150_LIGHTNING_MK1"
-    # tightfollow2pnw (driver req 2026-07-16): op-long's Aggressive personality (shared T_FOLLOW=1.25s,
-    # every car) was measured landing around 1.8s of real follow gap on the Lightning at highway speed —
-    # much looser than the driver's stock-ACC minimum-bar setting they compare it against. A STARTING
-    # POINT retune, Lightning-only (the shared upstream constant is untouched, so the Tesla's Aggressive
-    # is unaffected) — expect this to need iteration once driven, it will not make op-long identical to
-    # stock ACC (different control algorithm entirely, see docs).
-    self.tight_aggressive_follow: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+    # tightfollow2pnw (driver req 2026-07-16): DISABLED 2026-07-16 after on-road measurement — a flat
+    # 1.0s T_FOLLOW made things measurably WORSE, not better: avg gapS actually rose to 1.92s (looser
+    # than the pre-fix 1.84s) with the gap hunting 1.20-3.80s, and aEgo stdev rose 0.221->0.347 (audibly
+    # rougher ride). Root cause (Fable design review): the Lightning has no radar (radarUnavailable=True
+    # in ford/interface.py), so radard.py's vision-only lead path is completely unfiltered (no KF1D,
+    # unlike the radar Track path) -- tightening the target just asked the MPC to chase raw per-frame
+    # model noise harder. Fix needs to filter the vision lead in radard.py FIRST (a general fix, not
+    # Lightning-specific), then reintroduce tightening as a smaller (~1.15s), lead-stability-gated,
+    # slewed target -- not a flat constant. See PENDING-WORK.md. Left as an inert capability (False) so
+    # the plumbing (aggressive_t_follow / t_follow_override) stays in place for that follow-up.
+    self.tight_aggressive_follow: bool = False
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
