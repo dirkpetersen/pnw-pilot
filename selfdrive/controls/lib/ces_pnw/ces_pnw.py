@@ -972,6 +972,10 @@ def decision_telemetry(s) -> dict:
     "mapV": round(float(s["map_target_v"]), 1),
     "mapDist": round(float(md), 0) if md != float('inf') else 0.0,
     "vEgo": round(float(s["v_ego"]), 1),
+    # speedlimitdebug2pnw (driver req 2026-07-16): surface the OSM speed limit in the overlay feed
+    # too (it was already logged per-event via self._speed_limit, just never in the live CESStatus
+    # dict the on-screen box reads) so the overlay can flash it on a real change.
+    "spdLim": round(float(s.get("spd_lim", 0.0)), 1),
     # accelerate-zone + the signals that drive it (also logged per event for later tuning)
     "accelZone": _accelerate_zone(s),
     "hwyGate": s.get("spd_lim", 0.0) >= C.LOWSPEED_HWY_GATE,   # lowSpeed suppressed: on a highway

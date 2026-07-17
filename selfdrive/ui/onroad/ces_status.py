@@ -103,6 +103,8 @@ _CARD_LINE_EX = (
 _PAD = 24
 _MARGIN = 40         # gap from the screen's right / bottom edges
 _REAL_CURVE_MS = 40.0  # a map target speed below this (~90 mph) counts as a real curve to preview
+_SPDLIM_FLASH_S = 6.0  # speedlimitdebug2pnw: how long a just-changed speed limit stays on screen —
+                       # silent otherwise (driver: don't show static info, only when something changes)
 _MAX_LINES_MOVING = 5  # hard cap while moving — the box must never stack into the road path
 _CURVE_SHOW_PCT = 40   # moving view: curve% below this is noise, dot/nothing instead
 _NEXT_CURVE_S = 20.0   # moving view: preview the next map curve only within this many seconds
@@ -173,6 +175,8 @@ class CesStatusRenderer(Widget):
     self._st: dict = {}
     self._vtsc: dict = {}
     self._mapdl: str = ""
+    self._last_spdlim: float | None = None  # speedlimitdebug2pnw: previous OSM speed limit (m/s)
+    self._spdlim_change_t: float = 0.0      # speedlimitdebug2pnw: monotonic time of the last real change
     self._fordlat: dict = {}     # fordlatui2pnw: {"mode","ts"} published by the Ford carcontroller
     self._steerfault_n = 0       # fordlatui2pnw: leaky-bucket level of steer faults while sending 4-signal
     self._clean_streak = 0       # fordlatui2pnw: consecutive clean 4-signal-at-speed polls
@@ -239,6 +243,15 @@ class CesStatusRenderer(Widget):
       self._st = st if isinstance(st, dict) else {}
     except Exception:
       self._st = {}
+    # speedlimitdebug2pnw (driver req 2026-07-16): flash the speed-limit line only on a REAL change —
+    # a static "limit 55" sitting on screen the whole highway leg is exactly the noise the driver
+    # doesn't want; only the moment it changes is a live event worth a line. 0/absent (no OSM data)
+    # never counts as "changed" so a data dropout can't fire a false flash.
+    sl = _f(self._st.get("spdLim"))
+    if sl > 0.0 and self._last_spdlim is not None and abs(sl - self._last_spdlim) > 0.1:
+      self._spdlim_change_t = now
+    if sl > 0.0:
+      self._last_spdlim = sl
     # stophold2pnw (C): staleness — publisher stamps `ts` (wall clock) at ~5 Hz; missing/old means
     # selfdrived is not publishing (dead, disabled-by-bug, or never constructed). Wall-vs-wall
     # compare; a post-NTP clock jump can only make a healthy publisher look stale for one 5 Hz
@@ -416,6 +429,18 @@ class CesStatusRenderer(Widget):
     red = round(self._rain_mph.get(tier, 0.0) * _MPH_TO_MS * self._conv)
     return (f"RAIN -{red}", _C.GREY, self.font, None)
 
+  def _speedlimit_line(self):
+    """speedlimitdebug2pnw (driver req 2026-07-16): the OSM speed limit, shown ONLY for _SPDLIM_FLASH_S
+    seconds right after it actually changes — silent the rest of the time. The steady number already
+    lives on the sign icon (speed_limit.py); this line is purely a 'the limit just changed' event tag,
+    same philosophy as the rest of this box (dots/silence for steady state, a line for a live event)."""
+    if time.monotonic() - self._spdlim_change_t > _SPDLIM_FLASH_S:
+      return None
+    sl = _f(self._st.get("spdLim"))
+    if sl <= 0.0:
+      return None
+    return (f"limit {round(sl * self._conv)}", _C.ORANGE, self.font_bold, None)
+
   def _upload_err_line(self):
     """uploadretry2pnw: surface the uploader's last HARD upload failure so a stuck upload is visible.
     Silent when clear (the uploader removes LastUploadError on the next success + on startup, and
@@ -473,6 +498,10 @@ class CesStatusRenderer(Widget):
     rain = self._rain_line()   # armed-indicator, right under the identity line
     if rain:
       out.append(rain)
+
+    spdlim = self._speedlimit_line()   # speedlimitdebug2pnw: only while the flash window is live
+    if spdlim:
+      out.append(spdlim)
 
     icbm = self._icbm_line(active_only=True)
     if icbm:
@@ -632,6 +661,12 @@ class CesStatusRenderer(Widget):
     reason = st.get("reason", "")
     if reason and reason not in ("chill", ""):
       rows.append(("full", f"why {reason}", _C.WHITE, self.font, None))
+
+    # (4b) speed-limit-just-changed flash (speedlimitdebug2pnw) — same on/off philosophy as the
+    # moving view: silent unless it changed in the last _SPDLIM_FLASH_S seconds.
+    spdlim = self._speedlimit_line()
+    if spdlim:
+      rows.append(("full", spdlim[0], spdlim[1], spdlim[2], None))
 
     # (5) the fixed 3x2 diagnostics grid
     rows.append(("sep",))
