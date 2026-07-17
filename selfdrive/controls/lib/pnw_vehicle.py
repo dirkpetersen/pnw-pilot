@@ -12,9 +12,15 @@ import json
 import os
 import stat
 
+from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
+
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
 _MPH_TO_MS = 0.44704
+# tightfollow2pnw: Lightning-only Aggressive T_FOLLOW override (s), vs. the shared upstream 1.25s.
+# Deliberately a MODEST first cut for a heavy work truck, not an attempt to match the stock ACC's
+# tightest bar setting outright — validate on the road and retune from here.
+_TIGHT_AGGRESSIVE_T_FOLLOW = 1.0
 
 # standstillsoft2pnw: the launch accel ramp rises to this ceiling by launch_v (slightly above the stock
 # ~2.0 m/s^2 max so the cap never binds the normal accel envelope at/after launch_v).
@@ -207,6 +213,13 @@ class PnwVehicle:
     # a stop (following a lead that pulled away at a red) a hard LURCH; gentle the launch accel. The
     # Tesla launches smoothly and is NOT affected (capability, not a fingerprint check in feature code).
     self.gentle_launch: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+    # tightfollow2pnw (driver req 2026-07-16): op-long's Aggressive personality (shared T_FOLLOW=1.25s,
+    # every car) was measured landing around 1.8s of real follow gap on the Lightning at highway speed —
+    # much looser than the driver's stock-ACC minimum-bar setting they compare it against. A STARTING
+    # POINT retune, Lightning-only (the shared upstream constant is untouched, so the Tesla's Aggressive
+    # is unaffected) — expect this to need iteration once driven, it will not make op-long identical to
+    # stock ACC (different control algorithm entirely, see docs).
+    self.tight_aggressive_follow: bool = fp == "FORD_F_150_LIGHTNING_MK1"
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
@@ -334,3 +347,14 @@ class PnwVehicle:
     a0 = self._curve_cfg["launch_accel"]
     frac = _clamp(v_ego / v_lift, 0.0, 1.0)
     return a0 + frac * (_LAUNCH_TOP - a0)
+
+  def aggressive_t_follow(self, personality) -> float | None:
+    """tightfollow2pnw: a tighter T_FOLLOW (s) for the Lightning's Aggressive personality only —
+    None (unchanged upstream behavior) for every other car and every other personality, including
+    the Tesla's own Aggressive. The caller passes this straight through as long_mpc's optional
+    t_follow_override; None there means "use the shared get_T_FOLLOW(personality) as before"."""
+    if not self.tight_aggressive_follow:
+      return None
+    if int(personality) != int(log.LongitudinalPersonality.aggressive):
+      return None
+    return _TIGHT_AGGRESSIVE_T_FOLLOW
