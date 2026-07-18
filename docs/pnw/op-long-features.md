@@ -225,7 +225,142 @@ e2e Experimental braking; Standard (`CESMode=2`) where stop-light behavior matte
 
 ---
 
-## 5. Footer
+## 5. The radar constraint — the Lightning's *requires-vs-cannot* split
+
+The single fact that shapes every Lightning longitudinal decision: **the Lightning has no radar
+openpilot can read**, and this is encoded directly in upstream comma logic —
+
+```
+ford/interface.py:  ret.radarUnavailable = Bus.radar not in DBC[candidate]   # Lightning → True
+                    ret.alphaLongitudinalAvailable = ret.radarUnavailable    # op-long OFFERED *only because* there's no radar
+```
+
+That second line is the whole story: openpilot longitudinal on the Lightning is flagged **"alpha"**
+*precisely because* there is no radar — it is the vision-only fallback comma exposes only on radarless
+Ford builds. Consequence: on the Lightning the two things you want are on **opposite sides of the
+Alpha-Long switch and cannot coexist** —
+
+- **Real curve-brake authority** (VTSC/MTSC decel, stop-and-go, Experimental) **requires op-long ON.**
+- **Radar-quality following** (the measured ~1.43 s gap, no cut-ins) **requires op-long OFF** — because
+  op-long ON discards the stock ACC entirely, and there is no radar for openpilot to replace it with,
+  so it falls back to noisy vision-only leads (~1.84 s, hunting).
+
+### Lightning — which side of the switch each feature lives on
+
+| Feature | Needs op-long **ON** | Works op-long **OFF** (stock ACC) | Radar-dependent? |
+|---|:---:|:---:|---|
+| openpilot MPC gas/brake | ✅ only here | ➖ | — |
+| Experimental / end-to-end long | ✅ only here | ➖ | — |
+| VTSC decel-limited curve cap | ✅ only here | ➖ (feeds ICBM instead) | no |
+| MTSC map-curve **braking** | ✅ only here | ➖ (map data feeds ICBM) | no |
+| Red-light stop-and-go / standstill guards | ✅ only here | ➖ (stock ACC stops) | Ford radar |
+| Gentle standstill launch | ✅ only here | ➖ (moot) | — |
+| speedadjust (police/limit auto-reduce) | ✅ only here | ➖ (returns unchanged) | no |
+| BP highway follow shaping / fordregen A+B | ✅ only here | ➖ | — |
+| radarless2pnw vision-lead KF | ✅ (the lead source) | (telemetry only) | replaces radar |
+| tightfollow (T_FOLLOW) | ✅ | ➖ | — |
+| **Stock radar ACC following (1.43 s gap)** | ➖ **destroyed** | ✅ **only here** | **Ford radar** |
+| **Native gap button + dash feedback** | ➖ (silent personality trap) | ✅ **only here** | — |
+| **ICBM — SET-tap curve slowdown** | ➖ `icbm = buttons AND NOT op_long` | ✅ **only here** | — |
+| Lateral / nudgeless / BSM / DM / mapd / happening-ahead | works **either way** | works either way | — |
+
+### Tesla — no conflict (for contrast)
+
+op-long is unconditional AND the Raven has a real radar (Continental ARS4-B). op-long ON keeps radar
+following, so it gets curve authority AND radar leads at once. **The requires-vs-cannot tension is
+Lightning-only, and exists entirely because op-long there is radarless.**
+
+### Do we need a different solution? Three options
+
+1. **Make op-long's vision following good enough** → `radarless2pnw` (KF on vision lead, shipped 07-18,
+   unvalidated). Attacks the measured root cause (raw vLead noise into the MPC). Cheapest; already in
+   flight. If it lands, the tradeoff largely dissolves.
+2. **Keep stock ACC, nudge for curves** → **ICBM** (op-long OFF). Radar following + SET-tap curve
+   slowdowns. Deployed. Ceiling: set-point authority only, no brake, can't help once a curve needs
+   more than stock ACC's own decel.
+3. **The genuinely different solution — give op-long a radar lead on the Lightning.** openpilot's MPC
+   is all-or-nothing (it can't brake for curves while stock ACC follows), so the ONLY way to get
+   *both* radar-following AND curve authority is for op-long itself to have a radar lead.
+   **Key unknown:** `radarUnavailable=True` is a *DBC/fingerprint* fact (no radar bus defined) — it is
+   **not** proof the truck's ACC-radar tracks are absent from an accessible CAN bus (Ford models with
+   `DELPHI_MRR` radar *do* expose tracks). A telemetry CAN-discovery pass (dump unparsed CAN, look for
+   radar-shaped tracks) would settle whether wiring them into `radard` is possible. If it is, this
+   eliminates the tradeoff — strictly better than #1. **Not yet investigated.**
+
+---
+
+## 6. Toggle UX — how the Alpha-Long switch behaves (design LOCKED 2026-07-18, option A)
+
+Recorded 2026-07-18 from a design discussion, then **decided**. **Not yet on the channel** —
+implementation lives on branch `oplongui2pnw` (Sonnet-written, Fable + Gemini reviewed per pipeline).
+Goal: stop the toggle being a silent trap.
+
+### Decision — the shipped design (option A)
+
+Two surfaces, split by where each belongs:
+
+- **Settings toggle** (`selfdrive/ui/layouts/settings/developer.py`):
+  - **Tesla** → forced **ON**, greyed, subtext "always on for this car". Driven by the *native-op-long*
+    capability (`CP.openpilotLongitudinalControl && !CP.alphaLongitudinalAvailable`) — **never** a
+    `carFingerprint`/brand string (capability-view rule, 2026-07-11). Today the toggle is *hidden* on
+    Tesla; this makes it visible-ON-greyed instead, which is more honest.
+  - **Lightning** → honest subtext (*ON = openpilot pedal / vision leads; OFF = stock ACC / radar;
+    takes effect next ignition*), a normal toggle when offroad, **always able to turn OFF**.
+  - **No live-mode gating of the toggle.** Gating a fingerprint-time setting on the live driving mode
+    was judged a trap in its own right (see constraints below) — dropped.
+- **Onroad Experimental button** (`selfdrive/ui/onroad/exp_button.py`): today with op-long OFF the
+  cycle is `_CES_CYCLE_NO_LONG = (CES, Chill)` — forced Experimental is dropped, and the **CES state
+  already draws an experimental-style white/yellow icon**, so flipping wheel↔white-exp reads as
+  Chill↔Experimental even though it's Chill↔CES (this is what made the truck *look* like it could
+  reach Experimental on stock ACC). **Change:** when op-long is OFF and the driver reaches for
+  Experimental, surface an **informational** display — "Enable openpilot Longitudinal Control
+  (Settings ▸ Developer) to use Experimental mode."
+  - **Option A (chosen): informational only** — no enable-from-button, no `AlphaLongitudinalEnabled`
+    write, no `OnroadCycleRequested`, no restart, no new safety surface. It must **not** set
+    `CESButtonState = Exp` while op-long is off (that state is inert/undefined without op-long).
+  - **Option B (declined):** an actionable **[Enable]** button that turned op-long on from the prompt
+    (park-gated + AEB warning + restart). Lower convenience won; lowest surface preferred.
+
+Rationale for the split follows.
+
+### Two facts that constrain any grey-out logic
+
+1. **op-long (`AlphaLongitudinalEnabled`) is a fingerprint-time regime, not a live mode.** It is read
+   at car-init and takes effect only at the next ignition cycle (the red **LONG MISMATCH** overlay
+   exists to flag the stale state). Gating it on anything you change *while driving* (e.g. the
+   top-right CES icon) would grey/ungrey it live while changes silently do nothing until restart — a
+   new trap, not a fix.
+2. **Experimental mode *is* op-long.** End-to-end longitudinal = openpilot owning the pedal = op-long
+   ON. Experimental is a *consequence* of op-long, not a precondition — you cannot "enter Experimental,
+   then enable op-long." On an op-long-**OFF** Ford the top-right icon already only cycles CES↔Chill;
+   Experimental is structurally unreachable there.
+
+CES / Chill / Experimental are **sub-modes within op-long-ON**; op-long ON/OFF (openpilot-pedal vs
+stock-ACC) is a **different axis**. Blending the two axes together multiplies confusion.
+
+### Options considered (the Decision above is the locked outcome; this is the earlier exploration)
+
+| Case | Behavior | Verdict |
+|---|---|---|
+| **Tesla** (any mode) | op-long forced **ON**, greyed, subtext "always on for this car" | ✅ build — the toggle is a no-op on Tesla today; greying it ON tells the truth |
+| **Ford** | op-long stays a real **A/B choice**; subtext *"ON = openpilot pedal (vision leads). OFF = stock ACC (radar). Takes effect next ignition."* | ✅ honest, no false gating |
+| **Ford, op-long OFF** | grey the **Experimental** position of the top-right icon (already unreachable) | ✅ the *actual* confusion-reducer; matches driver intuition |
+
+- Tesla "forced ON" must be driven by the **`op_long` capability** in `pnw_vehicle.py` (structurally
+  `True` for Tesla), **never** a `carFingerprint == "TESLA"` string — capability-view rule (2026-07-11).
+
+### The feature hiding inside the plan
+
+The plan's real desire — *"on the Ford, stock ACC does the following normally, and openpilot only takes
+the pedal when I pick Experimental"* — is **not a grey-out, it's a new feature: conditional actuator
+switching** (stock-ACC ↔ openpilot-MPC handoff driven by the live mode; "CES for the actuator itself").
+Buildable, but it carries a real safety caveat the UI tweak does not: **handing pedal authority back
+and forth mid-drive** — the transition / standstill / brake-override interaction is the dangerous part.
+Own effort + Gemini pass, not a UI change. **Undecided / not scoped.**
+
+---
+
+## 7. Footer
 
 **Date:** 2026-07-18. **Code state:** pnw-pilot `speedlimitdebug2pnw` @ `a9bb7cf09f`
 (= `origin/3devpnw` channel tip; radarless2pnw `a46d8749b8` shipped, tightfollow reverted
@@ -249,3 +384,8 @@ e2e Experimental braking; Standard (`CESMode=2`) where stop-light behavior matte
 truth — validate any "deployed" claim here against it (and the live device) before relying on it.
 Items flagged **verify** above (NoDisengageOnBrake × stock-ACC interaction) have not been
 code-traced end-to-end and should be confirmed before being treated as fact.
+
+**Doc history:** §5 (radar constraint / requires-vs-cannot split) and §6 (toggle-UX) added
+2026-07-18 from a live design discussion. §6 is a **locked design (option A)** — implemented on branch
+`oplongui2pnw` (Sonnet + Fable/Gemini pipeline), **not yet on the channel**; the CAN-discovery option
+in §5 (#3) is **uninvestigated**.
