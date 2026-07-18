@@ -26,6 +26,15 @@ class PairingDialog(NavWidget):
     self._txt_pair = gui_app.texture("icons_mici/settings/device/pair.png", 33, 60)
     self._pair_label = UnifiedLabel("pair with comma connect", font_size=48, font_weight=FontWeight.BOLD, line_height=0.8)
 
+  def _pairing_host(self) -> str:
+    # connectsel2pnw: pair against the selected connect backend (PNW / Konik / Custom / Offline);
+    # defaults to the PNW self-hosted connect web UI on any failure.
+    try:
+      from openpilot.common.connect_backend import pairing_host
+      return pairing_host(self._params)
+    except Exception:
+      return "comma-connect.aws.internetchen.de"
+
   def _get_pairing_url(self) -> str:
     try:
       dongle_id = self._params.get("DongleId") or ""
@@ -33,7 +42,7 @@ class PairingDialog(NavWidget):
     except Exception as e:
       cloudlog.warning(f"Failed to get pairing token: {e}")
       token = ""
-    return f"https://comma-connect.aws.internetchen.de/?pair={token}"
+    return f"https://{self._pairing_host()}/?pair={token}"
 
   def _generate_qr_code(self) -> None:
     try:
