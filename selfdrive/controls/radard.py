@@ -110,6 +110,45 @@ class Track:
     return ret
 
 
+class VisionLeadFilter:
+  """radarless2pnw: Kalman-filters the vision-only lead's vLead/aLeadK, mirroring Track's own
+  radar-track filtering, so a radarless car (CarParams.radarUnavailable -- e.g. the Ford Lightning)
+  doesn't feed raw per-frame model noise straight into the MPC. get_safe_obstacle_distance's
+  v/COMFORT_BRAKE term amplifies vLead noise into a much larger obstacle-distance swing at highway
+  speed, so smoothing THIS field is the actual lever -- dRel is deliberately left raw (filtering
+  distance would delay braking response to a genuinely closing lead). One instance per lead SLOT
+  (one/two, held by RadarD); get_lead() calls reset() whenever this slot isn't the one supplying the
+  published lead this tick (radar took over, or there's no lead at all) so state never smears across
+  two different cars. Not car-specific: it only ever activates on the vision-only fallback path
+  (track is None), which for a radar-equipped car is just a dropout safety net."""
+  # a lead SWAP (a different car cutting in) looks like a step change in v_lead that the filter must
+  # not smooth over across ~1s -- reset outright past this jump instead of dragging toward it.
+  _SWAP_JUMP_MS = 8.0
+
+  def __init__(self, kalman_params: KalmanParams):
+    self._kalman_params = kalman_params
+    self.kf: KF1D | None = None
+    self.aLeadTau = FirstOrderFilter(_LEAD_ACCEL_TAU, 0.45, DT_MDL)
+
+  def reset(self) -> None:
+    self.kf = None
+
+  def update(self, v_lead: float) -> tuple[float, float, float]:
+    kp = self._kalman_params
+    if self.kf is None or abs(v_lead - self.kf.x[SPEED][0]) > self._SWAP_JUMP_MS:
+      self.kf = KF1D([[v_lead], [0.0]], kp.A, kp.C, kp.K)
+    else:
+      self.kf.update(v_lead)
+    v_lead_k = float(self.kf.x[SPEED][0])
+    a_lead_k = float(self.kf.x[ACCEL][0])
+    # Learn if constant acceleration (same rule as Track.update)
+    if abs(a_lead_k) < 0.5:
+      self.aLeadTau.x = _LEAD_ACCEL_TAU
+    else:
+      self.aLeadTau.update(0.0)
+    return v_lead_k, a_lead_k, float(self.aLeadTau.x)
+
+
 def laplacian_pdf(x: float, mu: float, b: float):
   b = max(b, 1e-4)
   return math.exp(-abs(x-mu)/b)
@@ -138,16 +177,22 @@ def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks
     return None
 
 
-def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: float, model_v_ego: float, lead_prob: float):
+def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: float, model_v_ego: float,
+                                lead_prob: float, vision_filter: "VisionLeadFilter | None" = None):
   lead_v_rel_pred = lead_msg.v[0] - model_v_ego
+  v_lead_raw = v_ego + lead_v_rel_pred
+  if vision_filter is not None:
+    v_lead_out, a_lead_out, a_lead_tau_out = vision_filter.update(v_lead_raw)
+  else:
+    v_lead_out, a_lead_out, a_lead_tau_out = v_lead_raw, float(lead_msg.a[0]), 0.3
   return {
     "dRel": float(lead_msg.x[0] - RADAR_TO_CAMERA),
     "yRel": float(-lead_msg.y[0]),
     "vRel": float(lead_v_rel_pred),
-    "vLead": float(v_ego + lead_v_rel_pred),
-    "vLeadK": float(v_ego + lead_v_rel_pred),
-    "aLeadK": float(lead_msg.a[0]),
-    "aLeadTau": 0.3,
+    "vLead": float(v_lead_out),
+    "vLeadK": float(v_lead_out),
+    "aLeadK": float(a_lead_out),
+    "aLeadTau": float(a_lead_tau_out),
     "fcw": False,
     "modelProb": float(lead_prob),
     "status": True,
@@ -157,7 +202,8 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
 
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
-             model_v_ego: float, lead_prob: float, low_speed_override: bool = True) -> dict[str, Any]:
+             model_v_ego: float, lead_prob: float, low_speed_override: bool = True,
+             vision_filter: "VisionLeadFilter | None" = None) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_prob > .5:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
@@ -165,10 +211,16 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
     track = None
 
   lead_dict = {'status': False}
+  vision_lead_active = False
   if track is not None:
     lead_dict = track.get_RadarState(lead_prob)
   elif (track is None) and ready and (lead_prob > .5):
-    lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, lead_prob)
+    lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, lead_prob, vision_filter)
+    vision_lead_active = True
+  if vision_filter is not None and not vision_lead_active:
+    # radarless2pnw: this slot isn't being supplied by the vision-only path this tick (radar took
+    # over, or there's no lead at all) -- reset so stale filter state can't leak into a future lead.
+    vision_filter.reset()
 
   if low_speed_override:
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
@@ -189,6 +241,8 @@ class RadarD:
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
+    # radarless2pnw: one persistent vision-lead filter per lead slot (one/two)
+    self.vision_lead_filters = [VisionLeadFilter(self.kalman_params) for _ in range(2)]
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -248,8 +302,12 @@ class RadarD:
         else:
           self.lead_prob_filters[i].update(lead_prob)
 
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x, low_speed_override=False)
+      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
+                                           self.lead_prob_filters[0].x, low_speed_override=True,
+                                           vision_filter=self.vision_lead_filters[0])
+      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
+                                           self.lead_prob_filters[1].x, low_speed_override=False,
+                                           vision_filter=self.vision_lead_filters[1])
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
