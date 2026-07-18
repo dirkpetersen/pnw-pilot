@@ -51,6 +51,20 @@ class TestManager:
     assert params.get("OpenpilotEnabledToggle")
     assert params.get("RouteCount") == 0
 
+  def test_alpha_longitudinal_forced_off_at_startup(self):
+    # oplongboot2pnw (docs/pnw/op-long-features.md §6): alpha op-long (e.g. the Lightning) must
+    # never persist ON across a cold boot. AlphaLongitudinalEnabled is PERSISTENT with no default
+    # value, so the generic "seed unset params to default" loop never touches an already-set value
+    # -- simulate a driver having left it ON in a previous session and confirm manager_init()
+    # unconditionally forces it back off at startup.
+    params = Params()
+    params.put_bool("AlphaLongitudinalEnabled", True)
+
+    os.environ['PREPAREONLY'] = '1'
+    manager.main()
+
+    assert params.get_bool("AlphaLongitudinalEnabled") is False
+
   @pytest.mark.skip("this test is flaky the way it's currently written, should be moved to test_onroad")
   def test_clean_exit(self, subtests):
     """

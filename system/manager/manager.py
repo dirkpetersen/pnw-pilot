@@ -45,6 +45,23 @@ def manager_init() -> None:
     if default_value is not None and params.get(k) is None:
       params.put(k, default_value)
 
+  # oplongboot2pnw (docs/pnw/op-long-features.md §6): force alpha longitudinal OFF on every manager
+  # startup, i.e. every genuine cold boot. Alpha op-long (e.g. the Lightning) is a per-session
+  # opt-in and must never persist ON across a boot -- the car has to come up on its own stock ACC.
+  # This is unconditional (no car/fingerprint branch -- capability-clean): the Tesla is unaffected
+  # because its op-long is native (openpilotLongitudinalControl=True regardless of this param; see
+  # opendbc_repo/opendbc/car/tesla/interface.py::_get_params_sx). Safe to run unconditionally here
+  # because manager_init() only runs once per manager PROCESS startup, never on a driver's
+  # in-session enable: _on_alpha_long_enabled() (selfdrive/ui/layouts/settings/developer.py) sets
+  # AlphaLongitudinalEnabled=True + OnroadCycleRequested=True, and OnroadCycleRequested is consumed
+  # entirely inside hardwared.py (system/hardware/hardwared.py) -- it cycles deviceState.started to
+  # make manager_thread's ensure_running() restart the onroad process set (card, controlsd, ...) so
+  # they re-fingerprint against the new param, but it never re-enters manager_init() or restarts the
+  # manager process itself (confirmed by reading manager_thread()'s loop below: it only exits on
+  # DoUninstall/DoShutdown/DoReboot). So a deliberate in-session enable survives; only a real cold
+  # boot (or a manager crash-restart) re-forces this to False.
+  params.put_bool("AlphaLongitudinalEnabled", False)
+
   # mapd2pnw: download-at-launch of the (un-vendored) mapd binary. Best-effort and
   # in the background so a slow/absent network never blocks manager startup or
   # driving; idempotent once the pinned binary from mapd_release.json is installed.
