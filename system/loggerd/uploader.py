@@ -62,6 +62,17 @@ PASS2_INTERLEAVE = 4
 # entry clears when the cooldown lapses) but spaced far apart.
 RETRY_COOLDOWN_S = 900.0
 
+# upload412ui2pnw: a single HTTP 412 on the upload_url request is usually benign dedupe (the gateway
+# already has this exact file from an earlier attempt whose 2xx we lost) and not worth alarming on.
+# But a RUN of 412s with no successful upload in between -- across any file, any pass -- is exactly
+# the silent-data-loss footgun _record_upload_error's own comment and 06e50c9eb6 name: e.g. API_HOST
+# silently reverting to the wrong backend makes EVERY upload_url GET 412 forever, so uploads stall
+# invisibly (files are preserved, never lost, but never leave the device either -- see finding F1).
+# This threshold is the line between "ignore it" and "surface it": low enough to alert quickly once
+# the failure is systemic, high enough that one isolated dedupe 412 (normally followed within a file
+# or two by an unrelated successful upload, which resets the streak) never lights UP ERR.
+HTTP_412_STREAK_THRESHOLD = 3
+
 # connect2pnw device-locator (2026-07-08): the device roams WiFi segments and its LAN IP keeps
 # changing, defeating SSH. AWS only ever sees the public NAT address, so the uploader self-reports
 # its LAN IP as a `local_ip` query param on every upload_url request; the comma-uploader-api Lambda
@@ -186,6 +197,7 @@ class Uploader:
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
     self._retry_after: dict[str, float] = {}   # uploadretry2pnw: fn -> monotonic time it may retry
     self._upload_err_desc: str | None = None   # uploadretry2pnw: last LastUploadError we wrote (change-only)
+    self._412_streak = 0   # upload412ui2pnw: consecutive 412s since the last successful upload (any file/pass)
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -239,6 +251,12 @@ class Uploader:
     # nothing to do about it while on the road — so it is NOT surfaced. The file is still preserved and
     # gently retried; a genuine server-side problem still shows. This kills the "UP ERR Connection error"
     # that lingered on flaky links with no actionable cause.
+    #
+    # upload412ui2pnw: 412 reaches this function too now (finding F1 — it used to take the
+    # upload_ignored branch and never call here at all, so a systemic 412 outbreak never surfaced).
+    # The single-vs-systemic judgment call is made by the CALLER (the HTTP_412_STREAK_THRESHOLD check
+    # in upload()), not here — this function just records whatever code it's handed, same as any other
+    # hard failure.
     try:
       if code is None:
         return                                 # transient network failure -> no actionable UP ERR
@@ -418,13 +436,24 @@ class Uploader:
                        network_type=network_type, metered=metered, speed=speed)
         success = True
         self._retry_after.pop(fn, None)
+        self._412_streak = 0   # upload412ui2pnw: a clean upload proves the backend is reachable again
         self._clear_upload_error()
       else:
         success = False
         self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S   # gentle: back off this file
         if code == 412:
-          # benign (gateway already has it / declined) -> retry after cooldown; not a surfaced error
+          # upload412ui2pnw (finding F1 fix): a lone 412 usually just means the gateway already has
+          # this exact file (dedupe -- e.g. a prior attempt's 2xx response was lost in transit), so it
+          # stays quiet like before -- still NOT marked uploaded, still cooled down, still retried.
+          # But if 412s keep happening with no successful upload in between, that's no longer benign
+          # dedupe, it's the silent-data-loss footgun _record_upload_error exists for (see its comment
+          # and 06e50c9eb6): every upload stalls invisibly because e.g. API_HOST reverted to the wrong
+          # backend. Only once the streak crosses HTTP_412_STREAK_THRESHOLD do we surface it -- a
+          # single isolated 412 still produces no UP ERR, avoiding alert noise for the common case.
           cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+          self._412_streak += 1
+          if self._412_streak >= HTTP_412_STREAK_THRESHOLD:
+            self._record_upload_error(412, last_exc)
         else:
           cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
           self._record_upload_error(code, last_exc)
