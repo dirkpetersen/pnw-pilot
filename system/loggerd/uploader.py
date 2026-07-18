@@ -62,6 +62,50 @@ PASS2_INTERLEAVE = 4
 # entry clears when the cooldown lapses) but spaced far apart.
 RETRY_COOLDOWN_S = 900.0
 
+# upload412ui2pnw: telling a benign dedupe 412 apart from a systemic outbreak (finding F1).
+#
+# A lone 412 is usually dedupe: the gateway already has this exact file from an earlier attempt whose
+# 2xx we lost. That is NOT rare here -- this fork's only-2xx-marks-uploaded rule (uploadretry2pnw)
+# means a dedupe'd file is a PERMANENT ORPHAN: it re-412s every RETRY_COOLDOWN_S forever (the deleter
+# preserves un-uploaded files). A naive "N 412s in a row" counter false-alarms on that single orphan
+# every night it sits parked with an otherwise-drained queue. A batch of several DISTINCT dedupe files
+# (e.g. a connection drop right after the gateway accepted 3+ files but their 2xx ACKs were lost) makes
+# it worse: those 412 sequentially with no shared cooldown, so a plain count crosses any small threshold
+# in seconds. Neither case is the footgun -- both are files the gateway has legitimately already seen.
+#
+# The real outbreak signature (API_HOST reverted to the wrong backend, so EVERY upload_url GET 412s
+# forever) is different: it declines files the gateway has *never* seen, including ones recorded AFTER
+# the trouble started. Dedupe is impossible for those -- the gateway cannot already have a file that
+# didn't exist yet when the streak of 412s began. So: remember when the current 412 streak started
+# (first 412 since the last successful upload, any file/pass); if a LATER 412 in that same streak
+# lands on a file recorded AFTER the streak's start, that file could not possibly be legitimate dedupe
+# -- surface it. Both false-alarm cases above involve only files that predate the streak (they were
+# recorded, and first attempted, before any 412 happened), so they never trigger no matter how many of
+# them there are or how long the orphan keeps re-412ing.
+#
+# Clock-jump immunity: the streak start is stamped with time.monotonic() (a free-running counter, never
+# adjusted by NTP/timezone), NOT a wall-clock reading. This fleet has cars with a dead RTC, so the wall
+# clock can be badly wrong right after boot until NTP catches up (and the timezoned daemon shifts local
+# time as the car crosses zones while driving) -- if we compared a wall-clock stamp taken at streak-start
+# against a file mtime, an NTP jump or zone shift BETWEEN the stamp and the comparison would corrupt the
+# comparison in either direction (false alarm on a jump-forward, masked real outbreak on a jump-back). We
+# only ever store the monotonic instant; at comparison time we rebase it into the CURRENT wall-clock frame
+# (see the rebase below), so both sides of every comparison are always evaluated in the same, current,
+# correctly-set clock frame -- immune to whatever the clock was doing in between.
+#
+# Tradeoff (intentional): if nothing new is being recorded (parked, no drive), an outbreak can only
+# ever re-412 pre-existing files, so it stays silent until a drive starts recording fresh files again.
+# That's fine -- UP ERR only renders on the ONROAD CES overlay, so the only moment the alarm is useful
+# to the driver is while driving, which is exactly when a fresh file will appear within seconds.
+#
+# Residual edge case (accepted, vanishingly unlikely): a file recorded MID-streak whose PUT actually
+# succeeds but whose 2xx response is lost (so it's retried and 412s as "already there") is genuinely a
+# fresh dedupe file and WOULD read as fresh here, since freshness alone can't tell it apart from an
+# outbreak file. This needs an already-open streak (so streak_start predates the file) PLUS every
+# response for that file lost while the PUT itself keeps succeeding -- and any adjacent 2xx anywhere
+# resets the whole streak, closing the window. Not worth added complexity to rule out; noted here so
+# the next reader doesn't have to rediscover it.
+
 # connect2pnw device-locator (2026-07-08): the device roams WiFi segments and its LAN IP keeps
 # changing, defeating SSH. AWS only ever sees the public NAT address, so the uploader self-reports
 # its LAN IP as a `local_ip` query param on every upload_url request; the comma-uploader-api Lambda
@@ -186,6 +230,12 @@ class Uploader:
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
     self._retry_after: dict[str, float] = {}   # uploadretry2pnw: fn -> monotonic time it may retry
     self._upload_err_desc: str | None = None   # uploadretry2pnw: last LastUploadError we wrote (change-only)
+    # upload412ui2pnw: MONOTONIC instant the current run of 412s with no success in between started;
+    # None means no streak in progress. Reset to None on the next 2xx. Deliberately time.monotonic(),
+    # not a wall-clock reading -- see the clock-jump-immunity paragraph in the "telling a benign dedupe
+    # 412 apart from a systemic outbreak" comment above RETRY_COOLDOWN_S for why and how it's rebased
+    # into the current wall-clock frame at comparison time.
+    self._412_streak_start: float | None = None
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -239,6 +289,12 @@ class Uploader:
     # nothing to do about it while on the road — so it is NOT surfaced. The file is still preserved and
     # gently retried; a genuine server-side problem still shows. This kills the "UP ERR Connection error"
     # that lingered on flaky links with no actionable cause.
+    #
+    # upload412ui2pnw: 412 reaches this function too now (finding F1 — it used to take the
+    # upload_ignored branch and never call here at all, so a systemic 412 outbreak never surfaced).
+    # The dedupe-vs-outbreak judgment call is made by the CALLER (the streak/ctime discriminator in
+    # upload(), see the comment above RETRY_COOLDOWN_S), not here — this function just records
+    # whatever code it's handed, same as any other hard failure.
     try:
       if code is None:
         return                                 # transient network failure -> no actionable UP ERR
@@ -418,13 +474,45 @@ class Uploader:
                        network_type=network_type, metered=metered, speed=speed)
         success = True
         self._retry_after.pop(fn, None)
+        self._412_streak_start = None   # upload412ui2pnw: a clean upload proves the backend is reachable again
         self._clear_upload_error()
       else:
         success = False
         self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S   # gentle: back off this file
         if code == 412:
-          # benign (gateway already has it / declined) -> retry after cooldown; not a surfaced error
+          # upload412ui2pnw (finding F1 fix): still behaves exactly as before by default -- NOT marked
+          # uploaded, cooled down, silently retried, logged as upload_ignored. It only escalates to
+          # _record_upload_error if THIS file's mtime postdates the streak's start (see the "telling a
+          # benign dedupe 412 apart from a systemic outbreak" comment above RETRY_COOLDOWN_S): that is
+          # the one case dedupe cannot explain, because the gateway can't already have a file that
+          # didn't exist when the streak of 412s began.
           cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+          if self._412_streak_start is None:
+            # first 412 of a new streak -- this file necessarily predates "now" (it had to exist to be
+            # attempted), so it can never itself satisfy the freshness check below. It only marks where
+            # the streak began (as a monotonic instant -- see the field comment), for whichever LATER
+            # 412 (if any) to be compared against.
+            self._412_streak_start = time.monotonic()
+          else:
+            # Rebase the streak-start instant into the CURRENT wall-clock frame before comparing, so an
+            # NTP jump / timezone shift that happened ANY TIME between streak-start and now can't skew
+            # the result (see the clock-jump-immunity paragraph above RETRY_COOLDOWN_S). Both sides of
+            # the comparison end up expressed in "now"'s clock, which is the only frame we trust.
+            elapsed = time.monotonic() - self._412_streak_start
+            effective_start = datetime.datetime.now() - datetime.timedelta(seconds=elapsed)
+            try:
+              # mtime, not ctime: ctime is ext4 inode-metadata-change time, which today happens to only
+              # move on the upload success path (this file's own setxattr() call below) so an
+              # un-uploaded orphan's ctime is stable -- but that's an accident of the current code, and
+              # any future metadata touch (chmod/rename/xattr) would silently bump an orphan's ctime and
+              # resurrect this false alarm. mtime is content-modification time; a closed log segment is
+              # never rewritten, so it's also the semantically correct answer to "when was this file
+              # actually recorded."
+              is_fresh = datetime.datetime.fromtimestamp(os.path.getmtime(fn)) > effective_start
+            except OSError:
+              is_fresh = False   # deleter raced us; mtime unknowable -- don't guess, stay quiet
+            if is_fresh:
+              self._record_upload_error(412, last_exc)
         else:
           cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
           self._record_upload_error(code, last_exc)
