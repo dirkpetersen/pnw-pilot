@@ -10,10 +10,11 @@ LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
 
 class FakeCP:
-  def __init__(self, fp="", brand="", op_long=False):
+  def __init__(self, fp="", brand="", op_long=False, dashcam_only=False):
     self.carFingerprint = fp
     self.brand = brand
     self.openpilotLongitudinalControl = op_long
+    self.dashcamOnly = dashcam_only
 
 
 def test_lightning_stock_acc():
@@ -296,3 +297,33 @@ def test_gentle_launch_reduce_only():
   # min(stock_max, cap) must never exceed the stock max -> can only soften, never speed up
   v = PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=True))
   assert all(min(2.0, v.gentle_launch_accel(x * 0.2)) <= 2.0 + 1e-9 for x in range(30))
+
+
+# ---- fpsidebar2pnw: fingerprint -> display name (offroad "last-known car" sidebar label) ----------
+def test_display_name_known_cars():
+  assert pv.display_name(FakeCP(LIGHTNING, "ford")) == "F-150 Lightning"
+  assert pv.display_name(FakeCP("TESLA_MODEL_S_HW3", "tesla")) == "Model S"
+
+
+def test_display_name_never_shows_mock_or_raw_fingerprint():
+  # MOCK must never be shown to the driver, and an unrecognized fingerprint falls back to None
+  # (the caller's default text) rather than leaking the raw internal string.
+  assert pv.display_name(FakeCP("MOCK", "mock")) is None
+  assert pv.display_name(FakeCP("SOME_OTHER_CAR", "hyundai")) is None
+  assert pv.display_name(FakeCP("", "")) is None
+
+
+def test_display_name_dashcam_only_hidden_even_if_fingerprint_known():
+  # a recognized fingerprint that's somehow flagged dashcamOnly must still show nothing (defense in
+  # depth alongside the card.py MOCK-persist guard).
+  assert pv.display_name(FakeCP(LIGHTNING, "ford", dashcam_only=True)) is None
+
+
+def test_display_name_defensive_on_bad_input():
+  # None CP, and any object missing the expected attributes, must never raise -> always None.
+  assert pv.display_name(None) is None
+  assert pv.display_name(object()) is None
+
+  class Garbage:
+    pass
+  assert pv.display_name(Garbage()) is None
