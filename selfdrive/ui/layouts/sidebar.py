@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from cereal import log
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.controls.lib.pnw_vehicle import display_name
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos, FONT_SCALE
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -158,8 +159,34 @@ class Sidebar(Widget):
   def _update_panda_status(self):
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
       self._panda_status.update(tr_noop("NO"), tr_noop("PANDA"), Colors.DANGER)
-    else:
-      self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
+      return
+    # fpsidebar2pnw (FINGERPRINT2XNOR.md): when OFFROAD, show the LAST-KNOWN car instead of a
+    # generic "ONLINE" — on the shared device (moved between the Tesla and the Ford), a parked car
+    # otherwise shows a bare offroad home screen with no identity, which reads as "dashcam mode".
+    #
+    # DISPLAY-ONLY, zero control risk: ui_state.CP is the already-cached CarParamsPersistent that
+    # ui_state.update_params() refreshes on its own ~5 s timer (see ui_state.py) — this reads that
+    # cache, it does NOT add a new param poll (uicpu2pnw budget untouched), and this whole method
+    # only runs when deviceState publishes (see _update_state's `sm.updated['deviceState']` gate
+    # above), not every frame. `card` stays only_onroad and always re-fingerprints authoritatively
+    # the moment a car powers on, so a stale cache (device just moved from the other car) can at
+    # worst show the wrong name for a moment while parked — it can never mis-control.
+    #
+    # display_name() itself never raises, but the try/except stays here too: this method must never
+    # crash the UI (selfdrive/ui is restart_if_crash), and a bad ui_state.CP read/attribute should
+    # degrade to the stock "ONLINE", not take the sidebar down with it.
+    if not ui_state.started:
+      try:
+        name = display_name(ui_state.CP)
+      except Exception:
+        name = None
+      if name:
+        # name is a proper noun (car model), not wrapped in tr_noop on purpose — it's the same
+        # string in every locale. _draw_metric still runs it through tr() at draw time; that's a
+        # harmless catalog miss (tr() falls back to the input text unchanged for an unknown key).
+        self._panda_status.update(tr_noop("VEHICLE"), name, Colors.GOOD)
+        return
+    self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
     if rl.check_collision_point_rec(mouse_pos, SETTINGS_BTN):

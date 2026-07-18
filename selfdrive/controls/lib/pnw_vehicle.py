@@ -174,6 +174,52 @@ def _load_curve_config() -> dict:
   return cfg
 
 
+# fpsidebar2pnw: fingerprint -> short driver-facing display name (FINGERPRINT2XNOR.md /
+# pending-work "Fingerprint sidebar"). This is the ONE place that maps a carFingerprint string to a
+# friendly name — same capability-view discipline as the rest of this module: feature/UI code asks
+# display_name(CP), it never string-compares carFingerprint itself. Used by the offroad sidebar to
+# show e.g. "F-150 Lightning" for the last-known car instead of a bare "dashcam"-looking home screen
+# when the shared device is parked (truck/car off). DISPLAY-ONLY: purely cosmetic, never read by any
+# control code and never influences fingerprinting — `card` (selfdrive/car/card.py) is only_onroad
+# and always re-fingerprints authoritatively the moment a car powers on.
+#
+# Deliberately module-level data + a plain function, NOT a PnwVehicle capability: PnwVehicle.__init__
+# reads curve.json/rain.json off disk on every construction (real drive-control tunables), which the
+# sidebar has no use for and shouldn't pay the I/O cost of on every offroad redraw.
+#
+# WIDTH BUDGET (code review 2026-07-18): the sidebar metric box is METRIC_WIDTH=240px, and
+# _draw_metric centers the value text UNCLIPPED in ~218px usable (240 - 22px left inset) at
+# FONT_SIZE 35 * FONT_SCALE (Inter SemiBold) — nothing scissors the text itself (only the colored
+# left edge is scissored), so an over-length value crosses the metric border / can bleed past the
+# sidebar edge. "F-150 Lightning" measured ~255-300px and overflowed; keep every value here short
+# enough to clear ~218px (roughly <= 10-11 chars at this font) — "Lightning" / "Model S" both fit.
+# Longest pre-existing sidebar value is "UPLOADING" (9 chars), a reasonable ceiling to match.
+_DISPLAY_NAMES = {
+  "FORD_F_150_LIGHTNING_MK1": "Lightning",
+  "TESLA_MODEL_S_HW3": "Model S",          # the fleet's Raven (HW3) — see CLAUDE.md Cars & Devices
+}
+
+
+def display_name(CP) -> str | None:
+  """Friendly driver-facing name for a fingerprinted car, for DISPLAY ONLY.
+
+  Returns None (never a raw fingerprint string, and never "MOCK") whenever there's nothing safe to
+  show: CP absent, MOCK/unrecognized brand, dashcamOnly, or a fingerprint not in the map above — the
+  caller's job is to fall back to its own default text in every one of those cases. Defensive:
+  accepts a capnp CarParams reader, the structs dataclass, or None; NEVER raises, so a future edit
+  here can't crash-loop the UI (selfdrive/ui is restart_if_crash)."""
+  try:
+    if CP is None:
+      return None
+    fp = str(getattr(CP, 'carFingerprint', '') or '')
+    brand = str(getattr(CP, 'brand', '') or '')
+    if not fp or brand == 'mock' or bool(getattr(CP, 'dashcamOnly', False)):
+      return None
+    return _DISPLAY_NAMES.get(fp)
+  except Exception:
+    return None
+
+
 class PnwVehicle:
   def __init__(self, CP, live_op_long=None):
     """live_op_long: UI contexts pass ui_state.has_longitudinal_control here — the PERSISTENT
