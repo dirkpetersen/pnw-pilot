@@ -1,8 +1,8 @@
-"""oplongfix2pnw (docs/pnw/op-long-features.md §6; supersedes oplongui2pnw / the discarded
-oplongboot2pnw): unit tests for the two pure decision helpers backing the op-long toggle UX. Both
-helpers take only CarParams capability fields (never carFingerprint/brand) plus plain UI state -- no
-pyray graphics context is needed to exercise them, so this covers the logic without constructing the
-full raylib widgets.
+"""oplongexp2pnw (docs/pnw/op-long-features.md §6; supersedes oplongfix2pnw / oplongui2pnw / the
+discarded oplongboot2pnw): unit tests for the pure decision helpers backing the op-long toggle UX and
+the onroad Experimental-button re-enable path. All helpers take only CarParams capability fields
+(never carFingerprint/brand) plus plain UI state -- no pyray graphics context is needed to exercise
+them, so this covers the logic without constructing the full raylib widgets.
 
 Flag ground truth (verified against opendbc_repo/opendbc/car/tesla/interface.py::_get_params_sx and
 opendbc_repo/opendbc/car/ford/interface.py):
@@ -19,9 +19,17 @@ exp_button.py/ces_status.py use). The driver's enable path is: turn CES mode off
 -> enable op-long. This deliberately does NOT gate on the live CESButtonState (Experimental is
 unreachable without op-long in the first place, so gating on "currently in Experimental" deadlocks --
 that was the discarded oplongboot2pnw's mistake).
+
+oplongexp2pnw adds a SECOND, onroad enable path: flipping the top-right button to Experimental while
+op-long is OFF on an alpha-capable car now enables op-long directly (no Settings trip), gated only on
+`not engaged` (a live reload would disengage a moving drive). See TestSelectCesCycle /
+TestDecideExpTapOutcome below.
 """
 from openpilot.selfdrive.ui.layouts.settings.developer import AlphaLongToggleState, compute_alpha_long_toggle_state
-from openpilot.selfdrive.ui.onroad.exp_button import should_show_op_long_hint
+from openpilot.selfdrive.ui.onroad.exp_button import (
+  _BTN_CES, _BTN_CHILL, _BTN_EXP, _CES_CYCLE, _CES_CYCLE_NO_LONG,
+  ExpTapOutcome, decide_exp_tap_outcome, select_ces_cycle,
+)
 
 
 class TestComputeAlphaLongToggleState:
@@ -121,23 +129,66 @@ class TestComputeAlphaLongToggleState:
       assert state.visible is False
 
 
-class TestShouldShowOpLongHint:
-  def test_lightning_op_long_off_shows_hint(self):
-    assert should_show_op_long_hint(ces_master=True, has_longitudinal_control=False, alpha_long_available=True) is True
+class TestSelectCesCycle:
+  def test_op_long_on_gets_full_cycle(self):
+    # Tesla (native), or the Lightning once alpha op-long is ON: unchanged, full cycle either way.
+    assert select_ces_cycle(has_longitudinal_control=True, alpha_long_available=True, op_long_native=True) == _CES_CYCLE
+    assert select_ces_cycle(has_longitudinal_control=True, alpha_long_available=True, op_long_native=False) == _CES_CYCLE
 
-  def test_tesla_never_shows_hint(self):
-    # Tesla always has_longitudinal_control=True (native op-long, fixed by ui_state.py's
-    # op_long_native check) and alpha_long_available=True (see module docstring) -- the hint is
-    # gated on `not has_longitudinal_control`, which is already False here, so alpha_long_available's
-    # value doesn't change the outcome; kept at its REAL value for accuracy (the oplongui2pnw test
-    # used the wrong alpha_long_available=False).
-    assert should_show_op_long_hint(ces_master=True, has_longitudinal_control=True, alpha_long_available=True) is False
+  def test_alpha_capable_op_long_off_gets_full_cycle_restored(self):
+    # The oplongexp2pnw change: the Lightning on stock ACC used to drop to _CES_CYCLE_NO_LONG here.
+    # Now it gets the full cycle back -- landing on Exp is the re-enable gesture, handled by
+    # decide_exp_tap_outcome, not by hiding the slot.
+    assert select_ces_cycle(has_longitudinal_control=False, alpha_long_available=True, op_long_native=False) == _CES_CYCLE
 
-  def test_lightning_op_long_on_hides_hint(self):
-    assert should_show_op_long_hint(ces_master=True, has_longitudinal_control=True, alpha_long_available=True) is False
+  def test_op_long_native_with_has_long_false_still_full_cycle(self):
+    # Defensive/theoretical: a native car should never actually report has_longitudinal_control=False
+    # (ui_state.py forces it True for op_long_native), but if it somehow did, op_long_native=True
+    # still excludes it from the "alpha capable and off" branch -- falls through to NO_LONG, not a
+    # crash. This documents the guard rather than asserting a real fleet scenario.
+    assert select_ces_cycle(has_longitudinal_control=False, alpha_long_available=True, op_long_native=True) == _CES_CYCLE_NO_LONG
 
-  def test_ces_master_off_hides_hint(self):
-    assert should_show_op_long_hint(ces_master=False, has_longitudinal_control=False, alpha_long_available=True) is False
+  def test_no_op_long_capability_at_all_drops_experimental(self):
+    assert select_ces_cycle(has_longitudinal_control=False, alpha_long_available=False, op_long_native=False) == _CES_CYCLE_NO_LONG
 
-  def test_car_without_any_op_long_capability_hides_hint(self):
-    assert should_show_op_long_hint(ces_master=True, has_longitudinal_control=False, alpha_long_available=False) is False
+
+class TestDecideExpTapOutcome:
+  def test_landing_on_exp_while_off_and_not_engaged_enables(self):
+    outcome = decide_exp_tap_outcome(_BTN_EXP, has_longitudinal_control=False, alpha_long_available=True,
+                                      op_long_native=False, engaged=False)
+    assert outcome is ExpTapOutcome.ENABLE_OP_LONG
+
+  def test_landing_on_exp_while_off_and_engaged_holds_off(self):
+    outcome = decide_exp_tap_outcome(_BTN_EXP, has_longitudinal_control=False, alpha_long_available=True,
+                                      op_long_native=False, engaged=True)
+    assert outcome is ExpTapOutcome.HOLD_ENGAGED
+
+  def test_landing_on_ces_or_chill_is_always_normal(self):
+    # Not landing on the Exp slot at all -- ordinary cycle step, regardless of capability/engaged.
+    for nxt in (_BTN_CES, _BTN_CHILL):
+      for engaged in (True, False):
+        outcome = decide_exp_tap_outcome(nxt, has_longitudinal_control=False, alpha_long_available=True,
+                                          op_long_native=False, engaged=engaged)
+        assert outcome is ExpTapOutcome.NORMAL
+
+  def test_landing_on_exp_with_op_long_already_on_is_normal(self):
+    # Real Experimental, not a re-enable reach -- has_longitudinal_control=True short-circuits.
+    outcome = decide_exp_tap_outcome(_BTN_EXP, has_longitudinal_control=True, alpha_long_available=True,
+                                      op_long_native=False, engaged=False)
+    assert outcome is ExpTapOutcome.NORMAL
+
+  def test_landing_on_exp_native_car_is_normal(self):
+    # Tesla: has_longitudinal_control is always True for a native car (ui_state.py), so this can't
+    # actually reach the op_long_native branch of the condition in practice -- but confirm it's
+    # NORMAL either way (defensive, matches select_ces_cycle's defensive case above).
+    outcome = decide_exp_tap_outcome(_BTN_EXP, has_longitudinal_control=False, alpha_long_available=True,
+                                      op_long_native=True, engaged=False)
+    assert outcome is ExpTapOutcome.NORMAL
+
+  def test_landing_on_exp_no_op_long_capability_is_normal(self):
+    # No capability at all -- can't happen via select_ces_cycle (Exp isn't in _CES_CYCLE_NO_LONG),
+    # but decide_exp_tap_outcome itself must still degrade safely (no false enable) if ever called
+    # with this combination directly.
+    outcome = decide_exp_tap_outcome(_BTN_EXP, has_longitudinal_control=False, alpha_long_available=False,
+                                      op_long_native=False, engaged=False)
+    assert outcome is ExpTapOutcome.NORMAL

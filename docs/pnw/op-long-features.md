@@ -289,11 +289,14 @@ Lightning-only, and exists entirely because op-long there is radarless.**
 
 ---
 
-## 6. Toggle UX — how the Alpha-Long switch behaves (design LOCKED 2026-07-18, option A)
+## 6. Toggle UX — how the Alpha-Long switch behaves (design LOCKED 2026-07-18, option A; onroad half SUPERSEDED same day, see §6a)
 
-Recorded 2026-07-18 from a design discussion, then **decided**. **Not yet on the channel** —
-implementation lives on branch `oplongui2pnw` (Sonnet-written, Fable + Gemini reviewed per pipeline).
-Goal: stop the toggle being a silent trap.
+Recorded 2026-07-18 from a design discussion, then **decided**. Settings-toggle half shipped via
+`oplongui2pnw`/`oplongfix2pnw`. **The onroad-button half (option A, informational-only) below is
+now superseded — see §6a for the shipped re-enable design (`oplongexp2pnw`).** Kept as the record of
+the original decision and its rationale, which §6a still relies on (the "op-long is a fingerprint-
+time regime" / "Experimental IS op-long" constraints did not change, only the chosen UX response to
+them did). Goal: stop the toggle being a silent trap.
 
 ### Decision — the shipped design (option A)
 
@@ -357,6 +360,44 @@ switching** (stock-ACC ↔ openpilot-MPC handoff driven by the live mode; "CES f
 Buildable, but it carries a real safety caveat the UI tweak does not: **handing pedal authority back
 and forth mid-drive** — the transition / standstill / brake-override interaction is the dangerous part.
 Own effort + Gemini pass, not a UI change. **Undecided / not scoped.**
+
+### §6a. Update (2026-07-18, same day): the onroad button now RE-ENABLES op-long directly
+
+Driver-confirmed follow-up, superseding option A's "informational only" onroad half above (the
+Settings-toggle half of §6 is unchanged). Implementation: branch `oplongexp2pnw`,
+`selfdrive/ui/onroad/exp_button.py`.
+
+**Why option A didn't stick:** it correctly diagnosed the confusion (flipping to the CES-auto icon
+*looked* like reaching Experimental on stock ACC) but only explained it — the driver still had to
+leave the drive view, open Settings ▸ Developer, and confirm a dialog to actually get op-long. Once
+the boot-time force-off (`oplongfix2pnw`) made op-long start OFF on the Lightning every drive, that
+extra trip became the everyday case, not an edge case. Restated: **Experimental *is* op-long, so
+flipping to it while op-long is off should turn op-long on** — the button already means the right
+thing, it just needs to act on it.
+
+**The new design:**
+- `_CES_CYCLE_NO_LONG` (CES↔Chill only) now applies ONLY to a car with no op-long capability at all
+  (neither native nor alpha-available — no car in the fleet today). An alpha-capable car with op-long
+  currently OFF (the Lightning on stock ACC) gets the FULL `_CES_CYCLE` back, same as op-long-ON.
+- Landing on the Experimental slot while op-long is OFF does not select real Experimental (still
+  inert without op-long — that invariant from the original §6 rationale is unchanged). Instead:
+  - **Not engaged:** writes `AlphaLongitudinalEnabled=True` + `OnroadCycleRequested=True` — the same
+    param pair `developer.py::_on_alpha_long_enabled` writes on confirm, minus the confirm dialog and
+    AEB-warning text (the button flip **is** the confirmation). No `CESButtonState=Exp` write; the
+    button lands back on CES. Shows a 4 s transient "Enabling openpilot Longitudinal Control..." box.
+  - **Engaged (moving):** does NOT enable (`OnroadCycleRequested` reloads the onroad stack, which
+    would disengage a moving drive) — this is the one safety gate carried over from option A. Shows a
+    4 s "Stop to enable openpilot Longitudinal Control" box instead and reverts the tap to CES.
+- `OnroadCycleRequested` only cycles the onroad processes (`hardwared.py`) — it does **not** re-run
+  `manager_init`, so this survives the rest of the session, but a **cold boot re-applies the
+  `oplongfix2pnw` boot force-off** and op-long starts OFF again next drive. That's intended (matches
+  the boot-time-off design), not a bug in this path.
+- The Settings toggle (§6, unchanged) remains the deliberate, considered path (dialog + AEB warning);
+  this onroad path is the fast in-drive path with a lighter but still real gate (not engaged).
+
+Pure decision logic lives in two testable helpers in `exp_button.py`: `select_ces_cycle` (which cycle
+applies) and `decide_exp_tap_outcome` (NORMAL / ENABLE_OP_LONG / HOLD_ENGAGED for a given tap) —
+tested in `selfdrive/ui/tests/test_oplongui.py`.
 
 ---
 
