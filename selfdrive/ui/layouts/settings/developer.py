@@ -184,9 +184,18 @@ class DeveloperLayout(Widget):
         # fpcache2pnw: only a REAL fingerprint that lacks alpha-long support may clear the driver's
         # preference — never a MOCK (flaky/no-car) CP. ui_state.CP comes from CarParamsPersistent,
         # which never-persist-MOCK keeps non-mock, so this is belt-and-braces (the live deleter was
-        # selfdrived.py — see the matching guard there). Native op-long cars are never hidden for
-        # this reason (they're only ever hidden by is_release), so this can't fire for them anyway
-        # — the extra guard is belt-and-braces to make the "never touch the param" rule explicit.
+        # selfdrived.py — see the matching guard there).
+        # NOTE this branch DOES fire for native op-long cars (e.g. Tesla) on a release build: on
+        # is_release, compute_alpha_long_toggle_state returns visible=False/checked=None for EVERY
+        # car (native included) — the "native" signal only exists in the non-release branch — so
+        # self._alpha_long_native is False there too and the param gets removed, same as every
+        # other hidden case. That is BYTE-IDENTICAL to the pre-oplongui2pnw behavior (the old code
+        # also unconditionally removed on `self._is_release`, regardless of car) — not a regression,
+        # just not something this comment should claim is impossible. The "not self._alpha_long_native"
+        # clause is in practice redundant given compute_alpha_long_toggle_state's invariant
+        # (checked=True is only ever returned together with visible=True, so
+        # "not alpha_state.visible" alone already excludes every native case) — kept for readability,
+        # to make the "never touch the param for the forced-native case" rule explicit at the call site.
         if ui_state.CP.brand != "mock":
           self._params.remove("AlphaLongitudinalEnabled")
 

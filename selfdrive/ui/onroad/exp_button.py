@@ -22,12 +22,18 @@ _PARAM_POLL_S = 0.5   # uicpu2pnw (T1): re-read the CES settings/tap params at 2
 # after a tap when this car COULD run op-long (alpha-long capable, e.g. the Lightning) but is
 # currently on stock ACC, so _CES_CYCLE_NO_LONG silently drops Experimental from the cycle above.
 # No enable path, no AlphaLongitudinalEnabled write, no OnroadCycleRequested, no restart.
-_INFO_HINT_TEXT = tr_noop("Enable openpilot Longitudinal Control (Settings ▸ Developer) to use Experimental mode.")
+# "▶" (U+25B6) is used, NOT "▸" (U+25B8) -- selfdrive/assets/fonts/process.py EXTRA_CHARS bakes the
+# former into the on-device font atlas but not the latter, which would render as notdef/tofu.
+_INFO_HINT_TEXT = tr_noop("Enable openpilot Longitudinal Control (Settings ▶ Developer) to use Experimental mode.")
 _INFO_HINT_S = 4.0      # seconds the hint stays on screen after a tap
 _INFO_HINT_WIDTH = 480
 _INFO_HINT_PAD = 20
 _INFO_HINT_FONT = 32
 _INFO_HINT_MARGIN = 20  # gap between the button and the hint box
+# Fallback left clamp for the hint box (mirrors hud_renderer.UI_CONFIG.border_size / the onroad
+# content rect's left inset -- duplicated as a literal rather than imported, since hud_renderer.py
+# already imports ExpButton and importing back would cycle).
+_INFO_HINT_MIN_X = 30
 _INFO_HINT_BG = rl.Color(0, 0, 0, 200)
 _INFO_HINT_TEXT_COLOR = rl.Color(255, 255, 255, 235)
 
@@ -121,9 +127,12 @@ class ExpButton(Widget):
       # oplongui2pnw (option A): the driver just tried to change mode on a car that COULD run
       # op-long but currently can't reach Experimental (_CES_CYCLE_NO_LONG above) -- explain why.
       # Purely informational: no CESButtonState=_BTN_EXP, no AlphaLongitudinalEnabled write, no
-      # OnroadCycleRequested, no modal.
+      # OnroadCycleRequested, no modal. Only fire on the tap that LANDS on CES (nxt == _BTN_CES):
+      # that's the tap that lands back on the experimental-looking icon (CES auto renders white/
+      # yellow-exp, see _render below) -- the moment the driver thinks they've reached Experimental.
+      # The other direction (landing on Chill) is a deliberate wheel-icon pick, not a reach for Exp.
       alpha_long_available = ui_state.CP is not None and ui_state.CP.alphaLongitudinalAvailable
-      if should_show_op_long_hint(self._ces_master, ui_state.has_longitudinal_control, alpha_long_available):
+      if nxt == _BTN_CES and should_show_op_long_hint(self._ces_master, ui_state.has_longitudinal_control, alpha_long_available):
         self._info_hint_until = time.monotonic() + _INFO_HINT_S
     elif self._is_toggle_allowed():
       # stock 2-state toggle
@@ -173,11 +182,19 @@ class ExpButton(Widget):
   def _render_info_hint(self):
     """oplongui2pnw: draw the transient info hint below the button. Self-contained (no cereal/
     selfdriveState round-trip, no new alert-type plumbing) -- matches the existing pattern of
-    other onroad overlays (e.g. ces_status.py) that draw directly with pyray."""
+    other onroad overlays (e.g. ces_status.py) that draw directly with pyray.
+
+    The button sits at the TOP-RIGHT of the screen (hud_renderer.py: button_x = content_rect right
+    edge - border - button_size), so a box CENTERED on the button overflows the content rect's
+    right edge (button right edge + ~half the box width - clipped by AugmentedRoadView's scissor).
+    Right-align the box to the button's right edge instead so it grows leftward and stays on
+    screen; box_x is then clamped to a safe minimum as a second line of defense.
+    """
     content_h = self._info_label.get_content_height(_INFO_HINT_WIDTH - _INFO_HINT_PAD * 2)
     box_w = _INFO_HINT_WIDTH
     box_h = content_h + _INFO_HINT_PAD * 2
-    box_x = self._rect.x + self._rect.width / 2 - box_w / 2
+    button_right = self._rect.x + self._rect.width
+    box_x = max(button_right - box_w, _INFO_HINT_MIN_X)
     box_y = self._rect.y + self._rect.height + _INFO_HINT_MARGIN
 
     rl.draw_rectangle_rounded(rl.Rectangle(box_x, box_y, box_w, box_h), 0.15, 8, _INFO_HINT_BG)
