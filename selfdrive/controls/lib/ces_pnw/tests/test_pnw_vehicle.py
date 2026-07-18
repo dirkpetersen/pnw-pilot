@@ -301,7 +301,9 @@ def test_gentle_launch_reduce_only():
 
 # ---- fpsidebar2pnw: fingerprint -> display name (offroad "last-known car" sidebar label) ----------
 def test_display_name_known_cars():
-  assert pv.display_name(FakeCP(LIGHTNING, "ford")) == "F-150 Lightning"
+  # code review 2026-07-18: "F-150 Lightning" overflowed the ~218px sidebar metric box (unclipped
+  # text) -> shortened to "Lightning", which fits (see the width-budget comment on _DISPLAY_NAMES).
+  assert pv.display_name(FakeCP(LIGHTNING, "ford")) == "Lightning"
   assert pv.display_name(FakeCP("TESLA_MODEL_S_HW3", "tesla")) == "Model S"
 
 

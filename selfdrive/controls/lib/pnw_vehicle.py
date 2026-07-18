@@ -186,8 +186,16 @@ def _load_curve_config() -> dict:
 # Deliberately module-level data + a plain function, NOT a PnwVehicle capability: PnwVehicle.__init__
 # reads curve.json/rain.json off disk on every construction (real drive-control tunables), which the
 # sidebar has no use for and shouldn't pay the I/O cost of on every offroad redraw.
+#
+# WIDTH BUDGET (code review 2026-07-18): the sidebar metric box is METRIC_WIDTH=240px, and
+# _draw_metric centers the value text UNCLIPPED in ~218px usable (240 - 22px left inset) at
+# FONT_SIZE 35 * FONT_SCALE (Inter SemiBold) — nothing scissors the text itself (only the colored
+# left edge is scissored), so an over-length value crosses the metric border / can bleed past the
+# sidebar edge. "F-150 Lightning" measured ~255-300px and overflowed; keep every value here short
+# enough to clear ~218px (roughly <= 10-11 chars at this font) — "Lightning" / "Model S" both fit.
+# Longest pre-existing sidebar value is "UPLOADING" (9 chars), a reasonable ceiling to match.
 _DISPLAY_NAMES = {
-  "FORD_F_150_LIGHTNING_MK1": "F-150 Lightning",
+  "FORD_F_150_LIGHTNING_MK1": "Lightning",
   "TESLA_MODEL_S_HW3": "Model S",          # the fleet's Raven (HW3) — see CLAUDE.md Cars & Devices
 }
 

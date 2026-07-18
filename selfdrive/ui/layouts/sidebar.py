@@ -181,6 +181,9 @@ class Sidebar(Widget):
       except Exception:
         name = None
       if name:
+        # name is a proper noun (car model), not wrapped in tr_noop on purpose — it's the same
+        # string in every locale. _draw_metric still runs it through tr() at draw time; that's a
+        # harmless catalog miss (tr() falls back to the input text unchanged for an unknown key).
         self._panda_status.update(tr_noop("VEHICLE"), name, Colors.GOOD)
         return
     self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
