@@ -3,7 +3,9 @@ import pyray as rl
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import Widget
+from openpilot.system.ui.widgets.label import UnifiedLabel
 
 # ces2xnor button states
 _BTN_CES, _BTN_CHILL, _BTN_EXP = 0, 1, 2
@@ -15,6 +17,31 @@ _CES_CYCLE = (_BTN_CES, _BTN_EXP, _BTN_CHILL)
 # CES(ICBM) <-> Chill; the orange forced-Exp state is unreachable and its icon never shows.
 _CES_CYCLE_NO_LONG = (_BTN_CES, _BTN_CHILL)
 _PARAM_POLL_S = 0.5   # uicpu2pnw (T1): re-read the CES settings/tap params at 2 Hz, not 60 Hz
+
+# oplongui2pnw (option A, docs/pnw/op-long-features.md §6): informational-only hint shown right
+# after a tap when this car COULD run op-long (alpha-long capable, e.g. the Lightning) but is
+# currently on stock ACC, so _CES_CYCLE_NO_LONG silently drops Experimental from the cycle above.
+# No enable path, no AlphaLongitudinalEnabled write, no OnroadCycleRequested, no restart.
+_INFO_HINT_TEXT = tr_noop("Enable openpilot Longitudinal Control (Settings ▸ Developer) to use Experimental mode.")
+_INFO_HINT_S = 4.0      # seconds the hint stays on screen after a tap
+_INFO_HINT_WIDTH = 480
+_INFO_HINT_PAD = 20
+_INFO_HINT_FONT = 32
+_INFO_HINT_MARGIN = 20  # gap between the button and the hint box
+_INFO_HINT_BG = rl.Color(0, 0, 0, 200)
+_INFO_HINT_TEXT_COLOR = rl.Color(255, 255, 255, 235)
+
+
+def should_show_op_long_hint(ces_master: bool, has_longitudinal_control: bool, alpha_long_available: bool) -> bool:
+  """Pure decision logic for the exp_button op-long info hint (oplongui2pnw option A).
+
+  True only for an alpha-op-long-capable car (e.g. Lightning) that is currently NOT running
+  longitudinal control (stock ACC) while CES is on -- the state where _CES_CYCLE_NO_LONG silently
+  drops Experimental. False for a native op-long car (Tesla: has_longitudinal_control is always
+  True there) and false once alpha op-long is turned ON (has_longitudinal_control True).
+  Capability-view only: never branches on carFingerprint/brand.
+  """
+  return ces_master and not has_longitudinal_control and alpha_long_available
 
 
 class ExpButton(Widget):
@@ -42,6 +69,19 @@ class ExpButton(Widget):
     self._txt_exp_white: rl.Texture = gui_app.texture('icons/experimental_white.png', icon_size, icon_size)  # ces2xnor
     self._txt_exp_yellow: rl.Texture = gui_app.texture('icons/experimental_yellow.png', icon_size, icon_size)  # icbm2pnw: CES-auto-Experimental (driver req 2026-07-11 — orange is forced-Exp ONLY)
     self._rect = rl.Rectangle(0, 0, button_size, button_size)
+
+    # oplongui2pnw: informational-only hint (option A) -- see should_show_op_long_hint above.
+    self._info_hint_until: float = 0.0
+    self._info_label = UnifiedLabel(
+      lambda: tr(_INFO_HINT_TEXT),
+      font_size=_INFO_HINT_FONT,
+      text_color=_INFO_HINT_TEXT_COLOR,
+      alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER,
+      alignment_vertical=rl.GuiTextAlignmentVertical.TEXT_ALIGN_TOP,
+      max_width=_INFO_HINT_WIDTH - _INFO_HINT_PAD * 2,
+      wrap_text=True,
+      elide=False,
+    )
 
   def set_rect(self, rect: rl.Rectangle) -> None:
     self._rect.x, self._rect.y = rect.x, rect.y
@@ -77,6 +117,14 @@ class ExpButton(Widget):
       self._params.put("CESButtonState", nxt)
       self._ces_button = nxt   # uicpu2pnw (T1): write-through so the icon flips instantly (the
                                # 2 Hz poll would otherwise lag the tap by up to _PARAM_POLL_S)
+
+      # oplongui2pnw (option A): the driver just tried to change mode on a car that COULD run
+      # op-long but currently can't reach Experimental (_CES_CYCLE_NO_LONG above) -- explain why.
+      # Purely informational: no CESButtonState=_BTN_EXP, no AlphaLongitudinalEnabled write, no
+      # OnroadCycleRequested, no modal.
+      alpha_long_available = ui_state.CP is not None and ui_state.CP.alphaLongitudinalAvailable
+      if should_show_op_long_hint(self._ces_master, ui_state.has_longitudinal_control, alpha_long_available):
+        self._info_hint_until = time.monotonic() + _INFO_HINT_S
     elif self._is_toggle_allowed():
       # stock 2-state toggle
       new_mode = not self._experimental_mode
@@ -118,6 +166,23 @@ class ExpButton(Widget):
 
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
     rl.draw_texture_ex(texture, rl.Vector2(center_x - texture.width / 2, center_y - texture.height / 2), 0.0, 1.0, color)
+
+    if time.monotonic() < self._info_hint_until:
+      self._render_info_hint()
+
+  def _render_info_hint(self):
+    """oplongui2pnw: draw the transient info hint below the button. Self-contained (no cereal/
+    selfdriveState round-trip, no new alert-type plumbing) -- matches the existing pattern of
+    other onroad overlays (e.g. ces_status.py) that draw directly with pyray."""
+    content_h = self._info_label.get_content_height(_INFO_HINT_WIDTH - _INFO_HINT_PAD * 2)
+    box_w = _INFO_HINT_WIDTH
+    box_h = content_h + _INFO_HINT_PAD * 2
+    box_x = self._rect.x + self._rect.width / 2 - box_w / 2
+    box_y = self._rect.y + self._rect.height + _INFO_HINT_MARGIN
+
+    rl.draw_rectangle_rounded(rl.Rectangle(box_x, box_y, box_w, box_h), 0.15, 8, _INFO_HINT_BG)
+    self._info_label.render(rl.Rectangle(box_x + _INFO_HINT_PAD, box_y + _INFO_HINT_PAD,
+                                         box_w - _INFO_HINT_PAD * 2, content_h))
 
   def _held_or_actual_mode(self):
     now = time.monotonic()
