@@ -31,6 +31,7 @@ the deeper per-feature design/rationale docs.
 | [CHANGELOG-2026-07-01.md](CHANGELOG-2026-07-01.md) | PNW changelog 06-29→07-06 |
 | [CHANGELOG-2026-07-12.md](CHANGELOG-2026-07-12.md) | PNW changelog 07-11→07-12 (the "Ford weekend") |
 | [CHANGELOG-2026-07-18.md](CHANGELOG-2026-07-18.md) | PNW changelog 07-12(eve)→07-18 (red-light-lurch arc, commIssue cascade, speedadjust, tightfollow arc + revert) |
+| [op-long-features.md](op-long-features.md) | **Capability matrix**: every feature x Tesla / Lightning+AlphaLong-ON / Lightning+AlphaLong-OFF, per-car pros/cons, which-mode-to-drive guidance (Fable-written 2026-07-18) |
 | [PNWTEST3-OVERNIGHT-2026-06-22.md](PNWTEST3-OVERNIGHT-2026-06-22.md) | Historical: network2xnor rebuilt as 4 increments on pnwtest3 |
 
 (The 16 docs below the first group were consolidated here from `~/gh/comma/docs/` on 2026-07-18 —
