@@ -62,16 +62,31 @@ PASS2_INTERLEAVE = 4
 # entry clears when the cooldown lapses) but spaced far apart.
 RETRY_COOLDOWN_S = 900.0
 
-# upload412ui2pnw: a single HTTP 412 on the upload_url request is usually benign dedupe (the gateway
-# already has this exact file from an earlier attempt whose 2xx we lost) and not worth alarming on.
-# But a RUN of 412s with no successful upload in between -- across any file, any pass -- is exactly
-# the silent-data-loss footgun _record_upload_error's own comment and 06e50c9eb6 name: e.g. API_HOST
-# silently reverting to the wrong backend makes EVERY upload_url GET 412 forever, so uploads stall
-# invisibly (files are preserved, never lost, but never leave the device either -- see finding F1).
-# This threshold is the line between "ignore it" and "surface it": low enough to alert quickly once
-# the failure is systemic, high enough that one isolated dedupe 412 (normally followed within a file
-# or two by an unrelated successful upload, which resets the streak) never lights UP ERR.
-HTTP_412_STREAK_THRESHOLD = 3
+# upload412ui2pnw: telling a benign dedupe 412 apart from a systemic outbreak (finding F1).
+#
+# A lone 412 is usually dedupe: the gateway already has this exact file from an earlier attempt whose
+# 2xx we lost. That is NOT rare here -- this fork's only-2xx-marks-uploaded rule (uploadretry2pnw)
+# means a dedupe'd file is a PERMANENT ORPHAN: it re-412s every RETRY_COOLDOWN_S forever (the deleter
+# preserves un-uploaded files). A naive "N 412s in a row" counter false-alarms on that single orphan
+# every night it sits parked with an otherwise-drained queue. A batch of several DISTINCT dedupe files
+# (e.g. a connection drop right after the gateway accepted 3+ files but their 2xx ACKs were lost) makes
+# it worse: those 412 sequentially with no shared cooldown, so a plain count crosses any small threshold
+# in seconds. Neither case is the footgun -- both are files the gateway has legitimately already seen.
+#
+# The real outbreak signature (API_HOST reverted to the wrong backend, so EVERY upload_url GET 412s
+# forever) is different: it declines files the gateway has *never* seen, including ones recorded AFTER
+# the trouble started. Dedupe is impossible for those -- the gateway cannot already have a file that
+# didn't exist yet when the streak of 412s began. So: remember the wall-clock time the current 412
+# streak started (first 412 since the last successful upload, any file/pass); if a LATER 412 in that
+# same streak lands on a file whose ctime is AFTER the streak's start, that file could not possibly be
+# legitimate dedupe -- surface it. Both false-alarm cases above involve only files that predate the
+# streak (they were recorded, and first attempted, before any 412 happened), so they never trigger no
+# matter how many of them there are or how long the orphan keeps re-412ing.
+#
+# Tradeoff (intentional): if nothing new is being recorded (parked, no drive), an outbreak can only
+# ever re-412 pre-existing files, so it stays silent until a drive starts recording fresh files again.
+# That's fine -- UP ERR only renders on the ONROAD CES overlay, so the only moment the alarm is useful
+# to the driver is while driving, which is exactly when a fresh file will appear within seconds.
 
 # connect2pnw device-locator (2026-07-08): the device roams WiFi segments and its LAN IP keeps
 # changing, defeating SSH. AWS only ever sees the public NAT address, so the uploader self-reports
@@ -197,7 +212,12 @@ class Uploader:
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
     self._retry_after: dict[str, float] = {}   # uploadretry2pnw: fn -> monotonic time it may retry
     self._upload_err_desc: str | None = None   # uploadretry2pnw: last LastUploadError we wrote (change-only)
-    self._412_streak = 0   # upload412ui2pnw: consecutive 412s since the last successful upload (any file/pass)
+    # upload412ui2pnw: wall-clock start of the current run of 412s with no success in between; None
+    # means no streak in progress. Reset to None on the next 2xx. datetime (not time.monotonic) because
+    # it must compare against file ctimes -- same idiom list_upload_files already uses for the metered
+    # 12h window below. See the "telling a benign dedupe 412 apart from a systemic outbreak" comment
+    # above RETRY_COOLDOWN_S for the design.
+    self._412_streak_start: datetime.datetime | None = None
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -254,9 +274,9 @@ class Uploader:
     #
     # upload412ui2pnw: 412 reaches this function too now (finding F1 — it used to take the
     # upload_ignored branch and never call here at all, so a systemic 412 outbreak never surfaced).
-    # The single-vs-systemic judgment call is made by the CALLER (the HTTP_412_STREAK_THRESHOLD check
-    # in upload()), not here — this function just records whatever code it's handed, same as any other
-    # hard failure.
+    # The dedupe-vs-outbreak judgment call is made by the CALLER (the streak/ctime discriminator in
+    # upload(), see the comment above RETRY_COOLDOWN_S), not here — this function just records
+    # whatever code it's handed, same as any other hard failure.
     try:
       if code is None:
         return                                 # transient network failure -> no actionable UP ERR
@@ -436,24 +456,31 @@ class Uploader:
                        network_type=network_type, metered=metered, speed=speed)
         success = True
         self._retry_after.pop(fn, None)
-        self._412_streak = 0   # upload412ui2pnw: a clean upload proves the backend is reachable again
+        self._412_streak_start = None   # upload412ui2pnw: a clean upload proves the backend is reachable again
         self._clear_upload_error()
       else:
         success = False
         self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S   # gentle: back off this file
         if code == 412:
-          # upload412ui2pnw (finding F1 fix): a lone 412 usually just means the gateway already has
-          # this exact file (dedupe -- e.g. a prior attempt's 2xx response was lost in transit), so it
-          # stays quiet like before -- still NOT marked uploaded, still cooled down, still retried.
-          # But if 412s keep happening with no successful upload in between, that's no longer benign
-          # dedupe, it's the silent-data-loss footgun _record_upload_error exists for (see its comment
-          # and 06e50c9eb6): every upload stalls invisibly because e.g. API_HOST reverted to the wrong
-          # backend. Only once the streak crosses HTTP_412_STREAK_THRESHOLD do we surface it -- a
-          # single isolated 412 still produces no UP ERR, avoiding alert noise for the common case.
+          # upload412ui2pnw (finding F1 fix): still behaves exactly as before by default -- NOT marked
+          # uploaded, cooled down, silently retried, logged as upload_ignored. It only escalates to
+          # _record_upload_error if THIS file's ctime postdates the streak's start (see the "telling a
+          # benign dedupe 412 apart from a systemic outbreak" comment above RETRY_COOLDOWN_S): that is
+          # the one case dedupe cannot explain, because the gateway can't already have a file that
+          # didn't exist when the streak of 412s began.
           cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
-          self._412_streak += 1
-          if self._412_streak >= HTTP_412_STREAK_THRESHOLD:
-            self._record_upload_error(412, last_exc)
+          if self._412_streak_start is None:
+            # first 412 of a new streak -- this file necessarily predates "now" (it had to exist to be
+            # attempted), so it can never itself satisfy the freshness check below. It only marks where
+            # the streak began, for whichever LATER 412 (if any) to be compared against.
+            self._412_streak_start = datetime.datetime.now()
+          else:
+            try:
+              is_fresh = datetime.datetime.fromtimestamp(os.path.getctime(fn)) > self._412_streak_start
+            except OSError:
+              is_fresh = False   # deleter raced us; ctime unknowable -- don't guess, stay quiet
+            if is_fresh:
+              self._record_upload_error(412, last_exc)
         else:
           cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
           self._record_upload_error(code, last_exc)
