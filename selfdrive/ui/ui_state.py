@@ -8,6 +8,7 @@ from cereal import messaging, car, log
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.hardware import HARDWARE, PC
@@ -187,7 +188,17 @@ class UIState:
     CP_bytes = self.params.get("CarParamsPersistent")
     if CP_bytes is not None:
       self.CP = messaging.log_from_bytes(CP_bytes, car.CarParams)
-      if self.CP.alphaLongitudinalAvailable:
+      # oplongfix2pnw (docs/pnw/op-long-features.md §6): native op-long (e.g. Tesla) must win
+      # regardless of alphaLongitudinalAvailable. The Tesla sets BOTH openpilotLongitudinalControl
+      # =True AND alphaLongitudinalAvailable=True unconditionally (opendbc's tesla
+      # _get_params_sx), so checking alphaLongitudinalAvailable first (the pre-fix order) wrongly
+      # put the Tesla on the alpha branch and made has_longitudinal_control mirror
+      # AlphaLongitudinalEnabled -- degrading the exp-button/CES capability (lost forced-Experimental)
+      # whenever that param read False. op_long_native is a per-platform constant, not session
+      # state, so a bare PnwVehicle(self.CP) (no live_op_long) is correct here.
+      if PnwVehicle(self.CP).op_long_native:
+        self.has_longitudinal_control = True
+      elif self.CP.alphaLongitudinalAvailable:
         self.has_longitudinal_control = self.params.get_bool("AlphaLongitudinalEnabled")
       else:
         self.has_longitudinal_control = self.CP.openpilotLongitudinalControl

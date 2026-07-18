@@ -236,6 +236,27 @@ class PnwVehicle:
     else:
       self.op_long = bool(getattr(CP, 'openpilotLongitudinalControl', False)) if CP is not None else False
 
+    # oplongfix2pnw (docs/pnw/op-long-features.md §6, correcting the oplongui2pnw bug): True when
+    # this platform's openpilot longitudinal is UNCONDITIONAL / native -- independent of the
+    # AlphaLongitudinalEnabled toggle. Today only the Tesla Raven: opendbc's tesla interface.py
+    # ::_get_params_sx (the legacy/HW3 path) sets openpilotLongitudinalControl=True with NO
+    # `if alpha_long:` gate around it -- the AP computer's driving role is fully replaced, so op-long
+    # isn't a per-session opt-in there. Contrast the Ford Lightning, where alphaLongitudinalAvailable
+    # IS the master A/B switch (opendbc/car/ford/interface.py: `alphaLongitudinalAvailable =
+    # radarUnavailable`, and openpilotLongitudinalControl only becomes True once the driver opts in).
+    #
+    # CRITICAL: alphaLongitudinalAvailable is ALSO True for the Tesla -- opendbc's tesla
+    # _get_params_sx sets `ret.alphaLongitudinalAvailable = True` right alongside the unconditional
+    # openpilotLongitudinalControl=True (both unconditional, both True). So
+    # "openpilotLongitudinalControl and not alphaLongitudinalAvailable" is NOT a valid native-op-long
+    # test -- that expression is False for the Tesla, and was the shipped oplongui2pnw bug: the Tesla
+    # fell through to the alpha branch, so its UI toggle / exp-button capability wrongly mirrored
+    # AlphaLongitudinalEnabled instead of being unconditionally True. brand == "tesla" is the correct
+    # capability-view test (matching the `nudgeless` line below), and callers (ui_state.py,
+    # developer.py's compute_alpha_long_toggle_state) must check op_long_native BEFORE
+    # alphaLongitudinalAvailable.
+    self.op_long_native: bool = brand == "tesla"
+
     # stock-ACC set-speed steering via SET +/- button taps on the SCCM stream (ICBM executor lives
     # in the ford carcontroller; 0x083 is TX-allowlisted). Today: the 2025 F-150 Lightning.
     self.stock_acc_buttons: bool = fp == "FORD_F_150_LIGHTNING_MK1"

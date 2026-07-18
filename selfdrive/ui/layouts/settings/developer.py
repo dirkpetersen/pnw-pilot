@@ -1,6 +1,8 @@
 from typing import NamedTuple
 
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, read_ces_mode
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
@@ -49,24 +51,43 @@ class AlphaLongToggleState(NamedTuple):
   enabled: bool
 
 
-def compute_alpha_long_toggle_state(*, openpilot_long_control: bool, alpha_long_available: bool,
-                                     is_release: bool, engaged: bool) -> AlphaLongToggleState:
+def compute_alpha_long_toggle_state(*, op_long_native: bool, alpha_long_available: bool,
+                                     openpilot_long_control: bool, is_release: bool, engaged: bool,
+                                     ces_master_on: bool) -> AlphaLongToggleState:
   """Capability-view-only decision logic (2026-07-11 directive: never branch on carFingerprint/brand).
 
-  Three cases, distinguished solely by CarParams capability fields:
-    1. native op-long (e.g. Tesla): openpilot_long_control and not alpha_long_available
-       -> visible, forced checked=True, disabled (greyed) -- never a real per-car choice.
-    2. alpha op-long (e.g. Lightning): alpha_long_available
-       -> visible, checked mirrors the real param, enabled whenever not engaged.
+  oplongfix2pnw (supersedes oplongui2pnw / the discarded oplongboot2pnw): three cases, distinguished
+  by capability-view fields -- op_long_native is itself the capability (pnw_vehicle.PnwVehicle),
+  never a carFingerprint/brand string here.
+    1. native op-long (e.g. Tesla): op_long_native
+       -> visible, forced checked=True, disabled (greyed) -- never a real per-car choice, and NEVER
+       gated on ces_master_on (there's nothing to re-enable). Checked FIRST, before
+       alpha_long_available: the Tesla ALSO has alpha_long_available=True (opendbc's tesla
+       _get_params_sx sets both openpilotLongitudinalControl and alphaLongitudinalAvailable
+       unconditionally), so the old test `openpilot_long_control and not alpha_long_available` never
+       matched the Tesla and it fell through to the alpha branch -- that was the bug this supersedes.
+    2. alpha op-long (e.g. Lightning): alpha_long_available (and not native)
+       -> visible, checked mirrors the real param, enabled = (not ces_master_on) and not engaged.
+       The driver's enable path is: turn CES mode OFF first (Settings), which un-greys this toggle,
+       then enable op-long. Gated on the CES **master** (Settings-level "is CES on at all", i.e.
+       `ces_enabled(read_ces_mode(params))` -- CESMode != Off / the legacy ConditionalExperimentalSwitching
+       bool it's kept in sync with), NOT the live CESButtonState: gating on the live button deadlocks,
+       since forced-Experimental is unreachable without op-long in the first place (the discarded
+       oplongboot2pnw's mistake).
     3. unavailable: neither -> hidden.
   is_release hides the toggle in all three cases (unchanged from prior behavior).
+
+  openpilot_long_control is retained in the signature for call-site parity with CarParams' fields,
+  but no longer drives a branch: op_long_native fully replaces its role in case 1, and no car in the
+  pnw capability matrix has openpilotLongitudinalControl=True while being neither native nor
+  alpha-available.
   """
   if is_release:
     return AlphaLongToggleState(visible=False, checked=None, enabled=False)
-  if alpha_long_available:
-    return AlphaLongToggleState(visible=True, checked=None, enabled=not engaged)
-  if openpilot_long_control:
+  if op_long_native:
     return AlphaLongToggleState(visible=True, checked=True, enabled=False)
+  if alpha_long_available:
+    return AlphaLongToggleState(visible=True, checked=None, enabled=(not ces_master_on) and not engaged)
   return AlphaLongToggleState(visible=False, checked=None, enabled=False)
 
 
@@ -160,25 +181,37 @@ class DeveloperLayout(Widget):
     # CP gating
     alpha_state: AlphaLongToggleState | None = None
     if ui_state.CP is not None:
-      # oplongui2pnw (option A, docs/pnw/op-long-features.md §6): capability-view only, never
-      # carFingerprint/brand -- see compute_alpha_long_toggle_state's docstring for the 3 cases.
+      # oplongfix2pnw (docs/pnw/op-long-features.md §6): capability-view only, never
+      # carFingerprint/brand directly here -- op_long_native comes from pnw_vehicle.py's
+      # PnwVehicle (a per-platform constant, not session state, so no live_op_long is needed).
+      # ces_master_on is the Settings-level "is CES on at all" signal -- the SAME reader
+      # exp_button.py/ces_status.py use (ces_enabled(read_ces_mode(params)), back-compat with the
+      # legacy ConditionalExperimentalSwitching bool) -- NOT the live CESButtonState (see
+      # compute_alpha_long_toggle_state's docstring for why that gate deadlocks).
+      ces_master_on = ces_enabled(read_ces_mode(self._params))
       alpha_state = compute_alpha_long_toggle_state(
-        openpilot_long_control=ui_state.CP.openpilotLongitudinalControl,
+        op_long_native=PnwVehicle(ui_state.CP).op_long_native,
         alpha_long_available=ui_state.CP.alphaLongitudinalAvailable,
+        openpilot_long_control=ui_state.CP.openpilotLongitudinalControl,
         is_release=self._is_release,
         engaged=ui_state.engaged,
+        ces_master_on=ces_master_on,
       )
       self._alpha_long_native = alpha_state.checked is True
       self._alpha_long_toggle.set_visible(alpha_state.visible)
       if self._alpha_long_native:
-        # Forced-ON + greyed unconditionally (never depends on engaged) -> a static disabled beats
-        # the live "not engaged" lambda here, since there's nothing to re-enable.
+        # Forced-ON + greyed unconditionally (never depends on engaged/CES) -> a static disabled
+        # beats a live lambda here, since there's nothing to re-enable.
         self._alpha_long_toggle.action_item.set_enabled(False)
       else:
-        # Alpha op-long (and hidden/unavailable, harmlessly) keep the ORIGINAL live callable so the
-        # toggle keeps tracking ui_state.engaged in real time, not just at each _update_toggles call
-        # (matches alpha_state.enabled's value at this instant, but stays live afterwards).
-        self._alpha_long_toggle.action_item.set_enabled(lambda: not ui_state.engaged)
+        # Alpha op-long (and hidden/unavailable, harmlessly): keep engaged live-tracked (matches the
+        # pre-oplongfix2pnw behavior) while the CES-master gate uses the snapshot read above
+        # (default-arg binds it at lambda-creation time, avoiding a late-binding closure bug --
+        # _update_toggles only runs on show/offroad-transition, not per-frame, so this is a
+        # snapshot: the driver has to leave and reopen this screen, or the offroad transition must
+        # fire, for a CESMode change to be reflected here).
+        ces_gate = ces_master_on
+        self._alpha_long_toggle.action_item.set_enabled(lambda ces_gate=ces_gate: not ces_gate and not ui_state.engaged)
 
       if not alpha_state.visible and not self._alpha_long_native:
         # fpcache2pnw: only a REAL fingerprint that lacks alpha-long support may clear the driver's
