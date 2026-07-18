@@ -1,9 +1,10 @@
 """
 speedadjust2pnw — automatic cruise-speed reduction for lower speed limits and police-ahead warnings.
 
-`SpeedAdjustController.cap(sm, v_cruise, v_ego)` returns a possibly-lowered cruise speed (m/s) for the
-longitudinal planner, exactly like `VTSCController` — **reduce-only, NEVER raises above v_cruise**. The
-planner MPC bounds the decel rate, so a cap can never slam; it composes with VTSC/MTSC via `min()`.
+`SpeedAdjustController.cap(sm, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)` returns a possibly-
+lowered cruise speed (m/s) for the longitudinal planner — **reduce-only, NEVER raises above v_cruise**.
+The planner MPC bounds the decel rate, so a cap can never slam; it composes with VTSC/MTSC via `min()`.
+(See the `cap()` docstring below for why it takes both a raw `v_cruise_set` and an effective `v_cruise`.)
 
 Selector param `AutoSpeedReduce` (INT, default 0):
   0 = Off
@@ -17,6 +18,21 @@ the /dev/shm mem store (written by the mapd bridge / location_servicesd) and `Au
 persistent — with **NO msgq subscriptions** (the background-subscriber cascade lesson).
 
 Runs inside plannerd (20 Hz) via the planner's cap chain. Pure-ish: only param reads + monotonic time.
+
+speedanchor2pnw (2026-07-18, three review-caught fixes to the anchor/seed math — none change the
+reduce-only envelope, all conservative):
+  F2  cap() now takes the driver's raw PRE-VTSC set (`v_cruise_set`) separately from the current
+      EFFECTIVE ceiling (`v_cruise`, after VTSC/etc. have already reduced it). The limit-drop ratio
+      anchor and the cap-slew seed use `v_cruise_set` — anchoring/seeding off a VTSC-curve-reduced
+      `v_cruise` instead recorded a too-low ratio (could disable the trim) and seeded the slew from
+      curve speed, crawling back up at CAP_SLEW after VTSC released instantly. The emitted output is
+      still bounded reduce-only against `v_cruise` (the effective ceiling), unchanged.
+  F3  the limit-drop baseline (`_sl_ref`/`_ratio`) is now kept current in mode 1 (police-only) too, via
+      `_update_baseline()`, not just inside `_limit_drop_cap()` (mode 2 only) — previously flipping
+      AutoSpeedReduce 1→2 mid-drive could resume off a baseline captured possibly hours earlier.
+  F_uninit  anchoring/seeding is skipped entirely while `v_cruise_initialized` is False (cruise never
+      set — `v_cruise`/`v_cruise_set` are the `V_CRUISE_UNSET` sentinel, ~145 km/h) — anchoring off
+      that would inflate `_ratio` and seed `_cap_out` far above the real set.
 """
 import json
 import math
@@ -148,10 +164,25 @@ class SpeedAdjustController:
       return self._sl + POLICE_MARGIN
     return None                              # no posted limit → no basis to pick a target → no cap
 
-  def _limit_drop_cap(self, v_cruise: float):
-    """Trim the driver's OVER-limit excess as the posted limit drops: cap = SL × (v_set/SL_ref), with the
-    ratio ANCHORED when last uncapped (not live v_cruise → no double-reduction if the set is re-scrolled).
-    Persistent while below the baseline; releases (re-anchors) when the limit rises back. m/s or None.
+  def _update_baseline(self, v_cruise_set: float):
+    """speedanchor2pnw (F3): keep the limit-drop baseline (_sl_ref/_ratio) current whenever the feature
+    is ACTIVE (mode 1 or 2) — not just inside _limit_drop_cap(), which only ran in mode 2. Previously a
+    police-only (mode 1) drive left _sl_ref/_ratio frozen; flipping AutoSpeedReduce 1→2 mid-drive then
+    resumed off a baseline captured possibly hours earlier, producing a surprise cap on the switch tick.
+
+    speedanchor2pnw (F2): anchors off `v_cruise_set` — the driver's raw, PRE-VTSC cruise set — not a
+    VTSC-curve-reduced `v_cruise`. A curve happening to be active at the moment of re-anchor must not
+    record a bogus-low ratio (which can silently disable the trim on the next real limit drop)."""
+    sl = self._sl
+    if sl > 0.0 and sl >= self._sl_ref:      # known limit, at/above baseline → uncapped; track it up
+      self._sl_ref = sl
+      self._ratio = v_cruise_set / sl        # anchor the over-limit ratio HERE (v_set/limit)
+
+  def _limit_drop_cap(self):
+    """Trim the driver's OVER-limit excess as the posted limit drops: cap = SL × (v_set/SL_ref), using
+    the ratio anchored by _update_baseline() (already refreshed this tick, before this is called).
+    Persistent while below the baseline; releases once _update_baseline() re-anchors on a rising limit.
+    m/s or None.
 
     Two guards (Corvallis city fix 2026-07-14): (1) only trim a driver who was ABOVE the baseline limit
     (ratio >= 1) — a limit drop must NOT slow a law-abiding driver (set 30 in a 45 -> ratio 0.65 -> a drop
@@ -161,9 +192,7 @@ class SpeedAdjustController:
     if sl <= 0.0:
       return None                            # unknown limit → no cap, preserve the baseline + ratio
     if sl >= self._sl_ref:
-      self._sl_ref = sl                      # at/above baseline → uncapped; track baseline up and
-      self._ratio = v_cruise / sl            #   anchor the over-limit ratio HERE (v_set/limit)
-      return None
+      return None                            # at/above baseline → uncapped (already re-anchored above)
     if self._ratio < 1.0:
       return None                            # driver was at/UNDER the limit → a drop shouldn't slow them
     if sl / self._sl_ref > MIN_DROP_FRAC:    # < 5% drop → noise
@@ -171,7 +200,18 @@ class SpeedAdjustController:
     return max(sl, sl * self._ratio)         # proportional trim, but NEVER below the posted limit
 
   # ---- the cap the planner folds (reduce-only) ------------------------------
-  def cap(self, sm, v_cruise: float, v_ego: float) -> float:
+  def cap(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float, v_cruise_initialized: bool) -> float:
+    """
+    v_cruise_set: the driver's raw, PRE-VTSC (pre-any-other-cap) cruise set (m/s) — used ONLY to anchor
+      the limit-drop ratio/baseline and to seed the cap slew (speedanchor2pnw F2). Using this instead of
+      the already-VTSC-reduced `v_cruise` stops a curve in effect at anchor/engage time from poisoning
+      the ratio or the slew seed.
+    v_cruise: the EFFECTIVE cruise ceiling after upstream reduce-only caps (VTSC etc.) have already been
+      applied — the emitted cap remains reduce-only bounded against THIS value, unchanged from before.
+    v_cruise_initialized: False before the driver has ever set cruise (v_cruise*/set are the
+      V_CRUISE_UNSET sentinel, ~145 km/h) — anchoring/seeding is skipped entirely in that case
+      (speedanchor2pnw F_uninit), same treatment as idle.
+    """
     now = time.monotonic()
     dt = min(max(now - self._last_t, 0.0), 0.5) if self._last_t is not None else 0.0
     self._last_t = now
@@ -179,21 +219,36 @@ class SpeedAdjustController:
       self._last_read = now
       self._read_inputs()
 
+    # speedanchor2pnw (F_uninit, Fable-caught): an uninitialized cruise is not a real driver set —
+    # anchoring/seeding off the ~145 km/h sentinel would inflate _ratio (silently no-ops the next real
+    # limit drop) and seed _cap_out far above the eventual real set. No bookkeeping, clean passthrough.
+    if not v_cruise_initialized:
+      self._engaged = False
+      self._police_latched = False
+      self._cap_out = None
+      self._release_t = None
+      return v_cruise
+
     if self._mode == 0 or not self._long_ok:
       self._engaged = False
       self._police_latched = False
       self._cap_out = None
       self._release_t = None
       self._sl_ref = self._sl                # keep baseline current while idle (no stale drop on enable)
-      self._ratio = (v_cruise / self._sl) if self._sl > 0.0 else 0.0
+      # speedanchor2pnw (F2): anchor off the raw set, not a VTSC-curve-reduced v_cruise.
+      self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
       return v_cruise
 
     caps = []
-    pc = self._police_cap(v_cruise, v_ego)   # modes 1 and 2
+    pc = self._police_cap(v_cruise_set, v_ego)   # modes 1 and 2
     if pc is not None:
       caps.append(pc)
-    if self._mode >= 2:                       # limit-drop: mode 2 only
-      lc = self._limit_drop_cap(v_cruise)
+    # speedanchor2pnw (F3): re-anchor the limit-drop baseline whenever the feature is active (mode 1 or
+    # 2) — not just when the drop-cap itself is computed (mode 2 only) — so it never goes stale across
+    # an AutoSpeedReduce 1→2 switch.
+    self._update_baseline(v_cruise_set)
+    if self._mode >= 2:                       # limit-drop cap itself: mode 2 only
+      lc = self._limit_drop_cap()
       if lc is not None:
         caps.append(lc)
 
@@ -216,10 +271,17 @@ class SpeedAdjustController:
     self._release_t = None
     target = max(MIN_CAP, min(caps))          # floor rejects garbage-low targets
     # SLEW: the emitted cap RAMPS toward its target instead of stepping — a step target made the MPC
-    # chase a square wave. Starts at the driver's set (no initial jump) and moves <= CAP_SLEW m/s per s
-    # in BOTH directions; the MPC still bounds the actual decel on top of this.
+    # chase a square wave. Seeds at the driver's RAW set on engage (no initial jump — see speedanchor2pnw
+    # F2 below) and moves <= CAP_SLEW m/s per s in BOTH directions; the MPC still bounds the actual decel
+    # on top of this.
     if self._cap_out is None:
-      self._cap_out = v_cruise
+      # speedanchor2pnw (F2): seed from v_cruise_set (the driver's raw, PRE-VTSC set), not v_cruise (the
+      # current EFFECTIVE ceiling). Seeding from `v_cruise` meant a VTSC curve cap active exactly at
+      # engage time seeded the slew from curve speed; after the curve ended and VTSC released instantly,
+      # this cap kept crawling up from curve speed at CAP_SLEW instead of already sitting near the real
+      # target ("won't come back up to my set"). `out` below is still bounded by the effective `v_cruise`
+      # on every tick, so seeding high here can never cause a jump — the min() catches it immediately.
+      self._cap_out = v_cruise_set
     if target < self._cap_out:
       self._cap_out = max(target, self._cap_out - CAP_SLEW * dt)
     else:
