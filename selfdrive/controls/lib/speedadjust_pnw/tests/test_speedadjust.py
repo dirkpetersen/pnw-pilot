@@ -1,7 +1,13 @@
 """speedadjust2pnw unit tests — the reduce-only cap math for limit-drop + police, mode-gated.
 Tests drive the internal state directly (skipping the ~1 Hz param read) so they are deterministic.
 The emitted cap SLEWS toward its target (never steps), so value assertions use _settle(), which
-replays cap() with simulated 0.5 s ticks until the output converges."""
+replays cap() with simulated 0.5 s ticks until the output converges.
+
+speedanchor2pnw: cap() takes v_cruise_set (the driver's raw, PRE-VTSC set) separately from v_cruise
+(the current EFFECTIVE ceiling) plus v_cruise_initialized. The _cap()/_settle() helpers default
+v_cruise_set=v_cruise and v_cruise_initialized=True so every pre-existing test (which never modeled
+VTSC or an unset cruise) keeps calling them unchanged; the new tests below pass v_cruise_set /
+v_cruise_initialized explicitly to exercise the three speedanchor2pnw fixes."""
 import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
@@ -38,16 +44,20 @@ def _ctrl(op_long=True, mode=2, sl=0.0, sl_ref=0.0, ratio=0.0, police=None):
   return c
 
 
-def _cap(c, v_cruise, v_ego):
-  return c.cap(None, v_cruise, v_ego)
+def _cap(c, v_cruise, v_ego, v_cruise_set=None, v_cruise_initialized=True):
+  if v_cruise_set is None:
+    v_cruise_set = v_cruise                # default: no VTSC in effect -> raw set == effective ceiling
+  return c.cap(None, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
 
 
-def _settle(c, v_cruise, v_ego, max_iter=400):
+def _settle(c, v_cruise, v_ego, v_cruise_set=None, v_cruise_initialized=True, max_iter=400):
   """Run cap() with simulated 0.5 s ticks until the slewed output converges."""
-  out = c.cap(None, v_cruise, v_ego)
+  if v_cruise_set is None:
+    v_cruise_set = v_cruise
+  out = c.cap(None, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
   for _ in range(max_iter):
     c._last_t -= 0.5                       # pretend 0.5 s passed since the last call
-    new = c.cap(None, v_cruise, v_ego)
+    new = c.cap(None, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
     if abs(new - out) < 1e-9:
       return new
     out = new
@@ -213,3 +223,99 @@ def test_sl_dropout_hold():
   assert abs(c._read_speed_limit() - V45) < 1e-6      # held
   c._sl_valid_t = time.monotonic() - 10.0             # hold expired
   assert c._read_speed_limit() == 0.0
+
+
+# ---- speedanchor2pnw fixes (2026-07-18) -------------------------------------
+
+# F2: the limit-drop ratio anchor and the cap-slew seed must use v_cruise_set (the driver's raw,
+# PRE-VTSC set), not v_cruise (the current EFFECTIVE ceiling, already reduced by VTSC for a curve).
+
+def test_idle_reanchor_uses_raw_set_not_vtsc_capped():
+  # idle (mode 0) re-anchor: a curve active RIGHT NOW (v_cruise=45, VTSC-capped) must not poison the
+  # ratio — it has to anchor off the driver's real 75 mph set.
+  c = _ctrl(mode=0, sl=V60)
+  _cap(c, V45, V60, v_cruise_set=V75)
+  assert abs(c._ratio - V75 / V60) < 1e-6              # anchored off the raw set...
+  assert c._ratio != V45 / V60                         # ...NOT the curve-capped effective ceiling
+
+
+def test_active_reanchor_uses_raw_set_not_vtsc_capped():
+  # active (mode >= 1) re-anchor via _update_baseline(): same requirement, while uncapped (sl >= sl_ref).
+  c = _ctrl(mode=2, sl=V60, sl_ref=V60)                 # at baseline -> _update_baseline() re-anchors
+  _cap(c, V45, V60, v_cruise_set=V75)                   # a curve is capping the effective ceiling to 45
+  assert abs(c._ratio - V75 / V60) < 1e-6
+
+
+def test_cap_slew_seeds_from_raw_set_not_vtsc_capped():
+  # engaging a drop-cap while VTSC is mid-curve: the slew must SEED from the driver's raw set (75), not
+  # the curve-reduced effective ceiling (45) — else it crawls up from curve speed after VTSC releases
+  # instead of already sitting near the real target. Output on this tick is still bounded by the curve
+  # (no jump), but the internal _cap_out reflects the correct high seed.
+  c = _drop(mode=2)                                     # ratio anchored 75/60, sl=45 -> target 56.25
+  first = _cap(c, V45, V60, v_cruise_set=V75)            # VTSC is capping the effective ceiling to 45
+  assert abs(first - V45) < 1e-9                        # output bounded by the curve -> no jump
+  assert abs(c._cap_out - V75) < 1e-9                    # but the slew SEEDED at the raw 75, not 45
+
+
+def test_post_curve_cap_does_not_crawl_from_curve_speed():
+  # end-to-end regression for the "won't come back up to my set" bug: once VTSC releases (effective
+  # ceiling jumps back to the raw set), the speedadjust cap must already be at/near its real target —
+  # not stuck ramping up from the curve speed at CAP_SLEW.
+  c = _drop(mode=2)                                      # target 56.25 mph
+  _cap(c, V45, V60, v_cruise_set=V75)                     # tick 1: engage mid-curve (VTSC capping to 45)
+  c._last_t -= 0.5
+  out = _cap(c, V75, V60, v_cruise_set=V75)               # tick 2: curve ends, VTSC releases instantly
+  # with the old (buggy) seed-from-effective-v_cruise behaviour this would be ~45 + 0.5 (barely off the
+  # curve speed); with the fix it's already ramping down from the correct 75 seed toward 56.25.
+  assert out > V60                                        # nowhere near stuck at curve speed
+
+
+# F3: the limit-drop baseline (_sl_ref/_ratio) must stay current in mode 1 (police-only), not just
+# mode 2, so an AutoSpeedReduce 1->2 switch mid-drive never resumes off a stale baseline.
+
+def test_mode1_keeps_baseline_current():
+  c = _ctrl(mode=1, sl=V60, sl_ref=V45, ratio=V75 / V45)  # stale: anchored hours ago at a 45 mph zone
+  _cap(c, V75, V60)                                       # a mode-1 (police-only) tick at the 60 limit
+  assert abs(c._sl_ref - V60) < 1e-6                      # baseline tracked up to the CURRENT limit
+  assert abs(c._ratio - V75 / V60) < 1e-6                 # ratio re-anchored off the current set/limit
+
+
+def test_mode1_to_mode2_switch_no_surprise_cap():
+  # end-to-end: baseline stays fresh through mode 1, so switching to mode 2 with a lower limit on the
+  # SAME drive produces the correct proportional trim off the CURRENT baseline, not a surprise cap
+  # computed from a baseline captured possibly hours earlier.
+  c = _ctrl(mode=1, sl=V60, sl_ref=V45, ratio=V75 / V45)  # stale baseline from a much earlier drive
+  _cap(c, V75, V60)                                       # drive continues in mode 1 at the 60 limit
+  c._mode = 2
+  c._sl = V45                                             # NOW the limit drops to 45
+  out = _settle(c, V75, V60)
+  assert abs(out - V75 * (V45 / V60)) < 1e-6              # correct trim off the fresh 60 baseline
+
+
+# F_uninit (Fable-caught): anchoring/seeding must be skipped while cruise was never set — else the
+# V_CRUISE_UNSET sentinel (~145 km/h) inflates _ratio and seeds _cap_out far above the real set.
+
+def test_uninitialized_cruise_skips_anchor_and_seed():
+  V90 = 90 * MPH                                          # stand-in for the ~145 km/h UNSET sentinel
+  c = _ctrl(mode=2, sl=V60)                                # _ratio=0.0, _cap_out=None by default
+  out = _cap(c, V90, V60, v_cruise_set=V90, v_cruise_initialized=False)
+  assert out == V90                                        # neutral passthrough
+  assert c._ratio == 0.0                                   # untouched — no bogus anchor recorded
+  assert c._cap_out is None                                # untouched — nothing seeded
+
+
+def test_uninitialized_idle_skips_ratio_anchor():
+  V90 = 90 * MPH
+  c = _ctrl(mode=0, sl=V60)
+  _cap(c, V90, V60, v_cruise_set=V90, v_cruise_initialized=False)
+  assert c._ratio == 0.0                                   # idle branch's ratio-anchor was skipped too
+
+
+def test_becomes_initialized_anchors_correctly():
+  # once the driver actually sets cruise, normal anchoring resumes cleanly on the very next tick
+  c = _ctrl(mode=0, sl=V60)
+  V90 = 90 * MPH
+  _cap(c, V90, V60, v_cruise_set=V90, v_cruise_initialized=False)   # not set yet — skipped
+  assert c._ratio == 0.0
+  _cap(c, V75, V60, v_cruise_set=V75, v_cruise_initialized=True)    # driver sets cruise to 75
+  assert abs(c._ratio - V75 / V60) < 1e-6

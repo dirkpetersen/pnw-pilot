@@ -128,6 +128,10 @@ class LongitudinalPlanner:
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
+    # speedanchor2pnw (F2): keep the driver's raw, PRE-VTSC cruise set around — speedadjust needs it to
+    # anchor its limit-drop ratio / seed its cap slew off the driver's actual intent, not a value VTSC
+    # has already curve-reduced (see the SpeedAdjustController.cap() docstring for the full rationale).
+    v_cruise_set = v_cruise
 
     # vtsc: lower the cruise target for an upcoming curve (default OFF -> returns v_cruise unchanged).
     # SAFETY (Gemini-reviewed): enforce in the WIRING that VTSC can only ever REDUCE v_cruise and can
@@ -140,7 +144,11 @@ class LongitudinalPlanner:
     # speedadjust2pnw: auto speed reduction for a lower posted limit / police ahead (default OFF ->
     # returns v_cruise unchanged). SAME wiring-enforced REDUCE-ONLY + NaN guard as VTSC above — never
     # trust the core's contract: a bad cap must not accelerate the car or inject NaN into the MPC.
-    cap_sa = self.speedadjust.cap(sm, v_cruise, v_ego)
+    # speedanchor2pnw (F2): pass v_cruise_set (pre-VTSC) SEPARATELY from v_cruise (the VTSC-reduced
+    # effective ceiling) — anchor/seed off the driver's raw set, but stay reduce-only bounded against
+    # the effective ceiling below, same as before. speedanchor2pnw (F_uninit): also pass
+    # v_cruise_initialized so speedadjust skips anchoring/seeding off the V_CRUISE_UNSET sentinel.
+    cap_sa = self.speedadjust.cap(sm, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
     if cap_sa is not None and not math.isnan(cap_sa):
       v_cruise = max(0.0, min(v_cruise, float(cap_sa)))
 
