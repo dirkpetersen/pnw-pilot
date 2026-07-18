@@ -111,6 +111,16 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
     {"DeferHDVideoUpload", {PERSISTENT, BOOL, "0"}},  // connect2pnw: hold fcamera/ecamera/dcamera uploads (qlog/rlog/qcam still flow); default OFF = unchanged behavior
+    // connectsel2pnw: connect backend selector (ported from BluePilot 7.0 BPConnectBackend; comma option
+    // removed, PNW self-hosted is the default, Custom URL added). Per-backend dongle-ID caches make
+    // switching reversible: each backend issues its own dongle ID at registration, so the last-seen ID
+    // is stashed per backend and swapped back in when returning. See common/connect_backend.py.
+    {"ConnectBackend", {PERSISTENT, INT, "0"}},  // connectsel2pnw: 0=PNW self-hosted 1=Konik 2=Custom 3=Offline; 0/unset = unchanged behavior
+    {"ConnectCustomUrl", {PERSISTENT, STRING}},  // connectsel2pnw: driver-entered https:// base URL for the Custom backend
+    {"ConnectActiveBackend", {PERSISTENT, STRING}},  // connectsel2pnw: backend token DongleId currently belongs to ("custom:<hash>" for Custom)
+    {"DongleIdCachePnw", {PERSISTENT, STRING}},  // connectsel2pnw: last dongle ID seen on the PNW backend
+    {"DongleIdCacheKonik", {PERSISTENT, STRING}},  // connectsel2pnw: last dongle ID issued by Konik
+    {"DongleIdCacheCustom", {PERSISTENT, STRING}},  // connectsel2pnw: JSON {sha256(url)[:16]: dongle_id} for Custom URLs
     {"OnPriorityNetwork", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: network_arbiterd sets True while joined to a priority (home) SSID; pass-2 (rlog/HD) uploads run ONLY there (driver spec 2026-07-13)
     {"GearPark", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // uploadgate2pnw: card's change-only "gear is in Park" flag; lets background procs gate on parked WITHOUT a 100Hz carState msgq sub (2026-07-13 commIssue lesson)
     {"LastUploadError", {CLEAR_ON_MANAGER_START, STRING}},  // uploadretry2pnw: last hard upload failure (HTTP status/exc) for the CES overlay, change-only; removed on next success + on startup

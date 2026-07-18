@@ -14,6 +14,9 @@ from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.hardware.hw import Paths
 from openpilot.common.swaglog import cloudlog
 
+# connectsel2pnw: PNW / Konik / Custom / Offline dongle ID switching (ported from BluePilot 7.0)
+from openpilot.common.connect_backend import BACKEND_PNW, BACKEND_OFFLINE, reconcile_backend
+
 
 UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
@@ -34,11 +37,19 @@ def register(show_spinner=False) -> str | None:
   """
   params = Params()
 
+  # connectsel2pnw: swap/clear DongleId when ConnectBackend changed (per-backend dongle-ID cache).
+  # Non-PNW backends skip the /persist comma dongle ID restore below — restoring the factory comma
+  # ID would short-circuit registration against Konik/Custom. Offline never touches the network.
+  backend = reconcile_backend(params)
+  # End connectsel2pnw
+
   dongle_id: str | None = params.get("DongleId")
-  if dongle_id is None and Path(Paths.persist_root()+"/comma/dongle_id").is_file():
+  if dongle_id is None and backend == BACKEND_PNW and Path(Paths.persist_root()+"/comma/dongle_id").is_file():  # connectsel2pnw: PNW only
     # not all devices will have this; added early in comma 3X production (2/28/24)
     with open(Paths.persist_root()+"/comma/dongle_id") as f:
       dongle_id = f.read().strip()
+  elif dongle_id is None and backend == BACKEND_OFFLINE:  # connectsel2pnw: never register against the bogus offline hosts
+    dongle_id = UNREGISTERED_DONGLE_ID
 
   # Create registration token, in the future, this key will make JWTs directly
   jwt_algo, private_key, public_key = get_key_pair()
