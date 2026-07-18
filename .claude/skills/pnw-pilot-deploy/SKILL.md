@@ -36,8 +36,10 @@ for the driver to ask.
 
 **Driver choreography rule (driver directive: "it needs to be automatic, tell me what to do"):**
 the driver must never have to reason about any of this. After ANY change: (1) Claude does the
-reboot HIMSELF the moment the truck is verifiably parked (GPS < 1.5 m/s + touch /tmp/booted) —
-never ask the driver to do ignition dances for code; (2) tell the driver exactly ONE thing in one
+reboot HIMSELF the moment the truck is verifiably parked — gate on a LIVE `CarState.gearShifter ==
+park` (+ `vEgo≈0`) read, NOT `IsOnroad`/GPS-speed/a verbal "I'm parked" (see the EV-gotcha block in
+Deploy path 2 #1) — + touch /tmp/booted; never ask the driver to do ignition dances for code;
+(2) tell the driver exactly ONE thing in one
 sentence ("stay parked two minutes, I'll say GO"), then verify (version + car recognized + safety
 model + nothing down) and give an explicit **GO**; (3) if something needs a driver action that
 Claude cannot do (e.g. flip a Settings toggle), say the exact button and when. One instruction,
@@ -121,8 +123,33 @@ the updater never fights manual edits. Path 2 below is for RECOVERY, not for shi
 
 ## Deploy path 2 — MANUAL (urgent fixes; also the rollback tool)
 
-1. **Gate: only when `IsOnroad=0`** (`cat /data/params/d/IsOnroad`). It LAGS (~15 s after parking; stays
-   `1` while charging). Never restart onroad — that restarts the control stack → disengage.
+1. **Gate: only when genuinely PARKED — verify via a LIVE `CarState.gearShifter == park` (+ `vEgo≈0`)
+   read, NOT `IsOnroad`.** (`IsOnroad` LAGS ~15 s after parking AND stays `1` while charging — see the
+   EV gotcha immediately below; it is not a reliable parked signal on the Lightning.) Never restart
+   onroad — that restarts the control stack → disengage.
+   - **EV-SPECIFIC GOTCHA (2026-07-16 incident — cost real back-and-forth mid-drive, don't repeat it):**
+     on the Ford F-150 Lightning, `IsOnroad` is driven by the ignition/12V line (`docs/ONROAD-
+     CHARGING.md`), which reads `1` even when the truck is genuinely PARKED and simply charging —
+     "stays 1 while charging" above is not a rare edge case on this car, it's routine, and it will
+     sit at `1` indefinitely while plugged in. **Never trust a verbal "I'm parked" or `IsOnroad`
+     alone before restarting** — confirm with a LIVE read of `CarState.gearShifter`/`vEgo`, the
+     actual signal, not the ignition-line proxy:
+     ```bash
+     ssh comma@$COMMA_IP "source /usr/local/venv/bin/activate; PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo timeout 5 python3 -c \"
+     from cereal.messaging import SubMaster
+     import time
+     sm = SubMaster(['carState']); t0 = time.monotonic()
+     while time.monotonic() - t0 < 4:
+         sm.update(100)
+         if sm.updated['carState']:
+             cs = sm['carState']
+             print('gearShifter=', cs.gearShifter, 'vEgo=', cs.vEgo, 'standstill=', cs.standstill)
+             break
+     \""
+     ```
+     Only proceed once this shows `gearShifter=park` and `vEgo` ≈ 0 — not just `IsOnroad=0`. This is
+     the same discriminator `docs/ONROAD-CHARGING.md` recommends (design doc, not yet coded into a
+     capability) — until that lands, run this check by hand every time.
 2. `cd /data/openpilot && git fetch --no-tags origin 3devpnw && GIT_LFS_SKIP_SMUDGE=1 git reset --hard <sha>
    && git lfs pull` — **always skip-smudge + separate lfs pull**: smudge-during-checkout of the ~61 MB
    model OOM'd git on the 3X (`fatal: Out of memory, realloc failed`, 2026-07-08) and left a half-reset

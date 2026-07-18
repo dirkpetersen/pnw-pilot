@@ -91,8 +91,16 @@ the fork's own modifications, host compile + on-device build.
 
 - **Live drive monitoring**: persistent Monitor over SSH-on-hotspot sampling ces_events (~22 s) +
   error counters; status line per minute, immediate alerts on modeld respawn/new errors/drive end.
-  Deploys queue for `IsOnroad=0` (drive-end event) — pure-python planner changes need no restart
-  when parked (onroad processes spawn fresh next drive).
+- **🔴 EV park detection — use `gearShifter`, NOT `IsOnroad` (driver directive 2026-07-18, applies
+  everywhere: restart gates AND monitoring/status checks).** On the Ford F-150 Lightning `IsOnroad`
+  is ignition/12 V-line-driven, so it reads `1` even when genuinely PARKED and charging — `IsOnroad=1`
+  is ambiguous (driving OR parked+charging). The authoritative signal is a live `CarState.gearShifter
+  == park` (+ `vEgo≈0`) read via a short SubMaster in the device venv. Never gate a restart on
+  `IsOnroad=0`/`vEgo=0`/a verbal "I'm parked" alone. Off/asleep fallback: when the car is fully off,
+  `carState` doesn't publish at all ("NO carState received") — that state is safely "not driving," and
+  `IsOnroad=0` is the only signal available. See `docs/ONROAD-CHARGING.md` + the `pnw-pilot-deploy`
+  skill's EV gotcha block. Pure-python planner changes still queue until a restart (onroad processes
+  spawn fresh next drive), but the *parked* determination that authorizes that restart is gearShifter.
 - **Qlog forensics**: `tools/lib/logreader` on-device over recent segment qlogs answers "which alert
   fired and why" (`onroadEvents`), and message-level inspection (e.g. livePose validity flags around
   an event timestamp) names the failing subsystem. swaglog alone often lacks alert events.
