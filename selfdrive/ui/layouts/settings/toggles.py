@@ -111,6 +111,13 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
   ),
+  # angleenable: experimental Ford angle-primary lateral opt-in, F-150 Lightning only.
+  "FordAngleLateral": tr_noop(
+    "EXPERIMENTAL. Use an angle-primary steering strategy instead of the default curvature-based " +
+    "control on the Ford F-150 Lightning. First drive at low speed on a quiet road and be ready to " +
+    "take over at any time. Falls back to the default steering strategy automatically on any " +
+    "internal error. Ford F-150 Lightning only — this toggle has no effect on the Tesla."
+  ),
   "LocationServicesEnabled": tr_noop(
     "Show the lower-left \"Happening Ahead\" overlay while on a freeway: the nearest police report (Waze), " +
     "rest area, and EV fast charger ahead. Display-only — never affects steering or speed."
@@ -177,6 +184,13 @@ class TogglesLayout(Widget):
         DESCRIPTIONS["NoDisengageOnBrake"],
         "disengage_on_accelerator.png",
         False,
+      ),
+      # angleenable: Ford angle-primary lateral opt-in (F-150 Lightning only, capability-gated below)
+      "FordAngleLateral": (
+        lambda: tr("Ford Angle Steering (experimental)"),
+        DESCRIPTIONS["FordAngleLateral"],
+        "warning.png",
+        True,
       ),
       "DisengageOnAccelerator": (
         lambda: tr("Disengage on Accelerator Pedal"),
@@ -466,6 +480,17 @@ class TogglesLayout(Widget):
     if "NoDisengageOnBrake" in self._toggles:
       self._toggles["NoDisengageOnBrake"].action_item.set_enabled(False)
       self._toggles["NoDisengageOnBrake"].action_item.set_state(False)
+
+    # angleenable: Ford angle-primary lateral is only meaningful on the F-150 Lightning (the only
+    # car with the matching flashed 4-signal/angle-mode panda safety — capability view, same
+    # stock_acc_buttons fingerprint basis icbm2pnw already uses for "this car is the Lightning").
+    # Grey out (and force off) everywhere else so the param can't be left stray-True on a shared
+    # device after a car swap.
+    if "FordAngleLateral" in self._toggles:
+      angle_ok = veh.stock_acc_buttons
+      self._toggles["FordAngleLateral"].action_item.set_enabled(angle_ok)
+      if not angle_ok:
+        self._toggles["FordAngleLateral"].action_item.set_state(False)
 
   def _render(self, rect):
     self._scroller.render(rect)

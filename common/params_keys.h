@@ -107,6 +107,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
+    {"FordAngleLateral", {PERSISTENT, BOOL, "0"}},     // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt) driver opt-in, F-150 Lightning only (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). Experimental — default OFF.
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
