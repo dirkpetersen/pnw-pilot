@@ -31,18 +31,28 @@ export STAGING_ROOT="/data/safe_staging"
 #   3         = Offline Mode (RFC 2606 .invalid hosts — uploads/athena can never egress)
 CONNECT_BACKEND="$(cat /data/params/d/ConnectBackend 2>/dev/null)"
 CONNECT_CUSTOM_URL="$(cat /data/params/d/ConnectCustomUrl 2>/dev/null)"
+# connectsel2pnw: this validation must accept/reject IDENTICALLY to common/connect_backend.py's
+# valid_custom_url() (finding #2) -- no leading/trailing whitespace, literal https:// prefix, non-
+# empty host -- or the two sides can pick different backends for the same stored param value. A
+# literal `${VAR#https://}` prefix match already rejects LEADING whitespace on its own (no match),
+# but does nothing about TRAILING whitespace or an empty host ("https://" or "https:///"), so both
+# are checked explicitly here. Trim via bash's leading/trailing [[:space:]] glob-strip idiom (no
+# external `sed`/`awk` dependency) and compare to the untrimmed value: any difference means
+# whitespace was present, matching Python's `url != url.strip()` check.
+CONNECT_CUSTOM_URL_TRIMMED="${CONNECT_CUSTOM_URL#"${CONNECT_CUSTOM_URL%%[![:space:]]*}"}"
+CONNECT_CUSTOM_URL_TRIMMED="${CONNECT_CUSTOM_URL_TRIMMED%"${CONNECT_CUSTOM_URL_TRIMMED##*[![:space:]]}"}"
+CONNECT_CUSTOM_HOST="${CONNECT_CUSTOM_URL#https://}"
+CONNECT_CUSTOM_HOST="${CONNECT_CUSTOM_HOST%%/*}"
 if [ "$CONNECT_BACKEND" = "1" ]; then
   export API_HOST="https://api.konik.ai"
   export ATHENA_HOST="wss://athena.konik.ai"
 elif [ "$CONNECT_BACKEND" = "3" ]; then
   export API_HOST="https://api.invalid"
   export ATHENA_HOST="wss://athena.invalid"
-elif [ "$CONNECT_BACKEND" = "2" ] && [ "${CONNECT_CUSTOM_URL#https://}" != "$CONNECT_CUSTOM_URL" ]; then
-  CONNECT_CUSTOM_URL="${CONNECT_CUSTOM_URL%/}"
-  export API_HOST="$CONNECT_CUSTOM_URL"
+elif [ "$CONNECT_BACKEND" = "2" ] && [ "$CONNECT_CUSTOM_URL" = "$CONNECT_CUSTOM_URL_TRIMMED" ] \
+     && [ "${CONNECT_CUSTOM_URL#https://}" != "$CONNECT_CUSTOM_URL" ] && [ -n "$CONNECT_CUSTOM_HOST" ]; then
   # athena lives on the custom URL's host (retropilot-style backends serve /ws/v2/ off the same host)
-  CONNECT_CUSTOM_HOST="${CONNECT_CUSTOM_URL#https://}"
-  CONNECT_CUSTOM_HOST="${CONNECT_CUSTOM_HOST%%/*}"
+  export API_HOST="${CONNECT_CUSTOM_URL%/}"
   export ATHENA_HOST="wss://${CONNECT_CUSTOM_HOST}"
 else
   # connect2pnw: self-hosted upload gateway (AWS API Gateway -> Lambda presign -> s3://comma-connect).
