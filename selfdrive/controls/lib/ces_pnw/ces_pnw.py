@@ -71,18 +71,38 @@ def clock_bad(t_wall: float) -> bool:
 # real target (e.g. 14.6 m/s) 3-4 s later. The ceiling below is set ABOVE the highest RAW target ever
 # exercised in this file's own test suite (110 mph / 49.2 m/s, `test_far_map_dec_only_above_ceiling_
 # ignored` -- a genuine generous-sweeper reading, not noise) so it can never reclassify a previously
-# real value as noise; it comfortably catches the unambiguous 2026-07-18 spikes (>=150 mph / 67 m/s
-# observed). Any point above it conveys no usable curve information (real or glitch, both == "no
-# actionable curve here") so it is treated exactly like the NaN case: dropped, not clamped -- clamping
-# to a fake "sane" speed would risk fabricating a binding target out of noise, which we never want.
+# real value as noise.
+#
+# SCOPE (Fable review, 2026-07-18): `_map_v_sane` is wired ONLY into `upcoming_curve` and
+# `icbm_far_map_candidate` -- the two CANDIDATE scanners, where a rejected point can only ever REMOVE
+# a value that would already have failed the reduce-only/binding test on its own (provably a no-op
+# for every existing decision downstream: v_ego - tv is always very negative, tv*scale is always far
+# above any sharp-curve/binding threshold). It is deliberately NOT wired into `icbm_map_reach`
+# (reverted -- see that function's own docstring): pfeiferj's targetVelocity is a `sqrt(2/kappa)`-
+# style function of curve RADIUS, so a wide/near-straight node (radius > ~1.7 km) legitimately
+# reports tv > this ceiling, and a straight/unmatched node legitimately carries the capnp default
+# 0.0 -- both are genuine "no slowdown needed" map verdicts on ordinary straight road, not noise.
+# Gating REACH (map "coverage") on tv would have zeroed out coverage on straights and wrongly opened
+# the MAP-FIRST gate (icbm_vision_may_start) for vision there -- the exact vision-over-slow class the
+# 2026-07-12 driver rule ("vis=60 dec ticks") exists to suppress. `tv` alone can't distinguish "Heron
+# glitch at a curve entry" from "legitimate gentle/straight road" -- reach stays position-based only.
+#
+# KNOWN PARTIAL COVERAGE (LOW, Fable finding 2): the ceiling can't be set below the legitimate 49.2
+# m/s (110 mph) sweeper reading above without reclassifying real data as noise, so the observed
+# 46.5-58 m/s slice of the garbage band (below this ceiling) still passes `_map_v_sane` and can still
+# mask a real curve candidate in `upcoming_curve`/`icbm_far_map_candidate` the same way the >=60 m/s
+# spikes used to. This is a PARTIAL fix for the primary late-onset stall, not a complete one -- if the
+# stall recurs with an observed garbage read in the 46.5-58 m/s range, that is this known gap, not a
+# new regression.
 MAP_CURVE_V_SANITY_MAX_MS = 58.0   # m/s (~130 mph)
 
 
 def _map_v_sane(tv) -> bool:
   """icbmonset: True when a raw mapd curve-target velocity (m/s) is finite, positive, and under the
-  implausibility ceiling above. Used everywhere a mapd path point's velocity is read (upcoming_curve,
-  icbm_far_map_candidate, icbm_map_reach) so a curvature-noise spike is rejected the same way NaN
-  already is, instead of being treated as legitimate 'no curve here' map coverage. Pure; never raises."""
+  implausibility ceiling above. Wired into the two candidate scanners (upcoming_curve,
+  icbm_far_map_candidate) so a curvature-noise spike is rejected the same way NaN already is, instead
+  of being treated as a legitimate candidate. Deliberately NOT used by icbm_map_reach -- see the
+  SCOPE note above. Pure; never raises."""
   try:
     tv = float(tv)
   except (TypeError, ValueError):
@@ -220,23 +240,23 @@ def icbm_map_reach(points, cur_lat, cur_lon, horizon_m=ICBM_MAP_HORIZON_M) -> fl
   every call, so a dead mapd's last path decays out of coverage as we drive on (mapd-liveness
   fallback: vision regains the right to initiate). NaN-guarded like the other scanners.
 
-  icbmonset: ALSO requires the point's own velocity to be sane (`_map_v_sane`). A point mapd itself
-  can't resolve trustworthily (curvature-noise spike, e.g. the live 2026-07-18 city-curve-entry
-  reads) must not count as "the map has judged this stretch" -- it inflates apparent coverage and
-  wrongly blocks vision from filling the gap (icbm_vision_may_start) while the map's own read for
-  that spot is garbage. Only ever SHRINKS reach vs before -- never grows it -- so this can only ever
-  let vision initiate MORE readily where the map is untrustworthy, never suppress a real map verdict.
-  Pure."""
+  icbmonset (POSITION-based only, deliberately NOT `_map_v_sane`-gated — see the reversion note at
+  MAP_CURVE_V_SANITY_MAX_MS): reach means "mapd published a point here", independent of what its
+  velocity says. pfeiferj's targetVelocity is `sqrt(2/kappa)`-derived: a wide/near-straight node
+  (radius > ~1.7 km) legitimately reports a HIGH target velocity, and a straight/unmatched node
+  legitimately carries the capnp default 0.0 — both are genuine "no slowdown needed here" verdicts,
+  not noise, and gating reach on velocity would silently zero out coverage on ordinary straight
+  road, wrongly opening icbm_vision_may_start there (the exact vision-over-slow class the
+  2026-07-12 driver rule exists to suppress). Pure."""
   if not points or cur_lat is None or cur_lon is None:
     return 0.0
   reach = 0.0
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
-      tv = p["velocity"]
     except (KeyError, TypeError, ValueError):
       continue
-    if d != d or not _map_v_sane(tv):              # NaN + curvature-noise guard (icbmonset)
+    if d != d:                                    # NaN guard
       continue
     if reach < d <= horizon_m:
       reach = d
