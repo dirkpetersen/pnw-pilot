@@ -484,13 +484,22 @@ class TogglesLayout(Widget):
     # angleenable: Ford angle-primary lateral is only meaningful on the F-150 Lightning (the only
     # car with the matching flashed 4-signal/angle-mode panda safety — capability view, same
     # stock_acc_buttons fingerprint basis icbm2pnw already uses for "this car is the Lightning").
-    # Grey out (and force off) everywhere else so the param can't be left stray-True on a shared
-    # device after a car swap.
+    # Grey out (and force off) everywhere else. (Gemini should-fix, 2026-07-18): also clear the
+    # PARAM itself, not just the displayed toggle state — otherwise FordAngleLateral can be left
+    # stray-True in the param store after a car swap (e.g. set on the Lightning, device later
+    # moved to the Tesla) while the UI shows OFF, a display/backend mismatch. The opendbc-side gate
+    # already ignores a stray-True param on a non-capable car (angle_lat requires four_signal_lat),
+    # so this is belt-and-suspenders for the display, not a safety fix — but a param that says one
+    # thing while the UI says another is exactly the kind of drift this codebase avoids elsewhere
+    # (see the DmMode clamp above). Only writes when actually stray-True, to avoid a write every
+    # _update_toggles call on every non-Lightning drive.
     if "FordAngleLateral" in self._toggles:
       angle_ok = veh.stock_acc_buttons
       self._toggles["FordAngleLateral"].action_item.set_enabled(angle_ok)
       if not angle_ok:
         self._toggles["FordAngleLateral"].action_item.set_state(False)
+        if self._params.get_bool("FordAngleLateral"):
+          self._params.put_bool("FordAngleLateral", False)
 
   def _render(self, rect):
     self._scroller.render(rect)
