@@ -28,6 +28,15 @@ class PairingDialog(Widget):
     self._close_btn = IconButton(gui_app.texture("icons/close.png", 80, 80))
     self._close_btn.set_click_callback(gui_app.pop_widget)
 
+  def _pairing_host(self) -> str:
+    # connectsel2pnw: pair against the selected connect backend (PNW / Konik / Custom / Offline);
+    # defaults to the PNW self-hosted connect web UI on any failure.
+    try:
+      from openpilot.common.connect_backend import pairing_host
+      return pairing_host(self.params)
+    except Exception:
+      return "comma-connect.aws.internetchen.de"
+
   def _get_pairing_url(self) -> str:
     try:
       dongle_id = self.params.get("DongleId") or ""
@@ -35,8 +44,8 @@ class PairingDialog(Widget):
     except Exception:
       cloudlog.exception("Failed to get pairing token")
       token = ""
-    # pnw: self-hosted comma-connect endpoint (replaces connect.comma.ai)
-    return f"https://comma-connect.aws.internetchen.de/?pair={token}"
+    # pnw: self-hosted comma-connect endpoint (replaces connect.comma.ai); connectsel2pnw: per-backend
+    return f"https://{self._pairing_host()}/?pair={token}"
 
   def _generate_qr_code(self) -> None:
     try:
@@ -114,10 +123,13 @@ class PairingDialog(Widget):
     return -1
 
   def _render_instructions(self, rect: rl.Rectangle) -> None:
+    # connectsel2pnw: swap the shown host for the selected backend (bp-7.0 pattern: replace on the
+    # translated string so existing translations keep working)
+    host = self._pairing_host()
     instructions = [
-      tr("Go to https://comma-connect.aws.internetchen.de on your phone"),
+      tr("Go to https://comma-connect.aws.internetchen.de on your phone").replace("comma-connect.aws.internetchen.de", host),
       tr("Click \"add new device\" and scan the QR code on the right"),
-      tr("Bookmark comma-connect.aws.internetchen.de to your home screen to use it like an app"),
+      tr("Bookmark comma-connect.aws.internetchen.de to your home screen to use it like an app").replace("comma-connect.aws.internetchen.de", host),
     ]
 
     font = gui_app.font(FontWeight.BOLD)

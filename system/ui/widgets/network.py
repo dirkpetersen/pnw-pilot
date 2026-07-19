@@ -161,6 +161,29 @@ class AdvancedNetworkSettings(Widget):
     wifi_metered_btn = ListItem(lambda: tr("Wi-Fi Network Metered"), description=lambda: tr("Prevent large data uploads when on a metered Wi-Fi connection"),
                                 action_item=self._wifi_metered_action)
 
+    # connectsel2pnw: connect backend selector (ConnectBackend: 0=PNW 1=Konik 2=Custom 3=Offline).
+    # Mirrors the Wi-Fi-metered row above: description + MultipleButtonAction is fine — the segmented
+    # action handles its own taps, so the "description makes the action button inert" bug does not
+    # apply (that bug only hits plain EDIT/ADD/VIEW action BUTTONS, see the priority-network rows).
+    # Defensive selected_index read (rain2pnw pattern) so a params/UI mismatch degrades gracefully
+    # instead of crash-looping the UI.
+    try:
+      _backend_selected = int(self._params.get("ConnectBackend", return_default=True) or 0)
+    except Exception:
+      _backend_selected = 0
+    if not 0 <= _backend_selected <= 3:
+      _backend_selected = 0
+    self._connect_backend_action = MultipleButtonAction([lambda: tr("PNW"), lambda: tr("Konik"), lambda: tr("Custom"), lambda: tr("Offline")],
+                                                        230, _backend_selected, callback=self._set_connect_backend)
+    connect_backend_btn = ListItem(
+      lambda: tr("Connect Backend"),
+      description=lambda: tr("PNW is this fork's self-hosted connect; Offline disables telemetry. Takes effect after reboot."),
+      action_item=self._connect_backend_action)
+
+    # connectsel2pnw: Custom backend base URL. NO description= — a ListItem with both a description
+    # and an action BUTTON renders the button non-tappable in this framework (known raylib list bug).
+    self._custom_url_btn = button_item(lambda: tr("Custom URL"), lambda: tr("EDIT"), callback=self._edit_connect_custom_url)
+
     items: list[Widget] = [
       tethering_btn,
       tethering_password_btn,
@@ -172,6 +195,8 @@ class AdvancedNetworkSettings(Widget):
       self._cellular_metered_btn,
       wifi_metered_btn,
       button_item(lambda: tr("Hidden Network"), lambda: tr("CONNECT"), callback=self._connect_to_hidden_network),
+      connect_backend_btn,
+      self._custom_url_btn,
     ]
 
     self._scroller = Scroller(items, line_separator=True, spacing=0)
@@ -279,6 +304,39 @@ class AdvancedNetworkSettings(Widget):
     self._keyboard.set_title(tr("Enter new tethering password"), "")
     self._keyboard.set_text(self._wifi_manager.tethering_password)
     self._keyboard.set_callback(update_password)
+    gui_app.push_widget(self._keyboard)
+
+  # --- connectsel2pnw: connect backend selection --------------------------------------------------
+
+  def _set_connect_backend(self, index: int):
+    # Host wiring is applied by launch_env.sh and the dongle-ID reconcile runs at manager start, so
+    # a backend change only takes effect on reboot (the row's description says so). Params only —
+    # no live re-wiring is attempted here. NOTE: do NOT set_enabled(False) (see priority-net rows).
+    self._params.put("ConnectBackend", index)
+    if index == 2 and not (self._params.get("ConnectCustomUrl") or "").startswith("https://"):
+      # Custom without a valid URL silently behaves as PNW — prompt for the URL right away instead.
+      self._edit_connect_custom_url()
+
+  def _edit_connect_custom_url(self):
+    def update_url(result: DialogResult):
+      if result != DialogResult.CONFIRM:
+        return
+      url = self._keyboard.text.strip().rstrip("/")
+      if url == "":
+        self._params.remove("ConnectCustomUrl")
+        return
+      # local import: standalone WifiManagerUI apps must not require the openpilot package (see the
+      # guarded imports at the top of this file); same pattern as _read_priority_networks.
+      from openpilot.common.connect_backend import valid_custom_url
+      if not valid_custom_url(url):
+        gui_app.push_widget(ConfirmDialog(tr("Invalid URL — must start with https://"), tr("OK")))
+        return
+      self._params.put("ConnectCustomUrl", url)
+
+    self._keyboard.reset(min_text_size=0)
+    self._keyboard.set_title(tr("Enter Custom Connect URL"), tr("https:// base URL, e.g. https://connect.example.com"))
+    self._keyboard.set_text(self._params.get("ConnectCustomUrl") or "")
+    self._keyboard.set_callback(update_url)
     gui_app.push_widget(self._keyboard)
 
   # --- network2xnor (multi-location): priority-network list management ---------------------------
