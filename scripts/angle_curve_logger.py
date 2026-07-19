@@ -171,6 +171,41 @@ def append_summary(obj):
     print(f"summary write failed: {e}", flush=True)
 
 
+def trace_worth_keeping(summ):
+  """Which curves earn a full ~292 kB 20 Hz trace. The 2.7 kB summary is always kept.
+
+  Measured 2026-07-19: 55 curves = 16 MB, and the large majority were parking-lot / intersection
+  maneuvers (R < 40 m, disengaged, hand-steered) from which nothing can be learned — pure waste.
+  Keep a trace only where someone would actually open it:
+    - clean_for_tuning        : the tuning dataset itself
+    - limit_alert             : openpilot said "Take Control" — ground truth, always keep
+    - angle_saturated >= 5%   : sustained tracking divergence
+    - exit_unwind_hold        : the open defect under investigation
+    - a real road curve with real amplitude, even if flagged (R > 80 m and green > 10 deg) —
+      flagged-but-large curves are where the confounds themselves are diagnosed
+  """
+  f = summ.get("flags", {})
+  k = summ.get("kappa_peak") or 0
+  radius = (1.0 / k) if k else 0.0
+
+  # A clean curve is the dataset — always keep, whatever its shape.
+  if f.get("clean_for_tuning"):
+    return True
+
+  # Everything else must be a ROAD curve to be worth 292 kB. Verified against the 2026-07-19
+  # session: without this gate, 7-24 m parking/intersection turns qualified on saturation alone
+  # (they saturate trivially — that is the envelope, not information) and the filter saved only 47%.
+  if radius <= 40.0:
+    return False
+
+  return bool(
+    f.get("limit_alert")                              # openpilot said "Take Control" on a real curve
+    or f.get("exit_unwind_hold")                      # the open defect
+    or (f.get("angle_saturated_frac") or 0) >= 0.05   # sustained tracking divergence
+    or abs(summ.get("green_peak_deg") or 0) > 10.0    # real amplitude: confounds get diagnosed here
+  )
+
+
 def read_tuning():
   """Snapshot of the tuning overlay in force (hot-reloads every ~5 s on the car) — per-curve, so
   config boundaries never have to be reconstructed from file mtimes again (2026-07-19 lesson).
@@ -460,13 +495,15 @@ def main():
         if free < MIN_FREE_ANY:
           print(f"curve {cid}: DROPPED, only {free // 1048576} MB free on /data", flush=True)
           continue
-        if free > MIN_FREE_TRACE:
+        if free > MIN_FREE_TRACE and trace_worth_keeping(summ):
           window = rows_now[max(0, i_start - PRE_N):min(len(rows_now), i_end + POST_N + 1)]
           with open(os.path.join(TRACE_DIR, f"{cid}.jsonl"), "w") as tf:
             for r in window:
               tf.write(json.dumps(r) + "\n")
         else:
-          summ["trace"] = None   # summary still written; trace skipped under disk pressure
+          # Summary is ALWAYS written (2.7 kB, it is the actual dataset); the ~292 kB trace is
+          # forensics and is skipped for curves nothing can be learned from, or under disk pressure.
+          summ["trace"] = None
         append_summary(summ)
         print(f"curve {cid}: {summ['dir']} {summ['v_mean_mph']}mph "
               f"green {summ['green_peak_deg']} yellow {summ['yellow_peak_deg']} d {summ['delta_deg']} "
