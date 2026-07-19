@@ -33,13 +33,51 @@ passive collection costs ~100 MB instead of ~40 MB/hour. Emits one aggregatable 
 curve (peak green, peak yellow, verdict, validity flags) plus a full trace. Works on **both cars**
 (both run `steerControlType = angle`); every record is tagged with brand/fingerprint.
 
+## ✅ RESOLVED — gain anchors: **15 / 70 mph, confirmed by Alan Polk directly** (2026-07-19)
+
+The driver asked him directly. **He confirmed the anchors are meant to be 15 and 70 mph, and that
+30 / 60 "is not enough."** So the shipping `bp-7.0` constants are a **bug**, not intent:
+
+```python
+# lateral_angle_ext.py:445-446  and  angle_factor_adjuster.py:33-34   (BluePilotDev/bluepilot @ bp-7.0)
+interp(v_ego, [13.5, 26.82], ...)     # 30.2 / 60.0 mph  — WRONG per the author
+                                      # intended: 6.71 / 31.29 m/s = 15 / 70 mph
+```
+
+**Why it matters (this is the whole low-speed story):** `interp` **clamps**, so with the 13.5 anchor
+the curve gain is **flat at `1.30 × low_speed_factor` from 30 mph all the way down to 0**. Every speed
+below 30 mph gets an identical gain — which makes 18 mph and 30 mph behavior impossible to separate
+with any knob. That is precisely how a 2026-07-19 attempt to cure sub-20 mph wide-running (raising
+`low_speed_curv_factor` 1.0 → 1.2) instead produced a **lane departure at 30 mph**: the "low speed"
+factor is at full strength *at* 30 mph.
+
+With the corrected 15 / 70 anchors the taper begins at 15 mph:
+
+| mph | gain @ 30/60 (shipped) | gain @ 15/70 (intended) | Δ |
+|---|---|---|---|
+| ≤15 | 1.300 | 1.300 | — |
+| 20 | 1.300 | 1.268 | −2.4% |
+| 25 | 1.300 | 1.236 | −4.9% |
+| **30** | **1.300** | **1.205** | **−7.3%** |
+| 40 | 1.185 | 1.141 | −3.7% |
+| 60 | 0.950 | 1.014 | +6.7% |
+| 70 | 0.950 | 0.950 | — |
+
+The largest reduction lands exactly at the departure speed, while sub-20 mph is nearly untouched —
+the two symptoms finally sit on different parts of the curve.
+
+**Applied here** via the tuning overlay (`gain_speed_lo_ms = 6.71`, `gain_speed_hi_ms = 31.29`),
+verified loaded on-device 2026-07-19. This is a **correction toward the author's stated intent**, not
+a deviation from his design — recorded as such in `ALAN-POLK-PORT-DEVIATIONS.md`.
+
+⚠️ **Upstream impact:** this affects **every BluePilot Ford user** on bp-7.0, not just us — the low-speed
+factor they are told to tune at 15 mph is in fact pinned at full strength through 30 mph.
+
 ## Open questions for Alan Polk
 
-1. **Anchor discrepancy** — video says the low/high factors sit at 15 / 70 mph; code and his own
-   debug widget use 13.5 / 26.82 m/s = **30 / 60 mph**. Because `interp` clamps, curve gain is **flat
-   from 30 mph down to 0**, so there is no knob that separates 20 mph from 30 mph behavior. Intended?
-2. **Exit-blend threshold** — `_desired_falling` needs the planner to unwind faster than
-   **0.2 (1/m)/s**. Measured on our roads: median 0.020, p99 0.119, **1 of 1134 frames** exceeded it.
-   His exit-biased blend collapse therefore never engages here, which is our leading explanation for
-   the exit-unwind hold. His pre-scaling value (0.002/call = 0.04 (1/m)/s) would fire on genuine exits.
-3. Lane Change Factor range: article says 0.5–2.0, code clips 0.85–1.50.
+1. **Exit-blend threshold** — `_desired_falling` (lateral_angle_ext.py:395) needs the planner to unwind
+   faster than **0.2 (1/m)/s**. Measured on our roads: median **0.020**, p99 0.119, **1 of 1134 frames**
+   exceeded it. His exit-biased blend collapse therefore never engages here — our leading explanation
+   for the observed **exit-unwind hold**. His pre-scaling value (`0.002`/call = 0.04 (1/m)/s) would fire
+   on genuine exits. Possibly the same class of bug as the anchors above.
+2. Lane Change Factor range: article says 0.5–2.0, code clips 0.85–1.50.

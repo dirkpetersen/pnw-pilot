@@ -148,7 +148,25 @@ overlay file (all keys at your defaults, with a `_doc` string per key) is commit
 | `_STALL_MAX_BLIPS` | 3 | 3 | ✓ |
 | `_PRESS_BLIP_MIN_S` | 0.5 | 0.5 | ✓ |
 | soft ROC bp `[9,10,15,25]` → `[0.055,0.055,0.0425,0.009]` | as shown | identical | ✓ |
-| gain-interp speed bp `[13.5, 26.82]` | as shown | identical default (tunable) | ✓ |
+| gain-interp speed bp `[13.5, 26.82]` | as shown | identical default (tunable) — **but see the author-confirmed correction below; we RUN 6.71 / 31.29** | ✓ (default) |
+
+### ⚠️ Author-confirmed correction — gain anchors run at 15 / 70 mph, not the shipped 30 / 60
+
+**Not a deviation — a correction toward the author's stated intent.** On 2026-07-19 the driver asked
+Alan Polk directly; **he confirmed the anchors are meant to be 15 and 70 mph, and that 30 / 60 "is not
+enough."** The shipped `bp-7.0` values (`13.5` / `26.82` m/s = 30.2 / 60.0 mph, in both
+`lateral_angle_ext.py:445-446` and his own `angle_factor_adjuster.py:33-34`) are therefore a **bug in
+upstream**, affecting every BluePilot Ford user — not only this port.
+
+We run the intended values via the tuning overlay: `gain_speed_lo_ms = 6.71`, `gain_speed_hi_ms = 31.29`.
+The in-code defaults are deliberately left at his shipped numbers so that "absent overlay == his code"
+remains true; the overlay carries the correction, and it is recorded here and in `README.md`.
+
+**Impact:** `interp` clamps, so at the shipped anchors curve gain is **flat at `1.30 × low_speed_factor`
+from 30 mph down to 0** — no knob can separate 18 mph from 30 mph behavior. That is the direct cause of
+the 2026-07-19 lane departure (raising `low_speed_curv_factor` to cure sub-20 mph wide-running also
+raised gain at 30 mph, where it is at full strength). With 15 / 70 the taper starts at 15 mph:
+30 mph gain drops 1.300 → 1.205 (−7.3%) while 18 mph moves only −1.5%.
 | low-speed boost `1.30` (line 446) | 1.30 | identical default (tunable) | ✓ |
 | curvature_factor bp `[0.0007, 0.001]` | as shown | identical default (tunable) | ✓ |
 | `CarControllerParams.CURVATURE_ERROR` | 0.002 (shared `values.py`) | 0.002 (same file) | ✓ |
