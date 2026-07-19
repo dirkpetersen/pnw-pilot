@@ -73,6 +73,14 @@ import cereal.messaging as messaging
 from cereal import car as car_capnp
 from opendbc.can.parser import CANParser
 
+# Alerts openpilot raises when lateral is at/над its limit. These are GROUND TRUTH — the system
+# telling the driver it could not hold the path — and cannot be reconstructed from signals after the
+# fact. Alan Polk describes seeing exactly this in his own drive video ("a flash saying that we're
+# getting off center of our path"). Any curve carrying one of these is a limit event, whatever the
+# peak comparison says.
+LIMIT_ALERT_TYPES = ("steerSaturated", "steerRequired", "preLaneChange", "ldw",
+                     "steerTempUnavailable", "belowSteerSpeed", "steerUnavailable")
+
 try:
   from openpilot.common.params import Params
 except ImportError:
@@ -165,11 +173,21 @@ def append_summary(obj):
 
 def read_tuning():
   """Snapshot of the tuning overlay in force (hot-reloads every ~5 s on the car) — per-curve, so
-  config boundaries never have to be reconstructed from file mtimes again (2026-07-19 lesson)."""
+  config boundaries never have to be reconstructed from file mtimes again (2026-07-19 lesson).
+
+  Stores VALUES ONLY -- the reference file's `_doc` help strings are ~2 kB of identical prose per
+  curve, which would be tens of MB of duplication over a month and makes curves.jsonl unreadable.
+  The docs live in opendbc/car/ford/angle_tuning.reference.json."""
   try:
     st = os.stat(TUNING_JSON)
     with open(TUNING_JSON) as f:
-      return {"mtime": int(st.st_mtime), "values": json.load(f)}
+      raw = json.load(f)
+    vals = {}
+    for k, v in raw.items():
+      if k.startswith("_"):
+        continue
+      vals[k] = v.get("value") if isinstance(v, dict) else v
+    return {"mtime": int(st.st_mtime), "values": vals}
   except FileNotFoundError:
     return None
   except Exception as e:
@@ -302,6 +320,14 @@ def summarize(rows, curve_id, i_start, i_end, car_ctx, timed_out, post_truncated
     "wire_dead_frac": round(1.0 - len(wire_rows) / len(curve), 3),   # 1.0 = wire never decoded
     "not_engaged": any(not r["lat"] for r in curve),
     "exit_unwind_hold": exit_hold,
+    # GROUND TRUTH: openpilot itself said it was at/over its lateral limit during this curve.
+    # NOT a cleanliness disqualifier — a limit event is the most interesting kind of curve there is
+    # (it is what the driver felt), so it stays "clean" and is surfaced separately for analysis.
+    "limit_alert": any(r.get("alert_type") for r in curve),
+    "limit_alert_types": sorted({r["alert_type"] for r in curve if r.get("alert_type")}) or None,
+    "limit_alert_text": next((r["alert1"] for r in curve if r.get("alert1")), None),
+    "angle_saturated": any(r.get("sat") for r in curve),
+    "angle_saturated_frac": round(sum(1 for r in curve if r.get("sat")) / len(curve), 3),
     "timed_out": timed_out,                    # hit MAX_CURVE_S; peak may be mid-curve, a follow-on
                                                # record covers the continuation
     "post_truncated": post_truncated,          # session ended before full post-roll (exit_hold weak)
@@ -383,7 +409,8 @@ def main():
 
   params = Params()
   car_ctx = load_car(params)
-  sm = messaging.SubMaster(["carState", "carControl", "modelV2", "liveDelay"])
+  sm = messaging.SubMaster(["carState", "carControl", "modelV2", "liveDelay",
+                            "selfdriveState", "controlsState"])
   sendcan = messaging.sub_sock("sendcan", conflate=False, timeout=100)
 
   def emit_marker(reason):
@@ -504,6 +531,29 @@ def main():
       except Exception:
         pass
 
+      # Lateral-limit ground truth: what openpilot told the DRIVER. Never inferable afterwards.
+      alert_type = alert1 = alert_status = None
+      sat = None
+      try:
+        if sm.alive["selfdriveState"]:
+          ss = sm["selfdriveState"]
+          at = str(ss.alertType) or None
+          # Keep only lateral/limit-relevant alerts; ignore the constant background chatter.
+          if at and any(k.lower() in at.lower() for k in LIMIT_ALERT_TYPES):
+            alert_type = at
+            alert1 = str(ss.alertText1) or None
+            _as = ss.alertStatus
+            alert_status = int(getattr(_as, "raw", _as))
+      except Exception:
+        pass
+      try:
+        if sm.alive["controlsState"]:
+          lcst = sm["controlsState"].lateralControlState
+          if lcst.which() == "angleState":
+            sat = bool(lcst.angleState.saturated)
+      except Exception:
+        pass
+
       row = {
         "t": round(row_t, 3),
         "wall": round(time.time(), 2),
@@ -521,6 +571,13 @@ def main():
         "lane_l": lane_l,
         "lane_r": lane_r,
         "lcs": lcs,
+        # GROUND TRUTH that openpilot itself hit a lateral limit. alert_type is the machine-readable
+        # name (e.g. "steerSaturated"); alert1 is what the driver actually saw on screen. sat is the
+        # angle controller's own saturation flag. See LIMIT_ALERT_TYPES.
+        "alert_type": alert_type,
+        "alert1": alert1,
+        "alert_status": alert_status,
+        "sat": sat,
         "lat_delay": round(float(sm["liveDelay"].lateralDelay), 3) if sm.alive["liveDelay"] else None,
         **(car_ctx.wire_row(mono) if car_ctx else
            {"wire_angle": None, "wire_mode": None, "wire_c2": None, "wire_c3": None,
