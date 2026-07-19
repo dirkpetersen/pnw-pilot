@@ -1582,8 +1582,13 @@ class CESController:
     # icbm2pnw: in Lightning shadow mode the CES/planner path never actuates, but the ICBM brain
     # publishes a stock-ACC set-speed target the ford carcontroller executor follows (curve
     # slow-down, dec-only against the driver's own set — see icbm_curve_target). ICBM mirrors the
-    # button: ACTIVE only in the CES state, SILENT in forced Chill (the truck's button flips only
-    # CES<->Chill — forced Exp is unreachable there). Publishing empty in Chill stops the executor.
+    # button: ACTIVE only in the CES state, SILENT in forced Chill. This is the driver's kill switch
+    # for ICBM, so it must stay reachable in ONE tap from the default boot state (CES) — verified by
+    # oplongexp2pnw's select_ces_cycle ordering (CES -> Chill -> Exp-confirm) in exp_button.py.
+    # CESButtonState itself still never stores BTN_EXP while op-long is off (exp_button.py forces the
+    # landing state back to CES and gates the actual enable behind a separate confirm tap), so forced
+    # Exp stays structurally unreachable HERE regardless of the onroad button's own multi-tap UI flow
+    # to reach it. Publishing empty in Chill stops the executor.
     if self._shadow:
       self._icbm_step(sig, active=(sig is not None and self._button == C.BTN_CES))
     return want and self._long_ok
