@@ -41,10 +41,14 @@ button AWAY from Experimental toward CES or Chill while op-long is currently ON 
 OFF (`AlphaLongitudinalEnabled=False` + `OnroadCycleRequested=True`, mirroring
 developer.py::_on_alpha_long_enabled's else-branch). Unlike the enable direction, this needs no second
 tap and no AEB-warning text -- disabling is the SAFE direction (it restores AEB and hands following
-back to the truck's own radar). It IS still standstill-gated (same `_STANDSTILL_MS` threshold) because
-`OnroadCycleRequested` restarts the whole onroad stack regardless of direction, and that must never
-happen while moving. `is_disable_reach` (which nxt values are a disable) and `decide_disable_outcome`
-(the standstill-only gate) are the pure helpers -- see TestIsDisableReach / TestDecideDisableOutcome.
+back to the truck's own radar). Fable review, F2 (MEDIUM): it DOES still need BOTH gates the enable
+direction has -- standstill (`_STANDSTILL_MS`, since `OnroadCycleRequested` restarts the whole onroad
+stack regardless of direction and that must never happen while moving) AND engaged (mirroring
+ConfirmOutcome's HOLD_ENGAGED): stopped at a light with openpilot ENGAGED, op-long is actively holding
+the brake, and the reload would release that hold with the driver's foot off the pedal -> EV creep.
+F3 (LOW): the standstill compare uses `abs(v_ego)` so a rolling-backward negative vEgo can't slip
+past it. `is_disable_reach` (which nxt values are a disable) and `decide_disable_outcome` (the
+standstill+engaged gate) are the pure helpers -- see TestIsDisableReach / TestDecideDisableOutcome.
 """
 from openpilot.selfdrive.ui.layouts.settings.developer import AlphaLongToggleState, compute_alpha_long_toggle_state
 from openpilot.selfdrive.ui.onroad.exp_button import (
@@ -275,24 +279,45 @@ class TestIsDisableReach:
 
 
 class TestDecideDisableOutcome:
-  """oplongdisable: the disable direction's gate is standstill-only (no `engaged` check -- see
-  decide_disable_outcome docstring: disabling is the SAFE direction, so a driver stopped under
-  openpilot control is not held back the way the enable direction's HOLD_ENGAGED holds a re-enable)."""
+  """oplongdisable, Fable F2 (MEDIUM) fix: the disable direction's gate is standstill AND engaged,
+  symmetric with decide_confirm_outcome's HOLD_ENGAGED. The concrete hazard: stopped at a light with
+  openpilot ENGAGED, op-long is holding the brake -- disabling reloads the onroad stack
+  (OnroadCycleRequested), which kills controls for >=1 s and releases that hold while the truck sits
+  in D with the driver's foot off the pedal (EV creep). So DISABLE requires BOTH stopped AND not
+  engaged; stopped-but-engaged holds instead."""
 
-  def test_stopped_disables(self):
-    assert decide_disable_outcome(v_ego=0.0) is DisableOutcome.DISABLE
+  def test_stopped_and_not_engaged_disables(self):
+    assert decide_disable_outcome(v_ego=0.0, engaged=False) is DisableOutcome.DISABLE
 
   def test_just_under_standstill_threshold_disables(self):
-    assert decide_disable_outcome(v_ego=_STANDSTILL_MS - 0.01) is DisableOutcome.DISABLE
+    assert decide_disable_outcome(v_ego=_STANDSTILL_MS - 0.01, engaged=False) is DisableOutcome.DISABLE
 
   def test_moving_holds_no_disable(self):
     # The core safety property this task is about: at speed, a flip to CES/Chill must NOT restart
     # the onroad stack.
-    assert decide_disable_outcome(v_ego=15.0) is DisableOutcome.HOLD_MOVING
+    assert decide_disable_outcome(v_ego=15.0, engaged=False) is DisableOutcome.HOLD_MOVING
 
   def test_at_standstill_threshold_still_holds(self):
     # Boundary: v_ego == _STANDSTILL_MS counts as still moving (>=), matching decide_confirm_outcome.
-    assert decide_disable_outcome(v_ego=_STANDSTILL_MS) is DisableOutcome.HOLD_MOVING
+    assert decide_disable_outcome(v_ego=_STANDSTILL_MS, engaged=True) is DisableOutcome.HOLD_MOVING
+
+  def test_stopped_but_engaged_holds_engaged_not_disable(self):
+    # Fable F2, the regression case: stopped at a light, openpilot ENGAGED and holding the brake --
+    # must NOT disable (that would release the brake hold mid-stop -> EV creep risk).
+    assert decide_disable_outcome(v_ego=0.0, engaged=True) is DisableOutcome.HOLD_ENGAGED
+
+  def test_moving_and_engaged_holds_moving_takes_precedence(self):
+    # Moving wins over engaged -- standstill is checked first, matching decide_confirm_outcome.
+    assert decide_disable_outcome(v_ego=20.0, engaged=True) is DisableOutcome.HOLD_MOVING
+
+  def test_negative_v_ego_rolling_backward_blocked_by_abs(self):
+    # Fable F3 (LOW hardening): a rolling-backward negative vEgo must not slip past the standstill
+    # gate just because it's negative -- abs(v_ego) is compared, not the raw signed value.
+    assert decide_disable_outcome(v_ego=-15.0, engaged=False) is DisableOutcome.HOLD_MOVING
+
+  def test_small_negative_v_ego_within_standstill_still_disables(self):
+    # A tiny negative creep (well within the standstill band) is still effectively stopped.
+    assert decide_disable_outcome(v_ego=-0.01, engaged=False) is DisableOutcome.DISABLE
 
 
 class TestOpLongOnLightningFullCycleDisable:
@@ -318,7 +343,7 @@ class TestOpLongOnLightningFullCycleDisable:
     nxt = cycle[(idx + 1) % len(cycle)]
     assert nxt == _BTN_CHILL
     assert is_disable_reach(nxt, has_long, alpha_avail, op_native) is True
-    assert decide_disable_outcome(v_ego=0.0) is DisableOutcome.DISABLE
+    assert decide_disable_outcome(v_ego=0.0, engaged=False) is DisableOutcome.DISABLE
     cur = nxt
 
     # tap 3 (hypothetically, if op-long hadn't actually been disabled): Chill -> CES -- also a

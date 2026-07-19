@@ -114,24 +114,40 @@ def is_disable_reach(nxt: int, has_longitudinal_control: bool, alpha_long_availa
 
 
 class DisableOutcome(Enum):
-  """oplongdisable: pure classification of a disable-reach tap -- see decide_disable_outcome. Unlike
-  ConfirmOutcome (the enable direction) there is no ENGAGED-specific outcome: disabling is the SAFE
-  direction (it returns to stock ACC and restores AEB), so the only hazard is reloading the onroad
-  stack AT SPEED -- standstill is the sole gate, no confirm dialog, no AEB warning needed."""
-  DISABLE = auto()      # stopped -> safe to hand control back to stock ACC now
-  HOLD_MOVING = auto()  # still moving -> reloading the onroad stack now would be dangerous
+  """oplongdisable: pure classification of a disable-reach tap -- see decide_disable_outcome.
+
+  Fable F2 (MEDIUM) fix: this DOES need an ENGAGED-specific outcome after all, symmetric with
+  ConfirmOutcome's HOLD_ENGAGED. The original reasoning ("disabling is the SAFE direction, so no
+  engaged check is needed") missed a concrete hazard on the Lightning: stopped at a light with
+  openpilot ENGAGED, op-long is actively HOLDING THE BRAKE. OnroadCycleRequested forces offroad for
+  >=1 s (hardwared.py) and kills controls -- releasing that brake hold while the truck is in D with
+  the driver's foot off the pedal (openpilot was holding it) lets the EV creep forward. Disabling is
+  still the SAFE direction in the sense that stock ACC/AEB come back, but the RELOAD ITSELF is exactly
+  as disruptive to an engaged stop as it is on the enable side -- there is no reason the two directions
+  should differ here."""
+  DISABLE = auto()       # stopped AND not engaged -> safe to hand control back to stock ACC now
+  HOLD_MOVING = auto()   # still moving -> reloading the onroad stack now would be dangerous
+  HOLD_ENGAGED = auto()  # stopped but still engaged -> reload would release the brake hold (creep)
 
 
-def decide_disable_outcome(v_ego: float) -> DisableOutcome:
+def decide_disable_outcome(v_ego: float, engaged: bool) -> DisableOutcome:
   """Pure decision: whether a disable-reach tap (is_disable_reach == True) may actually disable
   op-long right now. Reuses _STANDSTILL_MS, the same threshold decide_confirm_outcome uses for the
   enable direction, because the hazard is identical either way -- OnroadCycleRequested restarts the
   entire onroad stack (modeld/controlsd/card/...), which must never happen while the car is moving.
-  No `engaged` check (contrast decide_confirm_outcome): a driver stopped under openpilot control who
-  disables is just handed back to stock ACC/manual at a standstill -- not the "reload disengages an
-  active moving drive" hazard the enable direction's HOLD_ENGAGED exists to prevent."""
-  if v_ego >= _STANDSTILL_MS:
+
+  Fable F2 fix: also gates on `engaged`, mirroring decide_confirm_outcome's HOLD_ENGAGED -- a driver
+  stopped under active openpilot control (op-long holding the brake at a light) must NOT have the
+  reload yank that hold out from under them (EV creep risk). Checked as a second condition once
+  standstill is confirmed, same ordering as decide_confirm_outcome.
+
+  Fable F3 (LOW hardening): compares `abs(v_ego)` -- a rolling-backward negative vEgo (e.g. gently
+  rolling back on a hill before the driver catches it) must not slip past a bare `< _STANDSTILL_MS`
+  check just because it's negative."""
+  if abs(v_ego) >= _STANDSTILL_MS:
     return DisableOutcome.HOLD_MOVING
+  if engaged:
+    return DisableOutcome.HOLD_ENGAGED
   return DisableOutcome.DISABLE
 
 
@@ -156,11 +172,12 @@ _CONFIRM_HINT_TEXT = tr_noop(
 _ENABLE_HINT_TEXT = tr_noop("Enabling openpilot Longitudinal Control...")
 _STOP_HINT_TEXT = tr_noop("Stop to enable openpilot Longitudinal Control")
 _DISENGAGE_HINT_TEXT = tr_noop("Disengage to enable openpilot Longitudinal Control")
-# oplongdisable: same rendering, the disable direction's own two messages -- no AEB wording (this
-# direction restores AEB, it doesn't disable it) and no "disengage" variant (no engaged check, see
-# decide_disable_outcome docstring).
+# oplongdisable: same rendering, the disable direction's own three messages (Fable F2: now symmetric
+# with the enable direction's ARM/ENABLE/HOLD_MOVING/HOLD_ENGAGED set) -- no AEB wording since this
+# direction restores AEB rather than disabling it.
 _DISABLE_HINT_TEXT = tr_noop("Switching to stock ACC...")
 _STOP_DISABLE_HINT_TEXT = tr_noop("Stop to switch to stock ACC")
+_DISENGAGE_DISABLE_HINT_TEXT = tr_noop("Disengage to switch to stock ACC")
 _HINT_S = 4.0      # seconds the hint stays on screen after a tap
 _HINT_WIDTH = 480
 _HINT_PAD = 20
@@ -308,10 +325,11 @@ class ExpButton(Widget):
           # Experimental -- flipping AWAY from it to CES or Chill while op-long is ON should hand
           # control back to stock ACC. Unlike the enable reach this needs no second, deliberate tap
           # (Fable's two-tap gate exists because enabling drops AEB coverage until the driver
-          # confirms; disabling RESTORES AEB, so a single tap is the safe direction) -- only the
-          # standstill gate carries over, because OnroadCycleRequested still restarts the whole
-          # onroad stack and that must never happen while moving.
-          outcome = decide_disable_outcome(ui_state.sm["carState"].vEgo)
+          # confirms; disabling RESTORES AEB, so a single tap is the safe direction) -- but it DOES
+          # carry over BOTH the standstill AND the engaged gate (Fable F2/MEDIUM): OnroadCycleRequested
+          # restarts the whole onroad stack regardless of direction, and doing that while stopped-but-
+          # engaged would release op-long's brake hold out from under a driver at a light -> EV creep.
+          outcome = decide_disable_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged)
           if outcome is DisableOutcome.DISABLE:
             # Mirror of developer.py::_on_alpha_long_enabled's else-branch (the Settings-toggle
             # disable path) -- same param pair, this tap IS the driver's action.
@@ -319,10 +337,15 @@ class ExpButton(Widget):
             self._params.put_bool("OnroadCycleRequested", True)
             self._disable_pending_until = now + _ENABLE_GUARD_S
             self._hint_text = _DISABLE_HINT_TEXT
-          else:  # HOLD_MOVING: refuse to disable at speed -- don't advance the button either, it's
-                 # already sitting wherever it was (mirrors the enable confirm's "left untouched").
+          elif outcome is DisableOutcome.HOLD_MOVING:
+            # Refuse to disable at speed -- don't advance the button either, it's already sitting
+            # wherever it was (mirrors the enable confirm's "left untouched").
             nxt = cur
             self._hint_text = _STOP_DISABLE_HINT_TEXT
+          else:  # HOLD_ENGAGED: stopped, but openpilot still holding the brake -- disengage first,
+                 # not "stop" (Fable F2) -- same non-advance as HOLD_MOVING.
+            nxt = cur
+            self._hint_text = _DISENGAGE_DISABLE_HINT_TEXT
           self._hint_until = now + _HINT_S
 
         # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
