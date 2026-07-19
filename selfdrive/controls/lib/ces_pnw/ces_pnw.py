@@ -63,6 +63,53 @@ def clock_bad(t_wall: float) -> bool:
     return True
 
 
+# icbmonset: mapd's curvature calc (Heron's formula on near-collinear OSM nodes, see
+# system/mapd/mapd_configd.py) occasionally emits a FINITE but physically-implausible high target
+# velocity instead of NaN -- the existing NaN guards below don't catch it. Field-observed live
+# 2026-07-18 (Ballard/Shilshole tight city curves, drive_report `drives/2026-07-18/
+# lightning-icbm-curve/`): raw reads of 46.5-128.6 m/s (104-288 mph) at curve entry, settling to the
+# real target (e.g. 14.6 m/s) 3-4 s later. The ceiling below is set ABOVE the highest RAW target ever
+# exercised in this file's own test suite (110 mph / 49.2 m/s, `test_far_map_dec_only_above_ceiling_
+# ignored` -- a genuine generous-sweeper reading, not noise) so it can never reclassify a previously
+# real value as noise.
+#
+# SCOPE (Fable review, 2026-07-18): `_map_v_sane` is wired ONLY into `upcoming_curve` and
+# `icbm_far_map_candidate` -- the two CANDIDATE scanners, where a rejected point can only ever REMOVE
+# a value that would already have failed the reduce-only/binding test on its own (provably a no-op
+# for every existing decision downstream: v_ego - tv is always very negative, tv*scale is always far
+# above any sharp-curve/binding threshold). It is deliberately NOT wired into `icbm_map_reach`
+# (reverted -- see that function's own docstring): pfeiferj's targetVelocity is a `sqrt(2/kappa)`-
+# style function of curve RADIUS, so a wide/near-straight node (radius > ~1.7 km) legitimately
+# reports tv > this ceiling, and a straight/unmatched node legitimately carries the capnp default
+# 0.0 -- both are genuine "no slowdown needed" map verdicts on ordinary straight road, not noise.
+# Gating REACH (map "coverage") on tv would have zeroed out coverage on straights and wrongly opened
+# the MAP-FIRST gate (icbm_vision_may_start) for vision there -- the exact vision-over-slow class the
+# 2026-07-12 driver rule ("vis=60 dec ticks") exists to suppress. `tv` alone can't distinguish "Heron
+# glitch at a curve entry" from "legitimate gentle/straight road" -- reach stays position-based only.
+#
+# KNOWN PARTIAL COVERAGE (LOW, Fable finding 2): the ceiling can't be set below the legitimate 49.2
+# m/s (110 mph) sweeper reading above without reclassifying real data as noise, so the observed
+# 46.5-58 m/s slice of the garbage band (below this ceiling) still passes `_map_v_sane` and can still
+# mask a real curve candidate in `upcoming_curve`/`icbm_far_map_candidate` the same way the >=60 m/s
+# spikes used to. This is a PARTIAL fix for the primary late-onset stall, not a complete one -- if the
+# stall recurs with an observed garbage read in the 46.5-58 m/s range, that is this known gap, not a
+# new regression.
+MAP_CURVE_V_SANITY_MAX_MS = 58.0   # m/s (~130 mph)
+
+
+def _map_v_sane(tv) -> bool:
+  """icbmonset: True when a raw mapd curve-target velocity (m/s) is finite, positive, and under the
+  implausibility ceiling above. Wired into the two candidate scanners (upcoming_curve,
+  icbm_far_map_candidate) so a curvature-noise spike is rejected the same way NaN already is, instead
+  of being treated as a legitimate candidate. Deliberately NOT used by icbm_map_reach -- see the
+  SCOPE note above. Pure; never raises."""
+  try:
+    tv = float(tv)
+  except (TypeError, ValueError):
+    return False
+  return tv == tv and 0.0 < tv <= MAP_CURVE_V_SANITY_MAX_MS   # tv==tv rejects NaN
+
+
 def vision_curve_lat_accel(orientation_rate_z, velocity_x, timebase, v_ego):
   """FrogPilot-style vision curve detector: predicted lateral accel + time-to-curve over the model
   horizon. Returns (predicted_lat_accel m/s^2, time_to_curve s). Pure; lists must be equal length."""
@@ -158,7 +205,8 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   curve speeds are calibrated for stronger-steering cars) BEFORE the reduce-only test, so selection
   and use can't disagree. The per-point envelope uses the same drop-scaled icbm_approach_decel the
   downstream binding test uses. Returns (0.0, inf) if none. The actual DEC-only binding decision
-  stays in icbm_curve_target/_icbm_binding_apex. NaN-guarded like upcoming_curve. Pure."""
+  stays in icbm_curve_target/_icbm_binding_apex. NaN- and curvature-noise-guarded like upcoming_curve
+  (icbmonset: `_map_v_sane` rejects implausible finite reads, not just NaN). Pure."""
   if not points or cur_lat is None or cur_lon is None or ref <= 0.0:
     return 0.0, float('inf')
   best_cap = float('inf')
@@ -169,9 +217,9 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
       tv = float(p["velocity"])
     except (KeyError, TypeError, ValueError):
       continue
-    if tv != tv or d != d:                      # NaN guard (mapd emits non-finite velocities, seen live)
+    if not _map_v_sane(tv) or d != d:    # icbmonset: NaN + curvature-noise guard (mapd emits both live)
       continue
-    if tv <= 0.0 or not (0.0 < d <= horizon_m):
+    if not (0.0 < d <= horizon_m):
       continue
     eff = scale_fn(tv) * tv * map_scale
     if eff >= ref - ICBM_MIN_DROP_MS:
@@ -190,7 +238,16 @@ def icbm_map_reach(points, cur_lat, cur_lon, horizon_m=ICBM_MAP_HORIZON_M) -> fl
   candidate INSIDE this reach is on a stretch the map has judged, so the map verdict (including "no
   slowdown needed") wins for STARTING episodes. Distances are recomputed from the CURRENT position
   every call, so a dead mapd's last path decays out of coverage as we drive on (mapd-liveness
-  fallback: vision regains the right to initiate). NaN-guarded like the other scanners. Pure."""
+  fallback: vision regains the right to initiate). NaN-guarded like the other scanners.
+
+  icbmonset (POSITION-based only, deliberately NOT `_map_v_sane`-gated — see the reversion note at
+  MAP_CURVE_V_SANITY_MAX_MS): reach means "mapd published a point here", independent of what its
+  velocity says. pfeiferj's targetVelocity is `sqrt(2/kappa)`-derived: a wide/near-straight node
+  (radius > ~1.7 km) legitimately reports a HIGH target velocity, and a straight/unmatched node
+  legitimately carries the capnp default 0.0 — both are genuine "no slowdown needed here" verdicts,
+  not noise, and gating reach on velocity would silently zero out coverage on ordinary straight
+  road, wrongly opening icbm_vision_may_start there (the exact vision-over-slow class the
+  2026-07-12 driver rule exists to suppress). Pure."""
   if not points or cur_lat is None or cur_lon is None:
     return 0.0
   reach = 0.0
@@ -682,7 +739,16 @@ def map_turn_direction(points, cur_lat, cur_lon, target_dist, tol_m: float = 60.
 def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> tuple[float, float]:
   """From pfeiferj's MapTargetVelocities (list of {latitude, longitude, velocity}) + current
   position, return (min_target_velocity, distance) of the most-binding upcoming curve within the
-  lookahead distance (v_ego * lookahead_s). Returns (0.0, inf) if none / no data. Pure & testable."""
+  lookahead distance (v_ego * lookahead_s). Returns (0.0, inf) if none / no data. Pure & testable.
+
+  icbmonset: a point failing `_map_v_sane` (NaN, seen live 2026-07-11, OR a physically-implausible
+  finite spike, seen live 2026-07-18 — mapd's curvature calc misfiring at curve entry) is skipped
+  exactly like the pre-existing NaN case. Shared by CES's own curve trip (decide_active/
+  curve_closeness, both CES1 and the ces2_core shadow, all cars) as well as ICBM's near-window
+  candidate: provably a no-op for every existing decision there, since a value this high already
+  fails every 'is this curve binding' comparison identically to 'no candidate' (v_ego - tv is always
+  very negative, tv*scale is always far above any sharp-curve/binding threshold) — only the raw
+  telemetry (mapV/curvePct) stops showing the nonsense number."""
   if not target_velocities or cur_lat is None or cur_lon is None:
     return 0.0, float('inf')
   horizon = max(v_ego, 1.0) * lookahead_s
@@ -693,8 +759,8 @@ def upcoming_curve(target_velocities, cur_lat, cur_lon, v_ego, lookahead_s) -> t
       tv = float(p["velocity"])
     except (KeyError, TypeError, ValueError):
       continue
-    if tv != tv or d != d:   # NaN guard: mapd occasionally emits non-finite velocities (seen live
-      continue               # 2026-07-11) — a NaN silently falsifies every comparison downstream
+    if not _map_v_sane(tv) or d != d:   # icbmonset: NaN + curvature-noise guard
+      continue
     if 0.0 < d <= horizon:
       # most-binding = lowest target speed ahead within the horizon
       if best_v == 0.0 or tv < best_v:

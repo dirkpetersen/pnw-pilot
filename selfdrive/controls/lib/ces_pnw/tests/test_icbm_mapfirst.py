@@ -49,6 +49,27 @@ def test_map_reach_stale_path_decays_out():
   assert icbm_map_reach(stale, lat, lon) == 0.0
 
 
+def test_map_reach_is_position_based_not_velocity_gated():
+  """icbmonset regression fix (Fable review, 2026-07-18): reach must NOT be gated on `_map_v_sane` --
+  an earlier version of this branch did, which zeroed out coverage on ordinary straight/gentle road
+  and wrongly opened the MAP-FIRST vision gate there. pfeiferj's targetVelocity is a curve-RADIUS
+  function: a wide/near-straight node legitimately reports a high velocity (radius > ~1.7 km), and a
+  straight/unmatched node legitimately carries the capnp default 0.0 -- BOTH must still count toward
+  reach exactly as they did before this branch, regardless of how implausible-looking the velocity
+  is. Only position/NaN/coverage-window rules gate reach; velocity plausibility never does."""
+  lat, lon = 47.0, -122.0
+  # implausible-high (the live 2026-07-18 curvature-noise magnitude) still counts on position alone
+  assert abs(icbm_map_reach([_pt_north(lat, lon, 288.0, 128.6)], lat, lon) - 288.0) < 1.0
+  # the capnp default 0.0 (straight/unmatched node) still counts
+  assert abs(icbm_map_reach([_pt_north(lat, lon, 250.0, 0.0)], lat, lon) - 250.0) < 1.0
+  # a legitimate high-radius sweeper reading (well above the far-scanner sanity ceiling) still counts
+  assert abs(icbm_map_reach([_pt_north(lat, lon, 300.0, 110 * 0.44704)], lat, lon) - 300.0) < 1.0
+  # farthest-of-mixed-velocities point still wins, same as test_map_reach_farthest_valid_point
+  mixed = [_pt_north(lat, lon, 71.0, 77.8), _pt_north(lat, lon, 199.0, 14.6),
+           _pt_north(lat, lon, 288.0, 128.6)]
+  assert abs(icbm_map_reach(mixed, lat, lon) - 288.0) < 1.0
+
+
 def test_in_curve_thresholds():
   assert icbm_in_curve(ICBM_IN_CURVE_LAT + 0.1, 0.0, 10.0)              # loaded now
   assert icbm_in_curve(-ICBM_IN_CURVE_LAT - 0.1, 0.0, 10.0)             # sign-agnostic
