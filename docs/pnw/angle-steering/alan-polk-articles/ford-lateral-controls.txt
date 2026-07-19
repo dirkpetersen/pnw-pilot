@@ -1,0 +1,30 @@
+
+
+The previous post (
+https://bluepilot.dev/2025/07/13/what-isthe-model-why-does-it-change-so-often-and-why-cant-we-fix-problem-x-y-z-on-fords/
+ ) discussed the three main aspects of OpenPilot which were “The Model” , “Control Code (where the lateral planner lives)” and “Panda” along the role they play in OpenPilot. It will now be useful to understand how the Ford system works from an architecture standpoint, and how OpenPilot interfaces to it.
+
+Much like Comma the Ford system has three components, where there is a model, control code (lateral planner), and safety code. For the Ford system “The Model” is an output from the IPMA (image processing module A) to the lateral planner which is inside the PSCM (power steering control module), which is built into the steering rack and pinion unit. For most other manufacturers (Toyota, Honda, etc) the lateral planner lives in the IPMA, along with the model and the output is a direct signal to control the steering wheel. Since Ford’s lateral planner is in the power steering rack itself, we cannot bypass it and control the steering wheel directly. This means that when OpenPilot is interfacing with a Ford vehicle, it is not providing a signal to control the steering wheel like every other manufacturer the system supports, it is translating the output of the comma model into a data structure that mimics what the output of the IPMA from Ford would be, so that the lateral planner in the PSCM will execute the movements that we desire.
+
+To further complicate things, there is not a single signal from the IPMA to the PSCM, rather there are 7 signals that describe the path the vehicle needs to take, along with some toggles about how it should go about attempting to follow that path.
+
+Curvature – A measurement of the radius of the road in front of the vehicle
+
+Curvature Rate – A measurement of how quickly the radius of the road in front of the vehicle is changing
+
+Path Offset – How far from the center of the vehicle is away from the center of the ideal path
+
+Path Angle – The ideal angle for the vehicle to move along to reach a path offset of zero
+
+Edit: Lately I have come to believe that path_angle is actually the steering wheel angle to correct path offset and not the angle of the vehicle relative to centerline.
+
+Ramp Type – How quickly should the steering rack adjust to changes in control signals
+
+Precision Type – How strictly should the steering rack attempt to follow the described path
+
+Mode – Off, limited, extended.
+
+By using the extensive data logging capabilities of the Comma3x, we have been able to monitor all 7 of these signals on BlueCruise and Lane Centering drives, and attempt to reverse engineer how Ford calculates each one. The first three are relatively easy to reverse engineer and calculate based on the names and a basic understanding of geometry. The last four however present a much bigger challenge. We do have a pretty good idea of when Ford toggles precision type and ramp type based on the planned path, and mode seems to be a variable that is designed for future use because it has no discernible effect on output. However the path angle variable is calculated using a proprietary model predictive controller algorithm that we cannot duplicate. In accordance with Murphy’s Law, path angle is the most influential control signal at our disposal (and we don’t know how to calculate it).
+
+We were able to write some code that would read the signals Ford’s model calculated out of the IPMA (because it does this 100% of the time, even when lane centering or BlueCruise is turned off) and write those out using the Comma3x so that we could force BlueCruise to be engaged 100% of the time, even on surface streets, neighborhoods, and really curvy roads. What we found is that Ford does not appear to have designed the system for non-interstate use, because it controls very poorly in those situations. Extensive testing is underway to see if there is a way to manipulate the PSCM into behaving in a way Ford didn’t design it to so that we can have 100% hands free control in all situations.
+

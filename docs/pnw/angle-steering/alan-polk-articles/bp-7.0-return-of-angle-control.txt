@@ -1,0 +1,210 @@
+
+
+This article will discuss the return of angle-based control to the Ford platform in the upcoming bluepilot 7.0 release. Before continuing, it is important to understand the background of the Ford lateral controls scheme.  Two articles will provide sufficient background information:
+
+How do Ford Lateral Controls Work and Why Are They Such a Challenge for OpenPilot?
+
+Desired Curvature versus Predicted Curvature and why it matters for Ford
+
+The BluePilot team has known for several years that leveraging the path_angle signal was going to be the key to better lateral control for Ford vehicles.  Although Ford seems to use curvature as the primary variable for BlueCruise, the signal was always sub-optimal in urban and suburban driving.  BluePilot 3.0 was an attempt a using path_angle as the primary control variable, however that logic still kept the curvature signal, and the path_angle factor was PID feedback control.  Feedback control is always inferior to feedforward control, and the result was a drive that was very “twitchy” to many users.  Utlimately the path_angle signal was relegated to a small number to tweak the in-lane position while driving.
+
+Reverse Engineering the PSCM Firmware
+
+Using Ford’s own VBF firmware files and the Comma3x’s logging capabilities, we reverse-engineered the PSCM firmware for CAN-FD Ford vehicles, including the F-150, Lightning, Mustang Mach-E, Expedition, Ranger, and Escape. What we found inside that firmware changed everything about how we understood the problem.
+
+The sticky curvature filter
+
+At address 0x101B0B60 in the main firmware executable, there is a speed-indexed low-pass filter applied to the PSCM’s internal curvature state. Here’s what that filter looks like:
+
+Speed
+
+Filter Time Constant (T)
+
+Settle Time (5T)
+
+5 km/h
+
+328 ms
+
+1.64 s
+
+20 km/h
+
+195 ms
+
+~1.0 s
+
+40 km/h
+
+ 95 ms
+
+~0.5 s
+
+100 km/h
+
+35 ms
+
+~0.17 s
+
+What this means in practice: 
+when OpenPilot sends a curvature signal, the PSCM does not immediately act on it. It slowly integrates toward it.
+ And when the curvature command drops back to zero (such as at a curve exit or when the model is correcting back to center), the PSCM keeps commanding the previous curvature for nearly a full second before releasing. At city speeds, this memory extends even further.
+
+We call this “sticky c2.”
+
+The feedback loop we had been feeding
+
+Here is what sticky c2 creates:
+
+OpenPilot commands a curvature to correct a drift to the right
+
+The PSCM slowly integrates toward it –> the car begins to correct, but slowly
+
+OpenPilot sees insufficient correction and increases the curvature command
+
+The PSCM reaches the full correction and starts steering back left
+
+OpenPilot drops the curvature command; but the PSCM “remembers” the last value for ~500ms
+
+The car overcorrects left while OpenPilot has already backed off
+
+Repeat from step 1, now in the other direction
+
+The revelation:
+ What we had been seeing in PlotJuggler and calling “model noise” was the model faithfully responding to oscillations that the sticky curvature filter was creating. The noisy curvature waveform wasn’t the cause of the oscillation — it was the effect. 
+The model was never the problem.
+ (As an aside, this is common problem with data analysis, having enough context to seperate cause and effect).
+
+Once we understood this, the solution became obvious. Don’t fight the sticky c2 filter. Stop using it altogether.
+
+What Angle Control Actually Does
+
+The four-signal polynomial the PSCM evaluates is:
+
+	
+
+		
+
+			
+
+y(x) = c0 + c1·x + ½·c2·x² + ⅙·c3·x³
+
+		
+
+	
+
+The PSCM evaluates this at a lookahead distance 
+d_ref
+ — which, per the firmware’s own lookup table, is only about 1.4 meters at highway speed. Here’s what that means for the contribution of each signal:
+
+Signal
+
+Weight at 100 km/h 
+
+Contribution
+
+c0 (path_offset)
+
+1.0
+
+Full weight
+
+c1 (path_angle)
+
+1.4
+
+Full weight
+
+c2 (curvature)
+
+0.98
+
+centimeters
+
+c3 (curvature_rate)
+
+0.46
+
+millimeters
+
+At the short lookahead distances the PSCM actually uses, 
+c0 and c1 dominate completely. Curvature (c2) contributes at the centimeter scale. Curvature rate (c3) is sub-millimeter.
+ We had been obsessing over the signal that matters the least, and it was actively harming us.
+
+The formula
+
+Angle control sets c2 and c3 to zero. Instead, we derive path_angle (c1) directly from the planner’s desired curvature:
+
+	
+
+		
+
+			
+
+path_angle = κ × v_ego × gain_factor
+
+		
+
+	
+
+Where κ is the planner’s desired curvature, v_ego is vehicle speed, and gain_factor is a small vehicle-specific calibration value. Instead of telling the PSCM “here is the curvature of the road, please figure out the steering angle”  and waiting for it to slowly filter toward it;  we tell the PSCM directly: “here is the angle you need to achieve.” The PSCM executes it. No filter. No memory. No windup.
+
+When we want to stop turning, we send zero. And the PSCM stops turning, immediately and begins to unwind.  While there are still the Ford and Comma safety limits on how fast we can move the wheel, we are no longer bound by the sticky memory of the curvature signal.
+
+What We Observed After the Switch
+
+The model signal cleaned up (without touching the model)
+
+The most striking result happened immediately: the desired curvature signal in PlotJuggler became noticeably smoother and more consistent. Same model. Same neural network. Same vehicle. Just a completely different control signal underneath it; and suddenly the model looked like it was running on a different car.  
+This means that angle control will be much more tolerant of switching models, and we will no longer be bound to just 2 or 3 models that work well with Ford curvature control.
+
+Lane centering improved without any offset
+
+Many of our users had been running in-lane offsets to compensate for the consistent right bias resulting from the sticky curvature signal constantly integrating. With angle control, that offset became unnecessary for most vehicles. The car simply tracks better. 
+
+Lane changes became smooth
+
+In curvature mode, sticky c2 meant the PSCM kept “reaching” toward the target lane even after the model had started backing off its request. This is what produced the sharp, mechanical quality in lane changes — the car was still mid-command when the model wanted to be done. In angle mode, the command follows the model precisely and drops cleanly when the model finishes. Lane changes feel like something a well-tuned adaptive cruise system would do: smooth, confident, and finished when they’re finished.
+
+Sharper curves became manageable
+
+Because angle control has essentially no windup, it handles tighter curves substantially better. The system responds to the current commanded angle, not an accumulated history of past curvature commands. It can command a sharp turn and immediately begin unwinding without the PSCM “remembering” previous curvature and overshooting the exit. The range of curves we can handle reliably (and cleanly exit) is considerably larger than what was achievable in curvature mode (still subject to both Ford and Comma safety limits).
+
+The Honest Challenge: Every Vehicle Is Slightly Different
+
+We had hoped to release angle control with zero tuning required. That vision didn’t survive contact with reality.
+
+The formula κ × v_ego is pure geometry. A curve of radius R always produces the same curvature, full stop. That part is clean. The challenge is what happens after we send the command.
+
+The PSCM doesn’t simply execute the path_angle we send. It continuously compensates for yaw, sway, and roll; measuring them from the vehicle’s inertial sensors and adjusting the steering output accordingly. These compensation factors are calculated against a model of the vehicle that Ford programs in at the factory: trim level, suspension tuning, and weight distribution. The PSCM is always correcting for the vehicle it 
+thinks
+ it’s in.
+
+When you change the suspension geometry by installing a lift or level kit, a sway bar upgrade, or when the vehicle simply came from the factory with a different configuration than another in the same model line, those compensation factors don’t change. The PSCM is still correcting for its factory baseline. Our gain factor must account for how the PSCM’s dynamic compensation interacts with the path_angle we’re sending, and that interaction varies by
+ suspension configuration.
+  There are baseline gain factors for every vehicle we could test, but we found that a Ford F-150 Raptor with factory 37″ tires needed a different gain factor than a 4×2 XLT with a 157″ wheelbase.  In the end, we settles on base gains per model (F-150, MachE, Escape, etc) that should give reasonably good control, and then we exposed two gain factors to allow users to dial in their exact vehicle tuning.
+
+The Tuning Menu: Four Parameters
+
+We deliberately kept the tuning surface as small as possible. The underlying physics are well-understood; the only variable is the PSCM’s dynamic compensation and how it applies that differently per vehicle, which Comma can’t account for.
+
+The F-150 alone illustrates why a single default isn’t enough: it comes in three wheelbase lengths, two- and four-wheel drive configurations, and — straight from the factory — everything from a work truck to the Raptor, which ships with a substantial lift and 37-inch tires as standard equipment. We can’t build factory defaults for every combination. Many vehicles will drive well at the defaults we’ve set. Others will need a small dial-in, regardless of whether any aftermarket modifications have been made.
+
+Primary Control
+: Toggle between Curvature (the existing system) and Angle (the new system). Default: Curvature until you’re ready to switch.
+
+Low Speed Factor
+: Scales the steering response at lower speeds (below ~30 mph / 50 km/h). Default 1.0. Range 0.5–1.5. Numbers greater than 1.0 will increase cause the steering wheel to turn more, values less than 1.0 will cause the wheel to turn less.
+
+High Speed Factor
+: Scales the steering response at highway speeds (above ~70 mph / 115 km/h). Default 1.0. Range 0.5–1.5. Numbers greater than 1.0 will increase cause the steering wheel to turn more, values less than 1.0 will cause the wheel to turn less.
+
+Lane Change Factor
+: Scales steering authority during lane changes. Default 1.0. Range 0.5–2.0. Most users will never touch this — but a small number of users with custom suspensions found lane changes felt too soft, and increasing above 1.0 sharpened them back to the expected feel.
+
+The tuning process is straightforward and uses BluePilot’s built-in live lateral debug screen, available on both TICI and MICI devices, no external tools needed. We are releasing a video that walks through exactly how to use the debug screen to identify what to adjust and verify the result. For most vehicles, the process takes a few short test drives and at most one or two small changes.
+
+When Will This Launch?
+
+Our goal is to launch by the end of July, although the repository side of the project has been rough. Comma changed a lot of upstream aspects related to the thermal management of the Comma.  While the Comma4 is mostly unaffected, the Comma3X is really struggling to run the BluePilot UI without overheating or crashing.  It is very likely that some concessions will have to be made to meet a realistic launch date for the new lateral scheme.
+

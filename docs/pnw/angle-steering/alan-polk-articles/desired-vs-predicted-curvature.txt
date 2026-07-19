@@ -1,0 +1,18 @@
+
+
+Due to the unique nature of controlling Ford (see above), the bluepilot team has been forced to think outside the box to address ping pong on Fords. We will us this post to try and explain the issue and give some background on the solution.
+
+We will first start with discussing what are predicted curvature and desired curvature. Predicated curvature describes the path that the road follows (assuming no lane changes). On a perfectly straight road (which rarely exists outside of drag strips), predicted curvature would be 0.0. Desired curvature describes the path the vehicle needs to follow to drive down the road. The key difference is that desired curvature accounts for error correction. Even perfectly straight roads are usually crowned to help with drainage, meaning that a curvature of 0.0 would cause the vehicle to drift off the road to the outside edge because there was no accounting for the road crown. In theory, this distinction is not a problem, but the application is where the issue arises.
+
+There are very few vehicles designed for hands free driving. Ford (designed from the ground up for BlueCruise), Tesla’s FSD, and Chevy SuperCruise are the major players. Some European cars are starting to go hands free as well but of these, only Ford is compatible with Comma (Supercruise Chevy’s all have encrypted canbus). All of the other systems that Comma is designed around are designed for hands-on assistance by the ADAS. Since these systems are not designed for hands-free, the control is less than precise. The best analogy we have come up with, is that the ADAS in Hyundai, Kia, Toyota, etc is akin to an old muscle car with worn our steering components. If you have ever driven one, there is frequently slop in the steering wheel, where you can move the wheel 10-15 degrees and the front tires don’t turn at all. The Ford system is like a brand new sports car having tight steering with no slop. This causes an issue for Ford as the Comma system is designed around these sloppy ADAS systems. If a human were to drive around in an old mustang with sloppy steering for a month, then hop in a 2024 mustang, the steering would feel twitchy. The result of this is that the commands coming out of the comma are exaggerated. 
+
+Below are two charts showing predicted curvature and desired curvature coming from the Comma. Predicted curvature is in blue, and desired curvature is in red. The first chart is in a curve, and the second chart is on a straight away:
+
+In the first chart, which is for some curves, the desired and predicted curvature match really well. But in the second, you can see the desired curvature swinging positive and negative around the predicted curvature which stays very close to zero on the straightaway. This exaggerated swing of the desired curvature is what causes ping pong for Fords.
+
+The only way this gets truly fixed 100% of the time is for Comma to update the models to output a smooth signal designed for hands-free vehicles. Until that happens, we are stuck with looking for a work around.
+
+To address the issue, we first tried switching to predicted curvature. This did not work, because there was no error correction and the vehicle would just slowly drift to the outside of the lane and off the road due to the drainage slope.
+
+Starting with bp-1.1 the ratio is variable (for straight aways and curves), and the percentages are tunable from the menu so that you can dial in the percentages that work best for your road conditions and vehicle suspension.
+
