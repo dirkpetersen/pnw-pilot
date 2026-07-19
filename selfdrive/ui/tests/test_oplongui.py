@@ -34,11 +34,23 @@ Fable review of the first cut, this is a TWO-STEP, standstill-gated flow, not a 
      disengaged). Stopped-but-engaged and moving get distinct outcomes/hints (HOLD_ENGAGED vs
      HOLD_MOVING -- Fable F7: "disengage" vs "stop", not always "stop").
 See TestSelectCesCycle / TestIsExpSlotReach / TestDecideConfirmOutcome below.
+
+oplongdisable (docs/pnw/op-long-features.md §6, driver-confirmed 2026-07-18) adds the MIRROR flow: on
+the Lightning, op-long is meant to be exclusive to Experimental -- CES/Chill = stock ACC. Flipping the
+button AWAY from Experimental toward CES or Chill while op-long is currently ON must turn op-long back
+OFF (`AlphaLongitudinalEnabled=False` + `OnroadCycleRequested=True`, mirroring
+developer.py::_on_alpha_long_enabled's else-branch). Unlike the enable direction, this needs no second
+tap and no AEB-warning text -- disabling is the SAFE direction (it restores AEB and hands following
+back to the truck's own radar). It IS still standstill-gated (same `_STANDSTILL_MS` threshold) because
+`OnroadCycleRequested` restarts the whole onroad stack regardless of direction, and that must never
+happen while moving. `is_disable_reach` (which nxt values are a disable) and `decide_disable_outcome`
+(the standstill-only gate) are the pure helpers -- see TestIsDisableReach / TestDecideDisableOutcome.
 """
 from openpilot.selfdrive.ui.layouts.settings.developer import AlphaLongToggleState, compute_alpha_long_toggle_state
 from openpilot.selfdrive.ui.onroad.exp_button import (
   _BTN_CES, _BTN_CHILL, _BTN_EXP, _CES_CYCLE, _CES_CYCLE_NO_LONG, _CES_CYCLE_OFF_ALPHA, _STANDSTILL_MS,
-  ConfirmOutcome, decide_confirm_outcome, is_exp_slot_reach, select_ces_cycle,
+  ConfirmOutcome, DisableOutcome, decide_confirm_outcome, decide_disable_outcome, is_disable_reach,
+  is_exp_slot_reach, select_ces_cycle,
 )
 
 
@@ -224,3 +236,94 @@ class TestDecideConfirmOutcome:
   def test_moving_and_engaged_holds_moving_takes_precedence(self):
     # Moving wins over engaged -- standstill is checked first (see decide_confirm_outcome docstring).
     assert decide_confirm_outcome(v_ego=20.0, engaged=True) is ConfirmOutcome.HOLD_MOVING
+
+
+class TestIsDisableReach:
+  """oplongdisable: which `nxt` values, on which capability combination, count as the driver flipping
+  AWAY from Experimental to hand control back to stock ACC."""
+
+  def test_landing_on_ces_or_chill_with_op_long_on_lightning_is_a_disable_reach(self):
+    # The Lightning, op-long currently ON (has_longitudinal_control=True), alpha-capable, non-native:
+    # both CES and Chill are disable reaches (the full cycle is CES -> Exp -> Chill -> CES, so a tap
+    # landing anywhere but Exp means the driver just left Experimental).
+    for nxt in (_BTN_CES, _BTN_CHILL):
+      assert is_disable_reach(nxt, has_longitudinal_control=True, alpha_long_available=True, op_long_native=False) is True
+
+  def test_landing_on_exp_is_never_a_disable_reach(self):
+    # "Flipping to Experimental while op-long ON -> no change" (op-long-features.md §6, DEC.md
+    # design note in the task) -- CES -> Exp is an ordinary cycle step, not a disable trigger.
+    assert is_disable_reach(_BTN_EXP, has_longitudinal_control=True, alpha_long_available=True, op_long_native=False) is False
+
+  def test_tesla_native_never_disable_reach_regardless_of_nxt(self):
+    # THE proof this can't touch the Raven: op_long_native=True short-circuits to False for every nxt,
+    # even though has_longitudinal_control is unconditionally True for a native car (ui_state.py) and
+    # would otherwise satisfy every other condition on an ordinary CES<->Chill<->Exp cycle tap.
+    for nxt in (_BTN_CES, _BTN_CHILL, _BTN_EXP):
+      assert is_disable_reach(nxt, has_longitudinal_control=True, alpha_long_available=True, op_long_native=True) is False
+
+  def test_op_long_off_is_never_a_disable_reach(self):
+    # Nothing to disable -- has_longitudinal_control=False short-circuits regardless of nxt (this is
+    # the is_exp_slot_reach territory instead, not this branch).
+    for nxt in (_BTN_CES, _BTN_CHILL, _BTN_EXP):
+      assert is_disable_reach(nxt, has_longitudinal_control=False, alpha_long_available=True, op_long_native=False) is False
+
+  def test_non_alpha_op_long_on_car_is_never_a_disable_reach(self):
+    # Gate correctly even though no car in the fleet lands here today: has_longitudinal_control=True
+    # via a hypothetical non-alpha, non-native car (plain CP.openpilotLongitudinalControl) must not
+    # trigger a disable -- there is no AlphaLongitudinalEnabled toggle to turn off on such a car.
+    assert is_disable_reach(_BTN_CES, has_longitudinal_control=True, alpha_long_available=False, op_long_native=False) is False
+
+
+class TestDecideDisableOutcome:
+  """oplongdisable: the disable direction's gate is standstill-only (no `engaged` check -- see
+  decide_disable_outcome docstring: disabling is the SAFE direction, so a driver stopped under
+  openpilot control is not held back the way the enable direction's HOLD_ENGAGED holds a re-enable)."""
+
+  def test_stopped_disables(self):
+    assert decide_disable_outcome(v_ego=0.0) is DisableOutcome.DISABLE
+
+  def test_just_under_standstill_threshold_disables(self):
+    assert decide_disable_outcome(v_ego=_STANDSTILL_MS - 0.01) is DisableOutcome.DISABLE
+
+  def test_moving_holds_no_disable(self):
+    # The core safety property this task is about: at speed, a flip to CES/Chill must NOT restart
+    # the onroad stack.
+    assert decide_disable_outcome(v_ego=15.0) is DisableOutcome.HOLD_MOVING
+
+  def test_at_standstill_threshold_still_holds(self):
+    # Boundary: v_ego == _STANDSTILL_MS counts as still moving (>=), matching decide_confirm_outcome.
+    assert decide_disable_outcome(v_ego=_STANDSTILL_MS) is DisableOutcome.HOLD_MOVING
+
+
+class TestOpLongOnLightningFullCycleDisable:
+  """Integration-flavored (but still pure-function, no widget/pyray) check that the full tap cycle on
+  an op-long-ON Lightning produces a disable reach at exactly the two expected landing spots, using
+  select_ces_cycle + is_disable_reach together the way _handle_mouse_release does."""
+
+  def test_full_cycle_disables_at_chill_and_ces_not_at_exp(self):
+    has_long, alpha_avail, op_native = True, True, False  # Lightning, op-long currently ON
+    cycle = select_ces_cycle(has_long, alpha_avail, op_native)
+    assert cycle == _CES_CYCLE  # op-long ON always gets the full cycle
+
+    cur = _BTN_CES  # default boot state
+    # tap 1: CES -> Exp -- ordinary step, no disable (matches "flip to Experimental -> no change").
+    idx = cycle.index(cur)
+    nxt = cycle[(idx + 1) % len(cycle)]
+    assert nxt == _BTN_EXP
+    assert is_disable_reach(nxt, has_long, alpha_avail, op_native) is False
+    cur = nxt
+
+    # tap 2: Exp -> Chill -- this IS the disable reach (flip to CES or Chill in the task's wording).
+    idx = cycle.index(cur)
+    nxt = cycle[(idx + 1) % len(cycle)]
+    assert nxt == _BTN_CHILL
+    assert is_disable_reach(nxt, has_long, alpha_avail, op_native) is True
+    assert decide_disable_outcome(v_ego=0.0) is DisableOutcome.DISABLE
+    cur = nxt
+
+    # tap 3 (hypothetically, if op-long hadn't actually been disabled): Chill -> CES -- also a
+    # disable reach.
+    idx = cycle.index(cur)
+    nxt = cycle[(idx + 1) % len(cycle)]
+    assert nxt == _BTN_CES
+    assert is_disable_reach(nxt, has_long, alpha_avail, op_native) is True

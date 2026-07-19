@@ -89,6 +89,52 @@ def decide_confirm_outcome(v_ego: float, engaged: bool) -> ConfirmOutcome:
   return ConfirmOutcome.ENABLE
 
 
+def is_disable_reach(nxt: int, has_longitudinal_control: bool, alpha_long_available: bool,
+                      op_long_native: bool) -> bool:
+  """oplongdisable: pure decision, the mirror image of is_exp_slot_reach. Does a tap that computed
+  `nxt` represent the driver flipping AWAY from forced-Experimental toward CES or Chill on an
+  op-long-ON, alpha-capable, NON-NATIVE car (the Lightning, with op-long currently enabled)?
+
+  docs/pnw/op-long-features.md §6: "Experimental mode IS op-long" -- the enable direction already
+  treats reaching for Experimental as reaching for op-long. This is the converse: on the Lightning,
+  op-long is meant to be exclusive to Experimental (CES/Chill = stock ACC per the driver's design), so
+  leaving the Experimental slot for CES or Chill while op-long is ON should turn op-long back OFF.
+
+  `not op_long_native` is the load-bearing guard that keeps this off the Tesla: has_longitudinal_control
+  is unconditionally True there (ui_state.py forces it for a native car), so without this check every
+  ordinary CES<->Chill cycle tap on the Raven would look like a disable reach. op_long_native=True
+  short-circuits this to False regardless of nxt/has_longitudinal_control -- the Tesla can never reach
+  this branch. alpha_long_available also excludes the (today nonexistent) plain-native-without-alpha
+  case defensively, matching is_exp_slot_reach's pattern.
+
+  True only for nxt in (CES, Chill) -- landing on EXP (CES -> Exp, the ordinary first cycle step) is
+  excluded on purpose: "Flipping to Experimental while op-long ON -> no change" (unchanged behavior)."""
+  return (has_longitudinal_control and alpha_long_available and not op_long_native
+          and nxt in (_BTN_CES, _BTN_CHILL))
+
+
+class DisableOutcome(Enum):
+  """oplongdisable: pure classification of a disable-reach tap -- see decide_disable_outcome. Unlike
+  ConfirmOutcome (the enable direction) there is no ENGAGED-specific outcome: disabling is the SAFE
+  direction (it returns to stock ACC and restores AEB), so the only hazard is reloading the onroad
+  stack AT SPEED -- standstill is the sole gate, no confirm dialog, no AEB warning needed."""
+  DISABLE = auto()      # stopped -> safe to hand control back to stock ACC now
+  HOLD_MOVING = auto()  # still moving -> reloading the onroad stack now would be dangerous
+
+
+def decide_disable_outcome(v_ego: float) -> DisableOutcome:
+  """Pure decision: whether a disable-reach tap (is_disable_reach == True) may actually disable
+  op-long right now. Reuses _STANDSTILL_MS, the same threshold decide_confirm_outcome uses for the
+  enable direction, because the hazard is identical either way -- OnroadCycleRequested restarts the
+  entire onroad stack (modeld/controlsd/card/...), which must never happen while the car is moving.
+  No `engaged` check (contrast decide_confirm_outcome): a driver stopped under openpilot control who
+  disables is just handed back to stock ACC/manual at a standstill -- not the "reload disengages an
+  active moving drive" hazard the enable direction's HOLD_ENGAGED exists to prevent."""
+  if v_ego >= _STANDSTILL_MS:
+    return DisableOutcome.HOLD_MOVING
+  return DisableOutcome.DISABLE
+
+
 _STANDSTILL_MS = 0.1     # m/s -- "stopped enough" to safely reload the whole onroad stack
 _CONFIRM_WINDOW_S = 3.0  # oplongexp2pnw (Fable HIGH-3): deliberate two-tap confirm window
 # oplongexp2pnw (Fable HIGH-4/F4): once an enable has been requested, swallow taps until
@@ -110,6 +156,11 @@ _CONFIRM_HINT_TEXT = tr_noop(
 _ENABLE_HINT_TEXT = tr_noop("Enabling openpilot Longitudinal Control...")
 _STOP_HINT_TEXT = tr_noop("Stop to enable openpilot Longitudinal Control")
 _DISENGAGE_HINT_TEXT = tr_noop("Disengage to enable openpilot Longitudinal Control")
+# oplongdisable: same rendering, the disable direction's own two messages -- no AEB wording (this
+# direction restores AEB, it doesn't disable it) and no "disengage" variant (no engaged check, see
+# decide_disable_outcome docstring).
+_DISABLE_HINT_TEXT = tr_noop("Switching to stock ACC...")
+_STOP_DISABLE_HINT_TEXT = tr_noop("Stop to switch to stock ACC")
 _HINT_S = 4.0      # seconds the hint stays on screen after a tap
 _HINT_WIDTH = 480
 _HINT_PAD = 20
@@ -157,6 +208,11 @@ class ExpButton(Widget):
     # monotonic deadlines, 0.0 (default, always in the past) means "not armed/pending".
     self._confirm_armed_until: float = 0.0   # set when a tap reaches the Exp slot (arms the confirm)
     self._enable_pending_until: float = 0.0  # set right after ENABLE fires (swallow taps until then)
+    # oplongdisable: mirrors _enable_pending_until for the opposite direction -- set right after a
+    # DISABLE fires, swallowing taps until ui_state's ~5 s param poll has had a chance to observe
+    # has_longitudinal_control go False (otherwise a quick tap mid-reload could re-cycle against a
+    # stale capability read).
+    self._disable_pending_until: float = 0.0
     self._hint_label = UnifiedLabel(
       lambda: tr(self._hint_text),
       font_size=_HINT_FONT,
@@ -203,10 +259,10 @@ class ExpButton(Widget):
       has_long = ui_state.has_longitudinal_control
       off_alpha_capable = alpha_long_available and not op_long_native and not has_long
 
-      if self._enable_pending_until > now:
-        # oplongexp2pnw (Fable HIGH-4/F4): an enable was just requested and the reload/capability
-        # read hasn't caught up yet -- swallow the tap entirely rather than risk a stale-capability
-        # cycle step (or a re-arm) racing the reload.
+      if self._enable_pending_until > now or self._disable_pending_until > now:
+        # oplongexp2pnw (Fable HIGH-4/F4) / oplongdisable: an enable OR a disable was just requested
+        # and the reload/capability read hasn't caught up yet -- swallow the tap entirely rather than
+        # risk a stale-capability cycle step (or a re-arm) racing the reload, in either direction.
         pass
       elif off_alpha_capable and self._confirm_armed_until > now:
         # oplongexp2pnw (Fable HIGH-3): the CONFIRM tap -- a second, deliberate tap while the "tap
@@ -245,6 +301,28 @@ class ExpButton(Widget):
           nxt = _BTN_CES
           self._confirm_armed_until = now + _CONFIRM_WINDOW_S
           self._hint_text = _CONFIRM_HINT_TEXT
+          self._hint_until = now + _HINT_S
+        elif is_disable_reach(nxt, has_long, alpha_long_available, op_long_native):
+          # oplongdisable (docs/pnw/op-long-features.md §6, driver-confirmed 2026-07-18): the mirror
+          # of the enable reach above. On the Lightning op-long is meant to be exclusive to
+          # Experimental -- flipping AWAY from it to CES or Chill while op-long is ON should hand
+          # control back to stock ACC. Unlike the enable reach this needs no second, deliberate tap
+          # (Fable's two-tap gate exists because enabling drops AEB coverage until the driver
+          # confirms; disabling RESTORES AEB, so a single tap is the safe direction) -- only the
+          # standstill gate carries over, because OnroadCycleRequested still restarts the whole
+          # onroad stack and that must never happen while moving.
+          outcome = decide_disable_outcome(ui_state.sm["carState"].vEgo)
+          if outcome is DisableOutcome.DISABLE:
+            # Mirror of developer.py::_on_alpha_long_enabled's else-branch (the Settings-toggle
+            # disable path) -- same param pair, this tap IS the driver's action.
+            self._params.put_bool("AlphaLongitudinalEnabled", False)
+            self._params.put_bool("OnroadCycleRequested", True)
+            self._disable_pending_until = now + _ENABLE_GUARD_S
+            self._hint_text = _DISABLE_HINT_TEXT
+          else:  # HOLD_MOVING: refuse to disable at speed -- don't advance the button either, it's
+                 # already sitting wherever it was (mirrors the enable confirm's "left untouched").
+            nxt = cur
+            self._hint_text = _STOP_DISABLE_HINT_TEXT
           self._hint_until = now + _HINT_S
 
         # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
