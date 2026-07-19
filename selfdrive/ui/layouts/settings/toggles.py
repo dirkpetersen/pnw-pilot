@@ -457,10 +457,12 @@ class TogglesLayout(Widget):
     veh = PnwVehicle(ui_state.CP, live_op_long=ui_state.has_longitudinal_control)
     if "CESMode" in self._toggles:
       self._toggles["CESMode"].action_item.set_enabled(ces_long_ok or veh.ces_shadow)
-    # speedadjust2pnw: acts via the longitudinal planner cap, so it needs op-long (unlike CES it has no
-    # stock-ACC/ICBM path yet) — grey it out where openpilot doesn't control longitudinal.
+    # speedadjust2pnw: acts via the longitudinal planner cap, so it only has EFFECT under op-long
+    # (no stock-ACC/ICBM path yet). Driver directive 2026-07-19: never grey this selector — the
+    # driver wants the switch always operable; on stock ACC the selection is simply inert until a
+    # speedadjust ICBM path exists (pending work).
     if "AutoSpeedReduce" in self._toggles:
-      self._toggles["AutoSpeedReduce"].action_item.set_enabled(ces_long_ok)
+      self._toggles["AutoSpeedReduce"].action_item.set_enabled(True)
 
     # mapd2pnw: "Get map for this location" is greyed out (inactive) when the current GPS is already
     # covered by a downloaded map, or when there's no fix / unknown region (MapForLocationCovered is
