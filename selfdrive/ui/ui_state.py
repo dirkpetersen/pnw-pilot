@@ -81,6 +81,11 @@ class UIState:
     self.panda_type: log.PandaState.PandaType = log.PandaState.PandaType.unknown
     self.personality: log.LongitudinalPersonality = log.LongitudinalPersonality.standard
     self.has_longitudinal_control: bool = False
+    # oplongexp2pnw (F5): PnwVehicle(CP).op_long_native computed ONCE here (update_params, ~5 Hz max)
+    # and cached -- callers that need it per-tap/per-frame (e.g. exp_button.py's mouse-release
+    # handler) should read this instead of constructing a fresh PnwVehicle() themselves, which does
+    # file I/O (curve.json/rain.json) on every construction.
+    self.op_long_native: bool = False
     self.CP: car.CarParams | None = None
     self.light_sensor: float = -1.0
     self._param_update_time: float = 0.0
@@ -195,8 +200,11 @@ class UIState:
       # put the Tesla on the alpha branch and made has_longitudinal_control mirror
       # AlphaLongitudinalEnabled -- degrading the exp-button/CES capability (lost forced-Experimental)
       # whenever that param read False. op_long_native is a per-platform constant, not session
-      # state, so a bare PnwVehicle(self.CP) (no live_op_long) is correct here.
-      if PnwVehicle(self.CP).op_long_native:
+      # state, so a bare PnwVehicle(self.CP) (no live_op_long) is correct here. oplongexp2pnw (F5):
+      # cache it on self so other UI code (exp_button.py's per-tap handler) doesn't have to
+      # construct its own PnwVehicle() -- that does file I/O (curve.json/rain.json) on every call.
+      self.op_long_native = PnwVehicle(self.CP).op_long_native
+      if self.op_long_native:
         self.has_longitudinal_control = True
       elif self.CP.alphaLongitudinalAvailable:
         self.has_longitudinal_control = self.params.get_bool("AlphaLongitudinalEnabled")

@@ -2,7 +2,6 @@ import time
 from enum import Enum, auto
 import pyray as rl
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -14,6 +13,14 @@ _BTN_CES, _BTN_CHILL, _BTN_EXP = 0, 1, 2
 # tap cycle order (per spec): CES auto (white exp) -> forced Experimental (orange exp)
 #   -> forced Chill (white wheel) -> back to CES auto
 _CES_CYCLE = (_BTN_CES, _BTN_EXP, _BTN_CHILL)
+# oplongexp2pnw (Fable review, HIGH-1 fix): on an alpha-capable car with op-long OFF (the Lightning on
+# stock ACC), Chill is the driver's ICBM kill switch (ces_pnw.py only runs the ICBM executor outside
+# forced Chill) and MUST stay reachable in ONE tap from the default boot state (CES -- CESButtonState
+# is CLEAR_ON_MANAGER_START, so every drive starts here). Reusing _CES_CYCLE's (CES, EXP, CHILL) order
+# put Chill two taps away and made it UNREACHABLE in practice (every tap from CES lands on the Exp
+# slot, which this module always forces back to CES -- see _handle_mouse_release -- so the cycle index
+# never advances past it). CES -> Chill first, Exp (the enable reach) last.
+_CES_CYCLE_OFF_ALPHA = (_BTN_CES, _BTN_CHILL, _BTN_EXP)
 # icbm2pnw: without ANY openpilot-longitudinal capability at all (neither native nor alpha-available
 # -- there is no car in the pnw fleet today that lands here, but the capability view must still
 # degrade safely), forced Experimental is structurally impossible -- the planner never owns
@@ -23,63 +30,86 @@ _CES_CYCLE_NO_LONG = (_BTN_CES, _BTN_CHILL)
 _PARAM_POLL_S = 0.5   # uicpu2pnw (T1): re-read the CES settings/tap params at 2 Hz, not 60 Hz
 
 
-class ExpTapOutcome(Enum):
-  """oplongexp2pnw: pure classification of what a CES-cycle tap should do, given the button that was
-  JUST computed to land on (nxt) and this car's op-long capability/live state. Supersedes the
-  informational-only oplongui2pnw hint (docs/pnw/op-long-features.md §6, option A) -- the driver
-  decided the button should ACT, not just point at Settings."""
-  NORMAL = auto()          # ordinary cycle step -- write CESButtonState=nxt as-is, nothing special
-  ENABLE_OP_LONG = auto()  # landed on Exp while op-long is OFF but reachable, and not engaged -> enable
-  HOLD_ENGAGED = auto()    # landed on Exp while op-long is OFF but reachable, and engaged -> can't enable now
-
-
 def select_ces_cycle(has_longitudinal_control: bool, alpha_long_available: bool, op_long_native: bool) -> tuple:
   """Pure decision: which tap-cycle order the top-right button uses. Capability-view only -- never
   branches on carFingerprint/brand.
 
   - op-long ON (has_longitudinal_control): full cycle, unchanged -- includes real Experimental.
   - op-long OFF but this car COULD run it (alpha_long_available and not op_long_native -- e.g. the
-    Lightning on stock ACC today): ALSO the full cycle. Landing on the Experimental slot does not
-    select real Experimental mode (that's inert without op-long) -- decide_exp_tap_outcome turns it
-    into the op-long ENABLE flow instead. Restoring Experimental to the cycle is what lets the driver
-    "flip to Experimental to turn op-long on" the way the design intends.
+    Lightning on stock ACC today): _CES_CYCLE_OFF_ALPHA (CES -> Chill -> Exp). Landing on the
+    Experimental slot does not select real Experimental mode (that's inert without op-long) -- see
+    is_exp_slot_reach / _handle_mouse_release, which turn it into the op-long ENABLE-CONFIRM flow
+    instead. Chill comes BEFORE Exp in this ordering (Fable HIGH-1) so the ICBM kill switch is always
+    one tap away from the default boot state, and the enable reach is the deliberate later position.
   - genuinely no-op-long car (neither native nor alpha-available): CES<->Chill only -- there is no
     enable path to reach for, so Experimental must stay structurally unreachable (icbm2pnw).
   """
   if has_longitudinal_control:
     return _CES_CYCLE
   if alpha_long_available and not op_long_native:
-    return _CES_CYCLE
+    return _CES_CYCLE_OFF_ALPHA
   return _CES_CYCLE_NO_LONG
 
 
-def decide_exp_tap_outcome(nxt: int, has_longitudinal_control: bool, alpha_long_available: bool,
-                            op_long_native: bool, engaged: bool) -> ExpTapOutcome:
-  """Pure decision: what the button should DO for a tap that computed `nxt` as the next cycle
-  position, given this car's op-long capability and whether the drive is currently engaged.
-
-  Only ever fires for nxt == _BTN_EXP on an alpha-capable, non-native car with op-long OFF -- the
-  "reach for Experimental while on stock ACC" moment that select_ces_cycle's second branch makes
-  reachable again. Every other combination (op-long already ON, no op-long capability at all, or a
-  tap that landed on CES/Chill) is NORMAL: an ordinary cycle step, no side effects.
-
-  The engaged split is the one safety gate: enabling op-long writes OnroadCycleRequested, which
-  reloads the onroad stack -- doing that while the drive is moving/engaged would disengage it, so
-  ENABLE_OP_LONG is reserved for `not engaged`; while engaged the tap only explains why (HOLD_ENGAGED)
-  and must not enable.
+def is_exp_slot_reach(nxt: int, has_longitudinal_control: bool, alpha_long_available: bool,
+                       op_long_native: bool) -> bool:
+  """Pure decision: does a tap that computed `nxt` as the next cycle position represent the driver
+  reaching for Experimental on an op-long-OFF, alpha-capable car (e.g. the Lightning on stock ACC)?
+  True only for nxt == _BTN_EXP under exactly that capability combination -- op-long already ON, or a
+  car with no op-long capability at all, or a tap that landed on CES/Chill, are all False (an ordinary
+  cycle step). The caller (_handle_mouse_release) treats True as "ARM the enable-confirm window", not
+  an immediate enable -- see ConfirmOutcome / decide_confirm_outcome for the deliberate second gesture.
   """
-  if nxt == _BTN_EXP and alpha_long_available and not op_long_native and not has_longitudinal_control:
-    return ExpTapOutcome.HOLD_ENGAGED if engaged else ExpTapOutcome.ENABLE_OP_LONG
-  return ExpTapOutcome.NORMAL
+  return nxt == _BTN_EXP and alpha_long_available and not op_long_native and not has_longitudinal_control
 
 
-# oplongexp2pnw: transient on-screen messages for the two ExpTapOutcome branches above. Reuses the
-# oplongui2pnw transient-overlay rendering (self-drawn pyray box below the button) -- only the text
-# and trigger condition changed. Plain ASCII only ("..." not the U+2026 ellipsis glyph, no "▶"/"▸"
-# arrows) -- selfdrive/assets/fonts/process.py EXTRA_CHARS does not bake either non-ASCII glyph into
-# the on-device font atlas, so anything outside chr(32..127)|EXTRA_CHARS renders as notdef/tofu.
+class ConfirmOutcome(Enum):
+  """oplongexp2pnw: pure classification of the SECOND, confirming tap (the one that lands while the
+  "tap again to enable" hint from is_exp_slot_reach is still armed) -- see decide_confirm_outcome."""
+  ENABLE = auto()        # stopped and not engaged -> safe to enable op-long now
+  HOLD_MOVING = auto()   # still moving -> reloading the onroad stack now would be dangerous
+  HOLD_ENGAGED = auto()  # stopped but still engaged -> reload would disengage the drive
+
+
+def decide_confirm_outcome(v_ego: float, engaged: bool) -> ConfirmOutcome:
+  """Pure decision (Fable review, HIGH-2 fix): whether the confirming tap may actually enable op-long.
+
+  The original gate was `not engaged` alone, which is wrong: `engaged` only means openpilot currently
+  has active control (started AND selfdriveState.enabled) -- a driver cruising on stock ACC/manually
+  with openpilot DISENGAGED is still moving, and OnroadCycleRequested restarts the entire onroad stack
+  (modeld/controlsd/card/...), which would happen AT SPEED. The real requirement is STANDSTILL: v_ego
+  below _STANDSTILL_MS. `engaged` is still checked (stopped-but-engaged, e.g. held at a light under
+  openpilot control, still can't reload without disengaging) but only as a second condition once
+  standstill is confirmed -- the two failure modes get distinct hints (STOP vs DISENGAGE, Fable F7).
+  """
+  if v_ego >= _STANDSTILL_MS:
+    return ConfirmOutcome.HOLD_MOVING
+  if engaged:
+    return ConfirmOutcome.HOLD_ENGAGED
+  return ConfirmOutcome.ENABLE
+
+
+_STANDSTILL_MS = 0.1     # m/s -- "stopped enough" to safely reload the whole onroad stack
+_CONFIRM_WINDOW_S = 3.0  # oplongexp2pnw (Fable HIGH-3): deliberate two-tap confirm window
+# oplongexp2pnw (Fable HIGH-4/F4): once an enable has been requested, swallow taps until
+# has_longitudinal_control has had a chance to catch up (ui_state.update_params polls at ~5 s
+# cadence -- see update() in ui_state.py) so a stray tap mid-reload can't re-arm/re-cycle against a
+# stale capability read and (mis-)write CESButtonState=Exp before the car has actually come up on
+# op-long. Deliberately longer than the 5 s param-poll interval.
+_ENABLE_GUARD_S = 6.0
+
+# oplongexp2pnw: transient on-screen messages for the ARM / ENABLE / HOLD_MOVING / HOLD_ENGAGED
+# moments above. Reuses the oplongui2pnw transient-overlay rendering (self-drawn pyray box below the
+# button) -- only the text and trigger conditions changed. Plain ASCII only ("..." not the U+2026
+# ellipsis glyph, no "▶"/"▸" arrows) -- selfdrive/assets/fonts/process.py EXTRA_CHARS does not bake
+# either non-ASCII glyph into the on-device font atlas, so anything outside chr(32..127)|EXTRA_CHARS
+# renders as notdef/tofu. Fable F3/F7: the confirm hint names AEB explicitly, and the "can't enable"
+# hint distinguishes MOVING (stop) from STOPPED-BUT-ENGAGED (disengage) instead of always saying "stop".
+_CONFIRM_HINT_TEXT = tr_noop(
+  "Tap again within 3 seconds to enable openpilot Longitudinal Control. This disables Automatic Emergency Braking (AEB).")
 _ENABLE_HINT_TEXT = tr_noop("Enabling openpilot Longitudinal Control...")
-_HOLD_HINT_TEXT = tr_noop("Stop to enable openpilot Longitudinal Control")
+_STOP_HINT_TEXT = tr_noop("Stop to enable openpilot Longitudinal Control")
+_DISENGAGE_HINT_TEXT = tr_noop("Disengage to enable openpilot Longitudinal Control")
 _HINT_S = 4.0      # seconds the hint stays on screen after a tap
 _HINT_WIDTH = 480
 _HINT_PAD = 20
@@ -120,9 +150,13 @@ class ExpButton(Widget):
     self._rect = rl.Rectangle(0, 0, button_size, button_size)
 
     # oplongexp2pnw: transient hint (repurposed from oplongui2pnw's informational-only box) -- text
-    # is picked per-tap by _handle_mouse_release (see ExpTapOutcome) and held in self._hint_text.
+    # is picked per-tap by _handle_mouse_release and held in self._hint_text.
     self._hint_until: float = 0.0
     self._hint_text: str = _ENABLE_HINT_TEXT
+    # oplongexp2pnw (Fable HIGH-3/F4): the two-tap confirm gesture + post-enable tap guard. Both are
+    # monotonic deadlines, 0.0 (default, always in the past) means "not armed/pending".
+    self._confirm_armed_until: float = 0.0   # set when a tap reaches the Exp slot (arms the confirm)
+    self._enable_pending_until: float = 0.0  # set right after ENABLE fires (swallow taps until then)
     self._hint_label = UnifiedLabel(
       lambda: tr(self._hint_text),
       font_size=_HINT_FONT,
@@ -157,48 +191,67 @@ class ExpButton(Widget):
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     if self._ces_master:
-      # ces2xnor: 3-state cycle CES -> Experimental -> Chill -> CES (no confirm gate). icbm2pnw/
-      # oplongexp2pnw: which states are reachable depends on this car's op-long capability -- see
-      # select_ces_cycle. One CP/capability read per tap (not per frame) -- cheap, and _PARAM_POLL_S
-      # already throttles the other params this handler reads.
-      op_long_native = PnwVehicle(ui_state.CP).op_long_native if ui_state.CP is not None else False
+      now = time.monotonic()
+      # ces2xnor: 3-state cycle CES -> Experimental -> Chill -> CES (no confirm gate when op-long is
+      # already ON). icbm2pnw/oplongexp2pnw: which states are reachable, and whether reaching Exp
+      # needs a confirm gate at all, depends on this car's op-long capability -- see select_ces_cycle
+      # / is_exp_slot_reach below. oplongexp2pnw (Fable F5): op_long_native is read from ui_state (computed
+      # once per ~5 s in update_params), NOT constructed fresh here -- PnwVehicle() does file I/O
+      # (curve.json/rain.json) on every construction, which a per-tap handler shouldn't pay for.
+      op_long_native = ui_state.op_long_native
       alpha_long_available = ui_state.CP is not None and ui_state.CP.alphaLongitudinalAvailable
       has_long = ui_state.has_longitudinal_control
-      cycle = select_ces_cycle(has_long, alpha_long_available, op_long_native)
-      cur = int(self._params.get("CESButtonState", return_default=True) or _BTN_CES)
-      idx = cycle.index(cur) if cur in cycle else 0
-      nxt = cycle[(idx + 1) % len(cycle)]
+      off_alpha_capable = alpha_long_available and not op_long_native and not has_long
 
-      # oplongexp2pnw (supersedes oplongui2pnw's informational-only hint, docs/pnw/op-long-features.md
-      # §6): reaching Experimental while op-long is OFF on an alpha-capable car (e.g. the Lightning on
-      # stock ACC) IS the driver's re-enable gesture -- Experimental is a consequence of op-long, so
-      # flipping to it must turn op-long on rather than just point at Settings. decide_exp_tap_outcome
-      # classifies the tap; NORMAL (every other case) falls through to the plain cycle write below,
-      # byte-identical to the pre-existing behavior.
-      outcome = decide_exp_tap_outcome(nxt, has_long, alpha_long_available, op_long_native, ui_state.engaged)
-      if outcome is ExpTapOutcome.ENABLE_OP_LONG:
-        # Same param pair developer.py::_on_alpha_long_enabled writes on confirm (minus the dialog
-        # and AEB warning -- this button flip IS the driver's confirmation). Land the visible button
-        # on CES, never Exp: real Experimental stays inert until op-long actually comes up after the
-        # reload, and CES is the natural place to be sitting once it does.
-        nxt = _BTN_CES
-        self._params.put_bool("AlphaLongitudinalEnabled", True)
-        self._params.put_bool("OnroadCycleRequested", True)
-        self._hint_text = _ENABLE_HINT_TEXT
-        self._hint_until = time.monotonic() + _HINT_S
-      elif outcome is ExpTapOutcome.HOLD_ENGAGED:
-        # The one safety gate: OnroadCycleRequested reloads the onroad stack, which would disengage
-        # a moving drive. Explain why and revert the tap to CES instead of landing on the inert Exp
-        # slot -- no enable, no param writes.
-        nxt = _BTN_CES
-        self._hint_text = _HOLD_HINT_TEXT
-        self._hint_until = time.monotonic() + _HINT_S
+      if self._enable_pending_until > now:
+        # oplongexp2pnw (Fable HIGH-4/F4): an enable was just requested and the reload/capability
+        # read hasn't caught up yet -- swallow the tap entirely rather than risk a stale-capability
+        # cycle step (or a re-arm) racing the reload.
+        pass
+      elif off_alpha_capable and self._confirm_armed_until > now:
+        # oplongexp2pnw (Fable HIGH-3): the CONFIRM tap -- a second, deliberate tap while the "tap
+        # again to enable" hint (armed by is_exp_slot_reach below) is still showing. CESButtonState
+        # is left untouched here -- it's already sitting wherever the arming tap left it (CES).
+        self._confirm_armed_until = 0.0
+        outcome = decide_confirm_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged)
+        if outcome is ConfirmOutcome.ENABLE:
+          # Same param pair developer.py::_on_alpha_long_enabled writes on confirm (minus the dialog
+          # and AEB warning text -- this two-tap gesture IS the driver's confirmation).
+          self._params.put_bool("AlphaLongitudinalEnabled", True)
+          self._params.put_bool("OnroadCycleRequested", True)
+          self._enable_pending_until = now + _ENABLE_GUARD_S
+          self._hint_text = _ENABLE_HINT_TEXT
+        elif outcome is ConfirmOutcome.HOLD_MOVING:
+          self._hint_text = _STOP_HINT_TEXT
+        else:  # HOLD_ENGAGED: stopped, but openpilot still has control -- disengage first, not "stop"
+          self._hint_text = _DISENGAGE_HINT_TEXT
+        self._hint_until = now + _HINT_S
+      else:
+        self._confirm_armed_until = 0.0   # any other tap cancels a stale/expired arm
 
-      # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
-      # cast, so put(str) raised TypeError and the tap silently did nothing (button never moved).
-      self._params.put("CESButtonState", nxt)
-      self._ces_button = nxt   # uicpu2pnw (T1): write-through so the icon flips instantly (the
-                               # 2 Hz poll would otherwise lag the tap by up to _PARAM_POLL_S)
+        cycle = select_ces_cycle(has_long, alpha_long_available, op_long_native)
+        cur = int(self._params.get("CESButtonState", return_default=True) or _BTN_CES)
+        idx = cycle.index(cur) if cur in cycle else 0
+        nxt = cycle[(idx + 1) % len(cycle)]
+
+        # oplongexp2pnw (supersedes oplongui2pnw's informational-only hint, docs/pnw/op-long-features.md
+        # §6a): reaching Experimental while op-long is OFF on an alpha-capable car (e.g. the Lightning
+        # on stock ACC) is the driver's re-enable REACH -- Experimental is a consequence of op-long, so
+        # flipping to it starts the enable flow rather than just pointing at Settings. It does NOT
+        # enable on this tap alone (Fable HIGH-3): it ARMS a confirm window and lands on CES (never
+        # Exp -- that state is inert without op-long); the enable itself only happens on a second,
+        # deliberate tap handled by the branch above.
+        if is_exp_slot_reach(nxt, has_long, alpha_long_available, op_long_native):
+          nxt = _BTN_CES
+          self._confirm_armed_until = now + _CONFIRM_WINDOW_S
+          self._hint_text = _CONFIRM_HINT_TEXT
+          self._hint_until = now + _HINT_S
+
+        # CESButtonState is INT-typed: put an INT, not str(nxt). PYTHON_2_CPP has no (str, INT)
+        # cast, so put(str) raised TypeError and the tap silently did nothing (button never moved).
+        self._params.put("CESButtonState", nxt)
+        self._ces_button = nxt   # uicpu2pnw (T1): write-through so the icon flips instantly (the
+                                 # 2 Hz poll would otherwise lag the tap by up to _PARAM_POLL_S)
     elif self._is_toggle_allowed():
       # stock 2-state toggle
       new_mode = not self._experimental_mode
@@ -246,7 +299,7 @@ class ExpButton(Widget):
 
   def _render_hint(self):
     """oplongexp2pnw: draw the transient hint below the button (self._hint_text picks the message --
-    see ExpTapOutcome). Repurposed from oplongui2pnw's informational-only box; still self-contained
+    see is_exp_slot_reach / ConfirmOutcome). Repurposed from oplongui2pnw's informational-only box; still self-contained
     (no cereal/selfdriveState round-trip, no new alert-type plumbing) -- matches the existing pattern
     of other onroad overlays (e.g. ces_status.py) that draw directly with pyray.
 
