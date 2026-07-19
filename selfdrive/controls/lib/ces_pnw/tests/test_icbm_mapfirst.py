@@ -49,6 +49,20 @@ def test_map_reach_stale_path_decays_out():
   assert icbm_map_reach(stale, lat, lon) == 0.0
 
 
+def test_map_reach_rejects_curvature_noise_spike():
+  """icbmonset: a point mapd itself can't resolve trustworthily (curvature-noise spike, live-
+  observed magnitudes below) must not count as 'the map has judged this stretch' -- it was
+  previously counted toward reach purely on position, regardless of how implausible its velocity
+  was, wrongly blocking vision from filling the gap (icbm_vision_may_start) while the map's own
+  read there is garbage. Can only ever SHRINK reach vs before, never grow it."""
+  lat, lon = 47.0, -122.0
+  noise_only = [_pt_north(lat, lon, 71.0, 77.8), _pt_north(lat, lon, 288.0, 128.6)]
+  assert icbm_map_reach(noise_only, lat, lon) == 0.0        # was 288.0 before this fix
+  # a sane point still counts normally, noise sitting nearer or farther doesn't change that
+  mixed = noise_only + [_pt_north(lat, lon, 199.0, 14.6)]
+  assert abs(icbm_map_reach(mixed, lat, lon) - 199.0) < 1.0
+
+
 def test_in_curve_thresholds():
   assert icbm_in_curve(ICBM_IN_CURVE_LAT + 0.1, 0.0, 10.0)              # loaded now
   assert icbm_in_curve(-ICBM_IN_CURVE_LAT - 0.1, 0.0, 10.0)             # sign-agnostic

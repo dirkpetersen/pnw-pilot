@@ -109,6 +109,48 @@ def test_upcoming_curve_empty_returns_none():
   assert mtv == 0.0 and mtd == float('inf')
 
 
+# ---- icbmonset: map-curvature-noise sanity filter ---------------------------
+# Field-observed live 2026-07-18 (Ballard/Shilshole tight city curves, `drives/2026-07-18/
+# lightning-icbm-curve/`): mapd's curvature calc emits a FINITE but nonsensical target velocity for
+# 3-4 s at curve entry (raw m/s reads reproduced exactly from ces_events.jsonl below) before settling
+# to the real target. The existing NaN guard does not catch a finite garbage value.
+def test_map_v_sane_matches_live_observed_values():
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import _map_v_sane
+  # exact garbage magnitudes pulled from the live log (ces_tail.jsonl mapV field, m/s)
+  for garbage in (60.2, 62.6, 68.4, 72.5, 77.8, 128.6):
+    assert not _map_v_sane(garbage), garbage
+  # exact real (settled) curve targets from the SAME log/curve
+  for real in (12.9, 14.6, 15.9, 16.0, 16.9):
+    assert _map_v_sane(real), real
+  # the documented legitimate high-sweeper raw reading already exercised elsewhere in this suite
+  # (test_icbm_bridge.test_far_map_dec_only_above_ceiling_ignored, "the I-90 sweeper readings") must
+  # still be treated as sane data, not noise -- the ceiling sits above it on purpose.
+  assert _map_v_sane(110 * 0.44704)
+  # NaN / non-numeric / non-positive are still rejected the same as before
+  assert not _map_v_sane(float('nan'))
+  assert not _map_v_sane(0.0)
+  assert not _map_v_sane(-5.0)
+  assert not _map_v_sane("bogus")
+  assert not _map_v_sane(None)
+
+
+def test_upcoming_curve_rejects_curvature_noise_spike():
+  """The exact live failure mode: a curvature-noise point (raw velocity 77.8 m/s, the verbatim
+  observed mapV) must not be reported as 'the curve' -- before this fix upcoming_curve returned
+  (77.8, <dist>), reproducing the live garbage telemetry (drives/2026-07-18/lightning-icbm-curve/)."""
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import upcoming_curve
+  noisy = [{"latitude": 45.001, "longitude": -122.0, "velocity": 77.8}]
+  assert upcoming_curve(noisy, 45.0, -122.0, v_ego=19.1, lookahead_s=10.0) == (0.0, float('inf'))
+  # a SANE point at the same distance is unaffected
+  sane = [{"latitude": 45.001, "longitude": -122.0, "velocity": 14.6}]
+  mtv, mtd = upcoming_curve(sane, 45.0, -122.0, v_ego=19.1, lookahead_s=10.0)
+  assert abs(mtv - 14.6) < 1e-6 and 100 < mtd < 125
+  # a sane, more-binding point must still win over a co-located noise spike (never masks real data)
+  mixed = noisy + sane
+  mtv, mtd = upcoming_curve(mixed, 45.0, -122.0, v_ego=19.1, lookahead_s=10.0)
+  assert abs(mtv - 14.6) < 1e-6
+
+
 # ---- low speed / city ------------------------------------------------------
 def test_low_speed_city_no_lead_trips():
   # 30 mph, no lead, < CES_SPEED (40) -> Experimental (city; NO highway gate)

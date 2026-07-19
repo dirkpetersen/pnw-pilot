@@ -218,6 +218,22 @@ def test_far_map_nan_and_bad_points_skipped():
                                 lambda x: 1.0) == (0.0, float('inf'))
 
 
+def test_far_map_rejects_curvature_noise_spike():
+  """icbmonset: a curvature-noise spike (finite, but far above any plausible curve speed) must be
+  skipped exactly like NaN -- it was already provably non-binding either way (reduce-only rejects
+  it), but this proves the guard fires and a genuine sane candidate at the same/further distance is
+  still found. Magnitudes are the verbatim live-observed spikes, drives/2026-07-18/
+  lightning-icbm-curve/."""
+  lat, lon = 47.0, -122.0
+  v = vset = 46 * MPH
+  noise_only = [_pt_north(lat, lon, 71.0, 77.8), _pt_north(lat, lon, 288.0, 128.6)]
+  assert icbm_far_map_candidate(noise_only, lat, lon, v, vset, lambda x: 1.0) == (0.0, float('inf'))
+  # a sane, genuinely binding point further out is still found even with noise sitting closer
+  points = noise_only + [_pt_north(lat, lon, 199.0, 14.6)]
+  far_v, far_dist = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0)
+  assert math.isclose(far_v, 14.6, rel_tol=1e-6) and math.isclose(far_dist, 199.0, rel_tol=0.02)
+
+
 def test_approach_decel_monotonic_and_bounded():
   firm = 1.4
   v = 40.0
