@@ -82,13 +82,20 @@ jobs:
       - run: ./tools/op.sh setup
       - name: Install system build deps
         # op.sh setup only installs what tools/setup_dependencies.sh lists (build-essential, curl,
-        # git, xvfb, ...) — it does NOT install libusb-1.0-0-dev. selfdrive/pandad links against
-        # system usb-1.0 (SConstruct whitelists it as a non-vendored lib) but nothing adds the
-        # header to CPPPATH, so a bare runner fails with "libusb-1.0/libusb.h: No such file or
-        # directory". Same fix already proven working in 3pnw-release.yaml's aarch64 compile check.
+        # git, xvfb, ...) — neither of these ships there:
+        #  - libusb-1.0-0-dev: selfdrive/pandad links against system usb-1.0 (SConstruct whitelists
+        #    it as a non-vendored lib) but nothing adds the header to CPPPATH, so a bare runner
+        #    fails on "libusb-1.0/libusb.h: No such file or directory". Same fix already proven
+        #    working in 3pnw-release.yaml's aarch64 compile check.
+        #  - libva-dev: the off-device vendored ffmpeg (system/loggerd links avutil/avcodec/etc.)
+        #    has VAAPI hwcontext support compiled into libavutil.a on any non-larch64 Linux build —
+        #    including this runner — so encoderd/loggerd fail with undefined references to
+        #    vaInitialize/vaCreateContext/etc. unless libva is present. See
+        #    system/loggerd/SConscript + SConstruct's allowed_system_libs for the arch-gating (this
+        #    never touches the device build, which vendors a non-VAAPI ffmpeg).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libusb-1.0-0-dev
+          sudo apt-get install -y libusb-1.0-0-dev libva-dev
       - name: Build (same entrypoint the device runs on boot)
         timeout-minutes: 40
         run: python3 system/manager/build.py

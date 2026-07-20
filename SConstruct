@@ -55,6 +55,11 @@ allowed_system_libs = {
   # 3pnw CI: allow system libusb when it isn't vendored (generic aarch64 GitHub runner). On the comma
   # device libusb is vendored in third_party, so _resolve_lib finds it first and never reaches here.
   "usb-1.0",
+  # 3pnw CI: system libva/libva-drm — see system/loggerd/SConscript for why these are only ever
+  # added to LIBS on non-larch64, non-Darwin Linux (the vendored ffmpeg used off-device has VAAPI
+  # hwcontext compiled into libavutil.a; the device's vendored ffmpeg does not, so larch64 never
+  # needs — and must never link against — these).
+  "va", "va-drm",
 }
 
 def _resolve_lib(env, name):

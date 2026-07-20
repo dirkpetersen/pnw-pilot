@@ -8,6 +8,14 @@ src = ['logger.cc', 'zstd_writer.cc', 'video_writer.cc', 'encoder/encoder.cc', '
 if arch != "larch64":
   src += ['encoder/ffmpeg_encoder.cc']
   libs += ['yuv']
+  if arch != "Darwin":
+    # The off-device vendored ffmpeg (used for tooling/CI on any non-larch64 Linux host) has VAAPI
+    # hwcontext support compiled into libavutil.a, so linking it pulls in undefined `va*` symbols
+    # unless we also link libva/libva-drm. The device's own vendored ffmpeg build does NOT have
+    # VAAPI compiled in (no such hardware on-device), so this must stay off larch64 — see
+    # SConstruct's allowed_system_libs comment. macOS has no VAAPI at all (ffmpeg uses
+    # VideoToolbox there), so this is Linux-only too.
+    libs += ['va', 'va-drm']
 
 if arch == "Darwin":
   # exclude v4l
