@@ -17,6 +17,16 @@ blacklist = [
   ".gitattributes",
   ".git$",
   ".gitmodules",
+
+  # PNW: the 1.7 GB big_driving_supercombo.onnx is USB-GPU-only — the comma 3X never reads its
+  # content (modeld only builds the big pkl when UsbGpuPresent), so .lfsconfig sets
+  # `fetchexclude = *big_driving_supercombo.onnx` to cut ~95% of install/update download bytes.
+  # Consequence: `git lfs pull` deliberately leaves it as a ~135 B POINTER, and build_stripped.sh's
+  # `git lfs ls-files` guard then aborts the release with "LFS files detected!". Shipping a pointer
+  # file masquerading as a model would be worse than omitting it, so exclude it from the release
+  # tree outright. Anyone who genuinely needs it on a USB-GPU host pulls it explicitly:
+  #   git lfs pull --include big_driving_supercombo.onnx
+  "big_driving_supercombo.onnx",
 ]
 
 # gets you through the blacklist
