@@ -356,7 +356,7 @@ A supported vehicle is one that just works when you install a comma device. All 
 ### Footnotes
 <sup>1</sup>openpilot Longitudinal Control (Alpha) is available behind a toggle; the toggle is only available in non-release branches such as `nightly-dev`. <br />
 <sup>2</sup>Refers only to the Focus Mk4 (C519) available in Europe/China/Taiwan/Australasia, not the Focus Mk3 (C346) in North and South America/Southeast Asia. <br />
-<sup>3</sup>PNW: driven daily on this fork, but NOT shown in upstream comma docs — the Ford Q4 harness triggers Traction Control / Park Assist / One Pedal Drive errors on Lightnings while openpilot is not running (commaai/openpilot#30302, still open). Listed here because this fork targets this vehicle; be aware of the harness issue before installing. <br />
+<sup>3</sup>REQUIRES the BluePilot Lightning Coupler (https://bluepilot.dev/) in addition to the Ford Q4 harness. Without it the truck throws Traction Control / Park Assist / One Pedal Drive errors whenever openpilot is not running (commaai/openpilot#30302, still open upstream — which is why comma hides this car from its own docs). With the coupler fitted the Lightning is driven daily on this fork. <br />
 <sup>4</sup>See more setup details for <a href="https://github.com/commaai/openpilot/wiki/gm" target="_blank">GM</a>. <br />
 <sup>5</sup>2019 Honda Civic 1.6L Diesel Sedan does not have ALC below 12mph. <br />
 <sup>6</sup>See more setup details for <a href="https://github.com/commaai/openpilot/wiki/nissan" target="_blank">Nissan</a>. <br />
