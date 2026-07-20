@@ -1,0 +1,66 @@
+name: 3pnw compile check (aarch64)
+
+# Compile-verification gate for the 3pnw branch. Builds the buildable, non-device-coupled openpilot
+# targets on a GitHub-hosted ARM runner to catch code regressions before they reach the car.
+#
+# WHY THIS IS A COMPILE CHECK, NOT A PREBUILT — read 3PNW-RELEASE.md.
+# GitHub ARM runners are GENERIC aarch64, NOT the comma's `larch64`. The device-coupled MEDIA/ENCODER
+# stack (system/loggerd's encoderd/loggerd + system/camerad) links the vendored ffmpeg wheel, which on
+# a generic aarch64 host pulls in VAAPI/Vulkan hardware-encode symbols (vaCreateContext,
+# vaRenderPicture, vulkan refs) that have no off-device link target — a fundamental larch64 != aarch64
+# device coupling. So this build SKIPS that stack (scons --no-media, via SCONS_NO_MEDIA=1) and verifies
+# everything else compiles: cereal, common, panda firmware, pandad, the MPC libs, modeld/tinygrad,
+# locationd, rednose, the UI, and the cython extensions. A green run means the C/C++/cython tree builds
+# clean on aarch64 — it does NOT produce a device-deployable prebuilt.
+#
+# The authoritative device release is still release/build_release.sh, run ON the comma (it has the
+# larch64 toolchain + the panda signing cert and builds the full media stack natively).
+
+on:
+  push:
+    branches: [3pnw]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 3pnw-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: aarch64 compile check (no media stack)
+    runs-on: ubuntu-24.04-arm   # GitHub-hosted ARM runner (free on public repos)
+    timeout-minutes: 90
+    env:
+      TARGET_DIR: /tmp/3pnw-release
+      PYTHONPATH: /tmp/3pnw-release
+      SCONS_NO_MEDIA: "1"   # skip the device-coupled media/encoder stack (see header + SConstruct --no-media)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Fetch LFS objects (onnx models, svgs)
+        run: git lfs pull
+
+      - name: Build stripped source tree (release_files.py)
+        run: release/build_stripped.sh   # writes the release file set into $TARGET_DIR
+
+      - name: Install toolchain
+        run: ./tools/op.sh setup
+
+      - name: Install system build deps
+        # The bare ubuntu-24.04-arm runner lacks libusb, which the vendored panda/pandad stack links
+        # against (op.sh setup doesn't install it). libva/libdrm/libvulkan are NOT needed here because
+        # SCONS_NO_MEDIA=1 skips encoderd/loggerd/camerad (the only consumers of those device libs).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev
+
+      - name: Compile openpilot (aarch64, no media stack)
+        working-directory: ${{ env.TARGET_DIR }}
+        # SCONS_NO_MEDIA=1 makes build.py pass scons --no-media (see system/manager/build.py + SConstruct).
+        run: python3 system/manager/build.py
