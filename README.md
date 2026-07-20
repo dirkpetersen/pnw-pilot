@@ -62,10 +62,17 @@ commaai/openpilot          upstream
 
 ### Ford F-150 Lightning — lateral (steering)
 
-- **4-signal lateral control** — the BlueCruise-grade curvature command set (ported from
-  BluePilot), giving noticeably stronger, smoother steering than the stock 2-signal path, with a
-  **matching panda safety ruleset** (latch-hardened, written in C, capability-gated to the
-  Lightning so the Tesla is untouched).
+- **Angle steering (path-angle-primary)** — a faithful port of BluePilot **bp-7.0**'s newest lateral
+  scheme (alan-polk). Instead of asking Ford's steering rack for a *curvature* and waiting for its
+  internal filter to integrate toward it, this commands the **path angle** directly
+  (`path_angle = κ · v_ego · gain`, with curvature and curvature-rate zeroed). It sidesteps the
+  PSCM's "sticky c2" low-pass filter — the mechanism behind the ping-pong that Ford forks have
+  fought for years — so the wheel unwinds cleanly and much tighter curves become drivable.
+  Driver-selectable (`FordAngleLateral`, default **off**) and tunable on-road via a JSON overlay.
+- **4-signal lateral control** — the BlueCruise-grade curvature command set (also ported from
+  BluePilot), the default path and the fallback when angle steering is off. Noticeably stronger and
+  smoother than the stock 2-signal path, with a **matching panda safety ruleset** (latch-hardened,
+  written in C, capability-gated to the Lightning so the Tesla is untouched).
 - **Turn-exit predicted-curvature blend** — blends the model's predicted curvature on turn exit so
   the truck unwinds the wheel like a human instead of overshooting.
 - **Human-turn reset** — when the driver turns the wheel themselves, the controller's state resets
