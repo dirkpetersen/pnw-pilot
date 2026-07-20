@@ -11,11 +11,12 @@ if arch != "larch64":
   if arch != "Darwin":
     # The off-device vendored ffmpeg (used for tooling/CI on any non-larch64 Linux host) has VAAPI
     # hwcontext support compiled into libavutil.a, so linking it pulls in undefined `va*` symbols
-    # unless we also link libva/libva-drm. The device's own vendored ffmpeg build does NOT have
-    # VAAPI compiled in (no such hardware on-device), so this must stay off larch64 — see
-    # SConstruct's allowed_system_libs comment. macOS has no VAAPI at all (ffmpeg uses
-    # VideoToolbox there), so this is Linux-only too.
-    libs += ['va', 'va-drm']
+    # unless we also link libva/libva-drm. libva-drm.a in turn needs libdrm (drmGetMagic etc.) —
+    # 'drm' is already in SConstruct's allowed_system_libs (used elsewhere for EGL/gbm). The
+    # device's own vendored ffmpeg build does NOT have VAAPI compiled in (no such hardware
+    # on-device), so this must stay off larch64 — see SConstruct's allowed_system_libs comment.
+    # macOS has no VAAPI at all (ffmpeg uses VideoToolbox there), so this is Linux-only too.
+    libs += ['va', 'va-drm', 'drm']
 
 if arch == "Darwin":
   # exclude v4l

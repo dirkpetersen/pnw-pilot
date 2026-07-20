@@ -87,15 +87,16 @@ jobs:
         #    it as a non-vendored lib) but nothing adds the header to CPPPATH, so a bare runner
         #    fails on "libusb-1.0/libusb.h: No such file or directory". Same fix already proven
         #    working in 3pnw-release.yaml's aarch64 compile check.
-        #  - libva-dev: the off-device vendored ffmpeg (system/loggerd links avutil/avcodec/etc.)
-        #    has VAAPI hwcontext support compiled into libavutil.a on any non-larch64 Linux build —
-        #    including this runner — so encoderd/loggerd fail with undefined references to
-        #    vaInitialize/vaCreateContext/etc. unless libva is present. See
-        #    system/loggerd/SConscript + SConstruct's allowed_system_libs for the arch-gating (this
-        #    never touches the device build, which vendors a non-VAAPI ffmpeg).
+        #  - libva-dev / libdrm-dev: the off-device vendored ffmpeg (system/loggerd links
+        #    avformat/avcodec/avutil/etc.) has VAAPI hwcontext support compiled into libavutil.a on
+        #    any non-larch64 Linux build — including this runner — so encoderd/loggerd fail with
+        #    undefined references to vaInitialize/vaCreateContext/etc. (needs libva), and the
+        #    vendored libva-drm.a in turn calls into libdrm (drmGetMagic/drmGetVersion/etc., needs
+        #    libdrm). See system/loggerd/SConscript + SConstruct's allowed_system_libs for the
+        #    arch-gating (this never touches the device build, which vendors a non-VAAPI ffmpeg).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libusb-1.0-0-dev libva-dev
+          sudo apt-get install -y libusb-1.0-0-dev libva-dev libdrm-dev
       - name: Build (same entrypoint the device runs on boot)
         timeout-minutes: 40
         run: python3 system/manager/build.py
