@@ -80,6 +80,15 @@ jobs:
           max_attempts: 3
           command: git lfs pull
       - run: ./tools/op.sh setup
+      - name: Install system build deps
+        # op.sh setup only installs what tools/setup_dependencies.sh lists (build-essential, curl,
+        # git, xvfb, ...) — it does NOT install libusb-1.0-0-dev. selfdrive/pandad links against
+        # system usb-1.0 (SConstruct whitelists it as a non-vendored lib) but nothing adds the
+        # header to CPPPATH, so a bare runner fails with "libusb-1.0/libusb.h: No such file or
+        # directory". Same fix already proven working in 3pnw-release.yaml's aarch64 compile check.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev
       - name: Build (same entrypoint the device runs on boot)
         timeout-minutes: 40
         run: python3 system/manager/build.py
@@ -101,19 +110,53 @@ jobs:
         run: |
           # NB: the loop body must NOT be in a pipeline — a subshell `exit 1` would not fail the
           # step. Feed the list in via a process substitution and track failures in the parent.
+          #
+          # This was rewritten after the first version false-positived on every submodule except
+          # panda. Two bugs in that version:
+          #  - `git branch -r --contains` inspects the LOCAL clone's remote-tracking refs, but
+          #    actions/checkout does a shallow, detached submodule checkout with no remote-tracking
+          #    branches fetched — there is nothing for --contains to find even when the commit is
+          #    correctly pushed.
+          #  - it read the url straight out of .gitmodules, which is frequently a RELATIVE path
+          #    (e.g. `../pnw-opendbc.git`, `../../commaai/rednose.git`) — not a fetchable url.
+          #
+          # Fix: actions/checkout already resolves each submodule's relative .gitmodules url into
+          # an absolute one, written into that submodule's own `remote.origin.url` — read it from
+          # there instead of hand-rolling the ../ path math. Then, instead of trusting anything in
+          # the local clone (which — by construction — already HAS the pinned commit's object,
+          # since that's what got checked out, so any local-object-existence test trivially passes
+          # even for a commit that was never pushed), fetch the exact pinned sha into a brand-new,
+          # completely empty bare repo. That only succeeds if the REMOTE will actually serve that
+          # commit (GitHub — and most git hosts — refuse `fetch <sha>` for a sha that isn't
+          # reachable from some ref on the remote: "not our ref"). This is exactly what the car
+          # does on `git submodule update`, so it's the most direct test of the real failure mode.
+          # Verified against both a real pushed pin (ok) and a real, valid, but deliberately
+          # unpushed commit object (correctly rejected with "not our ref") before landing this.
           fail=0
           while read -r line; do
             sha=$(echo "$line" | awk '{print $1}' | tr -d '+-')
             path=$(echo "$line" | awk '{print $2}')
             [ -e "$path/.git" ] || continue
-            url=$(git config -f .gitmodules --get "submodule.$path.url" 2>/dev/null || echo "?")
-            git -C "$path" fetch -q --all 2>/dev/null || true
-            if git -C "$path" branch -r --contains "$sha" 2>/dev/null | grep -q .; then
-              echo "ok: $path @ ${sha:0:8}"
+            url=$(git -C "$path" config --get remote.origin.url 2>/dev/null || echo "")
+            if [ -z "$url" ]; then
+              echo "::error::submodule '$path' has no resolvable remote.origin.url — cannot verify its pin"
+              fail=1
+              continue
+            fi
+            # ssh urls (git@host:owner/repo.git) need a deploy key the runner doesn't have —
+            # these are all public repos, so fetch over anonymous https instead.
+            url_https=$(echo "$url" | sed -E 's#^git@([^:]+):#https://\1/#')
+            scratch=$(mktemp -d)
+            git init -q --bare "$scratch"
+            git -C "$scratch" remote add origin "$url_https"
+            if git -C "$scratch" -c credential.helper= fetch -q origin "$sha" 2>/tmp/pin-fetch-err; then
+              echo "ok: $path @ ${sha:0:8} ($url_https)"
             else
-              echo "::error::submodule '$path' is pinned to $sha which is on NO remote branch ($url). Push the companion repo BEFORE bumping the pin, or the car cannot fetch it."
+              echo "::error::submodule '$path' is pinned to $sha which the remote ($url_https) will NOT serve — it was never pushed (or was force-removed). Push the companion repo BEFORE bumping the pin, or the car cannot fetch it."
+              sed 's/^/    /' /tmp/pin-fetch-err
               fail=1
             fi
+            rm -rf "$scratch" /tmp/pin-fetch-err
           done < <(git submodule status --recursive)
           exit $fail
 
@@ -121,21 +164,51 @@ jobs:
       # which crash-loops the UI and has previously looked exactly like a hardware/power fault.
       - name: Params referenced by the UI exist in params_keys.h
         run: |
-          set -e
-          missing=0
-          # Receiver must be a params object — a bare `.get("x")` also matches dicts, capnp
-          # structs and state bags, which produced ~50 false positives when this was first written.
-          keys=$(grep -oE '\{"[A-Za-z0-9_]+"' common/params_keys.h | tr -d '{"' | sort -u)
-          used=$(grep -rhoE '(params|Params\(\))\.(get_bool|get|put_bool|put)\("[A-Za-z0-9_]+"' selfdrive/ui/ \
-                 | grep -oE '"[A-Za-z0-9_]+"' | tr -d '"' | sort -u)
-          for k in $used; do
-            if ! echo "$keys" | grep -qx "$k"; then
-              echo "::error file=common/params_keys.h::UI reads param '$k' which is NOT registered — this crash-loops the UI on the device."
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] && echo "all UI params registered"
-          exit $missing
+          # The first version of this check only matched the literal receivers `params.` and
+          # `Params().`, on the theory that a bare `.get("x")` also matches dicts/capnp
+          # structs/state bags (~50 false positives when first written). That fix over-corrected:
+          # the overwhelming majority of real Params() reads in selfdrive/ui/ go through
+          # `self.params`, `self._params`, `ui_state.params`, `self.mem` or `self._mem` — none of
+          # which matched — so the check was silently checking almost nothing. Rewritten to
+          # discover the actual Params()-typed attribute names from their `X = Params(...)`
+          # assignments, then only accept `.get/.put(...)` calls whose receiver's last dotted
+          # segment is one of those (or a bare `Params()`), which keeps the false-positive fix
+          # while covering the real call sites. This immediately caught a genuine bug: FordLatStatus
+          # (opendbc_repo/opendbc/car/ford/carcontroller.py -> selfdrive/ui/onroad/ces_status.py)
+          # was never registered, so that mem-param always raised UnknownKeyName (swallowed by a
+          # broad except, so it didn't crash-loop — it just silently made the Ford-lateral-status
+          # UI feature permanently dead) — fixed alongside this check in the same commit.
+          python3 - <<'PY'
+          import re, sys, glob
+
+          keys = set(re.findall(r'\{"([A-Za-z0-9_]+)"', open("common/params_keys.h").read()))
+
+          files = glob.glob("selfdrive/ui/**/*.py", recursive=True)
+          texts = {f: open(f, encoding="utf-8", errors="ignore").read() for f in files}
+
+          attr_names = set()
+          assign_re = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*Params\(')
+          for text in texts.values():
+              attr_names.update(m.group(1) for m in assign_re.finditer(text))
+
+          call_re = re.compile(r'([A-Za-z_][A-Za-z0-9_.]*|Params\(\))\.(get_bool|get|put_bool|put)\(\s*["\']([A-Za-z0-9_]+)["\']')
+          used = {}
+          for f, text in texts.items():
+              for lineno, line in enumerate(text.splitlines(), 1):
+                  for receiver, _method, key in call_re.findall(line):
+                      is_params = receiver == "Params()" or receiver.split(".")[-1] in attr_names
+                      if is_params:
+                          used.setdefault(key, (f, lineno))
+
+          missing = sorted(k for k in used if k not in keys)
+          for k in missing:
+              f, lineno = used[k]
+              print(f"::error file={f},line={lineno}::UI reads param '{k}' which is NOT registered in common/params_keys.h — this raises UnknownKeyName on the device.")
+
+          if missing:
+              sys.exit(1)
+          print(f"all {len(used)} UI params registered ({len(attr_names)} Params()-typed receiver names: {sorted(attr_names)})")
+          PY
 
       - name: Python syntax + lint on changed code
         run: |
