@@ -38,7 +38,12 @@ git submodule foreach --recursive git clean -xdff
 # do the files copy
 echo "[-] copying files T=$SECONDS"
 cd $SOURCE_DIR
-cp -pR --parents $(./release/release_files.py) $TARGET_DIR/
+# NB: do NOT do `cp -pR --parents $(./release/release_files.py) ...`. This tree emits ~21k paths
+# (~1.5 MB of argv); a single exec's argument list is capped at ARG_MAX/4 (512 KB on the GitHub
+# runners), so cp dies with E2BIG. Inside $( ) under `set -e` that aborts the script with NO error
+# text at all — the 3pnw aarch64 build failed this way, silently, right after printing
+# "++ ./release/release_files.py". Stream the list into xargs so it batches execs instead.
+./release/release_files.py | tr '\n' '\0' | xargs -0 cp -pR --parents --target-directory="$TARGET_DIR"
 
 # in the directory
 cd $TARGET_DIR
