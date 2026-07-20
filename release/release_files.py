@@ -18,13 +18,23 @@ blacklist = [
   ".git$",
   ".gitmodules",
 
-  # PNW: the 1.7 GB big_driving_supercombo.onnx is USB-GPU-only — the comma 3X never reads its
-  # content (modeld only builds the big pkl when UsbGpuPresent), so .lfsconfig sets
-  # `fetchexclude = *big_driving_supercombo.onnx` to cut ~95% of install/update download bytes.
-  # Consequence: `git lfs pull` deliberately leaves it as a ~135 B POINTER, and build_stripped.sh's
-  # `git lfs ls-files` guard then aborts the release with "LFS files detected!". Shipping a pointer
-  # file masquerading as a model would be worse than omitting it, so exclude it from the release
-  # tree outright. Anyone who genuinely needs it on a USB-GPU host pulls it explicitly:
+  # ==============================================================================================
+  # EXCLUDED BY DEFAULT — AND IT MUST STAY THAT WAY. Paired with .lfsconfig's fetchexclude; if you
+  # ever change one, change the other.
+  # ==============================================================================================
+  # big_driving_supercombo.onnx is 1.7 GB and is ONLY ever read on an external-GPU
+  # (eGPU-via-tinygrad) host — modeld builds the big pkl solely when UsbGpuPresent. The comma 3X
+  # never touches its content, so shipping it would add ~95% to every install and update download
+  # for zero benefit on the car.
+  #
+  # It is also excluded from LFS fetches (.lfsconfig `fetchexclude`), which means `git lfs pull`
+  # deliberately leaves it as a ~135 B POINTER on disk. Including it here would therefore put a
+  # pointer file masquerading as a 1.7 GB model into the release tree — and trip
+  # build_stripped.sh's `git lfs ls-files` guard, aborting the release with "LFS files detected!"
+  # (this broke the 3pnw aarch64 build on 2026-07-20).
+  #
+  # Planned: an eGPU toggle will make this opt-in for the (rare) tinygrad-on-external-GPU setup.
+  # Until then, fetch it by hand if you actually need it:
   #   git lfs pull --include big_driving_supercombo.onnx
   "big_driving_supercombo.onnx",
 ]
