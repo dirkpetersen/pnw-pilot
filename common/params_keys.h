@@ -157,6 +157,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESButtonState", {CLEAR_ON_MANAGER_START, INT, "0"}},  // ces2xnor: 0=CES 1=Chill 2=Exp (per-drive)
     {"CESStatus", {CLEAR_ON_MANAGER_START, JSON}},  // ces2xnor: live telemetry (selfdrived -> UI overlay)
     {"IcbmTarget", {CLEAR_ON_MANAGER_START, JSON}}, // icbm2pnw: stock-ACC set-speed target (ces brain -> ford carcontroller executor), mem-param
+    {"SpeedAdjustTarget", {CLEAR_ON_MANAGER_START, JSON}}, // speedadjust-exec2pnw: stock-ACC set-speed target for police/limit reduce-only caps (speedadjust brain -> ford carcontroller executor, arbitrated there against IcbmTarget), mem-param. Same {target,ceiling,ts,dir?} shape as IcbmTarget.
     {"FordLatStatus", {CLEAR_ON_MANAGER_START, JSON}}, // fordlatui2pnw: which lateral path is live (opendbc ford carcontroller -> UI mismatch warning), mem-param. Was previously UNREGISTERED (caught by the release-prep params check 2026-07-20) -- the UI read silently swallowed UnknownKeyName, so the mismatch warning was permanently dead.
     {"VTSCStatus", {CLEAR_ON_MANAGER_START, JSON}}, // vtsc: live status (plannerd -> UI overlay). Gated on the CES toggle.
     {"LaneCenterStatus", {CLEAR_ON_MANAGER_START, JSON}}, // lanecenter2pnw telemetry: per-tick status (controlsd -> CES event logger), ~5 Hz. mem-param, /dev/shm/params, same pattern as VTSCStatus.

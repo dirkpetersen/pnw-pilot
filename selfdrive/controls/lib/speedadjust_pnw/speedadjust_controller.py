@@ -11,13 +11,39 @@ Selector param `AutoSpeedReduce` (INT, default 0):
   1 = Police         → ease to (posted speed limit + 5 mph) when a police report is ~30 s ahead
   2 = Police+Limits  → ALSO cap proportionally when the posted limit drops (keeps your over-limit ratio)
 
-Works in BOTH Chill and Experimental (it caps `v_cruise`, which both modes honour). Only acts when
-openpilot controls longitudinal (op-long); returns v_cruise unchanged otherwise, so it's behaviour-
-neutral by default. Inputs are read from params at ~1 Hz — `MapSpeedLimit` + `LocationServices` from
-the /dev/shm mem store (written by the mapd bridge / location_servicesd) and `AutoSpeedReduce`
-persistent — with **NO msgq subscriptions** (the background-subscriber cascade lesson).
+Works in BOTH Chill and Experimental (it caps `v_cruise`, which both modes honour). The RETURNED cap
+only ever feeds the op-long MPC path, so `cap()`'s return value stays exactly what it always was —
+`v_cruise` unchanged whenever openpilot does not own longitudinal (op-long off), so this function is
+still behaviour-neutral by default on that axis. Inputs are read from params at ~1 Hz — `MapSpeedLimit`
++ `LocationServices` from the /dev/shm mem store (written by the mapd bridge / location_servicesd) and
+`AutoSpeedReduce` persistent — with **NO msgq subscriptions** for those reads (the background-
+subscriber cascade lesson); `sm['carState']` (already subscribed by plannerd at its normal control
+rate — not a new subscription) is read only as a defense-in-depth abort signal for the restore window
+below.
 
 Runs inside plannerd (20 Hz) via the planner's cap chain. Pure-ish: only param reads + monotonic time.
+
+speedadjust-exec2pnw (2026-08): the reduce-only cap math ITSELF now runs identically regardless of
+op-long — plannerd runs on every car (not gated on openpilotLongitudinalControl), so the target was
+always being computed for op-long cars but silently discarded for stock-ACC ones. On a car with NO
+op-long (the Lightning in its normal stock-ACC mode), this module ADDITIONALLY publishes its computed
+target as a `SpeedAdjustTarget` mem-param (`CLEAR_ON_MANAGER_START`, JSON) in the SAME
+`{target, ceiling, ts, dir?}` shape as icbm2pnw's `IcbmTarget` — so a capability-gated, per-brand
+stock-ACC button-tap executor (today: `opendbc/car/ford/icbm_pnw.py`, gated on
+`PnwVehicle.button_management`) can steer the truck's own SET-/SET+ buttons toward it, exactly the
+way icbm2pnw already does for curve slow-downs. Both mem-params share ONE executor; `arbitrate()`
+(icbm_pnw.py) reduces whichever brains are live down to a single most-restrictive target every poll —
+see `docs/pnw/SPEEDADJUST-EXECUTOR.md` for the full design. This module stays fully car-agnostic: it never
+checks carFingerprint/brand, only `self._long_ok` (openpilotLongitudinalControl) — the actual per-car
+capability gating lives in `PnwVehicle`/`icbm_pnw.py`, not here.
+
+The mem-param publish also includes a bounded (`RESTORE_WINDOW_S`, matching icbm2pnw's convention) SET+
+restore back to the ceiling latched at cap-engage once the cap clears — deliberately SIMPLER than
+icbm2pnw's full episode state machine: it does not track the truck's own reported stock set speed at
+all (the shared executor's `decide_press`/`RestoreGuard` already do that closed-loop, human-detection
+work directly off the real CAN state); this brain only decides WHEN a restore should be offered
+(bounded window, canceled instantly by a new cap or `sm['carState']` driver/ACC intervention) and
+WHAT ceiling to offer, never above the driver's own pre-cap set.
 
 speedanchor2pnw (2026-07-18, three review-caught fixes to the anchor/seed math — none change the
 reduce-only envelope, all conservative):
@@ -61,6 +87,12 @@ READ_S = 1.0                             # param read cadence
 SL_HOLD_S = 5.0                          # hold the last valid posted limit through brief map dropouts
 CAP_SLEW = 1.0                           # m/s per s — emitted cap RAMPS toward its target, never steps
 RELEASE_S = 2.0                          # cap sources must stay clear this long before the cap releases
+# speedadjust-exec2pnw: the stock-ACC button-management publish (mem-param only; never touches the
+# op-long return value)
+PUB_THROTTLE_S = 0.25                    # publish cadence — matches icbm2pnw's IcbmTarget cadence,
+                                          # well inside the executor's STALE_LIMIT_S=2.0
+RESTORE_WINDOW_S = 45.0                  # bounded SET+ walk-back window after a cap clears — matches
+                                          # icbm2pnw's own restore-episode window convention
 
 
 class SpeedAdjustController:
@@ -91,6 +123,14 @@ class SpeedAdjustController:
     self._cap_out = None         # the SLEWED cap currently emitted (None = not capping)
     self._release_t = None       # when the cap sources first went clear (release debounce)
     self._last_t = None          # last cap() call time (for slew dt)
+    # speedadjust-exec2pnw: stock-ACC button-management publish state (SpeedAdjustTarget mem-param).
+    # Inert / never touched on any op-long car (self._long_ok True) -- see _publish_target().
+    self._pub_ceiling = None     # driver's set latched at cap ENGAGE (icbm2pnw ceiling parity)
+    self._restore_ceiling = None # active bounded-restore target (None = no restore in progress)
+    self._restore_deadline = None  # monotonic deadline for the bounded restore window
+    self._pub_last = -1e9        # publish throttle (monotonic)
+    self._pub_active = False     # was the last SpeedAdjustTarget publish non-idle (need one more
+                                  # publish to clear it to {} on the transition to idle)
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -199,6 +239,72 @@ class SpeedAdjustController:
       return None
     return max(sl, sl * self._ratio)         # proportional trim, but NEVER below the posted limit
 
+  # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
+  def _publish_target(self, target, ceiling=None, direction="dec") -> None:
+    """Publish (or clear) the SpeedAdjustTarget mem-param for the shared stock-ACC button executor.
+    Car-agnostic: no fingerprint/brand check here — gated ONLY on self._long_ok (this is the ONE
+    choke point every call site funnels through, so a future call site can't forget the gate): a
+    no-op on any op-long car, since nothing there ever reads this mem-param — the op-long return
+    value from cap() is the only thing that ever steers those cars. target=None -> publish {} exactly
+    once on the active->idle transition (never spammed every idle tick); otherwise throttled to
+    PUB_THROTTLE_S. Best-effort: NEVER raises into the control path."""
+    if self._long_ok or self.mem_params is None:
+      return
+    now = time.monotonic()
+    if target is None:
+      if self._pub_active:
+        try:
+          self.mem_params.put_nonblocking("SpeedAdjustTarget", {})
+        except Exception:
+          pass
+        self._pub_active = False
+        self._pub_last = now
+      return
+    if now - self._pub_last < PUB_THROTTLE_S:
+      return
+    self._pub_last = now
+    self._pub_active = True
+    try:
+      payload = {"target": round(float(target), 2), "ceiling": round(float(ceiling), 2),
+                 "ts": time.time()}  # noqa: TID251 -- wall clock heartbeat shared with the executor
+      if direction == "inc":
+        payload["dir"] = "inc"
+      self.mem_params.put_nonblocking("SpeedAdjustTarget", payload)
+    except Exception:
+      pass
+
+  @staticmethod
+  def _driver_intervening(sm) -> bool:
+    """speedadjust-exec2pnw: defense-in-depth abort for the restore window ONLY (mirrors icbm2pnw's
+    "driver gas/brake or ACC-off in ANY phase" abort matrix entry). The shared executor's
+    decide_press()/RestoreGuard already independently gate EVERY press on the same signals read
+    directly off the real stock CAN state at the Ford carcontroller layer — this is a belt-and-
+    suspenders check at the brain layer, not the only guard. sm may be None (unit tests / no
+    SubMaster) or missing carState -> defensively "not intervening" (never raises)."""
+    if sm is None:
+      return False
+    try:
+      cs = sm['carState']
+      return bool(cs.gasPressed or cs.brakePressed or not cs.cruiseState.enabled)
+    except Exception:
+      return False
+
+  def _step_restore(self, now: float, sm) -> None:
+    """Bookkeeping + publish for the bounded restore window (see module docstring). Called only from
+    inside `cap()` while NOT actively capping. Cancels the moment: the window (RESTORE_WINDOW_S)
+    expires, the car is op-long (belt-and-suspenders — callers already gate on `not self._long_ok`
+    before starting a restore, so this only matters if that ever changes), or `sm['carState']` shows
+    driver/ACC intervention."""
+    if self._restore_ceiling is None:
+      self._publish_target(None)
+      return
+    if self._long_ok or now > self._restore_deadline or self._driver_intervening(sm):
+      self._restore_ceiling = None
+      self._restore_deadline = None
+      self._publish_target(None)
+      return
+    self._publish_target(self._restore_ceiling, self._restore_ceiling, "inc")
+
   # ---- the cap the planner folds (reduce-only) ------------------------------
   def cap(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float, v_cruise_initialized: bool) -> float:
     """
@@ -227,18 +333,32 @@ class SpeedAdjustController:
       self._police_latched = False
       self._cap_out = None
       self._release_t = None
+      # speedadjust-exec2pnw: an uninitialized cruise can't be a valid restore ceiling either.
+      self._pub_ceiling = None
+      self._restore_ceiling = None
+      self._restore_deadline = None
+      self._publish_target(None)
       return v_cruise
 
-    if self._mode == 0 or not self._long_ok:
+    if self._mode == 0:
       self._engaged = False
       self._police_latched = False
       self._cap_out = None
       self._release_t = None
+      self._pub_ceiling = None
+      self._restore_ceiling = None
+      self._restore_deadline = None
       self._sl_ref = self._sl                # keep baseline current while idle (no stale drop on enable)
       # speedanchor2pnw (F2): anchor off the raw set, not a VTSC-curve-reduced v_cruise.
       self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
+      self._publish_target(None)
       return v_cruise
 
+    # speedadjust-exec2pnw: the cap math below now runs for EVERY mode != 0 car, regardless of
+    # self._long_ok — plannerd runs on every car, so the target was always being computed for
+    # op-long cars and silently discarded otherwise. The RETURN value at the bottom stays gated on
+    # self._long_ok exactly as before (unchanged op-long behavior); the NEW mem-param publish is a
+    # pure side effect that only ever fires when not self._long_ok (see _publish_target()).
     caps = []
     pc = self._police_cap(v_cruise_set, v_ego)   # modes 1 and 2
     if pc is not None:
@@ -256,19 +376,35 @@ class SpeedAdjustController:
       # release DEBOUNCE: sources must stay clear for RELEASE_S before the cap lets go — an
       # engage/release oscillation (flapping source) was half of the "wild horse" ride.
       if self._cap_out is None:
+        # not currently capping (and the debounce already ran its course, if any) -- offer/continue
+        # any pending bounded restore.
+        self._step_restore(now, sm)
         return v_cruise
       if self._release_t is None:
         self._release_t = now
       if now - self._release_t < RELEASE_S:
+        self._publish_target(self._cap_out, self._pub_ceiling, "dec")  # still capping through debounce
         return max(0.0, min(v_cruise, self._cap_out))   # hold the last cap through the debounce window
+      # debounce elapsed -> the cap fully releases. speedadjust-exec2pnw: hand off to a bounded SET+
+      # restore back to the ceiling this cap latched at engage (stock-ACC only -- _step_restore() is a
+      # no-op on any op-long car since _pub_ceiling is never consulted there).
+      if not self._long_ok and self._pub_ceiling is not None:
+        self._restore_ceiling = self._pub_ceiling
+        self._restore_deadline = now + RESTORE_WINDOW_S
       self._cap_out = None
       self._release_t = None
+      self._pub_ceiling = None
       if self._engaged:
         self._engaged = False
         cloudlog.info("speedadjust: released -> cruise")
+      self._step_restore(now, sm)
       return v_cruise
 
     self._release_t = None
+    # speedadjust-exec2pnw: a NEW cap always preempts any in-progress restore (DEC ALWAYS WINS, same
+    # principle icbm2pnw's episode machine uses for its own new-cap-vs-restore conflicts).
+    self._restore_ceiling = None
+    self._restore_deadline = None
     target = max(MIN_CAP, min(caps))          # floor rejects garbage-low targets
     # SLEW: the emitted cap RAMPS toward its target instead of stepping — a step target made the MPC
     # chase a square wave. Seeds at the driver's RAW set on engage (no initial jump — see speedanchor2pnw
@@ -282,12 +418,21 @@ class SpeedAdjustController:
       # target ("won't come back up to my set"). `out` below is still bounded by the effective `v_cruise`
       # on every tick, so seeding high here can never cause a jump — the min() catches it immediately.
       self._cap_out = v_cruise_set
+      # speedadjust-exec2pnw: latch the ceiling at cap ENGAGE (icbm2pnw ceiling-latch parity) — the
+      # value a later bounded restore may walk back up to, never higher.
+      self._pub_ceiling = v_cruise_set
     if target < self._cap_out:
       self._cap_out = max(target, self._cap_out - CAP_SLEW * dt)
     else:
       self._cap_out = min(target, self._cap_out + CAP_SLEW * dt)
     out = max(0.0, min(v_cruise, self._cap_out))   # reduce-only — never raise above the driver's set
+    # speedadjust-exec2pnw: publish the SAME slewed cap value the op-long path would consume — the
+    # stock-ACC executor taps toward the identical target, just via buttons instead of the MPC.
+    self._publish_target(self._cap_out, self._pub_ceiling, "dec")
     if not self._engaged:
       self._engaged = True
       cloudlog.info(f"speedadjust: engaged mode={self._mode} cap={out:.1f} (police={pc} sl={self._sl:.1f})")
-    return out
+    # speedadjust-exec2pnw: the RETURN value stays exactly what it always was -- only an op-long car
+    # ever gets a non-neutral v_cruise back from this function. Stock-ACC cars are steered solely via
+    # the SpeedAdjustTarget mem-param publish above, never through this return path.
+    return out if self._long_ok else v_cruise

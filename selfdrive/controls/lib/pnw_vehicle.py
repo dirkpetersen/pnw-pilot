@@ -261,12 +261,28 @@ class PnwVehicle:
     # in the ford carcontroller; 0x083 is TX-allowlisted). Today: the 2025 F-150 Lightning.
     self.stock_acc_buttons: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # speedadjust-exec2pnw: the ONE generic capability that gates the shared stock-ACC button-tap
+    # executor (opendbc/car/ford/icbm_pnw.py) — mirrors opendbc/car/pnw_vehicle.py's identically-
+    # named field (kept in sync there; opendbc cannot import this openpilot-side module). True
+    # whenever this car has stock-ACC buttons AND openpilot does NOT own longitudinal. Car-agnostic
+    # by construction: ANY car-agnostic pnw brain that publishes a {target, ceiling, ts, dir?}
+    # mem-param (today: ces_pnw.py's IcbmTarget curve brain, speedadjust_controller.py's
+    # SpeedAdjustTarget police/limit brain) gets slowdowns for free on any car declaring this
+    # capability — the executor arbitrates every live brain's command down to one target and has no
+    # notion of "which feature". Neither brain checks carFingerprint/brand; this is the ONE place
+    # that does.
+    self.button_management: bool = self.stock_acc_buttons and not self.op_long
+
     # CES runs in SHADOW (decisions/telemetry/overlay, planner never actuates) with ICBM as the
     # actuator — exactly when the car has ACC buttons to steer and openpilot does NOT own long.
-    self.ces_shadow: bool = self.stock_acc_buttons and not self.op_long
+    self.ces_shadow: bool = self.button_management
 
     # CES can act on this car at all (planner via op-long, or ICBM via buttons)
     self.ces_capable: bool = self.op_long or self.ces_shadow
+
+    # speedadjust-exec2pnw: same capability under the feature's own name, for any call site that
+    # wants to name the feature rather than the umbrella mechanism (e.g. future UI/telemetry).
+    self.speedadjust_buttons: bool = self.button_management
 
     # nudgeless (blinker-hold) lane change support — BSM-gated in DesireHelper
     self.nudgeless: bool = brand == "tesla" or fp == "FORD_F_150_LIGHTNING_MK1"
