@@ -1618,6 +1618,7 @@ class CESController:
     self._last_mode = "off"         # last logged mode: off / chill / experimental
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
+    self._steer_tick_last = 0.0     # cessteerlog2pnw: monotonic stamp of last CES-off steer breadcrumb
     self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
     self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
     self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
@@ -1888,6 +1889,10 @@ class CESController:
       self._stock_set, self._stock_on = 0.0, False
     # greenlight2pnw: always-on (independent of CESMode/_enabled — display/sound only)
     self._green_light_step(car_state, sm)
+    # cessteerlog2pnw: unconditional steer/lane-centering breadcrumb — no-ops once _enabled is True
+    # (the normal tick/adopt path below already logs the same fields), so this only ever adds the
+    # CES-off records that were previously missing from the log entirely.
+    self._steer_log_step(car_state)
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -2023,6 +2028,62 @@ class CESController:
       ev = None
     self.green_light = ev == GL_EV_GREEN
     self.lead_departing = ev == GL_EV_LEAD
+
+  def _steer_log_step(self, car_state) -> None:
+    """cessteerlog2pnw: LOGGING ONLY. The sl*/lc*/vtsc* steering/lane-centering diagnostics in the
+    normal tick/adopt records (_event_record) are only ever written while CES is enabled
+    (CESMode>0) — _read_params() only calls _read_map() (which refreshes those fields from the
+    SteerLimitStatus/LaneCenterStatus/VTSCStatus mem-params) inside `if self._enabled:`. On a
+    CES-off drive that leaves steering behavior completely invisible in ces_events.jsonl. This
+    method closes that gap with its own throttled (~C.TICK_S, same cadence as the normal tick)
+    breadcrumb, mirroring _green_light_step's "always-on, log-validation channel" pattern:
+      - runs BEFORE the `if not self._enabled: return False` gate in experimental_request, but
+        no-ops immediately once _enabled is True, so it NEVER duplicates the existing tick/adopt
+        record and never runs while CES is on;
+      - when CES is off, calls _read_map() itself (the thing _read_params() skips) — that method
+        is a pure, defensive read against self.mem_params (published by controlsd independent of
+        CES) with try/except around every field, so it is safe to call regardless of _enabled;
+      - does NOT call experimental_request's own decision logic, _publish_status, the ICBM
+        executor, CES2, or any mode/actuator path — only reads mem-params and appends one JSONL
+        record via the same best-effort _append_event used everywhere else in this file.
+    Any exception here is swallowed; a broken breadcrumb must never affect control."""
+    if self._enabled:
+      return   # the enabled tick/adopt path already logs sl*/lc*/vtsc* once per ~1 Hz — no duplicate
+    now = time.monotonic()
+    if now - self._steer_tick_last < C.TICK_S:
+      return
+    self._steer_tick_last = now
+    try:
+      self._read_map()   # refresh sl*/lc*/vtsc*/GPS fields that _read_params() skips while CES is off
+      try:
+        v_ego = round(float(getattr(car_state, 'vEgo', 0.0)), 2)
+      except Exception:
+        v_ego = 0.0
+      now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
+      rec = {
+        "t": round(now_wall, 1),
+        # cesOff: True means self._enabled is False here — this can include CESMode 1/2 (Light/
+        # Standard) when the car has neither op-long nor shadow (see _enabled's definition).
+        "ev": "steer", "cesOff": True, "cesMode": self._mode, "car": self._car, "vEgo": v_ego,
+        "gps": self._cur_lat is not None and self._cur_lon is not None,
+        "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
+        "spdLim": round(self._speed_limit, 1) if self._speed_limit else 0.0,
+        # VTSC applied cap + state (from VTSCStatus) — same fields as the enabled-path tick record.
+        "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
+        # lanecenter2pnw fields (from LaneCenterStatus) — same subset the enabled-path tick logs.
+        "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
+        # steerlimit-log2pnw / steertele2pnw / fordkappalog2pnw fields (from SteerLimitStatus).
+        "slCurvLim": self._sl_curv_lim, "slSafetyLim": self._sl_safe_lim,
+        "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
+        "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
+        "slSat": self._sl_sat, "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
+        "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+      }
+      if clock_bad(now_wall):
+        rec["clockBad"] = True
+      self._append_event(rec)
+    except Exception:
+      pass
 
   def _icbm_step(self, sig, active: bool) -> None:
     """Publish the IcbmTarget mem-param at ~4 Hz (executor treats >2 s silence as stale-stop).
