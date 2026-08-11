@@ -11,7 +11,8 @@ v_cruise_initialized explicitly to exercise the three speedanchor2pnw fixes."""
 import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
-  SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S)
+  SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
+  SA_DRIVER_LOWER_TOL)
 
 MPH = MPH_TO_MS
 V75 = 75 * MPH
@@ -469,15 +470,16 @@ def test_new_cap_preempts_restore():
 
 
 class _FakeCruiseState:
-  def __init__(self, enabled=True):
+  def __init__(self, enabled=True, speed=0.0):
     self.enabled = enabled
+    self.speed = speed          # restore-hardening: the truck's OWN reported stock-ACC set speed
 
 
 class _FakeCS:
-  def __init__(self, gas=False, brake=False, cruise_enabled=True):
+  def __init__(self, gas=False, brake=False, cruise_enabled=True, speed=0.0):
     self.gasPressed = gas
     self.brakePressed = brake
-    self.cruiseState = _FakeCruiseState(cruise_enabled)
+    self.cruiseState = _FakeCruiseState(cruise_enabled, speed)
 
 
 def test_restore_aborted_by_driver_gas():
@@ -533,6 +535,173 @@ def test_mode_off_cancels_pending_restore():
   _tick(c)
   assert c._restore_ceiling is None
   assert c.mem_params.last == {}
+
+
+class _FakeAxis:
+  def __init__(self, x=None, z=None):
+    self.x = x
+    self.z = z
+
+
+class _FakeModelV2:
+  """orientationRate.z[0] * velocity.x[0] == lat_accel when v_ego != 0 (matches ces_pnw's own
+  measured-now lateral accel formula, which _in_curve() mirrors)."""
+  def __init__(self, lat_accel=0.0, v_ego=30.0):
+    self.orientationRate = _FakeAxis(z=[lat_accel / v_ego if v_ego else 0.0])
+    self.velocity = _FakeAxis(x=[v_ego])
+
+
+def _sm(gas=False, brake=False, cruise_enabled=True, speed=0.0, lat_accel=None, v_ego=30.0):
+  d = {"carState": _FakeCS(gas=gas, brake=brake, cruise_enabled=cruise_enabled, speed=speed)}
+  if lat_accel is not None:
+    d["modelV2"] = _FakeModelV2(lat_accel=lat_accel, v_ego=v_ego)
+  return d
+
+
+# ---- restore2pnw-hardening (2026-08, Gemini + Fable review) -----------------
+# finding #1 (BLOCKER): the restore must never command the truck above the driver's CURRENT live
+# stock set -- neither by ignoring a driver SET- during the cap, nor by ignoring one during the
+# restore window itself.
+
+def test_restore_blocked_when_driver_set_lower_than_commanded_during_cap():
+  # THE critical regression: while capping, the driver independently taps SET- on the truck's OWN
+  # stock ACC, landing the reported stock set BELOW anything speedadjust ever asked for -- that is the
+  # driver's own intent. When the cap later clears, speedadjust must NOT restore up to the stale
+  # pre-cap ceiling (it would accelerate the truck past what the driver just chose).
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                              # cap engages + fully slews; ceiling latched 75
+  target_now = c.mem_params.last["target"]              # our own commanded floor (~V60+POLICE_MARGIN)
+  driver_set = target_now - 5 * MPH                      # driver pushed noticeably BELOW our own target
+  for _ in range(5):
+    _tick(c, v_cruise=V75, v_ego=V60, sm=_sm(speed=driver_set))
+  c._police = {"state": "clear"}                        # source clears
+  _tick(c, sm=_sm(speed=driver_set))
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c, sm=_sm(speed=driver_set))                     # cap fully releases
+  assert c._restore_ceiling is None                      # NO restore offered -- driver's own intent wins
+  payload = c.mem_params.last
+  assert payload == {} or payload.get("dir") != "inc"    # never asked to press SET+
+
+
+def test_restore_proceeds_when_driver_dip_explained_by_our_own_tap_lag():
+  # counter-case: a small dip that's still ABOVE anything we ever commanded (our own tap latency, not
+  # a genuine driver SET-) must NOT block the restore.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  target_now = c.mem_params.last["target"]
+  slight_lag = target_now + 0.1 * MPH                    # still above our own commanded floor
+  _tick(c, v_cruise=V75, v_ego=V60, sm=_sm(speed=slight_lag))
+  c._police = {"state": "clear"}
+  _tick(c, sm=_sm(speed=slight_lag))
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c, sm=_sm(speed=slight_lag))
+  assert c._restore_ceiling is not None                  # restore proceeds normally
+  assert abs(c._restore_ceiling - V75) < 0.5
+
+
+def test_restore_ceiling_ratchets_down_to_live_driver_set_during_restore():
+  # the restore window itself must track a driver SET- happening WHILE it's in progress -- never
+  # publish/press toward anything above the truck's own current live reported set. A restore starts
+  # BELOW the ceiling by design (that's the gap being walked up), so the ratchet is relative to the
+  # last OBSERVED value during the restore (mirrors icbm_pnw.RestoreGuard), not the raw current
+  # reading -- establish a rising baseline first (as real taps would produce), then a genuine decrease.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins, ceiling ~= V75
+  assert abs(c._restore_ceiling - V75) < 0.5
+  near_ceiling = V75 - 2 * MPH                            # taps have walked it most of the way up
+  _tick(c, sm=_sm(speed=near_ceiling))                    # establishes the observed baseline
+  assert c._restore_ceiling is not None and c._restore_ceiling > near_ceiling
+  lower = 65 * MPH                                        # driver taps SET- mid-restore (a real drop)
+  assert lower < near_ceiling - SA_DRIVER_LOWER_TOL        # sanity: a real, unambiguous decrease
+  _tick(c, sm=_sm(speed=lower))
+  assert c._restore_ceiling <= lower + 0.05                # ratcheted down (2-decimal publish rounding)
+  payload = c.mem_params.last
+  if payload.get("dir") == "inc":
+    assert payload["target"] <= lower + 0.05
+    assert payload["ceiling"] <= lower + 0.05
+
+
+def test_restore_ceiling_never_ratchets_up():
+  # the ratchet is DOWN-only: a stock set reading ABOVE the current restore ceiling (e.g. our own tap
+  # having just landed) must never raise the ceiling past the original driver ceiling.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)
+  ceiling_before = c._restore_ceiling
+  above = V75 + 10 * MPH                                  # implausible reading above the driver's set
+  _tick(c, sm=_sm(speed=above))
+  assert c._restore_ceiling <= ceiling_before + 1e-6
+
+
+def test_pedal_press_during_cap_does_not_stop_dec_publish():
+  # restore-hardening must NEVER weaken the dec/cap slow-down side: a pedal press mid-cap clears the
+  # RESTORE bookkeeping (_pub_ceiling) but the cap (dec) target must keep publishing every tick.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  assert c._pub_ceiling is not None
+  _tick(c, sm=_sm(gas=True))                              # driver presses the gas mid-cap
+  assert c._pub_ceiling is None                            # restore bookkeeping cleared
+  assert c._min_pub_target is None
+  payload = c.mem_params.last
+  assert payload is not None and payload != {}
+  assert "dir" not in payload                              # still a dec publish, never dropped
+  assert payload.get("ceiling") is not None
+
+
+def test_pedal_press_during_cap_prevents_later_restore():
+  # mirrors ces_pnw.IcbmEpisode: a pedal press mid-cap kills the restore episode identity entirely --
+  # even after the pedal is released and the cap continues/re-releases, no restore is offered this run.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  _tick(c, sm=_sm(gas=True))                              # pedal mid-cap
+  _tick(c)                                                # pedal released, still capping
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # cap releases
+  assert c._restore_ceiling is None                        # no restore -- episode was killed
+
+
+# finding #3: the restore must not BEGIN/CONTINUE while laterally loaded in a curve.
+
+def test_restore_pauses_in_curve():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins
+  assert c._restore_ceiling is not None
+  n_before = len(c.mem_params.calls)
+  c._last_t -= 0.5
+  c._pub_last -= 1.0
+  out = c.cap(_sm(speed=V60, lat_accel=2.5, v_ego=30.0), V75, V75, V60, True)
+  assert out == V75                                        # neutral op-long return, unaffected
+  assert c._restore_ceiling is not None                     # episode still alive -- PAUSED, not aborted
+  assert len(c.mem_params.calls) == n_before                # no fresh publish while paused
+
+
+def test_restore_resumes_after_curve_clears():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins
+  c._last_t -= 0.5
+  c._pub_last -= 1.0
+  c.cap(_sm(speed=V60, lat_accel=2.5, v_ego=30.0), V75, V75, V60, True)   # in curve: paused
+  assert c._restore_ceiling is not None
+  _tick(c, sm=_sm(speed=V60))                              # curve clears (no modelV2 -> not in curve)
+  payload = c.mem_params.last
+  assert payload.get("dir") == "inc"                        # resumed
 
 
 def test_uninitialized_cruise_cancels_pending_restore():

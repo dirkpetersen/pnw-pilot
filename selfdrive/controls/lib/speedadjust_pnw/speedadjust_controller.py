@@ -93,6 +93,18 @@ PUB_THROTTLE_S = 0.25                    # publish cadence — matches icbm2pnw'
                                           # well inside the executor's STALE_LIMIT_S=2.0
 RESTORE_WINDOW_S = 45.0                  # bounded SET+ walk-back window after a cap clears — matches
                                           # icbm2pnw's own restore-episode window convention
+# restore2pnw-hardening (2026-08, Gemini + Fable review): the restore (SET+) path must never command
+# the truck above the driver's OWN current live stock set. These mirror ces_pnw.IcbmEpisode's own
+# guards (see its docstring / ~line 596-693) rather than reinventing them:
+SA_STEP_MS = 1.0 * MPH_TO_MS              # one Ford SET tap (mirrors opendbc/car/ford/icbm_pnw.STEP_MS)
+SA_DRIVER_LOWER_TOL = 1.7 * SA_STEP_MS    # mirrors ces_pnw.ICBM_DRIVER_LOWER_TOL: a live stock set this
+                                           # far below anything WE'VE ever commanded this cap is the
+                                           # driver's own SET-, not our own tap lag/latency
+SA_IN_CURVE_LAT_ACCEL = 1.3               # m/s^2; mirrors ces_pnw.ces_pnw_constants.CURVE_LAT_ACCEL_EXIT
+                                           # (the "curve considered done" hysteresis used by
+                                           # ces_pnw.icbm_in_curve's measured-now test) — kept as a LOCAL
+                                           # constant rather than an import so this module stays fully
+                                           # decoupled from ces_pnw (no cross-feature coupling)
 
 
 class SpeedAdjustController:
@@ -128,6 +140,14 @@ class SpeedAdjustController:
     self._pub_ceiling = None     # driver's set latched at cap ENGAGE (icbm2pnw ceiling parity)
     self._restore_ceiling = None # active bounded-restore target (None = no restore in progress)
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
+    self._min_pub_target = None  # restore-hardening #1: running MIN of _cap_out published this cap
+                                  # episode — the "explainability floor" (mirrors ces_pnw's
+                                  # IcbmEpisode._min_target): a live stock set below this by more than
+                                  # SA_DRIVER_LOWER_TOL is the driver's OWN doing, not ours
+    self._restore_last_stock = None  # restore-hardening #1: last observed live stock set DURING an
+                                      # active restore (mirrors icbm_pnw.RestoreGuard) — a DECREASE
+                                      # relative to this, not merely "below the ceiling", ratchets the
+                                      # restore ceiling down
     self._pub_last = -1e9        # publish throttle (monotonic)
     self._pub_active = False     # was the last SpeedAdjustTarget publish non-idle (need one more
                                   # publish to clear it to {} on the transition to idle)
@@ -265,7 +285,13 @@ class SpeedAdjustController:
     self._pub_last = now
     self._pub_active = True
     try:
-      payload = {"target": round(float(target), 2), "ceiling": round(float(ceiling), 2),
+      # restore-hardening: ceiling can legitimately be None here (e.g. a pedal/ACC-off intervention
+      # cleared _pub_ceiling mid-cap — see cap()) — fall back to target itself (self-clamping, a no-op
+      # for a dec command) rather than let a bare float(None) silently drop this publish and starve
+      # the executor of the dec target for the rest of the cap. That would WEAKEN the dec/slow-down
+      # side, which must never happen.
+      ceiling_val = float(ceiling) if ceiling is not None else float(target)
+      payload = {"target": round(float(target), 2), "ceiling": round(ceiling_val, 2),
                  "ts": time.time()}  # noqa: TID251 -- wall clock heartbeat shared with the executor
       if direction == "inc":
         payload["dir"] = "inc"
@@ -289,6 +315,41 @@ class SpeedAdjustController:
     except Exception:
       return False
 
+  @staticmethod
+  def _read_stock_set(sm) -> float:
+    """restore-hardening #1: the truck's OWN reported stock-ACC set speed (m/s) — the live ground
+    truth the restore ceiling must never be commanded above. Returns 0.0 (== "no evidence", NOT "the
+    driver commanded 0") whenever the value is absent/unreadable, and also whenever it reports
+    0/standby (observed on ACC-off) — callers must treat 0.0 as "unknown", never as a driver-chosen
+    floor. sm may be None/missing carState (unit tests, or a background-only sm) -> 0.0, never raises."""
+    if sm is None:
+      return 0.0
+    try:
+      v = float(sm['carState'].cruiseState.speed)
+      return v if v > 0.0 else 0.0
+    except Exception:
+      return 0.0
+
+  @staticmethod
+  def _in_curve(sm) -> bool:
+    """restore-hardening #3: True while the vehicle is laterally loaded in a curve RIGHT NOW — mirrors
+    ces_pnw.icbm_in_curve's measured-now test (yaw_rate * v_ego from the model's first point, against
+    the CURVE_LAT_ACCEL_EXIT hysteresis) WITHOUT importing ces_pnw (see SA_IN_CURVE_LAT_ACCEL — no
+    cross-feature coupling). The restore must not BEGIN and a running restore must PAUSE while this is
+    True, exactly like ces_pnw.IcbmEpisode: never raise the stock set speed mid-curve. sm may be
+    None/missing modelV2/empty arrays -> False (never blocks on garbage, never raises)."""
+    if sm is None:
+      return False
+    try:
+      model = sm['modelV2']
+      orz = model.orientationRate.z
+      vx = model.velocity.x
+      if not orz or not vx:
+        return False
+      return abs(float(orz[0]) * float(vx[0])) >= SA_IN_CURVE_LAT_ACCEL
+    except Exception:
+      return False
+
   def _step_restore(self, now: float, sm) -> None:
     """Bookkeeping + publish for the bounded restore window (see module docstring). Called only from
     inside `cap()` while NOT actively capping. Cancels the moment: the window (RESTORE_WINDOW_S)
@@ -296,13 +357,36 @@ class SpeedAdjustController:
     before starting a restore, so this only matters if that ever changes), or `sm['carState']` shows
     driver/ACC intervention."""
     if self._restore_ceiling is None:
+      self._restore_last_stock = None
       self._publish_target(None)
       return
     if self._long_ok or now > self._restore_deadline or self._driver_intervening(sm):
       self._restore_ceiling = None
       self._restore_deadline = None
+      self._restore_last_stock = None
       self._publish_target(None)
       return
+    # restore-hardening #3: never BEGIN or CONTINUE raising the set while laterally loaded in a curve
+    # — mirrors ces_pnw.IcbmEpisode's in-curve pause. PAUSE ONLY: skip the publish this tick (the
+    # mem-param heartbeat goes stale -> the executor stale-stops within STALE_LIMIT_S) but keep the
+    # episode alive (ceiling/deadline untouched) so the restore resumes the instant the curve clears,
+    # still bounded by the exact same window/pedal/ACC guards above.
+    if self._in_curve(sm):
+      return
+    # restore-hardening #1 (BLOCKER): the invariant this enforces — the restore can NEVER command a
+    # set speed above the driver's CURRENT live stock set. A restore STARTS below the ceiling by
+    # design (that's the gap being walked up), so the ceiling must NOT be floored to the raw current
+    # reading every tick (that would collapse the very first tick to a no-op restore) — instead, mirror
+    # icbm_pnw.RestoreGuard's own movement detection: ratchet the ceiling down only when the truck's
+    # OWN reported set MOVES DOWN relative to its last observed value while we only ever press up —
+    # that is a driver SET- (or something we don't understand), never our own tap (which only rises).
+    # The first observation in an episode just establishes the baseline (no judgment, same as
+    # RestoreGuard's `self._last_set is not None` gate).
+    stock_now = self._read_stock_set(sm)
+    if stock_now > 0.0:
+      if self._restore_last_stock is not None and stock_now < self._restore_last_stock - SA_DRIVER_LOWER_TOL:
+        self._restore_ceiling = min(self._restore_ceiling, stock_now)
+      self._restore_last_stock = stock_now
     self._publish_target(self._restore_ceiling, self._restore_ceiling, "inc")
 
   # ---- the cap the planner folds (reduce-only) ------------------------------
@@ -337,6 +421,8 @@ class SpeedAdjustController:
       self._pub_ceiling = None
       self._restore_ceiling = None
       self._restore_deadline = None
+      self._min_pub_target = None
+      self._restore_last_stock = None
       self._publish_target(None)
       return v_cruise
 
@@ -348,11 +434,29 @@ class SpeedAdjustController:
       self._pub_ceiling = None
       self._restore_ceiling = None
       self._restore_deadline = None
+      self._min_pub_target = None
+      self._restore_last_stock = None
       self._sl_ref = self._sl                # keep baseline current while idle (no stale drop on enable)
       # speedanchor2pnw (F2): anchor off the raw set, not a VTSC-curve-reduced v_cruise.
       self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
       self._publish_target(None)
       return v_cruise
+
+    # restore-hardening #1 (BLOCKER): ANY pedal press or ACC-off kills the restore EPISODE IDENTITY in
+    # ANY phase — mirrors ces_pnw.IcbmEpisode's reset-in-any-phase (ces_pnw.py ~599-609). The dec/cap
+    # math below is completely UNCHANGED/still computed and forwarded (reduce-only slow-down must never
+    # be weakened by this — see _publish_target()'s None-ceiling fallback); only the restore-ceiling
+    # bookkeeping is cleared, so a ceiling latched before the intervention can never later be walked
+    # back up to. If capping continues after the intervention clears, the NEXT fresh cap-engage
+    # (_cap_out is None) re-latches a ceiling off the THEN-current set, same as ces_pnw's own "next tick
+    # starts a fresh episode" behavior.
+    intervening = self._driver_intervening(sm)
+    if intervening:
+      self._pub_ceiling = None
+      self._restore_ceiling = None
+      self._restore_deadline = None
+      self._min_pub_target = None
+      self._restore_last_stock = None
 
     # speedadjust-exec2pnw: the cap math below now runs for EVERY mode != 0 car, regardless of
     # self._long_ok — plannerd runs on every car, so the target was always being computed for
@@ -388,12 +492,23 @@ class SpeedAdjustController:
       # debounce elapsed -> the cap fully releases. speedadjust-exec2pnw: hand off to a bounded SET+
       # restore back to the ceiling this cap latched at engage (stock-ACC only -- _step_restore() is a
       # no-op on any op-long car since _pub_ceiling is never consulted there).
+      # restore-hardening #1 (BLOCKER): only OPEN the restore window if the truck's current stock set
+      # is explainable by what we ourselves actually commanded this cap (mirrors ces_pnw.IcbmEpisode's
+      # `_min_target`/ICBM_DRIVER_LOWER_TOL eligibility check) — if the driver pushed the set below the
+      # lowest target we ever asked for, that is their own intent; restoring would fight it, so don't.
       if not self._long_ok and self._pub_ceiling is not None:
-        self._restore_ceiling = self._pub_ceiling
-        self._restore_deadline = now + RESTORE_WINDOW_S
+        stock_now = self._read_stock_set(sm)
+        driver_went_lower = (stock_now > 0.0 and self._min_pub_target is not None
+                             and stock_now < self._min_pub_target - SA_DRIVER_LOWER_TOL)
+        if not driver_went_lower:
+          self._restore_ceiling = self._pub_ceiling
+          self._restore_deadline = now + RESTORE_WINDOW_S
+        # else: no restore this episode — leave _restore_ceiling/_restore_deadline at None (already
+        # None unless a prior tick set them, which can't happen on a fresh release).
       self._cap_out = None
       self._release_t = None
       self._pub_ceiling = None
+      self._min_pub_target = None
       if self._engaged:
         self._engaged = False
         cloudlog.info("speedadjust: released -> cruise")
@@ -405,6 +520,7 @@ class SpeedAdjustController:
     # principle icbm2pnw's episode machine uses for its own new-cap-vs-restore conflicts).
     self._restore_ceiling = None
     self._restore_deadline = None
+    self._restore_last_stock = None
     target = max(MIN_CAP, min(caps))          # floor rejects garbage-low targets
     # SLEW: the emitted cap RAMPS toward its target instead of stepping — a step target made the MPC
     # chase a square wave. Seeds at the driver's RAW set on engage (no initial jump — see speedanchor2pnw
@@ -419,13 +535,29 @@ class SpeedAdjustController:
       # on every tick, so seeding high here can never cause a jump — the min() catches it immediately.
       self._cap_out = v_cruise_set
       # speedadjust-exec2pnw: latch the ceiling at cap ENGAGE (icbm2pnw ceiling-latch parity) — the
-      # value a later bounded restore may walk back up to, never higher.
-      self._pub_ceiling = v_cruise_set
+      # value a later bounded restore may walk back up to, never higher. restore-hardening #1: skip
+      # the latch if the driver is intervening THIS tick (pedal/ACC-off) — no restore episode should
+      # start from a tick where the driver doesn't even have control; _pub_ceiling stays None until a
+      # later, clean engage tick.
+      if not intervening:
+        self._pub_ceiling = v_cruise_set
+        self._min_pub_target = self._cap_out
     if target < self._cap_out:
       self._cap_out = max(target, self._cap_out - CAP_SLEW * dt)
     else:
       self._cap_out = min(target, self._cap_out + CAP_SLEW * dt)
     out = max(0.0, min(v_cruise, self._cap_out))   # reduce-only — never raise above the driver's set
+    # restore-hardening #1 (BLOCKER): continuously track the explainability floor (the lowest target
+    # WE'VE published this cap) and ratchet the latched ceiling DOWN (never up) the instant the truck's
+    # OWN reported stock set falls below that floor by more than our own tap latency/lag would explain
+    # — that's the driver's own SET-, and the eventual restore must never walk back up above it. This
+    # runs every tick a ceiling is latched (mirrors ces_pnw.IcbmEpisode's own explainability check, but
+    # applied continuously through the cap rather than only once at the clear transition).
+    if self._pub_ceiling is not None:
+      self._min_pub_target = self._cap_out if self._min_pub_target is None else min(self._min_pub_target, self._cap_out)
+      stock_now = self._read_stock_set(sm)
+      if stock_now > 0.0 and stock_now < self._min_pub_target - SA_DRIVER_LOWER_TOL:
+        self._pub_ceiling = min(self._pub_ceiling, stock_now)
     # speedadjust-exec2pnw: publish the SAME slewed cap value the op-long path would consume — the
     # stock-ACC executor taps toward the identical target, just via buttons instead of the MPC.
     self._publish_target(self._cap_out, self._pub_ceiling, "dec")
