@@ -167,7 +167,7 @@ class Controls:
     # or any of the controller's own gates below), update() returns new_desired_curvature unchanged,
     # so this is a byte-for-byte no-op path when the feature is off.
     self._read_lane_centering_enabled()
-    new_desired_curvature = self.lane_centering.update(
+    lane_centered_curvature = self.lane_centering.update(
       new_desired_curvature,
       model_v2,
       CS.vEgo,
@@ -176,6 +176,12 @@ class Controls:
       self.sm.all_checks(['modelV2']),
       bool(CS.leftBlinker or CS.rightBlinker),
     )
+    # Defense-in-depth: only accept the trimmed curvature if it is finite. A NaN/inf here would flow
+    # into self.desired_curvature and then serve as the rate-limit anchor for the NEXT tick, latching
+    # a non-finite curvature that deleting the tuning file could not heal. The controller already
+    # guarantees finiteness internally; this is the final guard before clip_curvature regardless.
+    if math.isfinite(lane_centered_curvature):
+      new_desired_curvature = lane_centered_curvature
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS

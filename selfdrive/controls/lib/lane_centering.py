@@ -55,6 +55,7 @@ THE SAFETY-ENVELOPE CONTRACT (read this before editing `_CLAMPS`)
 """
 
 import json
+import math
 import os
 import time
 
@@ -79,7 +80,6 @@ _RELOAD_INTERVAL_S = 1.0
 DEFAULT_TUNING: dict[str, float | bool] = {
   "offset": 0.0,                  # lateral bias from lane-midpoint, +right/-left (m)
   "e2e_authority": 1.0,           # how much the E2E model path can veto the lane-line correction (0-1)
-  "pause_on_signal": True,        # smoothly release the correction while a turn signal is active
   "deadband": 0.08,               # center-error deadband before any correction starts (m)
   "max_gain": 0.30,               # final scalar applied to the clamped raw correction
   "max_raw_correction": 0.004,    # hard clamp on the raw (pre-gain) curvature correction (1/m)
@@ -146,27 +146,45 @@ _CLAMPS: dict[str, tuple[float, float]] = {
   "smooth_tau": (0.01, 5.0),
   "signal_release_tau": (0.01, 5.0),
   "confidence_release_tau": (0.01, 5.0),
-  # Model-reported confidence/uncertainty fields are probabilities / normalized stds — [0, 1] is
-  # their entire valid domain regardless of what the JSON claims.
+  # min_lane_prob is a model-reported probability — [0, 1] is its entire valid domain.
   "min_lane_prob": (0.0, 1.0),
+  # max_lane_std (and e2e_max_path_std below) are model uncertainty in METERS, NOT a normalized
+  # [0, 1] quantity. The 1.0 m ceiling is a conservative cap: a lane line / path with more than ~1 m
+  # of predicted std is far too uncertain to trust for a centering trim, so clamping the ceiling to
+  # 1.0 m can only ever tighten this confidence gate, never loosen it below a usable value.
   "max_lane_std": (0.0, 1.0),
   # Minimum speed gate. Floored at 2.0 m/s (~4.5 mph) so a JSON edit can't enable the correction at
   # near-parking-lot speeds, where lane geometry and the lookahead math (which divides by
   # lookahead**2) get unstable. Capped at 40 m/s (~90 mph) purely so a fat-fingered huge value
   # can't silently read as "feature disabled" without anything showing why.
   "min_v_ego": (2.0, 40.0),
-  "e2e_max_path_std": (0.0, 1.0),
-  "e2e_break_in_start": (0.0, 1.0),
-  "e2e_break_in_full": (0.0, 1.0),
+  "e2e_max_path_std": (0.0, 1.0),    # E2E path uncertainty ceiling, METERS (see max_lane_std note)
+  "e2e_break_in_start": (0.0, 1.0),  # center-error magnitude, METERS, where the E2E veto starts
+  "e2e_break_in_full": (0.0, 1.0),   # center-error magnitude, METERS, where the E2E veto is full
 }
 
 
-def _clamp(value, lo: float, hi: float) -> float:
-  """Clamp a single scalar into [lo, hi], tolerating a value that fails float()."""
+def _clamp(value, lo: float, hi: float, default: float) -> float:
+  """
+  Clamp a single scalar into [lo, hi], falling back to `default` for anything unusable.
+
+  `default` is this field's DEFAULT_TUNING value (already inside the envelope), NOT `lo` — a bad
+  `offset` must fall back to 0.0 (centered), not to -0.3 (hard left), so the fallback has to be the
+  field's own safe default rather than the low edge of its clamp range.
+
+  Rejects NON-FINITE values explicitly. This is a safety boundary, not a nicety: json.load() parses
+  bare `NaN`/`Infinity`/`-Infinity` tokens (and overflowing literals like 1e999) into float
+  nan/inf WITHOUT raising, and np.clip(nan, lo, hi) returns nan — so without this isfinite gate a
+  single bad on-road JSON edit could smuggle a NaN past the entire clamp envelope and on into the
+  curvature command. Any nan/inf here is treated as an unusable edit and replaced by the default.
+  """
   try:
-    return float(np.clip(float(value), lo, hi))
+    v = float(value)
   except (TypeError, ValueError):
-    return lo
+    return default
+  if not math.isfinite(v):
+    return default
+  return float(np.clip(v, lo, hi))
 
 
 def _sanitize_tuning(raw: dict) -> dict[str, float | bool]:
@@ -195,7 +213,7 @@ def _sanitize_tuning(raw: dict) -> dict[str, float | bool]:
       out[key] = bool(value)
     else:
       lo, hi = _CLAMPS[key]
-      out[key] = _clamp(value, lo, hi)
+      out[key] = _clamp(value, lo, hi, float(default))
 
   # Invariant: lane-width band must be non-empty, or every lane-line read gets rejected forever.
   if out["min_lane_width"] >= out["max_lane_width"]:
@@ -318,7 +336,17 @@ class LaneCenteringController:
     function never raises: any unexpected input (NaN, wrong types, malformed model_v2) is treated as
     "can't trust this tick" and degrades to returning model_curvature unchanged.
     """
-    model_curvature = float(model_curvature)
+    try:
+      model_curvature = float(model_curvature)
+    except (TypeError, ValueError):
+      # The caller (controlsd) always passes a float, but honor the "never raises" contract even so:
+      # if the input curvature is somehow un-floatable there is nothing to correct, so drop out.
+      self.reset()
+      return 0.0
+    if not math.isfinite(model_curvature):
+      # A non-finite input curvature is an upstream problem we can't fix by adding to it; don't try.
+      self.reset()
+      return model_curvature
 
     # Pull current tuning before anything else. This can't fail or block (see _refresh_tuning).
     self._refresh_tuning()
@@ -348,7 +376,11 @@ class LaneCenteringController:
     # existing correction rather than fighting the driver's/planner's intent to move laterally.
     # This does not reset() — a release is a smooth decay, a reset is an instant snap to zero; the
     # decay is the point here (see signal_release_tau in the safety-envelope comments above).
-    if t["pause_on_signal"] and turn_signal_active:
+    # This release is ALWAYS active and is deliberately NOT tunable from the JSON: it is a promised
+    # safety behavior (the UI toggle text guarantees the trim "fades off … if you signal a turn"),
+    # and the safety-envelope contract forbids the JSON from being able to disable a safety gate.
+    # (StarPilot exposed a `pause_on_signal` switch here; we intentionally dropped it.)
+    if turn_signal_active:
       self._correction = float(smooth_value(0.0, self._correction, t["signal_release_tau"], dt=DT_CTRL))
       return model_curvature + self._correction
 
@@ -382,6 +414,12 @@ class LaneCenteringController:
     # the two multipliers are independent hard stops, not one combined budget.
     target = float(np.clip(raw_correction, -t["max_raw_correction"], t["max_raw_correction"])) * t["max_gain"]
     self._correction = float(smooth_value(target, self._correction, t["smooth_tau"], dt=DT_CTRL))
+    # Final backstop: the correction is provably finite here given the sanitized tuning and the
+    # finite-geometry gates above, but this is a lateral-adjacent command — never let a non-finite
+    # value reach clip_curvature/the actuator. If it somehow is, drop the correction entirely.
+    if not math.isfinite(self._correction):
+      self._correction = 0.0
+      return model_curvature
     return model_curvature + self._correction
 
   @staticmethod
