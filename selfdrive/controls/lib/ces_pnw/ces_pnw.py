@@ -1401,6 +1401,19 @@ class CESController:
     self._lc_s1 = self._lc_s2 = None    # laneLineStds[1]/[2] (m)
     self._lc_ystd = None     # E2E path position.yStd at lookahead (m)
     self._lc_w = None        # apparent lane width at lookahead (m)
+    # steerlimit-log2pnw telemetry: steering-limit status (from SteerLimitStatus, published by
+    # controlsd — see docs/STEERING-LIMITS.md) — logging only, never gates control here. Defaulted
+    # so a missing/never-published param (before the first controlsd tick lands) reads as a clean
+    # "no data" row rather than an AttributeError.
+    self._sl_curv_lim = False    # curvature_limited: clip_curvature's ISO jerk/accel/max-curv ceiling bound this tick
+    self._sl_safe_lim = False    # steer_limited_by_safety: carcontroller/panda had to override the commanded angle
+    self._sl_ang_des = None      # commanded steering angle (deg)
+    self._sl_ang_act = None      # measured steering angle (deg) -- also already logged as strAng
+    self._sl_ang_err = None      # angDes - angActual (deg)
+    self._sl_sat = False         # LatControlAngle's own time-integrated saturation flag
+    self._sl_lat_dem = None      # pre-clip lateral accel demand (m/s^2)
+    self._sl_lat_max = None      # live ISO lateral-accel ceiling this tick (m/s^2), varies with roll
+    self._sl_curv_max = None     # live "how tight a curve could we even ask for right now" (1/m)
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
@@ -1590,6 +1603,39 @@ class CESController:
       self._lc_ystd = self._lc_w = None
       self._lc_act = False
       self._lc_gate = None
+    # steerlimit-log2pnw telemetry: steering-limit status — logging only (see _event_record). Same
+    # cross-process read as LaneCenterStatus just above: controlsd (100 Hz) publishes to
+    # /dev/shm/params at ~5 Hz, this reads it at ~1 Hz. Fully defensive — any missing key, wrong
+    # type, or malformed JSON degrades to the same None/False defaults set in __init__ rather than
+    # raising; a stale telemetry read can never affect CES's own decisions (this method's output is
+    # display/log-only throughout). See docs/STEERING-LIMITS.md.
+    try:
+      sl = self.mem_params.get("SteerLimitStatus", return_default=True)
+      if isinstance(sl, (bytes, str)):
+        sl = json.loads(sl)
+      # Before controlsd's first publish the key reads back as None; treat anything that isn't a dict
+      # as an empty "no data yet" row so every field cleanly defaults below, same pattern as lc above.
+      if not isinstance(sl, dict):
+        sl = {}
+      self._sl_curv_lim = bool(sl.get("curvLim", False))
+      self._sl_safe_lim = bool(sl.get("safeLim", False))
+      ang_des = sl.get("angDes")
+      self._sl_ang_des = round(float(ang_des), 2) if ang_des is not None else None
+      ang_act = sl.get("angAct")
+      self._sl_ang_act = round(float(ang_act), 2) if ang_act is not None else None
+      ang_err = sl.get("angErr")
+      self._sl_ang_err = round(float(ang_err), 2) if ang_err is not None else None
+      self._sl_sat = bool(sl.get("sat", False))
+      lat_dem = sl.get("latDem")
+      self._sl_lat_dem = round(float(lat_dem), 3) if lat_dem is not None else None
+      lat_max = sl.get("latMax")
+      self._sl_lat_max = round(float(lat_max), 3) if lat_max is not None else None
+      curv_max = sl.get("curvMax")
+      self._sl_curv_max = round(float(curv_max), 5) if curv_max is not None else None
+    except Exception:
+      self._sl_curv_lim = self._sl_safe_lim = self._sl_sat = False
+      self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = None
+      self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = None
 
   def enabled(self) -> bool:
     return self._enabled
@@ -2009,6 +2055,13 @@ class CESController:
       "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
       "lcP1": self._lc_p1, "lcP2": self._lc_p2, "lcS1": self._lc_s1, "lcS2": self._lc_s2,
       "lcYStd": self._lc_ystd, "lcW": self._lc_w,
+      # steerlimit-log2pnw telemetry: steering-limit status (from SteerLimitStatus) — display/log
+      # only, same as lc* above. PURE OBSERVATION: never gates or alters any control value. See
+      # docs/STEERING-LIMITS.md for what each field means and how to read them together.
+      "slCurvLim": self._sl_curv_lim, "slSafetyLim": self._sl_safe_lim,
+      "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
+      "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
+      "slSat": self._sl_sat,
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,

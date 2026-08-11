@@ -4,14 +4,14 @@ from numbers import Number
 
 from cereal import car, log
 import cereal.messaging as messaging
-from openpilot.common.constants import CV
+from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY, CV
 from openpilot.common.params import Params
 from openpilot.common.realtime import config_realtime_process, DT_CTRL, Priority, Ratekeeper
 from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
+from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, MAX_LATERAL_ACCEL_NO_ROLL, MIN_SPEED
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -227,6 +227,48 @@ class Controls:
       if not math.isfinite(attr):
         cloudlog.error(f"actuators.{p} not finite {actuators.to_dict()}")
         setattr(actuators, p, 0.0)
+
+    # steerlimit-log2pnw telemetry: PURE OBSERVATION snapshot of this tick's steering-limit signals —
+    # never read back into any control value, computed entirely from values already finalized above
+    # (curvature_limited, self.desired_curvature, lac_log). Mirrors the LaneCenterStatus publish above
+    # byte-for-byte: same /dev/shm/params handle (self._mem_params), same throttle counter
+    # (_lane_centering_frame, just a per-tick counter — reused here rather than adding a second one),
+    # same try/except isolation so a param-store hiccup can never propagate into this 100 Hz loop. See
+    # docs/STEERING-LIMITS.md §4 for the field-by-field design this dict follows.
+    if self._mem_params is not None and self._lane_centering_frame % 20 == 0:
+      try:
+        v_ego_sq = max(CS.vEgo, MIN_SPEED) ** 2
+        # Same formula clip_curvature itself uses for its lateral-accel ceiling (drive_helpers.py) —
+        # the live ISO cap this tick, which varies with road roll.
+        lat_accel_max = MAX_LATERAL_ACCEL_NO_ROLL + lp.roll * ACCELERATION_DUE_TO_GRAVITY
+        # Pre-clip demand (new_desired_curvature, not the post-clip self.desired_curvature): using the
+        # post-clip value here would make this field redundant with latAccelMax whenever curvLimited is
+        # True, since clip_curvature pins the result to the ceiling — the pre-clip value is what shows
+        # how much curvature the plan actually wanted before the ISO ceiling reduced it.
+        lat_accel_demand = new_desired_curvature * v_ego_sq
+        angle_des = getattr(lac_log, "steeringAngleDesiredDeg", None)
+        if angle_des is None:
+          # Fallback for a steerControlType this fork doesn't currently ship (pid/torque cars' LatControl
+          # logs lack steeringAngleDesiredDeg) — same formula latcontrol_angle.py itself uses to compute
+          # angle_steers_des (STEERING-LIMITS.md §0/§4). Both current cars (Raven, Lightning) are angle-
+          # steered, so this branch is not expected to run in practice.
+          angle_des = math.degrees(self.VM.get_steer_from_curvature(-self.desired_curvature, CS.vEgo, lp.roll)) + lp.angleOffsetDeg
+        angle_actual = float(CS.steeringAngleDeg)
+        angle_err = float(angle_des) - angle_actual
+        steer_limit_status = {
+          "curvLim": bool(curvature_limited),
+          "safeLim": bool(self.steer_limited_by_safety),
+          "angDes": round(float(angle_des), 3),
+          "angAct": round(angle_actual, 3),
+          "angErr": round(angle_err, 3),
+          "sat": bool(getattr(lac_log, "saturated", False)),
+          "latDem": round(float(lat_accel_demand), 4),
+          "latMax": round(float(lat_accel_max), 4),
+          "curvMax": round(float(lat_accel_max / v_ego_sq), 6),
+        }
+        self._mem_params.put_nonblocking("SteerLimitStatus", steer_limit_status)
+      except Exception:
+        pass
 
     return CC, lac_log
 
