@@ -53,7 +53,8 @@ class DesireHelper:
     self.brand = CP.brand if CP is not None else ""
     self.car_fingerprint = CP.carFingerprint if CP is not None else ""
     self.nudgeless_supported = self.brand == "tesla" or self.car_fingerprint == "FORD_F_150_LIGHTNING_MK1"
-    self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
+    # toggles-invert2pnw: NudgeForLaneChange is opt-out (ON == nudge required); nudgeless by default.
+    self.nudgeless_lane_change = self.nudgeless_supported and not self.params.get_bool("NudgeForLaneChange")
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
 
@@ -70,7 +71,7 @@ class DesireHelper:
     # (still gated by nudgeless_supported — Tesla + F-150 Lightning only)
     self._param_read_counter += 1
     if self._param_read_counter % 60 == 0:
-      self.nudgeless_lane_change = self.nudgeless_supported and self.params.get_bool("NudgelessLaneChange")
+      self.nudgeless_lane_change = self.nudgeless_supported and not self.params.get_bool("NudgeForLaneChange")
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off

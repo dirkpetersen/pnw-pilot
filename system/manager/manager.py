@@ -39,6 +39,44 @@ def manager_init() -> None:
   if params.get_bool("RecordFrontLock"):
     params.put_bool("RecordFront", True)
 
+  # toggles-invert2pnw: one-time migration restructuring 4 toggles to opt-out semantics, so that
+  # "everything OFF" is the good/default behavior on a fresh install (same idiom as the existing
+  # DisableLaneCentering toggle) -- NudgelessLaneChange->NudgeForLaneChange,
+  # FordAngleLateral->NoFordAngleSteering, LocationServicesEnabled->DisableLocationServices,
+  # ShowSpeedLimit->NoSpeedLimitDisplay.
+  #
+  # MUST run BEFORE the generic default-seeding loop directly below (which treats
+  # `params.get(k) is None` as "never persisted, seed the registered default"). params.get() -- not
+  # get_bool(), which would coerce a never-set key to some default -- is what lets this code tell a
+  # genuinely fresh install (old key file never written by anyone) apart from an existing device that
+  # already has a real, driver-relevant value for the old key. That distinction is the whole point:
+  # existing devices must keep their exact current effective behavior; only fresh installs should pick
+  # up the new opt-out defaults (all four new keys default OFF, registered in params_keys.h).
+  if params.get("TogglesInvertedMigrated") is None:
+    _invert_map = {
+      "NudgelessLaneChange": "NudgeForLaneChange",
+      "FordAngleLateral": "NoFordAngleSteering",
+      "LocationServicesEnabled": "DisableLocationServices",
+      "ShowSpeedLimit": "NoSpeedLimitDisplay",
+    }
+    for _old_key, _new_key in _invert_map.items():
+      _old_val = params.get(_old_key)  # BOOL type -> already a Python bool, or None if never persisted
+      if _old_val is None:
+        continue  # fresh install: old key was never set -- leave _new_key alone, it falls through
+                  # to the generic seeding loop below and gets its OWN registered (new-good) default
+      params.put_bool(_new_key, not _old_val)  # opt-out toggle ON == old feature-enabled flag OFF
+    # FordAngleLateral's real behavioral gate lives in the opendbc submodule (a separate repo,
+    # pnw-opendbc master-pnw, opendbc_repo/opendbc/car/pnw_vehicle.py) which reads the LEGACY
+    # FordAngleLateral key directly and cannot be edited from this branch -- see toggles.py's
+    # _toggle_callback for the write-through mirror that keeps it in sync going forward. For a
+    # genuinely fresh install (no old key -> `continue`d above, so FordAngleLateral is still unset
+    # here), also explicitly seed the legacy mirror key to match the new opt-out default (angle
+    # steering ON) so the submodule -- unaware of NoFordAngleSteering -- behaves correctly without
+    # needing a companion opendbc change first.
+    if params.get("FordAngleLateral") is None:
+      params.put_bool("FordAngleLateral", True)
+    params.put_bool("TogglesInvertedMigrated", True)
+
   # set unset params to their default value
   for k in params.all_keys():
     default_value = params.get_default_value(k)

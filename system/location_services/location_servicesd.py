@@ -13,8 +13,8 @@ does cheap local geometry every tick; the police thread only refreshes a *cache*
 
 Runs as a NON_ESSENTIAL PythonProcess (always_run) — never on the control/safety path, never blocks
 engagement. Reads GPS/path/road from /dev/shm mem params (the mapd_configd bridge); writes a single
-`LocationServices` JSON mem param for the lower-left UI overlay. Gated by `LocationServicesEnabled`
-(default ON) and, for the lookups, `roadContext == freeway`.
+`LocationServices` JSON mem param for the lower-left UI overlay. Gated by `DisableLocationServices`
+(toggles-invert2pnw: opt-out, default OFF = enabled) and, for the lookups, `roadContext == freeway`.
 
 Police source (wazeproxy2pnw): by DEFAULT the device polls our KEYLESS caching edge proxy — no
 API key ever ships to (or needs configuring on) a device; the one shared RapidAPI key lives only in
@@ -287,7 +287,7 @@ class PoliceUpdater(threading.Thread):
   def __init__(self):
     super().__init__(daemon=True)
     self._mem = Params("/dev/shm/params")     # mem store: LastGPSPosition lives here
-    self._params = Params()                   # persistent store: LocationServicesEnabled lives here (NOT mem!)
+    self._params = Params()                   # persistent store: DisableLocationServices lives here (NOT mem!)
     self._lock = threading.Lock()
     self._alerts: list = []         # cached raw POLICE alerts (lat, lon, magvar, ts, uuid, street)
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
@@ -422,8 +422,9 @@ class PoliceUpdater(threading.Thread):
                                                            # without a daemon restart (was cached forever)
         enabled = False
         try:
-          enabled = self._params.get_bool("LocationServicesEnabled")   # PERSISTENT store (was wrongly read
-                                                                        # from mem -> always False -> never polled)
+          # toggles-invert2pnw: DisableLocationServices is opt-out (ON == disabled); enabled by default.
+          enabled = not self._params.get_bool("DisableLocationServices")   # PERSISTENT store (was wrongly read
+                                                                            # from mem -> always False -> never polled)
         except Exception:
           pass
         use_proxy = self._use_proxy(cfg)                       # keyless edge proxy (default) vs legacy direct
@@ -1011,7 +1012,8 @@ def main():
   last_car_check = 0.0
 
   while True:
-    enabled = params.get_bool("LocationServicesEnabled")
+    # toggles-invert2pnw: DisableLocationServices is opt-out (ON == disabled); enabled by default.
+    enabled = not params.get_bool("DisableLocationServices")
     if not enabled:
       mem.put_nonblocking("LocationServices", {"enabled": False, "ts": int(_now_epoch())})
       rk.keep_time()

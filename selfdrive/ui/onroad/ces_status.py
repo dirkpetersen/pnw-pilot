@@ -395,12 +395,15 @@ class CesStatusRenderer(Widget):
 
   def _steer_line(self):
     """suggestion #2 (+ driver req 2026-07-13): the alan-polk 4-signal lateral tell, BOTH failure
-    modes. The Ford carcontroller publishes FordLatStatus.mode ('4sig'/'pc'/'stock'). Fresh + not
-    '4sig' => the SOFTWARE fell back to stock (LateralCurvExt didn't construct): `STEER: STOCK`.
-    Fresh + '4sig' but a SUSTAINED steer fault at speed => the PANDA is rejecting the 4-signal
-    (flashed with stock ford safety, so nonzero curvature_rate is blocked and lateral is dead):
-    `STEER: NO 4SIG PANDA` — the panda/openpilot mismatch that can't be seen any other way while
-    driving. Stale/absent = Tesla/no-Ford -> nothing. Green confirm is dump-only."""
+    modes. The Ford carcontroller publishes FordLatStatus.mode ('4sig'/'angle'/'pc'/'stock'). Fresh
+    + neither '4sig' nor 'angle' => the SOFTWARE fell back to stock (LateralCurvExt/LateralAngleExt
+    didn't construct): `STEER: STOCK`. ('angle' == the angle2pnw-faithful2 LateralAngleExt path,
+    fordlatui2pnw addendum 2026-08: a fully-healthy mode where angle steering owns 100% of lateral,
+    NOT a failure — must not paint red here.) Fresh + '4sig' but a SUSTAINED steer fault at speed =>
+    the PANDA is rejecting the 4-signal (flashed with stock ford safety, so nonzero curvature_rate is
+    blocked and lateral is dead): `STEER: NO 4SIG PANDA` — the panda/openpilot mismatch that can't be
+    seen any other way while driving. Stale/absent = Tesla/no-Ford -> nothing. Green confirm is
+    dump-only."""
     try:
       ts = float(self._fordlat.get("ts"))
       if (time.time() - ts) > _FORDLAT_STALE_S:  # noqa: TID251 -- wall-vs-wall vs the publisher heartbeat
@@ -410,7 +413,7 @@ class CesStatusRenderer(Widget):
       return None
     if not mode:
       return None
-    if mode != "4sig":
+    if mode not in ("4sig", "angle"):
       return ("STEER: STOCK", _C.RED, self.font_bold, None)      # software fallback
     if self._steerfault_n >= _STEERFAULT_TRIP and not self._4sig_ok:
       return ("STEER: NO 4SIG PANDA", _C.RED, self.font_bold, None)  # panda rejecting 4-signal (flash reverted)

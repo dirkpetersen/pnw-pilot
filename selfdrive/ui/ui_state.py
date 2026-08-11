@@ -71,7 +71,7 @@ class UIState:
 
     # Core state variables
     self.is_metric: bool = self.params.get_bool("IsMetric")
-    self.show_speed_limit: bool = self.params.get_bool("ShowSpeedLimit")  # mapd2xnor
+    self.show_speed_limit: bool = not self.params.get_bool("NoSpeedLimitDisplay")  # mapd2xnor / toggles-invert2pnw (opt-out, default OFF = shown)
     self.show_road_name: bool = self.params.get_bool("ShowRoadName")      # mapd2xnor
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
@@ -210,7 +210,7 @@ class UIState:
         self.has_longitudinal_control = self.params.get_bool("AlphaLongitudinalEnabled")
       else:
         self.has_longitudinal_control = self.CP.openpilotLongitudinalControl
-    self.show_speed_limit = self.params.get_bool("ShowSpeedLimit")  # mapd2pnw
+    self.show_speed_limit = not self.params.get_bool("NoSpeedLimitDisplay")  # mapd2pnw / toggles-invert2pnw (opt-out, default OFF = shown)
     self.show_road_name = self.params.get_bool("ShowRoadName")      # mapd2pnw
     self._param_update_time = time.monotonic()
 
