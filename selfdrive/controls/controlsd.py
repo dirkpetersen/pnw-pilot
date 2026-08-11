@@ -255,6 +255,45 @@ class Controls:
           angle_des = math.degrees(self.VM.get_steer_from_curvature(-self.desired_curvature, CS.vEgo, lp.roll)) + lp.angleOffsetDeg
         angle_actual = float(CS.steeringAngleDeg)
         angle_err = float(angle_des) - angle_actual
+        # fordkappalog2pnw: commanded vs achieved CURVATURE (1/m), the empirical saturation signal --
+        # a sustained large kErr while hands-off means the PSCM couldn't deliver the requested path,
+        # i.e. the real curvature ceiling of THIS truck (2024+ CAN-FD/Q4, more torque than the
+        # 2021-2023 Q3 trucks openpilot's own limits were validated on). Investigated against
+        # opendbc_repo/opendbc/dbc/ford_lincoln_base_pt.dbc and opendbc_repo/opendbc/car/ford/{fordcan,
+        # carstate}.py before writing this -- see docs/STEERING-LIMITS.md "Ford curvature interface"
+        # section for the full writeup. Two findings that matter for what's logged below:
+        #   1. There is NO parsed "LatCtlCurv_No_Cmd" and no PSCM curvature-feedback signal on this
+        #      DBC. The only "LatCtlCurv_No_Actl" on the bus is a field *inside the LateralMotionControl
+        #      /LateralMotionControl2 message openpilot itself transmits* (fordcan.py: `"LatCtlCurv_No_Actl":
+        #      curvature` in create_lat_ctl_msg/create_lat_ctl2_msg) -- Ford's "_Actl" naming convention
+        #      here means "the ADAS's own commanded value", not a PSCM-measured response. carstate.py
+        #      never parses LateralMotionControl(2) as a received message. So "kCmd" below is sourced
+        #      from self.desired_curvature (this tick's post-ISO-clip request), matching what
+        #      STEERING-LIMITS.md calls the controlsd-level "commanded" value -- pre-clip demand is
+        #      already covered by the existing latDem field above.
+        #   2. kActl (achieved/measured curvature) is therefore DERIVED, not parsed: CS.yawRate is a
+        #      genuine physical sensor value (Yaw_Data_FD1/VehYaw_W_Actl, transmitted by the GWM from
+        #      the vehicle's own yaw sensor -- carstate.py:36, opendbc_repo/opendbc/dbc/
+        #      ford_lincoln_base_pt.dbc:3169 -- not something openpilot computed), so kActl = yawRate /
+        #      vEgo is the standard curvature-from-yaw-rate relation. This is the exact derivation this
+        #      fork's own Ford lateral code already uses for "current curvature" (LateralAngleExt.
+        #      get_current_curvature(), opendbc_repo/opendbc/car/ford/lateral_angle_pnw.py:318-329:
+        #      `-CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)`) -- reused here at the controlsd level
+        #      instead of duplicating a second helper, kept car-agnostic (CS.yawRate is a cereal
+        #      CarState field, not Ford-only, so this line runs harmlessly for the Raven too).
+        # Sign convention: Ford's own wire/DBC convention is positive=LEFT (fordcan.py:60, "c2:
+        # curvature of the centerline (positive is left)"), which is the OPPOSITE of openpilot's
+        # internal self.desired_curvature convention -- confirmed by carcontroller.py negating it
+        # before every CAN write ("-lat.apply_curvature" / "-self.apply_curvature_last") and by
+        # latcontrol_angle.py/line 255 above negating it again before converting to a steering angle.
+        # kCmd is therefore -self.desired_curvature (flips TO the Ford positive=left convention, not a
+        # correction to what's being asked for). CS.yawRate is already positive=left (standard ISO
+        # sensor convention -- lateral_angle_pnw.py's own get_current_curvature() negates yawRate
+        # *because* it needs openpilot's internal convention; kActl here wants Ford's, so no negation).
+        v_ego_kappa = max(CS.vEgo, MIN_SPEED)
+        k_cmd = -self.desired_curvature
+        k_actl = float(CS.yawRate) / v_ego_kappa
+        k_err = k_cmd - k_actl
         steer_limit_status = {
           "curvLim": bool(curvature_limited),
           "safeLim": bool(self.steer_limited_by_safety),
@@ -265,6 +304,9 @@ class Controls:
           "latDem": round(float(lat_accel_demand), 4),
           "latMax": round(float(lat_accel_max), 4),
           "curvMax": round(float(lat_accel_max / v_ego_sq), 6),
+          "kCmd": round(float(k_cmd), 6),
+          "kActl": round(float(k_actl), 6),
+          "kErr": round(float(k_err), 6),
         }
         self._mem_params.put_nonblocking("SteerLimitStatus", steer_limit_status)
       except Exception:

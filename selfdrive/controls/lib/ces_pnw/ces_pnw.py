@@ -1458,6 +1458,13 @@ class CESController:
     self._sl_lat_dem = None      # pre-clip lateral accel demand (m/s^2)
     self._sl_lat_max = None      # live ISO lateral-accel ceiling this tick (m/s^2), varies with roll
     self._sl_curv_max = None     # live "how tight a curve could we even ask for right now" (1/m)
+    # fordkappalog2pnw: commanded vs achieved curvature (1/m), Ford wire convention (positive=left) —
+    # see docs/STEERING-LIMITS.md "Ford curvature interface" and the kCmd/kActl/kErr comment block in
+    # controlsd.py for the full derivation. Pure observation, same defaulting rationale as the sl*
+    # fields above.
+    self._sl_k_cmd = None        # commanded curvature this tick (-self.desired_curvature)
+    self._sl_k_actl = None       # achieved/measured curvature, derived from CS.yawRate / vEgo
+    self._sl_k_err = None        # kCmd - kActl -- sustained large + hands-off = real saturation
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
@@ -1676,10 +1683,19 @@ class CESController:
       self._sl_lat_max = round(float(lat_max), 3) if lat_max is not None else None
       curv_max = sl.get("curvMax")
       self._sl_curv_max = round(float(curv_max), 5) if curv_max is not None else None
+      # fordkappalog2pnw: commanded vs achieved curvature — same read/default pattern as the sl*
+      # fields directly above, same dict, no separate publish/read cycle.
+      k_cmd = sl.get("kCmd")
+      self._sl_k_cmd = round(float(k_cmd), 6) if k_cmd is not None else None
+      k_actl = sl.get("kActl")
+      self._sl_k_actl = round(float(k_actl), 6) if k_actl is not None else None
+      k_err = sl.get("kErr")
+      self._sl_k_err = round(float(k_err), 6) if k_err is not None else None
     except Exception:
       self._sl_curv_lim = self._sl_safe_lim = self._sl_sat = False
       self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = None
       self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = None
+      self._sl_k_cmd = self._sl_k_actl = self._sl_k_err = None
 
   def enabled(self) -> bool:
     return self._enabled
@@ -2106,6 +2122,10 @@ class CESController:
       "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
       "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
       "slSat": self._sl_sat,
+      # fordkappalog2pnw: commanded vs achieved curvature (1/m, Ford wire convention positive=left) —
+      # the empirical saturation signal to characterize this truck's real curvature limit. Display/log
+      # only, same as sl* above. See docs/STEERING-LIMITS.md "Ford curvature interface" section.
+      "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
