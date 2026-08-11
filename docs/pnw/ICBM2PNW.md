@@ -130,8 +130,50 @@ guard matrix, governor cadence). Gemini per-branch: restore "3 real conflicts fi
 guards"; mapfirst "1 real catch (absorption anchor), fixed"; track "airtight". Lightning-only via
 PnwVehicle capabilities; Tesla unreachable + provably neutral.
 
+## Curve-slowing too LATE/insufficient — root cause + first-cut fix (`icbmcurve2pnw`, 2026-08-11)
+
+**Status: CODE WRITTEN, NOT YET DEPLOYED/DRIVEN.** Built in an isolated worktree stacked on
+`steerlimit-log2pnw` (branch `icbmcurve2pnw`). Full root-cause analysis: `docs/ICBM-CURVE-LATE.md`
+(workbench root, not committed on this branch — read it first). Summary:
+
+**Root cause:** ICBM's own map-curve candidacy test (`icbm_curve_target`/`_icbm_binding_apex`:
+"reject if `eff >= ref - ICBM_MIN_DROP_MS`") compared against an already-inflated target — the
+ICBM-only scale (`icbm_map_eff_scale`) flat-capped EVERY raw map speed at `ICBM_MAP_EFF_SCALE_CAP`
+(1.35), so a genuine ~50 mph-rated curve at 55 mph cruise inflated to an effective ~62 mph (net
+1.35 × the Lightning's 0.92 map-speed discount = 1.242), sat ABOVE cruise, and was silently
+discarded before any distance/window logic ran — not a late trigger, a non-trigger. 131 m of
+published map lead time went unused.
+
+**Fix (`selfdrive/controls/lib/ces_pnw/ces_pnw.py`, `icbm_map_eff_scale` + new constants):**
+replaced the flat cap with an ICBM-only two-point linear ramp:
+  - `ICBM_MAP_SCALE_MIN = 1.10` (near-raw) at/below `ICBM_MAP_SCALE_LO_MPH` (50 mph raw) — small,
+    documented correction for mapd/GPS curvature-noise, not a padding margin (driver direction:
+    target the physics limit `v = sqrt(a_lat/kappa)`, no ~20% derate).
+  - `ICBM_MAP_EFF_SCALE_CAP = MAP_SCALE_MIN` (1.35, **unchanged**) at/above `ICBM_MAP_SCALE_HI_MPH`
+    (60 mph raw) — identical to the old flat cap, so the two 2026-07-12 field-calibrated events
+    (64.9 mph binds at set 90; 70.9 mph stays silent at set 85) are byte-identical.
+  - linear between 50-60 mph raw.
+Scoped entirely to `icbm_map_eff_scale` inside `ces_pnw.py` — does **not** touch
+`vtsc_pnw/vtsc_constants.py`'s shared `MAP_SCALE_MIN`/`MAP_SPEED_SCALE`/`tiered_map_scale`, so
+VTSC/MTSC/Tesla are byte-unchanged. Every existing safety gate (reduce-only, `icbm_in_curve`
+mid-curve suppression, the abort matrix, ceiling latch, V_MIN floor, tap-rate limits) is untouched —
+this only changes which map targets qualify as candidates and what they're worth once they do.
+
+**Test coverage:** added `test_58mph_event_regression_moderate_curve_now_binds` (the field-event
+regression) and `test_icbm_scale_is_near_raw_for_tight_moderate_curves` to
+`selfdrive/controls/lib/ces_pnw/tests/test_icbm_track.py`; updated two tests
+(`test_icbm_scale_cap`, `test_map_beats_vision_when_both_present`) whose fixed inputs encoded the old
+flat-1.35 behavior. Full `ces_pnw` suite: 272/272 pass (270 pre-existing + 2 new).
+
+**Not yet done:** on-road validation against the `steerlimit-log2pnw` telemetry
+(`docs/STEERING-LIMITS.md`); the two MPH breakpoints and `ICBM_MAP_SCALE_MIN` are a conservative
+first estimate, meant to be iterated from real drive data, not a final tune. §7.C's speed-scaled
+timing margins (`ICBM_A_DECEL`/`ICBM_MARGIN_M`/`ICBM_VIS_MIN_TTC_S`) from `ICBM-CURVE-LATE.md` were
+deliberately NOT included in this first cut (out of scope — targets/candidacy only, not timing).
+
 ## Related
 
 `CURVESLOW2PNW.md` + `FORDLONG2PNW.md` *(branch docs, pnw-pilot root)* · `LIGHT_CES.md` (CESMode) ·
 `VTSC.md` (shared curve math) · `DEVICE-STATE.md` (params/files) ·
-`drives/2026-07-1{1,2}/*/DRIVE_REPORT.md` (the field evidence) · memory `icbm2pnw-design`.
+`drives/2026-07-1{1,2}/*/DRIVE_REPORT.md` (the field evidence) · memory `icbm2pnw-design` ·
+`docs/ICBM-CURVE-LATE.md` (root-cause analysis + as-built section for the curve-lateness fix).

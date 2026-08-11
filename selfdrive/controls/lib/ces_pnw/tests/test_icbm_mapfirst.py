@@ -18,7 +18,8 @@ import math
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (
   IcbmEpisode, icbm_map_reach, icbm_in_curve, icbm_vision_may_start,
   ICBM_VIS_MIN_TTC_S, ICBM_IN_CURVE_LAT, ICBM_RESTORE_DELAY_S, ICBM_RESTORE_DELAY_FAST_S,
-  ICBM_HOLD_MAX_S, ICBM_LATE_TAP_GRACE_S, ICBM_MARGIN_M, ICBM_EXEC_STEP_MS, ICBM_VISION_ENTER)
+  ICBM_HOLD_MAX_S, ICBM_LATE_TAP_GRACE_S, ICBM_MARGIN_M, ICBM_EXEC_STEP_MS, ICBM_VISION_ENTER,
+  ICBM_MAP_SCALE_MIN)
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
@@ -192,11 +193,13 @@ def test_map_beats_vision_when_both_present(tmp_path, monkeypatch):
   lat, lon = 47.0, -122.0
   mgr, step = _icbm_stub()
   mgr._cur_lat, mgr._cur_lon = lat, lon
-  # path covering ~430 m; near-window map candidate binds (raw 20/1.35 m/s scaled ~ 20*0.92)
+  # path covering ~430 m; near-window map candidate binds (raw 20/ICBM_MAP_SCALE_MIN m/s scaled by
+  # the ICBM-only near-raw floor -- icbmcurve2pnw, both this raw target and 15.0/1.35 below are well
+  # under ICBM_MAP_SCALE_LO_MPH (50 mph), so they land on the flat ICBM_MAP_SCALE_MIN tier)
   mgr._map_targets = [_pt_north(lat, lon, d, 50.0) for d in (250.0, 430.0)]
-  # vision apex (16.8 m/s) LOWER than the map's (18.9) -> yesterday's build would pick vision;
+  # vision apex (16.8 m/s) LOWER than the map's (~18.4) -> yesterday's build would pick vision;
   # map-first suppresses the covered vision start and the MAP candidate starts the episode instead
-  sig = _sig(26.0, 26.0, vis_lat=6.0, ttc=4.0, map_v=20.0 / 1.35, map_dist=105.0)
+  sig = _sig(26.0, 26.0, vis_lat=6.0, ttc=4.0, map_v=20.0 / ICBM_MAP_SCALE_MIN, map_dist=105.0)
   out = _run(mgr, step, sig)
   assert out.get("target") is not None
   assert mgr._icbm_src in ("map", "far")                     # never "vis" while covered

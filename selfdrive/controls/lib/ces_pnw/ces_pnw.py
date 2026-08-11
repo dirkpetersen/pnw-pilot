@@ -446,13 +446,57 @@ ICBM_TRACK_MAX_M = 350.0      # m hard cap on the tracking window — bounds exi
 # eff 80.6 mph (driver manually chose 80-82 there) => binds at set 90; morning sweepers raw 70.9 at
 # set 85 -> eff 88 => still silent (the morning over-slow complaint stays fixed). VTSC/MTSC/CES
 # classification keep the full tiered scale — this cap is ICBM-only.
-ICBM_MAP_EFF_SCALE_CAP = MAP_SCALE_MIN
+#
+# icbmcurve2pnw (2026-08-11, docs/ICBM-CURVE-LATE.md Root Cause A / "first cut"): the flat 1.35 cap
+# above was itself too COARSE — it applied the SAME ~35% inflation to every map curve, tight or
+# moderate, not just sweepers. Field replay of a 2026-08-10 drive found a genuine ~50 mph-rated curve
+# (131 m out, 55 mph cruise) that the flat cap inflated to an effective ~62 mph (50 * 1.35 * 0.92
+# Lightning map_scale discount = 1.242 net) — ABOVE the 55 mph cruise, so the reduce-only candidacy
+# test (icbm_curve_target/_icbm_binding_apex: "eff >= ref - ICBM_MIN_DROP_MS -> reject") discarded the
+# candidate outright, before distance/window logic ever ran. All 131 m of published map lead time went
+# unused — not a late trigger, a non-trigger. Driver direction (2026-08-10 follow-up): the curve
+# TARGET should approximate the real physics limit v = sqrt(a_lat_limit / kappa), not a padded number
+# — no separate safety-margin term on top. The fix below restores a genuine TWO-POINT ramp (same
+# tight->sweeper SHAPE as the shared tiered_map_scale, per ICBM-CURVE-LATE.md Sec 7.A/7.E) instead of
+# a flat cap, but stays ICBM-ONLY — it does NOT modify vtsc_pnw.MAP_SCALE_MIN/MAP_SPEED_SCALE/
+# tiered_map_scale, so VTSC/MTSC/Tesla are byte-unchanged by this function:
+#   - raw <= ICBM_MAP_SCALE_LO_MPH (50 mph): ICBM_MAP_SCALE_MIN (1.10) — NEAR-RAW. A small, documented
+#     correction for mapd/GPS curvature-estimate noise (within the doc's Option-1-recommended
+#     1.05-1.1x range), not a padding margin. This is what lets a genuine moderate-cut curve (the
+#     50 mph / 55 mph field event) qualify as a candidate AND be tracked/targeted close to its real
+#     rating instead of being inflated past the driver's cruise speed.
+#   - raw >= ICBM_MAP_SCALE_HI_MPH (60 mph): ICBM_MAP_EFF_SCALE_CAP, still == MAP_SCALE_MIN (1.35),
+#     UNCHANGED from the flat cap this replaces. The breakpoint is deliberately kept BELOW both
+#     2026-07-12 field-calibrated events so their outcomes stay byte-identical: 64.9 mph raw
+#     (29.02 m/s) and 70.9 mph raw (31.7 m/s) both sit above 60 mph -> flat 1.35, exactly as before
+#     (64.9 -> eff 80.6 mph, binds at set 90; 70.9 -> eff 88 mph, stays silent at set 85).
+#   - linear between 50-60 mph raw.
+# Net effect vs. the flat cap: tight/moderate curves (<=50 mph raw) now track close to raw (both
+# candidacy AND the published target use this SAME eff value — there is no separate candidacy-only
+# scale in this first cut, per ICBM-CURVE-LATE.md Sec 7.A Option 1's "smallest diff, easiest to
+# review" recommendation); both field-calibrated sweeper/binding events are unchanged; nothing at or
+# above 60 mph raw changes at all. CONSERVATIVE FIRST CUT — pending on-road validation against the new
+# steerlimit-log2pnw telemetry (docs/STEERING-LIMITS.md); iterate the two MPH breakpoints and
+# ICBM_MAP_SCALE_MIN from there, not by guessing further from a desk analysis.
+ICBM_MAP_EFF_SCALE_CAP = MAP_SCALE_MIN            # 1.35 — UNCHANGED, still the sweeper-end ceiling
+ICBM_MAP_SCALE_MIN = 1.10                         # near-raw floor for tight/moderate curves (<= LO)
+ICBM_MAP_SCALE_LO_MPH = 50.0 * CV.MPH_TO_MS       # ~22.35 m/s — ramp start (near-raw at/below this)
+ICBM_MAP_SCALE_HI_MPH = 60.0 * CV.MPH_TO_MS       # ~26.82 m/s — ramp end (flat 1.35 at/above this;
+                                                   #   below both 64.9/70.9 mph field-calibrated events)
 
 
 def icbm_map_eff_scale(tv_raw: float) -> float:
-  """icbmtrack2pnw: the ICBM-only effective scale for a RAW map target speed — the shared tiered
-  ramp, capped at its tight-curve end (see ICBM_MAP_EFF_SCALE_CAP root-cause note). Pure."""
-  return min(C.tiered_map_scale(tv_raw), ICBM_MAP_EFF_SCALE_CAP)
+  """icbmtrack2pnw + icbmcurve2pnw: the ICBM-only effective scale for a RAW map target speed (m/s).
+  NOT the shared vtsc_pnw.tiered_map_scale (VTSC/MTSC/Tesla are untouched by this function) — a
+  two-point linear ramp from ICBM_MAP_SCALE_MIN (near-raw, tight/moderate curves) up to
+  ICBM_MAP_EFF_SCALE_CAP (1.35, unchanged sweeper-end cap) between ICBM_MAP_SCALE_LO_MPH and
+  ICBM_MAP_SCALE_HI_MPH. See the icbmcurve2pnw root-cause note above. Pure."""
+  if tv_raw <= ICBM_MAP_SCALE_LO_MPH:
+    return ICBM_MAP_SCALE_MIN
+  if tv_raw >= ICBM_MAP_SCALE_HI_MPH:
+    return ICBM_MAP_EFF_SCALE_CAP
+  frac = (tv_raw - ICBM_MAP_SCALE_LO_MPH) / (ICBM_MAP_SCALE_HI_MPH - ICBM_MAP_SCALE_LO_MPH)
+  return ICBM_MAP_SCALE_MIN + (ICBM_MAP_EFF_SCALE_CAP - ICBM_MAP_SCALE_MIN) * frac
 
 
 def icbm_track_window_m(v_ego, ref, apex_eff) -> float:

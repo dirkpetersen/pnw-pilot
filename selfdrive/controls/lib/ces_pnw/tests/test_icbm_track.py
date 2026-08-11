@@ -16,7 +16,8 @@ import math
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (
   IcbmEpisode, icbm_curve_target, icbm_map_eff_scale, icbm_track_window_m,
-  ICBM_TRACK_MAX_M, ICBM_MAP_EFF_SCALE_CAP, ICBM_RESTORE_DELAY_S, ICBM_MIN_DROP_MS)
+  ICBM_TRACK_MAX_M, ICBM_MAP_EFF_SCALE_CAP, ICBM_RESTORE_DELAY_S, ICBM_MIN_DROP_MS,
+  ICBM_MAP_SCALE_MIN, ICBM_MAP_SCALE_LO_MPH, ICBM_MAP_SCALE_HI_MPH)
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
@@ -40,10 +41,51 @@ def test_track_window_shape():
 
 
 def test_icbm_scale_cap():
-  # tight curves: identical to the shared tiered scale; sweepers: capped at the tight end
-  assert icbm_map_eff_scale(10.0) == C.tiered_map_scale(10.0)            # 1.35 both
+  # sweepers (>= ICBM_MAP_SCALE_HI_MPH raw): UNCHANGED -- still the tight end of the SHARED tiered
+  # ramp (byte-identical sweeper/binding behavior to before the icbmcurve2pnw fix below).
   assert icbm_map_eff_scale(29.02) == ICBM_MAP_EFF_SCALE_CAP             # tiered says 1.8 here
   assert ICBM_MAP_EFF_SCALE_CAP < C.tiered_map_scale(29.02)
+
+
+def test_icbm_scale_is_near_raw_for_tight_moderate_curves():
+  """icbmcurve2pnw (ICBM-CURVE-LATE.md Root Cause A): tight/moderate curves (<= ICBM_MAP_SCALE_LO_MPH
+  raw, 50 mph) now get the NEAR-RAW ICBM_MAP_SCALE_MIN (1.10), NOT the old flat 1.35 -- the flat cap
+  is what inflated a genuine ~50 mph curve above cruise and killed its candidacy (see the field-event
+  regression test below). This is strictly LESS inflation than the shared tiered scale everywhere."""
+  assert icbm_map_eff_scale(10.0) == ICBM_MAP_SCALE_MIN
+  assert icbm_map_eff_scale(10.0) < C.tiered_map_scale(10.0)             # was: equal (1.35 both)
+  assert icbm_map_eff_scale(ICBM_MAP_SCALE_LO_MPH) == ICBM_MAP_SCALE_MIN  # boundary: flat MIN at/below
+  assert icbm_map_eff_scale(ICBM_MAP_SCALE_HI_MPH) == ICBM_MAP_EFF_SCALE_CAP  # boundary: flat CAP at/above
+  # strictly increasing (linear) between the two breakpoints -- no discontinuity
+  mid = (ICBM_MAP_SCALE_LO_MPH + ICBM_MAP_SCALE_HI_MPH) / 2.0
+  assert ICBM_MAP_SCALE_MIN < icbm_map_eff_scale(mid) < ICBM_MAP_EFF_SCALE_CAP
+
+
+def test_58mph_event_regression_moderate_curve_now_binds():
+  """ICBM-CURVE-LATE.md field event (2026-08-10): raw ~50 mph map curve, 131 m out, at 55 mph
+  cruise (Lightning, map_scale=0.92). Under the OLD flat 1.35 cap this was silently discarded --
+  eff = 50 * 1.35 * 0.92 = ~62 mph, ABOVE the 55 mph cruise, so the reduce-only candidacy test threw
+  it out before distance/window logic ever ran (icbmT/icbmGate stayed None for the whole approach).
+  Under the new near-raw ICBM_MAP_SCALE_MIN the same raw target now binds, with lead time to spare."""
+  mph = 0.44704
+  v_set, dist = 55.0 * mph, 131.0
+  raw_50mph = 50.0 * mph
+  # OLD behavior (reconstructed inline -- this is exactly what ICBM_MAP_EFF_SCALE_CAP alone computed
+  # before this fix): flat 1.35, net eff ABOVE cruise -> silently rejected.
+  old_eff = ICBM_MAP_EFF_SCALE_CAP * raw_50mph * 0.92
+  assert old_eff > v_set - ICBM_MIN_DROP_MS                              # confirms the pre-fix bug
+  # NEW behavior: near-raw floor -> binds, with the map's 131 m of lead time actually used.
+  # v_ego=22 m/s (~49 mph, matching the field event's "still accelerating toward 55") -- the pure
+  # v_ego decel envelope doesn't need to bind yet; the tracking window (icbmtrack2pnw) is what
+  # actually starts the walk-down early here, exactly the "131 m of lead time recovered" fix.
+  t, c, s = icbm_curve_target(22.0, v_set, raw_50mph, dist, None, icbm_map_eff_scale,
+                              map_scale=0.92, track=True)
+  assert s == "map" and t is not None
+  assert t < v_set - ICBM_MIN_DROP_MS
+  new_eff = icbm_map_eff_scale(raw_50mph) * raw_50mph * 0.92
+  assert abs(t - new_eff) < 1e-6
+  # the target stays CLOSE to the raw physics rating (no ~20% derate) -- driver direction 2026-08-10
+  assert new_eff < raw_50mph * 1.15                                      # < 15% inflation, not ~24%
 
 
 # ---- tracking start (pure icbm_curve_target) ------------------------------------------------------
