@@ -39,20 +39,38 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 #   car or don't belong here at all). Raising the low-speed cap never impairs the Tesla or any other
 #   car; it only ever gives clip_curvature more headroom to work with at low speed.
 #
-# THE SCHEDULE (mph -> m/s^2, linearly interpolated, held flat outside the ends)
+# THE SCHEDULE (mph -> m/s^2, linearly interpolated, held flat outside the ends) -- ONLY ACTIVE ONCE A
+# VALID FILE IS LOADED FROM DISK
 #   <=30 mph -> 5.0, tapering to 4.0 by 45 mph, tapering to 3.0 (ISO) by 60 mph, flat 3.0 above that.
-#   See docs/LATACCEL2PNW.md for the full writeup.
+#   See docs/pnw/LATACCEL2PNW.md for the full writeup.
+#
+# FAIL-SAFE DIRECTION: flat ISO 3.0, not the 5/4/3 schedule
+#   Until a VALID lataccel_limits.json has been parsed from disk -- at boot, if the file is missing, or
+#   any time it becomes unreadable/malformed/non-finite/out-of-range -- lat_accel_limit() returns the
+#   flat MAX_LATERAL_ACCEL_NO_ROLL (3.0 m/s^2) at every speed, i.e. plain upstream behavior. It does
+#   NOT fall back to DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH (the looser 5/4/3 schedule) -- a bad/missing file
+#   must never leave the car with a LOOSER cap than a driver's own stricter tune, and a deleted file
+#   must revert immediately rather than latching the last-good schedule forever.
+#   DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH exists only as the content _write_default_once() seeds to
+#   LAT_ACCEL_LIMITS_PATH the first time it's missing -- on the real device that seed write succeeds,
+#   so the 5/4/3 schedule activates within ~_LAT_ACCEL_RELOAD_INTERVAL_S of boot; in a read-only
+#   test/CI environment the seed write silently fails and the cap stays flat 3.0 (safe, matches stock).
 #
 # HOW TUNING WORKS (mirrors lane_centering.py's LaneCenteringController hot-reload pattern)
 #   The schedule lives in /data/pnw/lataccel_limits.json (breakpoints in MPH so it's easy to edit on
 #   the road), OUTSIDE the git tree so an auto-update's `git clean` can't delete a driver's tuning (see
 #   docs/mapd-binary-wiped-by-autoupdate.md for the incident this convention is copied from). It is
 #   re-stat'd at most once every _LAT_ACCEL_RELOAD_INTERVAL_S -- clip_curvature() runs at 100 Hz, so
-#   this keeps steady-state cost to one cheap os.path.getmtime() call every few seconds, not a JSON
-#   parse every tick. Any problem loading it (missing file, malformed JSON, non-finite/out-of-range
-#   values, wrong shape) is fully absorbed here: the schedule falls back to the last-good parse, or to
-#   DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH if nothing has ever loaded successfully. Loading can NEVER raise
-#   out of this module, and lat_accel_limit() always returns a finite float in _LAT_ACCEL_CAP_CLAMP.
+#   this keeps steady-state cost to one cheap os.stat() call every few seconds, not a JSON parse every
+#   tick. The parsed breakpoint arrays are built ONCE per successful reload (not per limit() call), and
+#   a file identity (mtime_ns, size) that failed to parse is memoized so a persistently-broken file is
+#   still cheaply stat'd every interval but never re-opened/re-read. Any problem loading it (missing
+#   file, malformed JSON, non-finite/out-of-range values, wrong shape, more than 32 breakpoints,
+#   non-strictly-increasing speeds) is fully absorbed here and RESETS to the flat-3.0 fail-safe (see
+#   above) -- loading can NEVER raise out of this module, and lat_accel_limit() always returns a finite
+#   float in _LAT_ACCEL_CAP_CLAMP. The effective cap returned is additionally rate-limited (see
+#   LAT_ACCEL_SLEW_RATE below) so a schedule swap -- including the fail-safe revert -- can never step
+#   the cap in a single control tick.
 # --------------------------------------------------------------------------------------------------
 
 LAT_ACCEL_LIMITS_PATH = "/data/pnw/lataccel_limits.json"
@@ -67,101 +85,145 @@ _LAT_ACCEL_RELOAD_INTERVAL_S = 5.0
 # decimal-point slip in the on-road file must not be able to command a harder turn than that.
 _LAT_ACCEL_CAP_CLAMP = (1.0, 6.0)
 
-# Built-in schedule -- used until/unless a valid JSON file is found, used again the moment the on-disk
-# file becomes unreadable/invalid, and also written out as the on-disk default the first time
-# LAT_ACCEL_LIMITS_PATH is missing. [speed_mph, accel_mps2] pairs, ascending by speed.
+# Hard ceiling on breakpoint count. A JSON file is untrusted, attacker-or-typo-controlled input read
+# every _LAT_ACCEL_RELOAD_INTERVAL_S by a 100 Hz control-loop caller -- without a cap, an arbitrarily
+# large "breakpoints" array would mean an arbitrarily large per-reload parse/sort AND (absent the
+# precomputed-array fix below) a per-tick list rebuild. 32 is far more resolution than a piecewise
+# speed schedule needs; reject (not truncate) anything larger, same all-or-nothing policy as every
+# other _sanitize check.
+_LAT_ACCEL_MAX_BREAKPOINTS = 32
+
+# Effective-cap slew rate: the value limit() returns can move at most this many m/s^2 per second of
+# wall-clock time, regardless of how much the underlying target schedule/value just changed. This is
+# what makes a schedule hot-swap (or the fail-safe revert to flat 3.0 below) a smooth transition
+# instead of a single-tick step in the curvature clamp -- clip_curvature() applies the jerk/rate limit
+# BEFORE this cap, so an instant cap drop while cornering would otherwise step the commanded curvature
+# in one 10 ms tick. Speed-driven target changes are already gradual (v_ego doesn't jump), so this
+# barely engages on them; it's here for the abrupt cases (a hot-reloaded file, or losing/regaining a
+# valid file).
+LAT_ACCEL_SLEW_RATE = 0.5  # m/s^2 per second
+
+# Built-in schedule -- used ONLY as the content _write_default_once() seeds to LAT_ACCEL_LIMITS_PATH
+# the first time it's missing, so a driver has something to edit. It is NOT an in-memory fallback: see
+# the "FAIL-SAFE DIRECTION" note above -- absent/invalid file means flat MAX_LATERAL_ACCEL_NO_ROLL, not
+# this schedule. [speed_mph, accel_mps2] pairs, ascending by speed.
 DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[30, 5.0], [45, 4.0], [60, 3.0]]
 
 
 class _LatAccelSchedule:
   """Caches the parsed, sanitized speed(m/s)->cap(m/s^2) schedule loaded from LAT_ACCEL_LIMITS_PATH,
   hot-reloaded at most every _LAT_ACCEL_RELOAD_INTERVAL_S. Mirrors the hot-reload/sanitize pattern in
-  lane_centering.py's LaneCenteringController._refresh_tuning() / _sanitize_tuning()."""
+  lane_centering.py's LaneCenteringController._refresh_tuning() / _sanitize_tuning().
+
+  self._xs/self._ys (precomputed once per successful reload, never rebuilt per-tick) are the ONLY
+  state limit() reads for the schedule itself. Both None means "no validly-loaded schedule" -- the
+  state at boot, and the state any load failure resets to -- in which case limit()'s target is the
+  flat MAX_LATERAL_ACCEL_NO_ROLL fail-safe rather than any speed-scheduled value."""
 
   def __init__(self) -> None:
-    self._breakpoints_ms = self._to_ms(DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
-    self._mtime: float | None = None
+    self._xs: np.ndarray | None = None
+    self._ys: np.ndarray | None = None
+    self._file_id: tuple[int, int] | None = None       # (st_mtime_ns, st_size) of the last file we successfully parsed
+    self._failed_file_id: tuple[int, int] | None = None  # (st_mtime_ns, st_size) of the last file that FAILED to parse
     self._last_check_mono = 0.0
-    self._last_load_error: str | None = None
     self._wrote_default = False
-
-  @staticmethod
-  def _to_ms(breakpoints_mph) -> list[tuple[float, float]]:
-    return [(speed_mph * CV.MPH_TO_MS, float(accel)) for speed_mph, accel in breakpoints_mph]
+    self._eff_cap = MAX_LATERAL_ACCEL_NO_ROLL           # slewed value limit() returns; see LAT_ACCEL_SLEW_RATE
+    self._last_limit_mono: float | None = None
 
   def _write_default_once(self) -> None:
     # Best-effort only, and only ever attempted once per process: /data/pnw/ may not exist yet, may be
     # read-only (tests/CI), or may race another process creating it -- all of that is fine, we simply
-    # keep running on the in-memory DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH like any other missing-file case.
+    # keep running on the flat MAX_LATERAL_ACCEL_NO_ROLL fail-safe like any other missing-file case.
+    # O_CREAT|O_EXCL on the FINAL path (not a shared ".tmp" + rename) so we never clobber a file a
+    # driver is mid-way through scp'ing into place, and never leave a stranded .tmp behind.
     if self._wrote_default:
       return
     self._wrote_default = True
     try:
       os.makedirs(os.path.dirname(LAT_ACCEL_LIMITS_PATH), exist_ok=True)
-      if not os.path.exists(LAT_ACCEL_LIMITS_PATH):
-        tmp_path = LAT_ACCEL_LIMITS_PATH + ".tmp"
-        with open(tmp_path, "w") as f:
-          json.dump({
-            "_comment": ("Speed-scheduled max lateral-accel cap for the curvature clip. " +
-                         "breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat " +
-                         "outside the ends. ISO baseline 3.0. Hot-reloaded (~every few seconds). " +
-                         "Corrupt/non-finite -> falls back to flat 3.0."),
-            "breakpoints": DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH,
-          }, f, indent=2)
-        os.rename(tmp_path, LAT_ACCEL_LIMITS_PATH)  # atomic, avoids a reader ever seeing a partial write
+      fd = os.open(LAT_ACCEL_LIMITS_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+      with os.fdopen(fd, "w") as f:
+        json.dump({
+          "_comment": ("Speed-scheduled max lateral-accel cap for the curvature clip, ACTIVE ONLY " +
+                       "WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], " +
+                       "linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite " +
+                       "-> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a " +
+                       "step). Hot-reloaded (~every few seconds)."),
+          "breakpoints": DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH,
+        }, f, indent=2)
     except OSError:
       pass
 
   @staticmethod
-  def _sanitize(raw) -> list[tuple[float, float]] | None:
-    """Validate raw["breakpoints"]: >=2 entries of [speed_mph, accel_mps2], both finite numbers,
-    accel within _LAT_ACCEL_CAP_CLAMP, speed non-negative. All-or-nothing -- a schedule is a shape,
-    not independently tunable fields, so any single bad entry discards the whole file rather than
-    silently distorting the curve; the caller falls back to the last-good (or default) schedule.
+  def _sanitize(raw) -> tuple[np.ndarray, np.ndarray] | None:
+    """Validate raw["breakpoints"]: 2-32 entries of [speed_mph, accel_mps2], both real (non-bool)
+    numbers, finite, accel within _LAT_ACCEL_CAP_CLAMP, speed non-negative, and STRICTLY increasing
+    speeds (no duplicate/non-increasing breakpoints -- matches the np.all(np.diff(x) > 0) contract
+    lane_centering.py's _valid_path() enforces, so np.interp behaves and "the cap at this speed" is
+    unambiguous). All-or-nothing -- a schedule is a shape, not independently tunable fields, so any
+    single bad entry discards the whole file rather than silently distorting the curve; the caller
+    resets to the flat fail-safe on any rejection (see module docstring FAIL-SAFE DIRECTION note).
     Rejects non-finite values explicitly: json.load() parses bare NaN/Infinity/-Infinity tokens (and
     overflowing literals like 1e999) into float nan/inf WITHOUT raising, so without this isfinite gate
-    a single bad on-road edit could smuggle a NaN into the curvature clamp."""
+    a single bad on-road edit could smuggle a NaN into the curvature clamp. Rejects bool/str explicitly
+    rather than relying on float()'s coercion (float("30") and float(True) both succeed silently)."""
     if not isinstance(raw, dict):
       return None
     breakpoints = raw.get("breakpoints")
-    if not isinstance(breakpoints, list) or len(breakpoints) < 2:
+    if not isinstance(breakpoints, list) or not (2 <= len(breakpoints) <= _LAT_ACCEL_MAX_BREAKPOINTS):
       return None
     parsed = []
     for entry in breakpoints:
       if not isinstance(entry, (list, tuple)) or len(entry) != 2:
         return None
-      try:
-        speed_mph = float(entry[0])
-        accel = float(entry[1])
-      except (TypeError, ValueError):
+      speed_mph, accel = entry[0], entry[1]
+      if not (isinstance(speed_mph, (int, float)) and not isinstance(speed_mph, bool)):
         return None
+      if not (isinstance(accel, (int, float)) and not isinstance(accel, bool)):
+        return None
+      speed_mph = float(speed_mph)
+      accel = float(accel)
       if not (math.isfinite(speed_mph) and math.isfinite(accel)):
         return None
       if speed_mph < 0.0 or not (_LAT_ACCEL_CAP_CLAMP[0] <= accel <= _LAT_ACCEL_CAP_CLAMP[1]):
         return None
       parsed.append((speed_mph * CV.MPH_TO_MS, accel))
     parsed.sort(key=lambda p: p[0])
-    return parsed
+    xs = np.array([p[0] for p in parsed], dtype=float)
+    ys = np.array([p[1] for p in parsed], dtype=float)
+    if not np.all(np.diff(xs) > 0):
+      return None  # duplicate or non-increasing speed breakpoints
+    return xs, ys
 
   def _refresh(self) -> None:
-    """Reload self._breakpoints_ms from disk if enough wall-clock time has passed AND the file's
-    mtime changed since the last successful parse. Never raises: any failure leaves the schedule
-    exactly as it was (last-good, or the built-in default if nothing has ever loaded)."""
+    """Reload self._xs/self._ys from disk if enough wall-clock time has passed AND the file's
+    identity (mtime_ns, size) changed since our last successful parse. Never raises. On ANY
+    error/missing-file/parse-failure this RESETS to the no-schedule state (self._xs = self._ys =
+    None) rather than keeping the last-good schedule -- see the module docstring's FAIL-SAFE
+    DIRECTION note for why: a deleted/broken file must revert immediately, not latch."""
     now = time.monotonic()
     if now - self._last_check_mono < _LAT_ACCEL_RELOAD_INTERVAL_S:
       return
     self._last_check_mono = now
 
     try:
-      mtime = os.path.getmtime(LAT_ACCEL_LIMITS_PATH)
+      st = os.stat(LAT_ACCEL_LIMITS_PATH)
     except OSError:
-      # Missing file (or /data/pnw/ not there yet) is a normal state, not an error -- try to seed the
-      # default once so a driver has something to edit, then move on.
+      # Missing file (or /data/pnw/ not there yet) is a normal state, not an error -- reset to the
+      # fail-safe (in case a previously-valid file was just deleted), try to seed the default once so
+      # a driver has something to edit, then move on.
+      self._xs = self._ys = None
+      self._file_id = None
+      self._failed_file_id = None
       self._write_default_once()
       return
 
-    if mtime == self._mtime:
+    file_id = (st.st_mtime_ns, st.st_size)
+
+    if file_id == self._file_id:
       return  # unchanged since our last successful parse
+    if file_id == self._failed_file_id:
+      return  # unchanged since our last failed parse -- cheap to stat, not worth re-opening/re-reading
 
     try:
       with open(LAT_ACCEL_LIMITS_PATH) as f:
@@ -169,34 +231,52 @@ class _LatAccelSchedule:
       parsed = self._sanitize(raw)
       if parsed is None:
         raise ValueError("invalid or out-of-range breakpoints")
-      self._breakpoints_ms = parsed
-      self._mtime = mtime
-      self._last_load_error = None
+      self._xs, self._ys = parsed
+      self._file_id = file_id
+      self._failed_file_id = None
     except Exception as e:
       # Malformed JSON, wrong shape, non-finite/out-of-range values, permission error, anything --
-      # keep the last-good schedule and move on. Log only when the error message is new, so a
-      # persistently-broken file doesn't spam the log for an entire drive.
-      msg = f"{type(e).__name__}: {e}"
-      if msg != self._last_load_error:
-        cloudlog.error(f"drive_helpers: failed to load {LAT_ACCEL_LIMITS_PATH}, keeping last-good lat-accel schedule ({msg})")
-        self._last_load_error = msg
-      # Deliberately do NOT update self._mtime here, so a subsequent fix is retried next check even if
-      # it happens to land on a mtime we've already seen.
+      # RESET to the flat fail-safe (do NOT keep last-good; see FAIL-SAFE DIRECTION above) and memoize
+      # this exact file identity so we don't keep re-opening/re-reading a persistently-broken file
+      # every reload interval (we still cheaply stat() it every interval, so a fix is picked up as
+      # soon as its mtime/size actually changes). Logging is keyed on file identity, not the error
+      # message string, so two different bad edits in a row are BOTH logged -- a driver must not be
+      # able to conclude a second bad edit "took" just because the message happened to repeat.
+      self._xs = self._ys = None
+      self._file_id = None
+      self._failed_file_id = file_id
+      cloudlog.error(f"drive_helpers: failed to load {LAT_ACCEL_LIMITS_PATH}, reverting to flat " +
+                     f"{MAX_LATERAL_ACCEL_NO_ROLL} m/s^2 fail-safe ({type(e).__name__}: {e})")
 
   def limit(self, v_ego: float) -> float:
+    """Returns the slewed effective cap. LAT_ACCEL_SLEW_RATE-limits the move toward the freshly
+    computed target so a schedule swap (hot-reload, or the fail-safe revert to flat 3.0) is a gentle
+    ramp rather than a single-tick step in the curvature clamp; the target itself is unslewed."""
     self._refresh()
+
     try:
       v_ego_f = float(v_ego)
     except (TypeError, ValueError):
-      return MAX_LATERAL_ACCEL_NO_ROLL
-    if not math.isfinite(v_ego_f):
-      return MAX_LATERAL_ACCEL_NO_ROLL
-    xs = [p[0] for p in self._breakpoints_ms]
-    ys = [p[1] for p in self._breakpoints_ms]
-    cap = float(np.interp(v_ego_f, xs, ys))
-    if not math.isfinite(cap):
-      return MAX_LATERAL_ACCEL_NO_ROLL
-    return float(np.clip(cap, *_LAT_ACCEL_CAP_CLAMP))
+      v_ego_f = float("nan")
+
+    if self._xs is None or not math.isfinite(v_ego_f):
+      target = MAX_LATERAL_ACCEL_NO_ROLL
+    else:
+      target = float(np.interp(v_ego_f, self._xs, self._ys))
+      if not math.isfinite(target):
+        target = MAX_LATERAL_ACCEL_NO_ROLL
+    target = float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP))
+
+    now = time.monotonic()
+    dt = 0.0 if self._last_limit_mono is None else float(np.clip(now - self._last_limit_mono, 0.0, 0.1))
+    self._last_limit_mono = now
+
+    max_step = LAT_ACCEL_SLEW_RATE * dt
+    eff_cap = self._eff_cap + float(np.clip(target - self._eff_cap, -max_step, max_step))
+    if not math.isfinite(eff_cap):
+      eff_cap = MAX_LATERAL_ACCEL_NO_ROLL
+    self._eff_cap = float(np.clip(eff_cap, *_LAT_ACCEL_CAP_CLAMP))
+    return self._eff_cap
 
 
 _lat_accel_schedule = _LatAccelSchedule()
@@ -204,9 +284,12 @@ _lat_accel_schedule = _LatAccelSchedule()
 
 def lat_accel_limit(v_ego: float) -> float:
   """Speed-scheduled maximum lateral acceleration (m/s^2), used by clip_curvature() in place of the
-  fixed MAX_LATERAL_ACCEL_NO_ROLL constant. Hot-reloaded from LAT_ACCEL_LIMITS_PATH; see the
-  lataccel2pnw module docstring above and docs/LATACCEL2PNW.md for the schedule and rationale.
-  Always returns a finite float in _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf."""
+  fixed MAX_LATERAL_ACCEL_NO_ROLL constant. Hot-reloaded from LAT_ACCEL_LIMITS_PATH when a valid file
+  is present; falls back to flat MAX_LATERAL_ACCEL_NO_ROLL (not the 5/4/3 schedule) otherwise -- see
+  the lataccel2pnw module docstring above and docs/pnw/LATACCEL2PNW.md for the schedule and rationale.
+  The return value is additionally slew-rate-limited (LAT_ACCEL_SLEW_RATE) so a schedule swap or the
+  fail-safe revert can never step in a single call. Always returns a finite float in
+  _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf."""
   return _lat_accel_schedule.limit(v_ego)
 
 

@@ -11,7 +11,7 @@ from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, MAX_LATERAL_ACCEL_NO_ROLL, MIN_SPEED
+from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, lat_accel_limit, MIN_SPEED
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -239,8 +239,10 @@ class Controls:
       try:
         v_ego_sq = max(CS.vEgo, MIN_SPEED) ** 2
         # Same formula clip_curvature itself uses for its lateral-accel ceiling (drive_helpers.py) —
-        # the live ISO cap this tick, which varies with road roll.
-        lat_accel_max = MAX_LATERAL_ACCEL_NO_ROLL + lp.roll * ACCELERATION_DUE_TO_GRAVITY
+        # the live SPEED-SCHEDULED cap this tick (lataccel2pnw's lat_accel_limit(), not the fixed ISO
+        # constant), which also varies with road roll. Must track what clip_curvature actually applies
+        # or this telemetry silently drifts from the real steer-limit envelope.
+        lat_accel_max = lat_accel_limit(CS.vEgo) + lp.roll * ACCELERATION_DUE_TO_GRAVITY
         # Pre-clip demand (new_desired_curvature, not the post-clip self.desired_curvature): using the
         # post-clip value here would make this field redundant with latAccelMax whenever curvLimited is
         # True, since clip_curvature pins the result to the ceiling — the pre-clip value is what shows

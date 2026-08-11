@@ -72,7 +72,7 @@ Format:
 
 ```json
 {
-  "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. ISO baseline 3.0. Hot-reloaded (~every few seconds). Corrupt/non-finite -> falls back to flat 3.0.",
+  "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip, ACTIVE ONLY WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite -> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a step). Hot-reloaded (~every few seconds).",
   "breakpoints": [[30, 5.0], [45, 4.0], [60, 3.0]]
 }
 ```
@@ -81,19 +81,28 @@ Breakpoints are `[speed_mph, accel_mps2]` pairs, in **MPH** (not m/s) specifical
 read/edit by hand on the road. Internally they're converted to m/s (`CV.MPH_TO_MS`) once per reload
 and interpolated against `v_ego`, which is already in m/s.
 
-If the file is missing, `lat_accel_limit()` runs on the built-in default schedule (the same three
-breakpoints above) and best-effort writes that default out to disk once, so there's something to edit
-— this write is wrapped in a bare `try/except OSError` and its failure is silently ignored (e.g. a
-read-only `/data/pnw` in CI/tests never breaks anything).
+**The 5/4/3 schedule is ACTIVE ONLY WHILE a valid file is loaded.** If the file is missing, unreadable,
+malformed, has fewer than 2 or more than 32 breakpoints, has non-finite/out-of-range/non-strictly-
+increasing values, or hasn't loaded yet (e.g. right at boot), `lat_accel_limit()` falls back to the
+**flat ISO baseline `MAX_LATERAL_ACCEL_NO_ROLL` (3.0 m/s²) at every speed** — i.e. plain upstream
+behavior — NOT the 5/4/3 schedule. `DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH` (the same three breakpoints
+above) exists only as the content best-effort-written out to disk once as a starting point to edit —
+this write is wrapped in a bare `try/except OSError` and its failure is silently ignored (e.g. a
+read-only `/data/pnw` in CI/tests never breaks anything, it just means the cap stays flat 3.0). On the
+real device the seed write succeeds, so the 5/4/3 schedule activates within
+`_LAT_ACCEL_RELOAD_INTERVAL_S` (~5 s) of boot.
 
 ### Hot-reload
 
 - `clip_curvature()` runs at 100 Hz (called every control-loop tick), so the file is **not** parsed
-  every call. It is `os.path.getmtime()`-checked at most once every 5 seconds
-  (`_LAT_ACCEL_RELOAD_INTERVAL_S`, gated with `time.monotonic()`), and only re-parsed if the mtime
-  actually changed since the last successful load.
-- A parsed-and-sanitized schedule is cached in a module-level `_LatAccelSchedule` instance
-  (`_lat_accel_schedule`) shared by every `lat_accel_limit()` call in the process.
+  every call. It is identity-checked (`os.stat()`'s `(st_mtime_ns, st_size)`, one syscall) at most once
+  every 5 seconds (`_LAT_ACCEL_RELOAD_INTERVAL_S`, gated with `time.monotonic()`), and only re-parsed
+  if that identity changed since the last successful (or last failed) load — a persistently-broken
+  file is still cheaply `stat()`-ed every interval but never re-opened/re-read.
+- A parsed-and-sanitized schedule is cached as precomputed `numpy` arrays (`self._xs`/`self._ys`) in a
+  module-level `_LatAccelSchedule` instance (`_lat_accel_schedule`) shared by every `lat_accel_limit()`
+  call in the process — built once per successful reload, never rebuilt inside `limit()`, and capped at
+  32 breakpoints so a malicious/typo'd file can't blow up reload cost.
 
 ### Fail-safe / robustness
 
@@ -102,20 +111,31 @@ remote-tuning channel, so it is treated as **untrusted input**, mirroring the ha
 used by `selfdrive/controls/lib/lane_centering.py`'s `LaneCenteringController` (also hot-reloaded JSON,
 also `math.isfinite()`-gated against `json.load()`'s bare `NaN`/`Infinity` parsing):
 
-- Any of the following discards the whole file and falls back to the built-in default schedule
-  `[[30, 5.0], [45, 4.0], [60, 3.0]]`: file missing, parse error, wrong JSON shape, fewer than 2
-  breakpoints, any breakpoint entry that isn't a 2-element `[speed, accel]` pair, any non-finite
-  (`NaN`/`Infinity`/`-Infinity`) speed or accel value, a negative speed, or an accel value outside the
-  hard clamp **[1.0, 6.0] m/s²**. Validation is all-or-nothing (not per-breakpoint clamp-and-continue)
-  — a schedule is a shape, and silently "fixing" one bad entry could distort the curve in a way that's
-  hard to notice while driving, so a bad file is rejected wholesale in favor of the last-known-good (or
-  default) schedule instead.
+- Any of the following discards the whole file and **resets to the flat 3.0 fail-safe** (never to the
+  5/4/3 schedule, and never keeping a stale last-good schedule): file missing, parse error, wrong JSON
+  shape, fewer than 2 or more than 32 breakpoints, any breakpoint entry that isn't a 2-element
+  `[speed, accel]` pair, a `bool`/`str` where a number is required, any non-finite (`NaN`/`Infinity`/
+  `-Infinity`) speed or accel value, a negative speed, duplicate/non-increasing speeds, or an accel
+  value outside the hard clamp **[1.0, 6.0] m/s²**. Validation is all-or-nothing (not per-breakpoint
+  clamp-and-continue) — a schedule is a shape, and silently "fixing" one bad entry could distort the
+  curve in a way that's hard to notice while driving, so a bad file is rejected wholesale.
+- **No latching:** deleting a previously-valid file, or overwriting it with a broken one, reverts to
+  flat 3.0 on the very next reload check — the schedule never keeps running on a value that's no
+  longer backed by a validly-loaded file.
+- **Gentle transitions:** the cap `limit()` returns is additionally slew-rate-limited
+  (`LAT_ACCEL_SLEW_RATE = 0.5` m/s² per second of wall-clock time) toward whatever the current target
+  is, so a schedule hot-swap — including the fail-safe revert to 3.0 — ramps rather than steps the
+  curvature clamp in a single 10 ms control tick. Speed-driven target changes are already gradual, so
+  this only meaningfully engages on abrupt schedule swaps.
 - `lat_accel_limit(v_ego)` itself never raises and always returns a finite float clamped to
   **[1.0, 6.0] m/s²**, regardless of what's on disk or what `v_ego` is (a non-finite/non-numeric
   `v_ego` falls straight back to `MAX_LATERAL_ACCEL_NO_ROLL` = 3.0).
 - The [1.0, 6.0] clamp is hardcoded in `drive_helpers.py` and is **not** reachable from the JSON — the
   file can only tune *within* that fixed envelope, matching the "safety-envelope contract" convention
   from `lane_centering.py`.
+- `controlsd.py`'s `SteerLimitStatus` telemetry (`latMax`/`curvMax`) calls the same
+  `lat_accel_limit(CS.vEgo)` clip_curvature() uses, so the logged steer-limit envelope always matches
+  what was actually applied that tick.
 
 ## How to tune on the road
 
@@ -126,11 +146,13 @@ ssh comma@$COMMA_IP
 vi /data/pnw/lataccel_limits.json   # edit the "breakpoints" array
 ```
 
-Changes take effect within `_LAT_ACCEL_RELOAD_INTERVAL_S` (5 seconds) — no reboot, no manager restart.
-If the edit is invalid (typo, non-finite value, cap outside [1.0, 6.0]) `controlsd`'s `cloudlog` will
-log a `drive_helpers: failed to load /data/pnw/lataccel_limits.json, keeping last-good lat-accel
-schedule (...)` line once (not spammed every tick) and the car keeps running on whatever schedule was
-last valid — never on a corrupted value.
+Changes take effect within `_LAT_ACCEL_RELOAD_INTERVAL_S` (5 seconds) — no reboot, no manager restart
+— ramped in over ~1-2 seconds by the slew limiter rather than stepping instantly. If the edit is
+invalid (typo, non-finite value, cap outside [1.0, 6.0], duplicate speeds) `controlsd`'s `cloudlog`
+will log a `drive_helpers: failed to load /data/pnw/lataccel_limits.json, reverting to flat 3.0 m/s^2
+fail-safe (...)` line — keyed on the file's identity (mtime/size) so a second bad edit is logged again
+even if the error message repeats — and the car reverts to the flat 3.0 ISO baseline, never to a
+corrupted value and never stuck on a stale schedule.
 
 ## Unrelated same-commit note: `NoFordAngleSteering` / `FordAngleLateral` comment
 
