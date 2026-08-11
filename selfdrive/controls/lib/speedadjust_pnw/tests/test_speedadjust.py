@@ -11,7 +11,7 @@ v_cruise_initialized explicitly to exercise the three speedanchor2pnw fixes."""
 import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
-  SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S)
+  SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S)
 
 MPH = MPH_TO_MS
 V75 = 75 * MPH
@@ -57,6 +57,9 @@ def _settle(c, v_cruise, v_ego, v_cruise_set=None, v_cruise_initialized=True, ma
   out = c.cap(None, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
   for _ in range(max_iter):
     c._last_t -= 0.5                       # pretend 0.5 s passed since the last call
+    c._pub_last -= 0.5                     # speedadjust-exec2pnw: also age the publish throttle so
+                                            # repeated test cap() calls (near-zero real wall time
+                                            # apart) don't get silently swallowed by PUB_THROTTLE_S
     new = c.cap(None, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
     if abs(new - out) < 1e-9:
       return new
@@ -319,3 +322,229 @@ def test_becomes_initialized_anchors_correctly():
   assert c._ratio == 0.0
   _cap(c, V75, V60, v_cruise_set=V75, v_cruise_initialized=True)    # driver sets cruise to 75
   assert abs(c._ratio - V75 / V60) < 1e-6
+
+
+# ---- speedadjust-exec2pnw: SpeedAdjustTarget mem-param publish + bounded restore ------------------
+# The RETURN value of cap() is unaffected by any of this (see test_no_oplong_is_neutral above, which
+# still passes unmodified) -- these tests exercise the NEW mem-param SIDE EFFECT that feeds the shared
+# stock-ACC button executor (opendbc/car/ford/icbm_pnw.py) on a car with no op-long.
+
+class _FakeMemParams:
+  """Records SpeedAdjustTarget publishes for assertion; mirrors the mem_params.put_nonblocking(key,
+  payload) interface the real /dev/shm Params exposes. Real Params() is unavailable on this host
+  (no built params_pyx.so), so production code already falls back to mem_params=None here — tests
+  inject this fake directly to observe the publish side effect."""
+  def __init__(self):
+    self.calls = []          # [(key, payload), ...] in call order
+
+  def put_nonblocking(self, key, payload):
+    self.calls.append((key, payload))
+
+  @property
+  def last(self):
+    return self.calls[-1][1] if self.calls else None
+
+
+def _stock_ctrl(**kw):
+  """Same as _ctrl() but for a stock-ACC (no op-long) car with an inspectable fake mem_params."""
+  c = _ctrl(op_long=False, **kw)
+  c.mem_params = _FakeMemParams()
+  return c
+
+
+def _tick(c, v_cruise=V75, v_ego=V60, v_cruise_set=None, sm=None, dt=0.5):
+  """Advance both the slew clock and the publish-throttle clock together, then call cap() once."""
+  if v_cruise_set is None:
+    v_cruise_set = v_cruise
+  c._last_t -= dt
+  c._pub_last -= dt
+  return c.cap(sm, v_cruise_set, v_cruise, v_ego, True)
+
+
+def _settle_pub(c, v_cruise=V75, v_ego=V60, iters=250):
+  """_settle() detects convergence off cap()'s RETURN value, which for a stock-ACC controller (no
+  op-long) is ALWAYS the neutral v_cruise -- it never moves, so _settle() would report "converged"
+  after a single tick even while the SLEWED _cap_out/published target is still far from its final
+  value. Stock-ACC tests that need the published target to actually finish slewing use this instead:
+  a fixed iteration count comfortably longer than any realistic engage swing needs at CAP_SLEW."""
+  c.cap(None, v_cruise, v_cruise, v_ego, True)   # first call: initializes _last_t (dt=0), like _settle()
+  for _ in range(iters):
+    _tick(c, v_cruise=v_cruise, v_ego=v_ego)
+
+
+def test_no_publish_when_idle_from_start():
+  c = _stock_ctrl(mode=0)
+  _cap(c, V75, V60)
+  assert c.mem_params.calls == []
+
+
+def test_no_publish_on_oplong_car():
+  # same scenario as test_publish_dec_while_capping below, but op_long=True: the mem-param is never
+  # touched -- op-long cars are steered solely through cap()'s return value.
+  c = _ctrl(op_long=True, mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  c.mem_params = _FakeMemParams()   # inject AFTER construction so we can observe (a lack of) calls
+  _settle(c, V75, V60)
+  assert c.mem_params.calls == []
+
+
+def test_publish_dec_while_capping():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                              # need the full slew, not just return-value
+                                                         # convergence (always neutral on a stock car)
+  payload = c.mem_params.last
+  assert payload is not None
+  assert "dir" not in payload                          # default cap direction is "dec"
+  assert abs(payload["target"] - (V60 + POLICE_MARGIN)) < 0.01   # 2-decimal m/s rounding in the publish
+  assert abs(payload["ceiling"] - V75) < 0.01           # latched at the driver's raw set on engage
+  assert "ts" in payload
+
+
+def test_publish_target_matches_op_long_cap_value():
+  # the stock-ACC executor must tap toward the IDENTICAL value the op-long MPC would have consumed --
+  # build the same scenario on both an op-long and a stock-ACC controller and compare.
+  long_c = _ctrl(op_long=True, mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  long_out = _settle(long_c, V75, V60)
+  stock_c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(stock_c, V75, V60)
+  assert abs(stock_c.mem_params.last["target"] - long_out) < 0.01
+
+
+def test_restore_begins_after_cap_clears():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                              # cap engages + fully slews, latches ceiling=75
+  assert abs(c.mem_params.last["ceiling"] - V75) < 0.01
+  assert abs(c.mem_params.last["target"] - (V60 + POLICE_MARGIN)) < 0.01   # fully slewed by now
+  c._police = {"state": "clear"}                        # source clears
+  _tick(c)                                               # still holding through the debounce window
+  assert abs(c.mem_params.last["target"] - (V60 + POLICE_MARGIN)) < 0.01  # unchanged during the hold
+  c._release_t -= (RELEASE_S + 0.1)                      # debounce elapses
+  _tick(c)                                               # cap releases -> restore should start
+  payload = c.mem_params.last
+  assert payload.get("dir") == "inc"
+  assert abs(payload["target"] - V75) < 0.01
+  assert abs(payload["ceiling"] - V75) < 0.01
+  assert c._restore_ceiling is not None
+
+
+def test_restore_never_above_driver_ceiling():
+  # a curve happening to hand a HIGHER v_cruise while the restore is in progress must not change the
+  # restore target -- it stays pinned to the ceiling latched at the ORIGINAL cap engage.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)
+  assert abs(c.mem_params.last["target"] - V75) < 0.01   # never above the original 75 mph ceiling
+
+
+def test_restore_expires_after_window():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  c._restore_deadline -= (RESTORE_WINDOW_S + 1.0)        # window expires
+  _tick(c)
+  assert c._restore_ceiling is None
+  assert c.mem_params.last == {}
+
+
+def test_new_cap_preempts_restore():
+  # DEC ALWAYS WINS: a fresh cap engaging mid-restore must cancel the restore immediately, not race it
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  c._police = {"state": "alert", "dist_mi": 0.4}         # a NEW police report appears
+  _tick(c)
+  assert c._restore_ceiling is None                      # preempted
+  payload = c.mem_params.last
+  assert "dir" not in payload                             # back to a dec (cap), not inc
+
+
+class _FakeCruiseState:
+  def __init__(self, enabled=True):
+    self.enabled = enabled
+
+
+class _FakeCS:
+  def __init__(self, gas=False, brake=False, cruise_enabled=True):
+    self.gasPressed = gas
+    self.brakePressed = brake
+    self.cruiseState = _FakeCruiseState(cruise_enabled)
+
+
+def test_restore_aborted_by_driver_gas():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  _tick(c, sm={"carState": _FakeCS(gas=True)})
+  assert c._restore_ceiling is None
+  assert c.mem_params.last == {}
+
+
+def test_restore_aborted_by_acc_off():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  _tick(c, sm={"carState": _FakeCS(cruise_enabled=False)})
+  assert c._restore_ceiling is None
+  assert c.mem_params.last == {}
+
+
+def test_restore_survives_missing_or_none_sm():
+  # sm may legitimately be None (unit tests) or missing carState -- must never raise, never abort
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  _tick(c, sm=None)
+  assert c._restore_ceiling is not None                  # still restoring
+  _tick(c, sm={})                                        # sm present but no carState key
+  assert c._restore_ceiling is not None                  # still restoring, no crash
+
+
+def test_mode_off_cancels_pending_restore():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  c._mode = 0
+  _tick(c)
+  assert c._restore_ceiling is None
+  assert c.mem_params.last == {}
+
+
+def test_uninitialized_cruise_cancels_pending_restore():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                               # restore begins
+  assert c._restore_ceiling is not None
+  c._last_t -= 0.5
+  c._pub_last -= 0.5
+  c.cap(None, V75, V60, V60, False)                      # cruise goes uninitialized
+  assert c._restore_ceiling is None
+  assert c.mem_params.last == {}
