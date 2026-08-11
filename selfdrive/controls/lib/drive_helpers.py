@@ -101,7 +101,19 @@ _LAT_ACCEL_MAX_BREAKPOINTS = 32
 # in one 10 ms tick. Speed-driven target changes are already gradual (v_ego doesn't jump), so this
 # barely engages on them; it's here for the abrupt cases (a hot-reloaded file, or losing/regaining a
 # valid file).
-LAT_ACCEL_SLEW_RATE = 0.5  # m/s^2 per second
+#
+# 2026-08-11 (Crown Hill ~50 mph right curve, see drives/2026-08-11): 0.5 was too low -- during hard
+# braking into a curve the scheduled cap RISES fast (speed drops -> schedule interpolates toward the
+# looser low-speed end) and 0.5 m/s^2/s couldn't keep up, so the slewed cap pinned near its 3.0 floor
+# and clipped a legitimate ~3.8 m/s^2 cornering demand mid-brake. The slew was only ever meant to
+# soften an ABRUPT schedule swap (a hot-reload edit, or the fail-safe revert), not to throttle the
+# normal speed-driven cap change, which needs only ~0.5-1.0 m/s^2/s here. Bound: at saturation, the
+# lateral jerk a cap-change rate R (m/s^2/s) induces equals R (m/s^3), so any R <= MAX_LATERAL_JERK
+# (5.0 m/s^3, ISO baseline) stays in the ISO jerk envelope. 4.0 gives ample margin under 5.0 while
+# easily tracking real deceleration (4-8x headroom), and still softens the abrupt-swap case: a
+# worst-case full-range swap (cap 6.0 -> 1.0, the [1.0, 6.0] clamp span) now ramps over ~1.25 s instead
+# of a single 10 ms tick, well short of a one-tick snap.
+LAT_ACCEL_SLEW_RATE = 4.0  # m/s^2 per second
 
 # Built-in schedule -- used ONLY as the content _write_default_once() seeds to LAT_ACCEL_LIMITS_PATH
 # the first time it's missing, so a driver has something to edit. It is NOT an in-memory fallback: see

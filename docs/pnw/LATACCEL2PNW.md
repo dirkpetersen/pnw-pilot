@@ -123,10 +123,21 @@ also `math.isfinite()`-gated against `json.load()`'s bare `NaN`/`Infinity` parsi
   flat 3.0 on the very next reload check — the schedule never keeps running on a value that's no
   longer backed by a validly-loaded file.
 - **Gentle transitions:** the cap `limit()` returns is additionally slew-rate-limited
-  (`LAT_ACCEL_SLEW_RATE = 0.5` m/s² per second of wall-clock time) toward whatever the current target
+  (`LAT_ACCEL_SLEW_RATE = 4.0` m/s² per second of wall-clock time) toward whatever the current target
   is, so a schedule hot-swap — including the fail-safe revert to 3.0 — ramps rather than steps the
   curvature clamp in a single 10 ms control tick. Speed-driven target changes are already gradual, so
   this only meaningfully engages on abrupt schedule swaps.
+  **2026-08-11 retune (0.5 → 4.0):** live telemetry from a Crown Hill ~50 mph right curve showed the
+  0.5 rate couldn't keep up with the scheduled cap's speed-driven rise during hard braking into the
+  curve (speed drops fast → schedule interpolates toward its looser low-speed end fast → the 0.5 slew
+  lagged → the effective cap pinned near its 3.0 floor → a legitimate ~3.8 m/s² cornering demand got
+  clipped mid-brake — an under-turn, not the abrupt-swap case the slew was built for). Jerk bound: at
+  saturation, a cap-change rate `R` (m/s²/s) induces lateral jerk of exactly `R` (m/s³), so any
+  `R ≤ MAX_LATERAL_JERK` (5.0 m/s³, ISO baseline) stays inside the ISO jerk envelope. 4.0 leaves
+  ample margin under 5.0 while comfortably tracking real deceleration (which only needs ~0.5–1.0
+  m/s²/s here, 4–8× headroom), and still softens the abrupt-swap case: a worst-case full-range swap
+  (cap 6.0 → 1.0, the full `[1.0, 6.0]` clamp span) now ramps over ~1.25 s instead of stepping in a
+  single 10 ms tick.
 - `lat_accel_limit(v_ego)` itself never raises and always returns a finite float clamped to
   **[1.0, 6.0] m/s²**, regardless of what's on disk or what `v_ego` is (a non-finite/non-numeric
   `v_ego` falls straight back to `MAX_LATERAL_ACCEL_NO_ROLL` = 3.0).
@@ -147,7 +158,8 @@ vi /data/pnw/lataccel_limits.json   # edit the "breakpoints" array
 ```
 
 Changes take effect within `_LAT_ACCEL_RELOAD_INTERVAL_S` (5 seconds) — no reboot, no manager restart
-— ramped in over ~1-2 seconds by the slew limiter rather than stepping instantly. If the edit is
+— ramped in (worst case ~1.25 seconds for a full [1.0, 6.0] swing) by the slew limiter rather than
+stepping instantly. If the edit is
 invalid (typo, non-finite value, cap outside [1.0, 6.0], duplicate speeds) `controlsd`'s `cloudlog`
 will log a `drive_helpers: failed to load /data/pnw/lataccel_limits.json, reverting to flat 3.0 m/s^2
 fail-safe (...)` line — keyed on the file's identity (mtime/size) so a second bad edit is logged again
