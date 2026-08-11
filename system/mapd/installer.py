@@ -4,9 +4,15 @@ mapd2pnw: download-at-launch installer for the pfeiferj `mapd` binary.
 
 The mapd binary is ~20 MB. Vendoring it in git bloats every clone and every
 on-device update, so PNW does NOT commit it. Instead the release is pinned in
-`mapd_release.json` at the repo root (url + version + sha256 + install_path) and
-this module fetches it once, verifying the sha256, into `install_path`. It is
-idempotent: a no-op when the pinned binary is already installed and valid.
+`mapd_release.json` at the repo root (url + version + sha256) and this module
+fetches it, verifying the sha256, into the PERSISTENT `MAPD_BINARY` path
+(`/data/mapd/mapd` on-device -- see below; NOT `mapd_release.json`'s
+`install_path`, which is a legacy in-tree fallback used only when `/data` isn't
+writable, e.g. off-device dev). It is idempotent: a no-op when the pinned
+binary is already installed and valid (sha256 matches), and it re-downloads
+automatically when the pin is bumped to a new sha256 -- UNLESS the
+`/data/mapd/.override` flag is set (see `override_active()` below), which
+intentionally freezes the installed binary across every future pin change.
 
   python3 -m openpilot.system.mapd.installer            # ensure installed
   python3 -m openpilot.system.mapd.installer --check     # report status, no download
@@ -80,6 +86,25 @@ def override_active() -> bool:
   return os.path.exists(MAPD_OVERRIDE_FLAG) and os.path.exists(MAPD_BINARY) and os.access(MAPD_BINARY, os.X_OK)
 
 
+# 2026-08-11 incident: mapd_release.json was bumped v2.0.6 -> v2.2.0 and deployed, but the device kept
+# running v2.0.6 with manager.py logging "mapd installer: binary present" (i.e. ensure_mapd() returned
+# without downloading). Root cause: is_installed()'s sha256 compare against the pin is correct and DOES
+# force a re-download on a genuine mismatch (verified offline) -- but override_active() short-circuits
+# it unconditionally whenever the .override flag is set, regardless of how stale the installed binary
+# is relative to the current pin. That flag is meant to be a TEMPORARY pin for a hand-deployed test
+# build (see mapdpin2pnw / GOMSGQ-SHADOW-FIX.md); left set after the test build was rolled back to the
+# official binary (or restored by hand without `rm /data/mapd/.override`), it silently blocks every
+# future release bump forever with no visible signal. override_shadows_pin() below detects exactly that
+# so callers can surface it instead of it staying silent.
+def override_shadows_pin(rel: dict | None = None) -> bool:
+  """True when the override flag is masking a pinned release the installed binary does not match."""
+  if not override_active():
+    return False
+  rel = rel or load_release()
+  expected = rel.get("sha256")
+  return bool(expected) and _sha256(MAPD_BINARY) != expected
+
+
 def is_installed(rel: dict | None = None) -> bool:
   if override_active():
     return True
@@ -102,6 +127,12 @@ def ensure_mapd(retries: int = 3) -> str:
   expected = rel.get("sha256")
 
   if is_installed(rel):
+    if override_shadows_pin(rel):
+      print(
+        f"mapd installer: WARNING /data/mapd/.override is active and installed binary {_sha256(dest)[:12]}… "
+        + f"does NOT match pinned {rel.get('version')} ({str(expected)[:12]}…) -- the pin bump was IGNORED. "
+        + "Run `rm /data/mapd/.override` on the device to receive the pinned release."
+      )
     return dest
 
   os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -167,7 +198,9 @@ def main() -> None:
   import sys
   rel = load_release()
   if "--check" in sys.argv:
-    print(f"mapd {rel.get('version')} install_path={rel['install_path']} installed={is_installed(rel)} dest={MAPD_BINARY}")
+    print(f"mapd {rel.get('version')} installed={is_installed(rel)} dest={MAPD_BINARY} override_active={override_active()}")
+    if override_shadows_pin(rel):
+      print(f"  WARNING: override is masking pinned {rel.get('version')} -- " + "installed binary sha does not match. rm /data/mapd/.override to receive it.")
     return
   ensure_mapd()
 
