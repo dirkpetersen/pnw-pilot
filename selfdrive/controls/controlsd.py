@@ -294,6 +294,27 @@ class Controls:
         k_cmd = -self.desired_curvature
         k_actl = float(CS.yawRate) / v_ego_kappa
         k_err = k_cmd - k_actl
+        # steertele2pnw: two additions for capability-analysis drives, both pure observation.
+        #   1. latActive -- CC.latActive is already computed above (line ~144) and fed into
+        #      LaC.update() this same tick (line 217); reusing it here (not re-deriving) so this
+        #      field can never drift from what actually gated angDes/angAct this tick. Without it,
+        #      a capability drive can't tell "openpilot commanded this angle and didn't achieve it"
+        #      from "driver was hand-steering" -- when latActive is False, angDes freezes to
+        #      CS.steeringAngleDeg (latcontrol_angle.py: angle_steers_des = steeringAngleDeg when
+        #      not active), so angDes==angAct and any apparent "capability" in angErr is fake.
+        #   2. angSat -- the un-fused angle-only saturation half. "sat" above is lac_log.saturated,
+        #      which is LatControlAngle's *time-integrated, hysteresis-smoothed* fusion of
+        #      (angle_control_saturated OR curvature_limited) (latcontrol.py:_check_saturation) --
+        #      curvLim already isolates the curvature half, but the angle half (angle_control_saturated)
+        #      is a local variable inside LatControlAngle.update() that never reaches angle_log, so it
+        #      isn't reachable from lac_log here. Recomputed instead using the same threshold constant
+        #      latcontrol_angle.py itself compares against (STEER_ANGLE_SATURATION_THRESHOLD, imported
+        #      at module level above) applied to angErr (== angle_steers_des - CS.steeringAngleDeg,
+        #      the same operands latcontrol_angle.py's non-Tesla branch compares). Caveat: on Tesla
+        #      (CP.brand == "tesla"), latcontrol_angle.py's real angle_control_saturated is instead
+        #      `steer_limited_by_safety` (already logged above as safeLim) -- this computed angSat is
+        #      the Ford/EPS-style angle-saturation proxy, not a byte-for-byte mirror of the Tesla branch.
+        angle_control_saturated = abs(angle_err) > STEER_ANGLE_SATURATION_THRESHOLD
         steer_limit_status = {
           "curvLim": bool(curvature_limited),
           "safeLim": bool(self.steer_limited_by_safety),
@@ -301,6 +322,8 @@ class Controls:
           "angAct": round(angle_actual, 3),
           "angErr": round(angle_err, 3),
           "sat": bool(getattr(lac_log, "saturated", False)),
+          "angSat": bool(angle_control_saturated),
+          "latActive": bool(CC.latActive),
           "latDem": round(float(lat_accel_demand), 4),
           "latMax": round(float(lat_accel_max), 4),
           "curvMax": round(float(lat_accel_max / v_ego_sq), 6),
