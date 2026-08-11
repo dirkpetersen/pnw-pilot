@@ -111,6 +111,14 @@ DESCRIPTIONS = {
     "openpilot will resume controlling speed as soon as you release the brake. " +
     "Not currently supported on any car here (Ford or Tesla) — this toggle is disabled."
   ),
+  # lanecenter2pnw: Lane Centering is ON by default; this is the opt-OUT toggle. Tuning lives in a
+  # hot-reloaded file, not the UI, so the description points there rather than to sliders.
+  "DisableLaneCentering": tr_noop(
+    "Lane Centering nudges steering toward the middle of the lane when both lane lines are clearly " +
+    "visible. It is ON by default, applies a small bounded correction, and fades off if lane lines " +
+    "become uncertain, you signal a turn, or a lane change starts. Turn this ON to disable it — a " +
+    "quick escape hatch if steering ever feels off. Advanced tuning: /data/pnw/lanecenter_tuning.json."
+  ),
   # angleenable: experimental Ford angle-primary lateral opt-in, F-150 Lightning only.
   "FordAngleLateral": tr_noop(
     "EXPERIMENTAL. Use an angle-primary steering strategy instead of the default curvature-based " +
@@ -183,6 +191,15 @@ class TogglesLayout(Widget):
         lambda: tr("No Disengage on Braking"),
         DESCRIPTIONS["NoDisengageOnBrake"],
         "disengage_on_accelerator.png",
+        False,
+      ),
+      # lanecenter2pnw: opt-OUT toggle for a feature that ships ON by default (param default "0" =
+      # not disabled). Same idiom as every other bool toggle here (toggle_item, no restart needed —
+      # controlsd re-reads DisableLaneCentering at ~1 Hz, see controlsd.py).
+      "DisableLaneCentering": (
+        lambda: tr("Disable Lane Centering"),
+        DESCRIPTIONS["DisableLaneCentering"],
+        "warning.png",
         False,
       ),
       # angleenable: Ford angle-primary lateral opt-in (F-150 Lightning only, capability-gated below)

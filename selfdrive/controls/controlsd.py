@@ -12,6 +12,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
+from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
@@ -58,6 +59,20 @@ class Controls:
     elif self.CP.lateralTuning.which() == 'torque':
       self.LaC = LatControlTorque(self.CP, self.CI, DT_CTRL)
 
+    # lanecenter2pnw: small bounded curvature trim toward lane-line center. See
+    # selfdrive/controls/lib/lane_centering.py for the full design + safety-envelope contract.
+    # Enabled BY DEFAULT (see the "DisableLaneCentering" read below in state_control) — the escape
+    # hatch is the UI toggle, not this constructor. Tuning is a hot-reloaded JSON file, not Params.
+    self.lane_centering = LaneCenteringController()
+    # DisableLaneCentering is read at ~1 Hz, not every 100 Hz control tick (see
+    # _read_lane_centering_enabled below) — a Params() disk read on every frame is unnecessary
+    # here since a toggle flip only needs to take effect within about a second.
+    self._lane_centering_frame = 0
+    # Fail-safe initial value: stays False (feature inactive) until the first param read below
+    # succeeds, even though the feature is enabled-by-default once that read completes. This avoids
+    # ever computing a correction before we've actually confirmed the disable-toggle's live state.
+    self._lane_centering_enabled = False
+
   def update(self):
     self.sm.update(15)
     if self.sm.updated["liveCalibration"]:
@@ -65,6 +80,31 @@ class Controls:
     if self.sm.updated["livePose"]:
       device_pose = Pose.from_live_pose(self.sm['livePose'])
       self.calibrated_pose = self.pose_calibrator.build_calibrated_pose(device_pose)
+
+  def _read_lane_centering_enabled(self) -> None:
+    """
+    lanecenter2pnw: refresh the lane-centering master-enable flag at ~1 Hz, not every 100 Hz control
+    tick — matches the cadence CES/other pnw features use for their Params() reads (see
+    selfdrive/controls/lib/ces_pnw/ces_pnw.py's _read_params for the same `frame % (1/DT_CTRL)`
+    pattern). A toggle flip only needs to take effect within about a second; reading Params() at
+    100 Hz would be pure overhead.
+
+    The param is `DisableLaneCentering` (NOT `LaneCentering`) because the feature is enabled BY
+    DEFAULT — this is the one deliberate exception to this fork's "new toggles default OFF" rule.
+    See selfdrive/controls/lib/lane_centering.py and selfdrive/ui/layouts/settings/toggles.py for
+    the full justification (short version: the correction is hard-bounded to a tiny curvature
+    nudge, confidence-gated, releases smoothly, and can be switched off instantly from this toggle).
+
+    Fail-safe: ANY exception reading the param (missing key, param-store hiccup, etc.) is treated as
+    "disabled", not "keep the last-known state" — a param-store problem must never be able to leave
+    a lateral-adjacent correction silently stuck on.
+    """
+    if self._lane_centering_frame % max(1, int(1.0 / DT_CTRL)) == 0:
+      try:
+        self._lane_centering_enabled = not self.params.get_bool("DisableLaneCentering")
+      except Exception:
+        self._lane_centering_enabled = False
+    self._lane_centering_frame += 1
 
   def state_control(self):
     CS = self.sm['carState']
@@ -107,6 +147,9 @@ class Controls:
 
     if not CC.latActive:
       self.LaC.reset()
+      # lanecenter2pnw: zero the carried correction on every lateral disengage so it can't survive
+      # into the next engagement and cause a step at re-engage.
+      self.lane_centering.reset()
     if not CC.longActive:
       self.LoC.reset()
 
@@ -117,6 +160,23 @@ class Controls:
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
+
+    # lanecenter2pnw: apply the lane-centering trim BEFORE clip_curvature, so the correction still
+    # passes through the same ISO lateral jerk/accel limiter as every other curvature source below —
+    # this call can never bypass that limiter. When the feature is disabled (DisableLaneCentering=1,
+    # or any of the controller's own gates below), update() returns new_desired_curvature unchanged,
+    # so this is a byte-for-byte no-op path when the feature is off.
+    self._read_lane_centering_enabled()
+    new_desired_curvature = self.lane_centering.update(
+      new_desired_curvature,
+      model_v2,
+      CS.vEgo,
+      self._lane_centering_enabled,
+      CC.latActive,
+      self.sm.all_checks(['modelV2']),
+      bool(CS.leftBlinker or CS.rightBlinker),
+    )
+
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 

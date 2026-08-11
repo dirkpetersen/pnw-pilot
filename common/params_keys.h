@@ -107,6 +107,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
+    // lanecenter2pnw: small bounded curvature trim toward lane-line center. Deliberately an OPT-OUT
+    // (default "0" = NOT disabled = feature ON), the one exception to this fork's "new toggles
+    // default OFF" rule — see selfdrive/controls/lib/lane_centering.py + toggles.py for why (the
+    // correction is hard-clamped to a tiny curvature nudge, confidence-gated, releases smoothly,
+    // and this toggle switches it off instantly). Tuning is a hot-reloaded JSON file, not a param.
+    {"DisableLaneCentering", {PERSISTENT, BOOL, "0"}},
     {"FordAngleLateral", {PERSISTENT, BOOL, "0"}},     // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt) driver opt-in, F-150 Lightning only (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). Experimental — default OFF.
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
