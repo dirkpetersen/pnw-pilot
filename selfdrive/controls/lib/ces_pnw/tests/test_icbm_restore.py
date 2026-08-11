@@ -187,6 +187,12 @@ def test_icbm_step_publishes_inc_marker_and_restore_src(tmp_path, monkeypatch):
   # 1) cap: a plain dict WITHOUT "dir" (wire-compatible with the pre-restore executor)
   out = run(cap_sig, 60 * MPH, True)
   assert out.get("target") is not None and "dir" not in out and mgr._icbm_dir == "dec"
+  # icbmratchet2pnw: this plumbing test uses REAL wall-clock time and clear_delay_s=0 purely to skip
+  # the debounce wait; in production the vehicle stays bound for well over ICBM_RATCHET_CONFIRM_S
+  # before a curve genuinely clears, so age the engage timestamp back to simulate that (otherwise
+  # the brand-new engage-confirmation guard would correctly, but irrelevantly to this test's intent,
+  # treat this synthetic back-to-back engage/clear as unconfirmed and wipe the episode).
+  mgr._icbm_ep._engage_t0 -= (m.ICBM_RATCHET_CONFIRM_S + 0.1)
   # 2) curve cleared, stock tapped down to 45: restore -> "dir": "inc", target == latched ceiling 60
   out = run(clear_sig, 45 * MPH, True)
   assert out.get("dir") == "inc" and abs(out["target"] - round(60 * MPH, 2)) < 0.01

@@ -556,11 +556,14 @@ def _icbm_track_apex(v_ego, ref, eff, dist):
 # not change tick to tick, only whether/when it starts binding — so this is a deliberately
 # conservative "obviously not a real curve reading" gate, not a general smoothing filter that would
 # blunt a genuine hard brake. See IcbmEpisode._ratchet_confirm for the mechanism.
-ICBM_RATCHET_OUTLIER_DROP_MS = 3.0 * ICBM_EXEC_STEP_MS   # ~6.7 mph (1.34 m/s); the field glitch was
-                                                          # a 16 mph one-tick drop (31->15), far above
-                                                          # this — comfortably gates it while staying
-                                                          # well clear of ordinary tick-to-tick source/
-                                                          # tiering jitter (a few mph at most)
+ICBM_RATCHET_OUTLIER_DROP_MS = 3.0   # m/s (~6.7 mph). Defined directly in m/s, NOT as a multiple of
+                                      # ICBM_EXEC_STEP_MS (that constant is itself already 1 mph in
+                                      # m/s — an earlier draft of this fix wrote "3.0 * ICBM_EXEC_STEP_MS"
+                                      # intending 3 m/s and got 3 mph instead, a Fable review catch).
+                                      # The field glitch was a 16 mph (7.2 m/s) one-tick drop (31->15),
+                                      # far above this — comfortably gates it while staying well clear
+                                      # of ordinary tick-to-tick source/tiering jitter (a few mph at
+                                      # most).
 ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz. Worst-case added
                                                           # travel before a genuine large drop is
                                                           # honored: v_ego * this (e.g. ~24 m at
@@ -601,6 +604,10 @@ class IcbmEpisode:
     # in one tick, awaiting confirmation (see _ratchet_confirm) before it is adopted/published.
     self._pending_low_target = None
     self._pending_low_t0 = None         # monotonic time the pending candidate was first seen
+    # icbmratchet2pnw: when the CURRENT ceiling/_min_target was (re)latched at engage (Gemini review
+    # catch) — an engage that goes silent again before this proves itself for ICBM_RATCHET_CONFIRM_S
+    # is treated as unconfirmed noise, not a real curve; see step()'s clear-debounce entry.
+    self._engage_t0 = None
     self._t0 = None                     # restore start (monotonic)
     self._clear_t0 = None               # first tick the curve was clear while capping (debounce)
     self._hold_set0 = None              # stock set snapshot at hold entry (movement = human)
@@ -620,6 +627,7 @@ class IcbmEpisode:
     self._min_target = None
     self._pending_low_target = None
     self._pending_low_t0 = None
+    self._engage_t0 = None
     self._t0 = None
     self._clear_t0 = None
     self._hold_set0 = None
@@ -630,36 +638,46 @@ class IcbmEpisode:
     self._apex_passed = False
     self._late_tap_set = None
 
-  def _ratchet_confirm(self, now: float, cap_target: float) -> float:
-    """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet within an already-active cap
-    episode (self.phase == "cap", self._min_target already set). Returns the target THIS tick
-    should actually command/ratchet toward:
-      - cap_target itself, immediately, when it is not an outlier-sized drop from the last
-        CONFIRMED target (self._min_target) — this is the common case: flat, rising, or an
-        ordinary small/gradual decrease. _min_target is updated (ratcheted down, never up) exactly
-        as before.
-      - the last CONFIRMED target (self._min_target, unchanged), while an outlier-sized drop is
-        pending confirmation — never act on an unconfirmed low reading.
+  def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> float:
+    """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
+    outlier-sized drop is measured against — self._min_target (the last CONFIRMED target) for an
+    already-active cap episode, or the driver's own v_set for the very first tick of a fresh
+    episode (there is no confirmed target yet; a Gemini/Fable review catch on the first version of
+    this fix found that skipping confirmation entirely at engage let a single bad engage tick latch
+    a ceiling/min_target that a subsequent immediate clear-and-reset (see step()'s clear-debounce
+    handling of self._engage_t0) could not always undo before it reached the executor). Returns the
+    target THIS tick should actually command/ratchet toward:
+      - cap_target itself, immediately, when it is not an outlier-sized drop below `baseline` — the
+        common case: flat, rising, or an ordinary small/gradual decrease. _min_target is updated
+        (ratcheted down, never up; initialized on first use) exactly as before the fix.
+      - the last CONFIRMED target (self._min_target, or `baseline` if nothing confirmed yet), while
+        an outlier-sized drop is pending confirmation — never act on an unconfirmed low reading.
       - the pending candidate (the lowest value seen while it was pending), once an outlier-sized
         drop has persisted for >= ICBM_RATCHET_CONFIRM_S — a genuinely sustained lower target is
         adopted and _min_target ratchets down to it, same as the pre-fix behavior but proven, not
         assumed.
-    A recovery back within the outlier band of self._min_target (checked every tick via the first
-    branch) discards any pending candidate outright — a transient never gets a "grace" tap."""
-    last = self._min_target
-    if last is None or cap_target >= last - ICBM_RATCHET_OUTLIER_DROP_MS:
+    A recovery back within the outlier band of `baseline` (checked every tick via the first branch)
+    discards any pending candidate outright — a transient never gets a "grace" tap. A reading that
+    ITSELF deviates from the currently-pending candidate by more than the outlier band (Gemini
+    review catch: an extreme one-tick outlier landing inside an otherwise-legitimate pending window
+    must not "hide" there and get adopted via the worst-seen min()) restarts the confirmation window
+    at the new value instead of blending into the old one — noisy/unstable readings simply take
+    longer to confirm, they never let one wild tick hijack a window opened by a different value."""
+    held = self._min_target if self._min_target is not None else baseline
+    if cap_target >= baseline - ICBM_RATCHET_OUTLIER_DROP_MS:
       self._pending_low_target = None
       self._pending_low_t0 = None
-      self._min_target = cap_target if last is None else min(last, cap_target)
+      self._min_target = cap_target if self._min_target is None else min(self._min_target, cap_target)
       return cap_target
-    # outlier-sized drop vs the last confirmed target: hold there until this (or a lower) reading
-    # persists ICBM_RATCHET_CONFIRM_S. Track the WORST (lowest) value seen during the window —
-    # conservative on purpose (never less braking than warranted), consistent with the rest of the
-    # file's reduce-only bias.
-    if self._pending_low_t0 is None:
+    # outlier-sized drop vs baseline: hold at the last confirmed (or baseline) value until this (or
+    # a lower) reading persists ICBM_RATCHET_CONFIRM_S. Track the WORST (lowest) value seen among
+    # readings CONSISTENT with each other during the window — conservative on purpose (never less
+    # braking than warranted), consistent with the rest of the file's reduce-only bias.
+    if (self._pending_low_t0 is None
+        or abs(cap_target - self._pending_low_target) > ICBM_RATCHET_OUTLIER_DROP_MS):
       self._pending_low_target = cap_target
       self._pending_low_t0 = now
-      return last
+      return held
     self._pending_low_target = min(self._pending_low_target, cap_target)
     if now - self._pending_low_t0 >= ICBM_RATCHET_CONFIRM_S:
       confirmed = self._pending_low_target
@@ -667,7 +685,7 @@ class IcbmEpisode:
       self._pending_low_target = None
       self._pending_low_t0 = None
       return confirmed
-    return last
+    return held
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
            cap_dist=None, v_ego=0.0, in_curve=False):
@@ -706,11 +724,15 @@ class IcbmEpisode:
         self.phase = "cap"
         self.ceiling = float(v_set)
         self._min_target = cap_target
+        self._engage_t0 = now             # icbmratchet2pnw: see the clear-debounce handling below
         publish_target = cap_target
       else:
         # icbmratchet2pnw: an outlier-sized single-tick drop is held pending confirmation instead
         # of ratcheting (and publishing) immediately — see _ratchet_confirm / the constants above.
-        publish_target = self._ratchet_confirm(now, cap_target)
+        # baseline: the last CONFIRMED target, or (nothing confirmed yet — a fresh episode whose
+        # very first tick was itself never validated) the driver's current set.
+        baseline = self._min_target if self._min_target is not None else float(v_set)
+        publish_target = self._ratchet_confirm(now, cap_target, baseline)
       self._clear_t0 = None             # curve (re)bound: reset the clear debounce
       # icbmmapfirst2pnw: remember where the binding candidate sits — used at clear to tell
       # "passed the curve" (early restore) from "detection dropout" (full debounce).
@@ -728,9 +750,31 @@ class IcbmEpisode:
       # curve has stayed clear for clear_delay_s. A detection flicker or an S-curve gap therefore
       # keeps the ORIGINAL ceiling instead of starting a restore and re-latching lower.
       if self._clear_t0 is None:
+        # icbmratchet2pnw (Gemini review catch): the engage that latched the CURRENT ceiling/
+        # _min_target never had a chance to prove itself for ICBM_RATCHET_CONFIRM_S before the
+        # candidate vanished again — an engage-then-immediate-clear is exactly the single-tick-
+        # outlier signature this whole fix targets, just at the FIRST tick instead of a later one
+        # (where _ratchet_confirm already catches it). Without this, a bad engage tick's ceiling/
+        # _min_target could survive the clear and get reused — including by a later, unrelated,
+        # genuinely-binding candidate reusing this SAME (unconfirmed, wrong) episode — because caps
+        # are DEC-only: once a low value is tapped, only the fully separate, much slower guarded
+        # RESTORE can undo it, never an in-episode recompute. Wipe the episode outright so any later
+        # rebind starts completely fresh instead of resuming an unproven one.
+        if self._engage_t0 is not None and (now - self._engage_t0) < ICBM_RATCHET_CONFIRM_S:
+          self.reset()
+          return None, None
         self._clear_t0 = now
         self._hold_set0 = stock_set     # snapshot: we go SILENT now, so nothing of ours moves the set
         self._late_tap_set = None       # fresh clear window: any previous absorbed tap is void
+        # icbmratchet2pnw (Fable review catch): a candidate awaiting confirmation must NOT survive
+        # a gap in cap ticks. _ratchet_confirm measures WALL TIME, not contiguous low readings, so
+        # without this an old pending value (e.g. a glitch tick just before a brief detection
+        # dropout) could sit stale through the gap and then get instantly "confirmed" — using
+        # elapsed time that includes the silent gap — the moment ANY new, unrelated, merely
+        # outlier-sized-but-legitimate candidate rebinds, via the worst-seen min(). Void it here so
+        # a rebind after any gap always starts its own fresh confirmation window.
+        self._pending_low_target = None
+        self._pending_low_t0 = None
         # icbmmapfirst2pnw: apex passage — the binding candidate vanished while within the tap
         # margin + ~1 s of travel of us => we drove past it (curve behind), not a dropout.
         self._apex_passed = (self._last_cap_dist is not None
