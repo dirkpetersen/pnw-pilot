@@ -526,6 +526,51 @@ def _icbm_track_apex(v_ego, ref, eff, dist):
   return None
 
 
+# --- icbmratchet2pnw (root-cause fix, field event 2026-08-10: computed ~31 mph target / ~13.86 m/s,
+# ~15 mph delivered) --------------------------------------------------------------------------------
+# ROOT CAUSE: IcbmEpisode._min_target only ever ratchets DOWN for the life of a cap episode
+# (min(_min_target, cap_target) every tick), so a single transient low tick — e.g. a vision-
+# curvature reading (orientationRate.z / icbm_vision_apex) distorted for one ~0.25 s brain tick by
+# the truck being momentarily off-line/understeering under the ISO 3.0 clip — was treated exactly
+# like a genuine, sustained curve reading and floored the whole episode at that outlier value. The
+# VERY NEXT tick's recomputed (correct, ~31 mph) target could never undo it: caps are DEC-only by
+# design (icbm_curve_target never commands an increase), and the only path back up is the bounded,
+# guarded RESTORE — which only fires once the curve clears ENTIRELY, all the way to the driver's
+# original pre-curve ceiling, never to an intermediate "that reading was noise, the real target is
+# 31" value. So one bad tick permanently pinned the truck at the outlier speed for the rest of the
+# curve.
+#
+# FIX: a tick that wants to drop the ratchet by more than ICBM_RATCHET_OUTLIER_DROP_MS below the
+# LAST CONFIRMED target must PERSIST for ICBM_RATCHET_CONFIRM_S before it is adopted (updates
+# _min_target) or published. While a drop is pending confirmation, the episode keeps commanding the
+# last CONFIRMED target — still braking normally for whatever curve was already recognized, never
+# silently going fully hands-off — just not lurching to the unconfirmed outlier. A tick that
+# recovers back within the outlier band of the last confirmed target cancels the pending candidate
+# outright: proven transient, never adopted, never published, never tapped toward.
+#
+# Only large SINGLE-tick drops are gated — ordinary continuous refinement (a curve's estimate
+# tightening smoothly tick to tick as distance/geometry closes) is always small and passes straight
+# through with no delay, so genuine sustained curves brake exactly as before. A drop this large
+# across one ~0.25 s tick (icbm_curve_target/_icbm_step run at ~4 Hz, matching IcbmEpisode.step's
+# docstring) is not something real road geometry produces — a candidate curve's RATED speed does
+# not change tick to tick, only whether/when it starts binding — so this is a deliberately
+# conservative "obviously not a real curve reading" gate, not a general smoothing filter that would
+# blunt a genuine hard brake. See IcbmEpisode._ratchet_confirm for the mechanism.
+ICBM_RATCHET_OUTLIER_DROP_MS = 3.0 * ICBM_EXEC_STEP_MS   # ~6.7 mph (1.34 m/s); the field glitch was
+                                                          # a 16 mph one-tick drop (31->15), far above
+                                                          # this — comfortably gates it while staying
+                                                          # well clear of ordinary tick-to-tick source/
+                                                          # tiering jitter (a few mph at most)
+ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz. Worst-case added
+                                                          # travel before a genuine large drop is
+                                                          # honored: v_ego * this (e.g. ~24 m at
+                                                          # 90 mph) — a small fraction of the existing
+                                                          # ICBM_MARGIN_M(30 m) start-early buffer and
+                                                          # the (typically hundreds-of-metres) comfort-
+                                                          # decel envelope; negligible against the many
+                                                          # taps (ICBM_TAP_PERIOD_S=0.4 s each) a real
+                                                          # multi-mph slowdown needs anyway.
+
 
 class IcbmEpisode:
   """Cap -> clear -> RESTORE -> done state machine (pure, unit-tested; owned by CESController).
@@ -551,7 +596,11 @@ class IcbmEpisode:
     self._clear_delay_s = clear_delay_s
     self.phase = "idle"                 # idle | cap | restore
     self.ceiling = None                 # driver's own set (m/s), latched while an episode is active
-    self._min_target = None             # lowest cap target commanded this episode
+    self._min_target = None             # lowest CONFIRMED cap target commanded this episode
+    # icbmratchet2pnw: a candidate that would drop _min_target by more than an outlier-sized step
+    # in one tick, awaiting confirmation (see _ratchet_confirm) before it is adopted/published.
+    self._pending_low_target = None
+    self._pending_low_t0 = None         # monotonic time the pending candidate was first seen
     self._t0 = None                     # restore start (monotonic)
     self._clear_t0 = None               # first tick the curve was clear while capping (debounce)
     self._hold_set0 = None              # stock set snapshot at hold entry (movement = human)
@@ -569,6 +618,8 @@ class IcbmEpisode:
     self.phase = "idle"
     self.ceiling = None
     self._min_target = None
+    self._pending_low_target = None
+    self._pending_low_t0 = None
     self._t0 = None
     self._clear_t0 = None
     self._hold_set0 = None
@@ -578,6 +629,45 @@ class IcbmEpisode:
     self._last_cap_vego = 0.0
     self._apex_passed = False
     self._late_tap_set = None
+
+  def _ratchet_confirm(self, now: float, cap_target: float) -> float:
+    """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet within an already-active cap
+    episode (self.phase == "cap", self._min_target already set). Returns the target THIS tick
+    should actually command/ratchet toward:
+      - cap_target itself, immediately, when it is not an outlier-sized drop from the last
+        CONFIRMED target (self._min_target) — this is the common case: flat, rising, or an
+        ordinary small/gradual decrease. _min_target is updated (ratcheted down, never up) exactly
+        as before.
+      - the last CONFIRMED target (self._min_target, unchanged), while an outlier-sized drop is
+        pending confirmation — never act on an unconfirmed low reading.
+      - the pending candidate (the lowest value seen while it was pending), once an outlier-sized
+        drop has persisted for >= ICBM_RATCHET_CONFIRM_S — a genuinely sustained lower target is
+        adopted and _min_target ratchets down to it, same as the pre-fix behavior but proven, not
+        assumed.
+    A recovery back within the outlier band of self._min_target (checked every tick via the first
+    branch) discards any pending candidate outright — a transient never gets a "grace" tap."""
+    last = self._min_target
+    if last is None or cap_target >= last - ICBM_RATCHET_OUTLIER_DROP_MS:
+      self._pending_low_target = None
+      self._pending_low_t0 = None
+      self._min_target = cap_target if last is None else min(last, cap_target)
+      return cap_target
+    # outlier-sized drop vs the last confirmed target: hold there until this (or a lower) reading
+    # persists ICBM_RATCHET_CONFIRM_S. Track the WORST (lowest) value seen during the window —
+    # conservative on purpose (never less braking than warranted), consistent with the rest of the
+    # file's reduce-only bias.
+    if self._pending_low_t0 is None:
+      self._pending_low_target = cap_target
+      self._pending_low_t0 = now
+      return last
+    self._pending_low_target = min(self._pending_low_target, cap_target)
+    if now - self._pending_low_t0 >= ICBM_RATCHET_CONFIRM_S:
+      confirmed = self._pending_low_target
+      self._min_target = confirmed
+      self._pending_low_target = None
+      self._pending_low_t0 = None
+      return confirmed
+    return last
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
            cap_dist=None, v_ego=0.0, in_curve=False):
@@ -608,15 +698,19 @@ class IcbmEpisode:
         return cap_target, "dec"
       return None, None
     if cap_target is not None:
+      cap_target = float(cap_target)
       # DEC ALWAYS WINS. A cap during RESTORE cancels the restore episode entirely and re-latches
       # at the CURRENT set; a cap during CAP just continues the episode (ceiling untouched).
       if self.phase != "cap":
         self.reset()
         self.phase = "cap"
         self.ceiling = float(v_set)
-        self._min_target = float(cap_target)
+        self._min_target = cap_target
+        publish_target = cap_target
       else:
-        self._min_target = float(cap_target) if self._min_target is None else min(self._min_target, float(cap_target))
+        # icbmratchet2pnw: an outlier-sized single-tick drop is held pending confirmation instead
+        # of ratcheting (and publishing) immediately — see _ratchet_confirm / the constants above.
+        publish_target = self._ratchet_confirm(now, cap_target)
       self._clear_t0 = None             # curve (re)bound: reset the clear debounce
       # icbmmapfirst2pnw: remember where the binding candidate sits — used at clear to tell
       # "passed the curve" (early restore) from "detection dropout" (full debounce).
@@ -627,7 +721,7 @@ class IcbmEpisode:
       except (TypeError, ValueError):
         self._last_cap_dist = None
         self._last_cap_vego = 0.0
-      return cap_target, "dec"
+      return publish_target, "dec"
 
     if self.phase == "cap":
       # clear DEBOUNCE: hold silent (ceiling retained, executor stale-stops within 2 s) until the
