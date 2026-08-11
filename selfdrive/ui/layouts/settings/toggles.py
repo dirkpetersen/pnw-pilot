@@ -126,6 +126,11 @@ DESCRIPTIONS = {
   ),
   # angleenable / toggles-invert2pnw: EXPERIMENTAL angle-primary lateral is ON by default on the
   # F-150 Lightning; this is the opt-OUT toggle.
+  # Intentional two-param bridge: NoFordAngleSteering (here) is the only param the driver sees/writes.
+  # Steering/control code (opendbc_repo/opendbc/car/pnw_vehicle.py, a separate repo consumed as a
+  # submodule) still reads the older positive-sense FordAngleLateral directly and can't be edited from
+  # this branch. system/manager/manager.py re-derives FordAngleLateral = not NoFordAngleSteering on
+  # every boot, which is what fixes a stray/stale mirror value showing as a "STEER: STOCK" red mismatch.
   "NoFordAngleSteering": tr_noop(
     "EXPERIMENTAL. On the Ford F-150 Lightning, openpilot steers using an angle-primary strategy by " +
     "default instead of the older curvature-based control. First drive at low speed on a quiet road " +
