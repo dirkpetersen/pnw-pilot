@@ -1563,6 +1563,11 @@ class CESController:
       lc = self.mem_params.get("LaneCenterStatus", return_default=True)
       if isinstance(lc, (bytes, str)):
         lc = json.loads(lc)
+      # Before controlsd's first publish (feature/CES just started) the key reads back as None; treat
+      # anything that isn't a dict as an empty "no data yet" row so every field cleanly defaults to
+      # None below, instead of throwing an AttributeError into the except once per second until live.
+      if not isinstance(lc, dict):
+        lc = {}
       corr = lc.get("corr")
       self._lc_corr = round(float(corr), 5) if corr is not None else None
       self._lc_act = bool(lc.get("act", False))
