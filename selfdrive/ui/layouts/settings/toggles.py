@@ -517,23 +517,22 @@ class TogglesLayout(Widget):
     # angleenable / toggles-invert2pnw: Ford angle-primary lateral is only meaningful on the F-150
     # Lightning (the only car with the matching flashed 4-signal/angle-mode panda safety — capability
     # view, same stock_acc_buttons fingerprint basis icbm2pnw already uses for "this car is the
-    # Lightning"). Grey out (and force ON, i.e. "no angle steering") everywhere else. (Gemini
-    # should-fix, 2026-07-18, carried through the opt-out rename): also clear the underlying PARAMs,
-    # not just the displayed toggle state — otherwise the legacy FordAngleLateral mirror (see
-    # params_keys.h) can be left stray-True in the param store after a car swap (e.g. set on the
-    # Lightning, device later moved to the Tesla) while the UI shows "disabled," a display/backend
-    # mismatch. The opendbc-side gate already ignores a stray-True FordAngleLateral on a non-capable
-    # car (angle_lat requires four_signal_lat), so this is belt-and-suspenders for the display, not a
-    # safety fix — but a param that says one thing while the UI says another is exactly the kind of
-    # drift this codebase avoids elsewhere (see the DmMode clamp above). Only writes when actually
-    # stray, to avoid a write every _update_toggles call on every non-Lightning drive.
+    # Lightning"). Grey out (and force ON, i.e. "no angle steering" display) everywhere else — DISPLAY
+    # ONLY. Fable finding (2026-08-10, shared-device bug): this clamp must NEVER put_bool
+    # NoFordAngleSteering. veh is derived from ui_state.CP, the last-fingerprinted car — on this
+    # ONE physical device that is swapped between the Tesla and the Lightning, "not capable" simply
+    # means "currently plugged into the Tesla." Persisting True here would permanently flip the
+    # driver-facing default to "angle OFF" the next time the device is back in the Lightning, with
+    # no way for the clamp itself to ever flip it back (it only ever forces True, never False). The
+    # single source of truth is the every-boot re-sync in manager.manager_init(), which re-derives
+    # the legacy FordAngleLateral mirror from NoFordAngleSteering on every boot and self-heals any
+    # stray state. Clearing the inert legacy FordAngleLateral key here is still fine (harmless/inert
+    # on a non-capable car, and the manager re-sync overwrites it on the next boot anyway).
     if "NoFordAngleSteering" in self._toggles:
       angle_ok = veh.stock_acc_buttons
       self._toggles["NoFordAngleSteering"].action_item.set_enabled(angle_ok)
       if not angle_ok:
         self._toggles["NoFordAngleSteering"].action_item.set_state(True)
-        if not self._params.get_bool("NoFordAngleSteering"):
-          self._params.put_bool("NoFordAngleSteering", True)
         if self._params.get_bool("FordAngleLateral"):
           self._params.put_bool("FordAngleLateral", False)
 

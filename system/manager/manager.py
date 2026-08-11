@@ -77,6 +77,20 @@ def manager_init() -> None:
       params.put_bool("FordAngleLateral", True)
     params.put_bool("TogglesInvertedMigrated", True)
 
+  # toggles-invert2pnw / shared-device fix (2026-08-10, Fable finding): unconditional every-boot
+  # re-sync of the legacy FordAngleLateral mirror from NoFordAngleSteering, NOT one-shot like the
+  # migration above. NoFordAngleSteering is the single source of truth; FordAngleLateral only exists
+  # because the opendbc submodule (pnw-opendbc master-pnw, opendbc_repo/opendbc/car/pnw_vehicle.py)
+  # still reads the old key directly. This is the ONE physical comma device, swapped between the
+  # Tesla and the F-150 Lightning -- toggles.py's _update_toggles grey-out clamp for the Lightning-only
+  # NoFordAngleSteering toggle must never PERSIST a value while running on the (non-capable) Tesla, or
+  # a Tesla stint would permanently flip the Lightning's default to "angle steering OFF" with no code
+  # path to ever flip it back. Re-deriving the mirror here, unconditionally, on every boot self-heals
+  # any such stray write (or a manual SSH edit) the moment the device is rebooted, regardless of which
+  # car it was last plugged into. Delete this once pnw-opendbc master-pnw reads NoFordAngleSteering
+  # directly (see the matching write-through mirror in toggles.py's _toggle_callback).
+  params.put_bool("FordAngleLateral", not params.get_bool("NoFordAngleSteering"))
+
   # set unset params to their default value
   for k in params.all_keys():
     default_value = params.get_default_value(k)
