@@ -88,6 +88,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RoadContext", {PERSISTENT, STRING}},   // location2pnw: mapd road class 'freeway'|'city'|'unknown' (freeway-gate)
     {"MapOneWay", {PERSISTENT, STRING}},      // dmroad2pnw: mapd oneWay bridged to mem params ("1"/"0"); with MapLanes -> divided-multilane detect
     {"MapLanes", {PERSISTENT, STRING}},       // dmroad2pnw: mapd lane count bridged to mem params (int as string; 0 = unknown)
+    // mapd220-2pnw PHASE 1: mapd v2.2.0 mapdOut fields (@24-@26) bridged to mem params; telemetry/
+    // observation only, no consumer reads these yet (see docs/MAPD-V220-UPGRADE.md).
+    {"MapHighwayClass", {PERSISTENT, STRING}},          // HighwayClass enum name, e.g. "motorway"
+    {"MapWayId", {PERSISTENT, STRING}},                 // OSM way id (int64 as string)
+    {"MapConditionalSpeedLimit", {PERSISTENT, STRING}}, // raw OSM maxspeed:conditional text; "" = none
     {"MapDownloadStatus", {CLEAR_ON_MANAGER_START, STRING}},  // mapd2pnw: live OSM DB download state ("OK"/"downloading X/Y"/"incomplete X/Y"/"none") for the debug overlay (updates ~1Hz -> not PERSISTENT)
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
     {"OsmDownloadedDate", {PERSISTENT, STRING}},

@@ -173,6 +173,29 @@ enum RoadContext {
   unknown @2;
 }
 
+# mapd2pnw v2.2.0: HighwayClass copied VERBATIM (same ordinals) from mapd's
+# cereal/custom/custom.capnp (PR #89). mapd's own comment: must be kept in
+# perfect sync (names and values) with the HighwayClass enum in
+# cereal/offline/offline.capnp — state.go casts directly between the two
+# generated enum types. unknown means the way's highway tag was not one of
+# the listed values, or the loaded map tiles predate this field.
+enum HighwayClass {
+  unknown @0;
+  motorway @1;
+  motorwayLink @2;
+  trunk @3;
+  trunkLink @4;
+  primary @5;
+  primaryLink @6;
+  secondary @7;
+  secondaryLink @8;
+  tertiary @9;
+  tertiaryLink @10;
+  unclassified @11;
+  residential @12;
+  livingStreet @13;
+}
+
 struct MapdOut @0xa4f1eb3323f5f582 {
   wayName @0 :Text;
   wayRef @1 :Text;
@@ -198,4 +221,9 @@ struct MapdOut @0xa4f1eb3323f5f582 {
   mapCurveSpeed @21 :Float32;
   waySelectionType @22 :WaySelectionType;
   speedLimitAccepted @23 :Bool;
+  # mapd2pnw v2.2.0: append-only, ordinals/types copied VERBATIM from mapd's
+  # v2.2.0 custom.capnp (PRs #89/#90/#93/#94). Do not renumber @0-@23 above.
+  highwayClass @24 :HighwayClass;
+  wayId @25 :Int64;
+  conditionalSpeedLimit @26 :Text;
 }

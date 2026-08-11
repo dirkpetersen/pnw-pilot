@@ -101,6 +101,13 @@ def main():
         # divided multi-lane carriageway even where mapd doesn't class it 'freeway' (oneWay && lanes>=2).
         mem.put_nonblocking("MapOneWay", "1" if mo.oneWay else "0")
         mem.put_nonblocking("MapLanes", str(int(mo.lanes)))
+        # mapd220-2pnw PHASE 1 (plumbing/telemetry only): bridge the three v2.2.0 mapdOut fields as
+        # mem-params, mirroring the RoadContext/MapOneWay pattern above. No consumer reads these yet —
+        # this only makes the data flow + observable (ces_pnw telemetry) so a later phase can gate
+        # curve-tiering / freeway-floor / posted-limit logic on them once validated against real drives.
+        mem.put_nonblocking("MapHighwayClass", str(mo.highwayClass))
+        mem.put_nonblocking("MapWayId", str(int(mo.wayId)))
+        mem.put_nonblocking("MapConditionalSpeedLimit", mo.conditionalSpeedLimit or "")
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point

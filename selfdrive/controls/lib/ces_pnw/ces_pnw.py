@@ -1466,6 +1466,11 @@ class CESController:
     self._sl_k_actl = None       # achieved/measured curvature, derived from CS.yawRate / vEgo
     self._sl_k_err = None        # kCmd - kActl -- sustained large + hands-off = real saturation
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
+    # mapd220-2pnw PHASE 1: mapd v2.2.0 mapdOut fields (@24/@26), bridged via mem params
+    # (MapHighwayClass/MapConditionalSpeedLimit — see mapd_configd.py). PURE OBSERVATION: logged
+    # only, never gates any curve/speed-limit decision here. See docs/MAPD-V220-UPGRADE.md.
+    self._hwy_class = None          # HighwayClass enum name, e.g. "motorway" (None = no data yet)
+    self._cond_spd_lim = ""         # raw OSM maxspeed:conditional text; "" = none
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
     self._last_mode = "off"         # last logged mode: off / chill / experimental
@@ -1599,6 +1604,18 @@ class CESController:
       self._speed_limit = float(sl) if sl not in (None, "", b"") else 0.0
     except Exception:
       self._speed_limit = 0.0
+    # mapd220-2pnw PHASE 1: mapd v2.2.0 highwayClass/conditionalSpeedLimit — logging only (see
+    # _event_record). Same cross-process mem-param read pattern as MapSpeedLimit just above.
+    try:
+      hc = self.mem_params.get("MapHighwayClass", return_default=True)
+      self._hwy_class = str(hc) if hc not in (None, "", b"") else None
+    except Exception:
+      self._hwy_class = None
+    try:
+      csl = self.mem_params.get("MapConditionalSpeedLimit", return_default=True)
+      self._cond_spd_lim = str(csl) if csl not in (None, b"") else ""
+    except Exception:
+      self._cond_spd_lim = ""
     # VTSC applied cap + state — logging only (see _event_record)
     try:
       vt = self.mem_params.get("VTSCStatus", return_default=True)
@@ -2094,6 +2111,12 @@ class CESController:
       # 2026-07-13). None on the noData path, same as every other tele passthrough.
       "visLat": tele.get("visLat"), "visTtc": tele.get("visTtc"), "blnk": tele.get("blnk"),
       "mapV": tele.get("mapV"), "mapDist": tele.get("mapDist"), "mapPts": tele.get("mapPts"),
+      # mapd220-2pnw PHASE 1: mapd v2.2.0 highwayClass/conditionalSpeedLimit telemetry. PURE
+      # OBSERVATION — this is the dataset a later phase validates curve-tiering/freeway-floor/
+      # posted-limit gating against (docs/MAPD-V220-UPGRADE.md); nothing here changes any target.
+      # condSpdLim truncated to bound the JSONL row size (raw OSM text, unbounded upstream).
+      "hwyClass": self._hwy_class,
+      "condSpdLim": (self._cond_spd_lim[:80] if self._cond_spd_lim else ""),
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
       # vtsctele2pnw: explicit lead-present bool + gap time (s) + lead speed delta (m/s)
       "lead": tele.get("lead"), "gapS": tele.get("gapS"), "dV": tele.get("dV"),
