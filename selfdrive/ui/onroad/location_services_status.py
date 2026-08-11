@@ -4,7 +4,7 @@ location2pnw: "HAPPENING AHEAD" on-screen overlay — LOWER-LEFT, display-only.
 Mirrors ces_status.py (CES/VTSC overlays render lower-RIGHT; this is lower-LEFT, verified free). Reads
 the `LocationServices` JSON the pnw_location_services daemon publishes to /dev/shm/params at ~5 Hz and
 renders three advisory lines (police / rest / EV fast). Never computes anything itself; never touches
-control/safety. Shown whenever LocationServicesEnabled is on (default ON).
+control/safety. Shown unless DisableLocationServices is on (toggles-invert2pnw: opt-out, default OFF = shown).
 
 NOTE: plain text labels (not emoji) — the openpilot Inter font has no emoji glyphs, so 👮/🛏/⚡ would
 render as tofu. Swap to an icon atlas later if pictograms are wanted.
@@ -77,7 +77,8 @@ class LocationServicesStatusRenderer(Widget):
     if now - self._last_poll < _REFRESH_S:
       return
     self._last_poll = now
-    if self._mem is None or not ui_state.params.get_bool("LocationServicesEnabled"):
+    # toggles-invert2pnw: DisableLocationServices is opt-out (ON == hidden); shown by default.
+    if self._mem is None or ui_state.params.get_bool("DisableLocationServices"):
       self._st, self._cached_layout = {}, None
       return
     try:

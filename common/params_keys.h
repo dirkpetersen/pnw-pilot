@@ -104,13 +104,24 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OSMDownloadBounds", {PERSISTENT, STRING}},
     {"MapTargetVelocities", {PERSISTENT, JSON}},
     {"ShowRoadName", {PERSISTENT, BOOL, "1"}},
-    {"ShowSpeedLimit", {PERSISTENT, BOOL, "0"}},  // mapd: speed-limit display consumer (default OFF; lives here so the foundation registers it)
+    {"ShowSpeedLimit", {PERSISTENT, BOOL, "0"}},  // LEGACY (toggles-invert2pnw): superseded by NoSpeedLimitDisplay below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
+    // toggles-invert2pnw: opt-out sibling of ShowSpeedLimit -- default OFF = NOT hidden, i.e. the
+    // speed-limit display/warning is ON by default for a fresh install (same idiom as
+    // DisableLaneCentering). manager_init() migrates an existing device's ShowSpeedLimit value into
+    // this key once (see TogglesInvertedMigrated) so upgrading never flips anyone's live behavior.
+    {"NoSpeedLimitDisplay", {PERSISTENT, BOOL, "0"}},
     // mapd2pnw: "Get map for this location" on-demand download
     {"GetMapForLocation", {PERSISTENT, BOOL, "0"}},      // the toggle — ON downloads the region under current GPS
     {"MapForLocationRegion", {CLEAR_ON_MANAGER_START, STRING}},  // mapd_manager writes the region code under current GPS (for the UI to display/gate); "" = covered/unknown
     {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_manager writes True when current GPS is already covered by a downloaded map (UI greys the toggle)
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
-    {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // auto2pnw: nudgeless lane change (Tesla + F-150 Lightning), default OFF
+    {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // LEGACY (toggles-invert2pnw): superseded by NudgeForLaneChange below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
+    // toggles-invert2pnw: opt-out sibling of NudgelessLaneChange -- default OFF = nudge NOT required,
+    // i.e. lane changes are nudgeless by default for a fresh install (Tesla + F-150 Lightning; other
+    // cars still require the wheel nudge regardless of this toggle, see desire_helper.py). manager_init()
+    // migrates an existing device's NudgelessLaneChange value into this key once (see
+    // TogglesInvertedMigrated) so upgrading never flips anyone's live behavior.
+    {"NudgeForLaneChange", {PERSISTENT, BOOL, "0"}},
     {"NoDisengageOnBrake", {PERSISTENT, BOOL, "0"}},   // auto2pnw: stay engaged through brake (unsupported here; toggle greyed)
     // lanecenter2pnw: small bounded curvature trim toward lane-line center. Deliberately an OPT-OUT
     // (default "0" = NOT disabled = feature ON), the one exception to this fork's "new toggles
@@ -118,7 +129,22 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // correction is hard-clamped to a tiny curvature nudge, confidence-gated, releases smoothly,
     // and this toggle switches it off instantly). Tuning is a hot-reloaded JSON file, not a param.
     {"DisableLaneCentering", {PERSISTENT, BOOL, "0"}},
-    {"FordAngleLateral", {PERSISTENT, BOOL, "0"}},     // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt) driver opt-in, F-150 Lightning only (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). Experimental — default OFF.
+    // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt), F-150 Lightning only
+    // (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). toggles-invert2pnw: this key is now a
+    // LIVE MIRROR, not the driver-facing toggle -- NoFordAngleSteering below is what the UI shows/writes.
+    // The real behavioral gate is opendbc_repo/opendbc/car/pnw_vehicle.py (a SEPARATE repo, pnw-opendbc
+    // master-pnw, consumed as a submodule) which still reads THIS key directly and cannot be edited from
+    // this branch. toggles.py's _toggle_callback write-through-mirrors NoFordAngleSteering into this key
+    // (inverted) on every change so the submodule keeps working correctly without modification; delete
+    // this key + the mirror once pnw-opendbc master-pnw is updated to read NoFordAngleSteering directly.
+    {"FordAngleLateral", {PERSISTENT, BOOL, "0"}},
+    // toggles-invert2pnw: opt-out sibling of FordAngleLateral -- default OFF = angle steering NOT
+    // disabled, i.e. angle-primary lateral is ON by default on a fresh F-150 Lightning install (same
+    // idiom as DisableLaneCentering). This is the driver-facing toggle now; see the FordAngleLateral
+    // mirror note above and toggles.py. manager_init() migrates an existing device's FordAngleLateral
+    // value into this key once (see TogglesInvertedMigrated) so upgrading never flips anyone's live
+    // behavior; a genuinely fresh install also seeds the legacy FordAngleLateral mirror to True there.
+    {"NoFordAngleSteering", {PERSISTENT, BOOL, "0"}},
     {"FirehoseActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set by uploader while a pass-2 (video/rlog) transfer is in flight
     {"Pass1UploadActive", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // connect2pnw: set while pass-1 (qlog/qcam) uploads are making progress; sidebar shows GREEN (pass 1) vs BLUE (pass 2, FirehoseActive) per driver req 2026-07-09
     {"FirehoseSpeed", {CLEAR_ON_MANAGER_START, INT, "0"}},  // connect2pnw: Mbps of the in-flight pass-2 transfer; uploader publishes per completed HD file (~1/min); sidebar shows it next to CONNECT
@@ -163,7 +189,18 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SteerLimitStatus", {CLEAR_ON_MANAGER_START, JSON}}, // steerlimit-log2pnw telemetry: PURE OBSERVATION per-tick steering-limit status (curvLim/safeLim/angDes/angAct/angErr/sat/latDem/latMax/curvMax) (controlsd -> CES event logger), ~5 Hz. mem-param, /dev/shm/params, same pattern as LaneCenterStatus. See docs/STEERING-LIMITS.md.
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
-    {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // master toggle (UI), default ON; daemon idles + overlay hidden when off
+    {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // LEGACY (toggles-invert2pnw): superseded by DisableLocationServices below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
+    // toggles-invert2pnw: opt-out sibling of LocationServicesEnabled -- default OFF = NOT disabled,
+    // i.e. the "Happening Ahead" overlay is ON by default for a fresh install (same idiom as
+    // DisableLaneCentering). manager_init() migrates an existing device's LocationServicesEnabled
+    // value into this key once (see TogglesInvertedMigrated) so upgrading never flips anyone's live behavior.
+    {"DisableLocationServices", {PERSISTENT, BOOL, "0"}},
+    // toggles-invert2pnw: one-shot guard for manager_init()'s opt-out-toggle migration (NudgelessLaneChange
+    // -> NudgeForLaneChange, FordAngleLateral -> NoFordAngleSteering, LocationServicesEnabled ->
+    // DisableLocationServices, ShowSpeedLimit -> NoSpeedLimitDisplay). Set True the first time the
+    // migration runs and never re-checked after -- a driver flipping a toggle post-migration must never
+    // be silently re-flipped back by this code on a later boot.
+    {"TogglesInvertedMigrated", {PERSISTENT, BOOL, "0"}},
     {"EvIncludeLevel2", {PERSISTENT, BOOL, "0"}},  // location2pnw: also surface slow Level 2 chargers (reads ev_other_chargers.geojson); default OFF
     {"LocationServices", {CLEAR_ON_MANAGER_START, JSON}},  // mem: JSON the daemon publishes for the lower-left overlay
     {"LastManagerExitReason", {CLEAR_ON_MANAGER_START, STRING}},

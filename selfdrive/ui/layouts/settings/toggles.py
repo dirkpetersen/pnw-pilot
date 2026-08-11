@@ -72,10 +72,12 @@ DESCRIPTIONS = {
     "connection to one of your Priority Networks (Wi-Fi). The default Pacific Northwest set (WA/OR/ID) " +
     "is downloaded automatically; use this only when you drive outside it."
   ),
-  "ShowSpeedLimit": tr_noop(
-    "Show OpenStreetMap speed limits on the onroad screen and flash a warning when the limit drops. " +
-    "When first enabled, openpilot downloads offline maps for Washington, Oregon, and Idaho — keep the car " +
-    "parked with Wi-Fi until the download completes (the sign shows \"-\" until then). Requires a GPS fix to display a limit."
+  # mapd2pnw / toggles-invert2pnw: OSM speed-limit display is ON by default; this is the opt-OUT toggle.
+  "NoSpeedLimitDisplay": tr_noop(
+    "OpenStreetMap speed limits show on the onroad screen and flash a warning when the limit drops. " +
+    "It is ON by default — the first time it's active, openpilot downloads offline maps for Washington, " +
+    "Oregon, and Idaho (keep the car parked with Wi-Fi until the download completes; the sign shows \"-\" " +
+    "until then). Requires a GPS fix to display a limit. Turn this ON to hide the display and warning."
   ),
   "ConditionalExperimentalSwitching": tr_noop(
     "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
@@ -100,11 +102,14 @@ DESCRIPTIONS = {
     "in progress) switches to Experimental Mode for the maneuver. Only used by the CES2 core " +
     "(shadow or live). Off by default."
   ),
-  "NudgelessLaneChange": tr_noop(
-    "Start a lane change from the turn signal alone, without nudging the steering wheel. " +
-    "Hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes. " +
-    "The lane change is blocked while the blind spot monitor detects a vehicle. Keep your hands on the wheel and check your surroundings. " +
-    "Tesla and the Ford F-150 Lightning only — other cars still require the steering-wheel nudge."
+  # auto2pnw / toggles-invert2pnw: nudgeless lane change is ON by default (Tesla + F-150 Lightning);
+  # this is the opt-OUT toggle.
+  "NudgeForLaneChange": tr_noop(
+    "By default, a lane change starts from the turn signal alone, without nudging the steering wheel — " +
+    "hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes " +
+    "(blocked while the blind spot monitor detects a vehicle). Turn this ON to require a steering-wheel " +
+    "nudge before every lane change instead. Keep your hands on the wheel and check your surroundings. " +
+    "Tesla and the Ford F-150 Lightning only — other cars always require the steering-wheel nudge."
   ),
   "NoDisengageOnBrake": tr_noop(
     "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
@@ -119,16 +124,20 @@ DESCRIPTIONS = {
     "become uncertain, you signal a turn, or a lane change starts. Turn this ON to disable it — a " +
     "quick escape hatch if steering ever feels off. Advanced tuning: /data/pnw/lanecenter_tuning.json."
   ),
-  # angleenable: experimental Ford angle-primary lateral opt-in, F-150 Lightning only.
-  "FordAngleLateral": tr_noop(
-    "EXPERIMENTAL. Use an angle-primary steering strategy instead of the default curvature-based " +
-    "control on the Ford F-150 Lightning. First drive at low speed on a quiet road and be ready to " +
-    "take over at any time. Falls back to the default steering strategy automatically on any " +
-    "internal error. Ford F-150 Lightning only — this toggle has no effect on the Tesla."
+  # angleenable / toggles-invert2pnw: EXPERIMENTAL angle-primary lateral is ON by default on the
+  # F-150 Lightning; this is the opt-OUT toggle.
+  "NoFordAngleSteering": tr_noop(
+    "EXPERIMENTAL. On the Ford F-150 Lightning, openpilot steers using an angle-primary strategy by " +
+    "default instead of the older curvature-based control. First drive at low speed on a quiet road " +
+    "and be ready to take over at any time. Falls back to curvature-based control automatically on " +
+    "any internal error, regardless of this toggle. Turn this ON to always use curvature-based " +
+    "control instead. Ford F-150 Lightning only — this toggle has no effect on the Tesla."
   ),
-  "LocationServicesEnabled": tr_noop(
-    "Show the lower-left \"Happening Ahead\" overlay while on a freeway: the nearest police report (Waze), " +
-    "rest area, and EV fast charger ahead. Display-only — never affects steering or speed."
+  # location2pnw / toggles-invert2pnw: the overlay is ON by default; this is the opt-OUT toggle.
+  "DisableLocationServices": tr_noop(
+    "By default, the lower-left \"Happening Ahead\" overlay shows while on a freeway: the nearest " +
+    "police report (Waze), rest area, and EV fast charger ahead. Display-only — never affects " +
+    "steering or speed. Turn this ON to hide it."
   ),
   "EvIncludeLevel2": tr_noop(
     "Also show slow Level 2 (AC) chargers in the EV line, not just DC-fast. Off by default."
@@ -180,10 +189,11 @@ class TogglesLayout(Widget):
         "speed_limit.png",
         False,
       ),
-      # auto2pnw: nudgeless lane change (Tesla + F-150 Lightning) + no-disengage-on-brake (unsupported, greyed)
-      "NudgelessLaneChange": (
-        lambda: tr("Nudgeless Lane Change"),
-        DESCRIPTIONS["NudgelessLaneChange"],
+      # auto2pnw / toggles-invert2pnw: nudgeless lane change ON by default (Tesla + F-150 Lightning);
+      # opt-OUT toggle. + no-disengage-on-brake (unsupported, greyed)
+      "NudgeForLaneChange": (
+        lambda: tr("Nudge for Lane Change"),
+        DESCRIPTIONS["NudgeForLaneChange"],
         "warning.png",
         False,
       ),
@@ -202,10 +212,11 @@ class TogglesLayout(Widget):
         "warning.png",
         False,
       ),
-      # angleenable: Ford angle-primary lateral opt-in (F-150 Lightning only, capability-gated below)
-      "FordAngleLateral": (
-        lambda: tr("Ford Angle Steering (experimental)"),
-        DESCRIPTIONS["FordAngleLateral"],
+      # angleenable / toggles-invert2pnw: Ford angle-primary lateral ON by default (F-150 Lightning
+      # only, capability-gated below); opt-OUT toggle.
+      "NoFordAngleSteering": (
+        lambda: tr("No Ford Angle Steering"),
+        DESCRIPTIONS["NoFordAngleSteering"],
         "warning.png",
         True,
       ),
@@ -245,10 +256,11 @@ class TogglesLayout(Widget):
         "metric.png",
         False,
       ),
-      # mapd2pnw: OSM speed-limit display + lower-limit warning (gates the OSM map download too)
-      "ShowSpeedLimit": (
-        lambda: tr("Speed limit display/warning (MAPD/PNW)"),
-        DESCRIPTIONS["ShowSpeedLimit"],
+      # mapd2pnw / toggles-invert2pnw: OSM speed-limit display + lower-limit warning ON by default
+      # (gates the OSM map download too); opt-OUT toggle.
+      "NoSpeedLimitDisplay": (
+        lambda: tr("No Speed Limit Display/Warning"),
+        DESCRIPTIONS["NoSpeedLimitDisplay"],
         "speed_limit.png",
         False,
       ),
@@ -260,10 +272,11 @@ class TogglesLayout(Widget):
         "speed_limit.png",
         False,
       ),
-      # location2pnw: "Happening Ahead" overlay master toggle, with the slow-L2-charger sub-option right below it
-      "LocationServicesEnabled": (
-        lambda: tr("Location Services"),
-        DESCRIPTIONS["LocationServicesEnabled"],
+      # location2pnw / toggles-invert2pnw: "Happening Ahead" overlay ON by default, with the
+      # slow-L2-charger sub-option right below it; opt-OUT toggle.
+      "DisableLocationServices": (
+        lambda: tr("Disable Location Services"),
+        DESCRIPTIONS["DisableLocationServices"],
         "speed_limit.png",
         False,
       ),
@@ -489,34 +502,38 @@ class TogglesLayout(Widget):
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["GetMapForLocation"].action_item.set_enabled(not covered)
 
-    # auto2pnw: Nudgeless Lane Change support comes from the capability view — grey out (and force
-    # off) elsewhere. No Disengage on Braking is unsupported here on every car — always greyed off.
+    # auto2pnw / toggles-invert2pnw: Nudge for Lane Change support comes from the capability view —
+    # grey out (and force ON, i.e. "nudge required") elsewhere, since nudgeless is impossible there.
+    # No Disengage on Braking is unsupported here on every car — always greyed off.
     nudgeless_ok = veh.nudgeless
-    if "NudgelessLaneChange" in self._toggles:
-      self._toggles["NudgelessLaneChange"].action_item.set_enabled(nudgeless_ok)
+    if "NudgeForLaneChange" in self._toggles:
+      self._toggles["NudgeForLaneChange"].action_item.set_enabled(nudgeless_ok)
       if not nudgeless_ok:
-        self._toggles["NudgelessLaneChange"].action_item.set_state(False)
+        self._toggles["NudgeForLaneChange"].action_item.set_state(True)
     if "NoDisengageOnBrake" in self._toggles:
       self._toggles["NoDisengageOnBrake"].action_item.set_enabled(False)
       self._toggles["NoDisengageOnBrake"].action_item.set_state(False)
 
-    # angleenable: Ford angle-primary lateral is only meaningful on the F-150 Lightning (the only
-    # car with the matching flashed 4-signal/angle-mode panda safety — capability view, same
-    # stock_acc_buttons fingerprint basis icbm2pnw already uses for "this car is the Lightning").
-    # Grey out (and force off) everywhere else. (Gemini should-fix, 2026-07-18): also clear the
-    # PARAM itself, not just the displayed toggle state — otherwise FordAngleLateral can be left
-    # stray-True in the param store after a car swap (e.g. set on the Lightning, device later
-    # moved to the Tesla) while the UI shows OFF, a display/backend mismatch. The opendbc-side gate
-    # already ignores a stray-True param on a non-capable car (angle_lat requires four_signal_lat),
-    # so this is belt-and-suspenders for the display, not a safety fix — but a param that says one
-    # thing while the UI says another is exactly the kind of drift this codebase avoids elsewhere
-    # (see the DmMode clamp above). Only writes when actually stray-True, to avoid a write every
-    # _update_toggles call on every non-Lightning drive.
-    if "FordAngleLateral" in self._toggles:
+    # angleenable / toggles-invert2pnw: Ford angle-primary lateral is only meaningful on the F-150
+    # Lightning (the only car with the matching flashed 4-signal/angle-mode panda safety — capability
+    # view, same stock_acc_buttons fingerprint basis icbm2pnw already uses for "this car is the
+    # Lightning"). Grey out (and force ON, i.e. "no angle steering") everywhere else. (Gemini
+    # should-fix, 2026-07-18, carried through the opt-out rename): also clear the underlying PARAMs,
+    # not just the displayed toggle state — otherwise the legacy FordAngleLateral mirror (see
+    # params_keys.h) can be left stray-True in the param store after a car swap (e.g. set on the
+    # Lightning, device later moved to the Tesla) while the UI shows "disabled," a display/backend
+    # mismatch. The opendbc-side gate already ignores a stray-True FordAngleLateral on a non-capable
+    # car (angle_lat requires four_signal_lat), so this is belt-and-suspenders for the display, not a
+    # safety fix — but a param that says one thing while the UI says another is exactly the kind of
+    # drift this codebase avoids elsewhere (see the DmMode clamp above). Only writes when actually
+    # stray, to avoid a write every _update_toggles call on every non-Lightning drive.
+    if "NoFordAngleSteering" in self._toggles:
       angle_ok = veh.stock_acc_buttons
-      self._toggles["FordAngleLateral"].action_item.set_enabled(angle_ok)
+      self._toggles["NoFordAngleSteering"].action_item.set_enabled(angle_ok)
       if not angle_ok:
-        self._toggles["FordAngleLateral"].action_item.set_state(False)
+        self._toggles["NoFordAngleSteering"].action_item.set_state(True)
+        if not self._params.get_bool("NoFordAngleSteering"):
+          self._params.put_bool("NoFordAngleSteering", True)
         if self._params.get_bool("FordAngleLateral"):
           self._params.put_bool("FordAngleLateral", False)
 
@@ -527,6 +544,15 @@ class TogglesLayout(Widget):
     # ces2xnor: ExperimentalMode toggle removed (replaced by CES). CES is a plain bool toggle —
     # no confirm dialog, no icon swap. Full Experimental is reachable via the top-right button.
     self._params.put_bool(param, state)
+    # angleenable / toggles-invert2pnw: NoFordAngleSteering is the driver-facing opt-out toggle, but
+    # the actual behavioral gate lives in the opendbc submodule (opendbc_repo/opendbc/car/pnw_vehicle.py,
+    # a SEPARATE repo on pnw-opendbc's master-pnw branch) which still reads the LEGACY FordAngleLateral
+    # key directly and cannot be edited from this branch. Write-through-mirror it here (inverted) on
+    # every change so the toggle keeps working correctly without an opendbc change; see the
+    # FordAngleLateral/NoFordAngleSteering comments in params_keys.h. Delete this mirror once
+    # pnw-opendbc master-pnw reads NoFordAngleSteering directly.
+    if param == "NoFordAngleSteering":
+      self._params.put_bool("FordAngleLateral", not state)
     if self._toggle_defs[param][3]:
       self._params.put_bool("OnroadCycleRequested", True)
 
