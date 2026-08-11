@@ -87,6 +87,77 @@ overwritten (discard hot-patches first); (b) the UI's version label is read once
 after a manual install it lags until the next ignition cycle/reboot even though the tree is correct.
 Python-only changes need no rebuild; a reboot (or process restart) makes running code match the tree.
 
+**⚠️ Preparing the submodule PIN-BUMP COMMIT on the DEV HOST (bit us 2026-08-11 — cost real time):**
+after pushing the companion `master-pnw`, the pin bump on `3devpnw` is a superproject commit. Do it
+with `-C <worktree>` paths and **NEVER `cd` into `opendbc_repo`** — a failed submodule checkout leaves
+the shell cwd corrupted (`fatal: Unable to read current working directory`), and every later git
+command then silently runs against the SUBMODULE repo, not the superproject (you'll see opendbc
+history where you expected pnw-pilot). Also, a FRESH `git worktree`'s `opendbc_repo` often has a
+WRONG/default remote (saw `commaai`, not `pnw-opendbc`) and has NOT fetched the new `master-pnw` SHA,
+so `checkout <sha>` fails. **CLEAN method — set the gitlink without touching the submodule worktree:**
+```bash
+git -C <wt> update-index --cacheinfo 160000,<FULL-40char-sha>,opendbc_repo
+git -C <wt> commit -m "bump opendbc pin to master-pnw <sha>"
+```
+The SHA only needs to be on **origin/master-pnw** (device-fetchable) — the dev-host submodule need not
+have it. If `update-index` errors, the fallback is `git -C <wt>/opendbc_repo fetch <path-to-local-pnw-opendbc> master-pnw && git -C <wt>/opendbc_repo checkout <sha> && git -C <wt> add opendbc_repo` (all `-C`,
+no interactive cd). **Never mix** the two: `git add opendbc_repo` records the submodule worktree's
+CHECKED-OUT commit and silently clobbers an `update-index` pin. ALWAYS verify after:
+`git -C <wt> ls-tree HEAD opendbc_repo` shows the intended SHA, and `git -C <wt> diff --name-only
+origin/3devpnw..HEAD` lists only your files + `opendbc_repo`. This mechanical surgery is error-prone
+mid-deploy — worth farming to a fresh-context subagent that only PREPARES the branch (no push), then
+you push to the channel + reboot.
+
+## 🔴 KNOW WHAT'S ACTUALLY DEPLOYED — never reason from local branches or assume `master-pnw` (learned 2026-08-10, the hard way)
+
+Deploy state lives on **origin** and the **device** — NEVER your local branches. Local `master-pnw` /
+`3devpnw` can be hours/days behind origin; reasoning from them tells you the wrong thing is deployed
+(2026-08-10 this caused a real detour: concluded angle-steering "wasn't live on the truck" when it
+was, off a stale local `3devpnw`/`master-pnw` both stuck at an old SHA).
+
+### Local MUST mirror origin — GitHub is the source of truth (driver directive 2026-08-10)
+There must NEVER be a different history on GitHub than local; local is only a mirror. **Sync + inspect
+before any deploy reasoning:**
+```bash
+for d in ~/gh/comma/pnw/pnw-pilot ~/gh/comma/pnw/pnw-opendbc ~/gh/comma/pnw/pnw-panda; do
+  git -C "$d" fetch origin --prune
+  git -C "$d" for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads   # spot drift
+done
+# what the car's channel ACTUALLY pins, and which branch that SHA is on:
+git -C ~/gh/comma/pnw/pnw-pilot   ls-tree origin/3devpnw opendbc_repo
+git -C ~/gh/comma/pnw/pnw-opendbc branch -a --contains <that-sha>
+```
+Per branch you care about: **behind origin -> fast-forward/reset local to origin. Ahead (unpushed) ->
+push FIRST (GitHub must hold everything or it is not deployed, see PRE-DRIVE SYNC). Diverged (both) ->
+stop and reconcile; never let a local branch carry a different history than its origin counterpart.**
+A worktree sitting on an old SHA is stale, not "a version".
+
+### THE MODEL (invariant — restored 2026-08-10)
+`master-pnw` in each companion repo is the **single deploy source of truth**, and **every channel
+pins a commit OF `master-pnw`**: `3devpnw` (car) pins the tip / latest promoted commit; `3testpnw`
+(friends) and `3pnw` (release) pin older commits of `master-pnw` (promotion = bump a channel's
+`opendbc_repo` pin forward to a newer `master-pnw` commit); `4devpnw` pins a known-good older commit.
+**Verify the invariant whenever you touch deploy:** `git -C pnw-opendbc merge-base --is-ancestor
+<channel-pin> master-pnw` must be TRUE for every channel. A channel pin NOT on `master-pnw` means the
+invariant is broken — fix it before deploying.
+
+### History: the 2026-08-10 divergence (fixed)
+The channels had been pinning `angle2pnw-faithful2` (`d6f8024c`, the DEPLOYED faithful angle port)
+while `master-pnw` (`8796ceaf`) carried a DIFFERENT, un-deployed angle line (`angle2pnw`/
+`angleenable`); they diverged from ancestor `3f6fd4b0`, so `master-pnw` tip was NOT what ran on the
+car. Back then a naive `push origin master-pnw` + pin bump to master-pnw tip would have **swapped the
+car's angle implementation AND reflashed the panda** (`ford.h` differs). Reconciled 2026-08-10:
+`master-pnw` force-moved onto the deployed faithful line + shadow-fix + VIN (`2d040baa`); old line
+archived to `angleenable-archived`.
+
+**RECONCILE (open TODO):** merge the deployed `angle2pnw-faithful2` into `master-pnw` (or retire the
+divergent master-pnw angle line) so `master-pnw` == deployed again — otherwise every "ship an opendbc
+change" step is a landmine.
+
+**Ground truth is the DEVICE, not even origin:** `git -C /data/openpilot rev-parse HEAD` ==
+`origin/3devpnw`, the `opendbc_repo` submodule pin matches, and `CarParamsPersistent.carFingerprint`
+is the real car (see Verification).
+
 ## ⚡ CHANNEL MAP (2026-07-10 — auto-update is ON and e2e-validated)
 
 | Branch | Role |
@@ -214,7 +285,11 @@ against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}
   land there. Local clones: `~/gh/comma/pnw/pnw-opendbc` and `~/gh/comma/pnw/pnw-panda` (checked out
   on `master-pnw`). `master-xnor` = xnor upstream mirror; each fork also has a `4devpnw` branch
   snapshotting the frozen-fallback pins. The pin may deliberately LAG the `master-pnw` tip (frozen
-  validated state) — a pin behind tip is not an error.
+  validated state) — a pin behind tip is not an error. **⚠️ And the pinned SHA can be on a DIFFERENT
+  branch than `master-pnw` entirely** — always `git -C pnw-opendbc branch -a --contains <pin>` to see
+  which (see the 🔴 "KNOW WHAT'S ACTUALLY DEPLOYED" section up top). Verify the
+  channel-pin-is-on-master-pnw invariant every time — it was broken 2026-08-10 (channels on a
+  divergent `angle2pnw-faithful2`) and reconciled so `master-pnw` == deployed again.
 - **Shipping an opendbc/panda change:**
   1. Commit on `master-pnw` in the companion repo and **`git push origin master-pnw` FIRST**. A pin
      not reachable from the pushed branch makes the device's `git submodule update --init` fail
@@ -401,6 +476,17 @@ never-persist-MOCK fix in `card.py` keeps a flaky read from overwriting the good
 - **Empty-grep awk false positive**: `ps | grep X | awk '{exit ($1>=60)?0:1}'` exits **0 when grep
   matches nothing** (awk never runs the block) — a wait-loop on that "succeeds" while the process
   doesn't exist. Require a non-empty match count AND the etimes condition.
+- **`grep … | head … && echo FOUND` FALSE-POSITIVE (cost time on the lanecenter2pnw deploy 2026-08-10):**
+  a pipeline's exit status is the LAST command's. `grep -rl "UnknownKeyName" /data/log | head -1 && echo
+  "FOUND (bad)"` prints "FOUND" **even when grep matches nothing**, because `head` exits 0 on empty
+  input and masks grep's exit 1 — so a perfectly healthy deploy looks like it's crash-looping (and a
+  false "crash detected" can trigger a needless rollback, its own hazard). **Never gate a bad-condition
+  check on `grep | head && echo`.** Check the CROSS-DAEMON COUNT instead and treat 0 as clean:
+  `grep -rc "UnknownKeyName" /data/log 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'` → must be `0`.
+  (Or `grep -rq … ; echo $?` — but with `set -o pipefail` OFF, keep the count out of any pipe.) Then
+  corroborate liveness directly: `get_bool("<newkey>")` returns without raising, and ui/manager hold
+  the SAME pid over ~5 s. A key that greps "missing" but whose `get_bool` succeeds = a stale BOOT-WINDOW
+  log line (old `params_pyx` briefly live while new `toggles.py` loaded), not a live fault.
 - **`pkill` a manager child ≠ it comes back**: plain `PythonProcess` entries (e.g. `uploader`) are NOT
   restart-on-crash — pkill leaves them dead until a full comma restart. (And `pkill -f` of a pattern
   contained in your own ssh command kills your shell mid-script.)
