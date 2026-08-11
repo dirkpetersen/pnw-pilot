@@ -1465,6 +1465,10 @@ class CESController:
     self._sl_k_cmd = None        # commanded curvature this tick (-self.desired_curvature)
     self._sl_k_actl = None       # achieved/measured curvature, derived from CS.yawRate / vEgo
     self._sl_k_err = None        # kCmd - kActl -- sustained large + hands-off = real saturation
+    # steertele2pnw: capability-analysis additions — see the steer_limit_status comment block in
+    # controlsd.py for the full derivation of each. Same defaulting rationale as the sl* fields above.
+    self._sl_lat_active = False  # CC.latActive this tick -- False means angDes/angAct froze to manual steering, not an openpilot capability signal
+    self._sl_ang_sat = False     # un-fused angle-only saturation half (curvLim already isolates the curvature half of the fused "sat" flag)
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     # mapd220-2pnw PHASE 1: mapd v2.2.0 mapdOut fields (@24/@26), bridged via mem params
     # (MapHighwayClass/MapConditionalSpeedLimit — see mapd_configd.py). PURE OBSERVATION: logged
@@ -1708,11 +1712,16 @@ class CESController:
       self._sl_k_actl = round(float(k_actl), 6) if k_actl is not None else None
       k_err = sl.get("kErr")
       self._sl_k_err = round(float(k_err), 6) if k_err is not None else None
+      # steertele2pnw: same defensive get/default pattern as the sl* fields above, same dict, no
+      # separate publish/read cycle.
+      self._sl_lat_active = bool(sl.get("latActive", False))
+      self._sl_ang_sat = bool(sl.get("angSat", False))
     except Exception:
       self._sl_curv_lim = self._sl_safe_lim = self._sl_sat = False
       self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = None
       self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = None
       self._sl_k_cmd = self._sl_k_actl = self._sl_k_err = None
+      self._sl_lat_active = self._sl_ang_sat = False
 
   def enabled(self) -> bool:
     return self._enabled
@@ -2145,6 +2154,11 @@ class CESController:
       "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
       "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
       "slSat": self._sl_sat,
+      # steertele2pnw: capability-analysis pair — slLatAct disambiguates openpilot-engaged steering
+      # from manual maneuvering (angDes/angAct freeze together when False), slAngSat is the un-fused
+      # angle-only half of slSat (slCurvLim already isolates the curvature half). See the
+      # steer_limit_status comment block in controlsd.py for the exact derivation of each.
+      "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
       # fordkappalog2pnw: commanded vs achieved curvature (1/m, Ford wire convention positive=left) —
       # the empirical saturation signal to characterize this truck's real curvature limit. Display/log
       # only, same as sl* above. See docs/STEERING-LIMITS.md "Ford curvature interface" section.
