@@ -229,3 +229,84 @@ BTN_EXP   = 2  # forced full Experimental
 TICK_S          = 1.0                    # s between heartbeat breadcrumb records (dense for the test drive)
 HWY_SPEED_LIMIT = 55 * CV.MPH_TO_MS      # OSM speed limit >= this => coarse "highway" guess
 HWY_VEGO        = 55 * CV.MPH_TO_MS       # or sustained speed >= this (authoritative = GPS+OSM+300ft in analysis)
+
+# --- curvefloor2pnw: posted-limit curve floor + steering-saturation evidence gate ---------------
+# Field event 2026-08-11 (drives/2026-08-11 forensics): sharp right curve, posted limit 25 mph
+# (spdLim 11.2 m/s), the truck slowed 50->29->~15 mph even though the computed curve target
+# (icbmT) was ~31 mph. Root cause (see docs/pnw root-cause note / this branch's commit message):
+# ICBM's episode ratchet (`IcbmEpisode._min_target = min(_min_target, cap_target)`, ces_pnw.py) never
+# rises within one capped episode, and NOTHING floored the per-tick candidate at the posted limit on
+# the stock-ACC/ICBM path (VTSC's existing floor is op-long-only and was additionally gated to
+# freeways only) — one noisy/cascading vision-curvature tick below the limit permanently latches the
+# whole episode there. Driver principle: the curve slowdown must never command below the posted limit
+# UNLESS there is EVIDENCE the steering genuinely cannot hold the curve at the limit speed.
+#
+# Evidence source: SteerLimitStatus (controlsd.py, steerlimit-log2pnw/fordkappalog2pnw) —
+# `sat` (LatControlAngle's OWN saturation flag; already time-integrated with a continuous 1.0 s hold
+# above 5 m/s and suppressed while the driver's hands are on the wheel -- see
+# docs/STEERING-LIMITS.md Sec 2.3) OR (`curvLim` [this tick's ISO clip_curvature bound] AND
+# `|kErr| >= KERR_EVIDENCE_THRESH`). kErr is the commanded-vs-yaw-rate-measured curvature divergence
+# (STEERING-LIMITS.md Sec 6.6); the threshold reuses Ford's OWN CarControllerParams.CURVATURE_ERROR
+# tuning constant (opendbc `ford/values.py` -- the divergence Ford's own carcontroller treats as "no
+# longer trustworthy, clip it"), which also brackets the field-observed 0.0016->0.0021 range logged at
+# the moment of the reported over-slow. This is deliberately NOT a new/invented number.
+KERR_EVIDENCE_THRESH = 0.002       # 1/m; == Ford's CarControllerParams.CURVATURE_ERROR (values.py)
+EVIDENCE_ENTER_TICKS = 2           # consecutive ~1 Hz reads of raw saturation evidence required
+                                   # before it's trusted (both CES/ICBM and VTSC read SteerLimitStatus
+                                   # at ~1 Hz -- see _read_map()/​_read_enabled()) -- damps a single
+                                   # noisy tick from unlocking the below-limit exception.
+EVIDENCE_CLEAR_TICKS = 3           # consecutive ~1 Hz reads WITHOUT evidence before the floor
+                                   # RE-engages. Deliberately >= EVIDENCE_ENTER_TICKS (asymmetric,
+                                   # matching this fork's other de-flap idioms, e.g. ICBM_RESTORE_DELAY_S):
+                                   # snapping back to the posted-limit floor is the safe default, so
+                                   # clearing evidence is made slightly stickier than acquiring it --
+                                   # this is what prevents the floor from chattering on/off right at
+                                   # the saturation boundary.
+
+
+def steering_saturation_tick(sat, curv_lim, k_err) -> bool:
+  """One tick's RAW (undebounced) saturation-evidence predicate, from the SteerLimitStatus fields
+  already read by the caller. Pure; never raises -- bad/missing input reads as False, the safe/
+  conservative default (no evidence -> the posted-limit floor stays enforced)."""
+  try:
+    if bool(sat):
+      return True
+    if k_err is None:
+      return False
+    return bool(curv_lim) and abs(float(k_err)) >= KERR_EVIDENCE_THRESH
+  except (TypeError, ValueError):
+    return False
+
+
+def evidence_gate_step(prev_count: int, prev_evidence: bool, raw_tick: bool) -> tuple:
+  """Debounced/hysteretic evidence latch stepped once per ~1 Hz read. ENTERS (evidence=True) after
+  EVIDENCE_ENTER_TICKS consecutive positive raw ticks; CLEARS (evidence=False) after
+  EVIDENCE_CLEAR_TICKS consecutive negative ticks. The caller owns the (count, evidence) state pair
+  across calls -- same pattern as this fork's other counter-based hysteresis (e.g.
+  VTSCController._below/_clear, IcbmEpisode's own debounce timers). Pure; count is bounded to
+  +/-EVIDENCE_CLEAR_TICKS so it can't grow unbounded over a long steady run."""
+  clamp = max(EVIDENCE_ENTER_TICKS, EVIDENCE_CLEAR_TICKS)
+  if raw_tick:
+    count = min((prev_count + 1) if prev_count >= 0 else 1, clamp)
+  else:
+    count = max((prev_count - 1) if prev_count <= 0 else -1, -clamp)
+  evidence = prev_evidence
+  if not evidence and count >= EVIDENCE_ENTER_TICKS:
+    evidence = True
+  elif evidence and count <= -EVIDENCE_CLEAR_TICKS:
+    evidence = False
+  return count, evidence
+
+
+def speed_limit_curve_floor(target: float, spd_lim: float, evidence: bool) -> float:
+  """The floor itself: a binding curve TARGET (m/s, already the finalized per-tick candidate -- e.g.
+  ICBM's chosen map/vision/far apex after the Lightning penalty + rain margin, or VTSC's rate-limited
+  `capped`) is never lowered by this function -- it only ever RAISES a too-low target up to the
+  posted limit `spd_lim`. Relaxed (no-op) when `evidence` (sustained steering-saturation, see
+  evidence_gate_step above) is True, or when there is no limit data (spd_lim <= 0 -- V_MIN is the
+  only floor left, exactly as before this branch). Callers MUST still clamp the result to
+  <= v_cruise/the episode ceiling themselves (this function has no notion of either) -- it only
+  implements the floor half of the reduce-only contract. Pure; never raises."""
+  if spd_lim <= 0.0 or evidence:
+    return target
+  return max(target, spd_lim)

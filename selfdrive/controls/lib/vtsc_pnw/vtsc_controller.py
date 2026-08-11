@@ -59,8 +59,14 @@ class VTSCController:
     # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
     self._map_curves = False
     self._map_targets: list = []
-    self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
-    self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
+    self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here (driver
+                               # rule 2026-07-01; curvefloor2pnw 2026-08-11 generalized this off
+                               # freeways too — see the floor block in cap() for the full rationale)
+    # curvefloor2pnw: debounced steering-saturation evidence gate (ces_pnw_constants.py) — the ONLY
+    # thing allowed to relax the speed-limit floor below spdLim. Starts at "no evidence" (floor
+    # enforced) until SteerLimitStatus has actually been read at least EVIDENCE_ENTER_TICKS times.
+    self._sl_evid_count = 0
+    self._sl_evidence = False
     self._cur_lat = self._cur_lon = None
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
@@ -109,16 +115,34 @@ class VTSCController:
           self._read_map()
         else:
           self._map_targets = []
-        # speed-limit floor inputs (driver rule 2026-07-01): posted limit + road context from the mapd bridge
-        # mem params (same source as the map curves). Applied in cap(); 0 / non-freeway -> no floor.
+        # speed-limit floor input (driver rule 2026-07-01): posted limit from the mapd bridge mem
+        # param (same source as the map curves). Applied in cap(); 0 -> no floor (V_MIN still applies).
+        # curvefloor2pnw (2026-08-11): the floor used to be gated to RoadContext=='freeway' only —
+        # generalized to every road now that the steering-evidence gate below can distinguish a
+        # genuinely-too-tight curve from an over-slow artifact without relying on a road-class proxy
+        # (the field event that motivated this was a 25 mph SURFACE curve, which the old freeway-only
+        # gate would never have floored at all).
         try:
           sl = self.mem_params.get("MapSpeedLimit", return_default=True) if self.mem_params else None
           self._speed_limit = float(sl) if sl is not None else 0.0
-          ctx = self.mem_params.get("RoadContext", return_default=True) if self.mem_params else None
-          ctx = ctx.decode() if isinstance(ctx, bytes) else (ctx or "")
-          self._is_freeway = (ctx == "freeway")
         except Exception:
-          self._speed_limit, self._is_freeway = 0.0, False
+          self._speed_limit = 0.0
+        # curvefloor2pnw: steering-saturation evidence (see ces_pnw_constants.py) — same SteerLimitStatus
+        # mem-param controlsd already publishes at ~5 Hz for ces_pnw's identical read; same ~1 Hz cadence
+        # as the other _read_enabled() reads. Any failure -> raw tick False (safe default, floor stays
+        # enforced) rather than touching the debounce state with a poisoned reading.
+        try:
+          sl_status = self.mem_params.get("SteerLimitStatus", return_default=True) if self.mem_params else None
+          if isinstance(sl_status, (bytes, str)):
+            sl_status = json.loads(sl_status)
+          if not isinstance(sl_status, dict):
+            sl_status = {}
+          raw = CES.steering_saturation_tick(sl_status.get("sat", False), sl_status.get("curvLim", False),
+                                             sl_status.get("kErr"))
+        except Exception:
+          raw = False
+        self._sl_evid_count, self._sl_evidence = CES.evidence_gate_step(
+          self._sl_evid_count, self._sl_evidence, raw)
       except Exception:
         self._enabled = False
         self._map_curves = False
@@ -337,11 +361,18 @@ class VTSCController:
     self._applied = apply_limits(self._applied, target, v_cruise, dt, self._a_decel_max, self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
 
-    # SPEED-LIMIT FLOOR (driver rule 2026-07-01): on a HIGHWAY, never trim below the posted limit — only from
-    # the set speed DOWN TOWARD the limit. This bounds the downside (worst case = the limit, never the old deep
-    # over-slow), which is what makes the lower A_LAT_TARGET safe. Off-highway / no limit data -> no floor
-    # (V_MIN still applies). A curve genuinely too tight for the limit is then the driver's to handle.
-    if self._is_freeway and self._speed_limit > 0.0:
+    # SPEED-LIMIT FLOOR (driver rule 2026-07-01, generalized by curvefloor2pnw 2026-08-11): never trim
+    # below the posted limit — only from the set speed DOWN TOWARD the limit. This bounds the downside
+    # (worst case = the limit, never a deep over-slow), which is what makes the lower A_LAT_TARGET safe.
+    # No limit data -> no floor (V_MIN still applies).
+    # curvefloor2pnw: this floor USED TO be gated to RoadContext=='freeway' only — "a curve genuinely
+    # too tight for the limit is then the driver's to handle" off-highway. The field event that motivated
+    # this branch (2026-08-11: 50->29->~15 mph on a 25 mph SURFACE curve, well below the ~31 mph computed
+    # target) is exactly the case that old gate could never catch. Replaced with the more precise
+    # `_sl_evidence` gate below: sustained steering-saturation is a direct physical signature of "this
+    # curve genuinely can't be held at the limit," so the road-class heuristic is no longer needed to
+    # avoid over-constraining genuinely tight backroad curves.
+    if self._speed_limit > 0.0:
       # curveslow-lightning floor fix (2026-07-11 evening passes): the floor was erasing the
       # Lightning penalty on posted-limit sweepers — caps pinned at exactly the 65 mph limit
       # (29.1 m/s) through all 13 takeovers while the penalized v_curve sat ~4.5 m/s lower.
@@ -355,7 +386,13 @@ class VTSCController:
       # when a curve is actually pulling the cap down — straight-line cruise stays at the limit).
       floor_v = max(self._speed_limit - self.veh.curve_speed_penalty_ms(self._speed_limit)
                     - self.veh.rain_penalty_ms(), C.V_MIN)
-      capped = min(v_cruise, max(capped, floor_v))
+      # curvefloor2pnw: sustained steering-saturation evidence (SteerLimitStatus, read in
+      # _read_enabled()) is the ONLY thing allowed to relax this floor below the penalty/rain-adjusted
+      # value above — see ces_pnw_constants.speed_limit_curve_floor for the exact rule. No evidence ->
+      # byte-identical to the pre-curvefloor2pnw floor (now just evaluated on every road, not only
+      # freeways).
+      if not self._sl_evidence:
+        capped = min(v_cruise, max(capped, floor_v))
 
     engaged = capped < v_cruise_set - 0.5
     if engaged != self._engaged:
@@ -388,6 +425,9 @@ class VTSCController:
         "pen": round(float(self._tele_pen), 2),
         "pitch": round(float(self._tele_pitch), 4) if self._tele_pitch is not None else None,
         "dir": self._tele_dir,
+        # curvefloor2pnw: whether the speed-limit floor was RELAXED this tick (steering-saturation
+        # evidence) — lets ces_events distinguish "floored at the limit" from "evidence let it go lower."
+        "evid": bool(self._sl_evidence),
       })
     except Exception:
       pass

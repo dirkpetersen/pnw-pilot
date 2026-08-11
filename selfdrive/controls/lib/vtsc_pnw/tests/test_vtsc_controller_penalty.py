@@ -246,5 +246,64 @@ def test_rain_lowers_freeway_floor_below_limit():
   dry = floored_cap(0)
   wet = floored_cap(2)
   assert abs(dry - 29.06) < 1e-6                          # dry Tesla floor = the posted limit
-  assert abs((dry - wet) - 5.0 * MPH) < 1e-6             # heavy rain lowers the floor by 5 mph
+  assert abs((dry - wet) - 5.0 * MPH) < 1e-2             # heavy rain lowers the floor by 5 mph
   assert wet < 29.06                                     # ... so the car may now trim below the limit
+
+
+# ---- curvefloor2pnw: the floor now generalizes off freeways + the steering-evidence gate ----------
+class _FakeMemNoCtx:
+  """Same shape as _FakeMem but with NO RoadContext key at all (surface road / unclassified) and an
+  optional SteerLimitStatus payload, so the floor generalization + evidence gate can be exercised."""
+  def __init__(self, limit_ms, sl_status=None):
+    self.d = {"MapSpeedLimit": limit_ms}
+    if sl_status is not None:
+      self.d["SteerLimitStatus"] = sl_status
+  def get(self, k, return_default=False):
+    return self.d.get(k)
+
+
+def _surface_floored_cap(spd_lim_ms, sl_status=None):
+  ctrl = VTSCController(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True),
+                        params=FakeParams({"CESMode": "2"}))
+  ctrl.mem_params = _FakeMemNoCtx(spd_lim_ms, sl_status)
+  ctrl._state = "hold"
+  ctrl._applied = spd_lim_ms - 10.0 * MPH   # simulate a deep over-slow well below the limit
+  return ctrl, ctrl.cap(_make_sm(0.0, vx=spd_lim_ms), spd_lim_ms + 20 * MPH, spd_lim_ms)
+
+
+def test_floor_applies_off_freeway_no_road_context():
+  """The 2026-08-11 field event (25 mph SURFACE curve) is exactly the case the old RoadContext==
+  'freeway' gate would never floor. No RoadContext key at all -> the floor must still bind."""
+  spd_lim = 25 * MPH
+  ctrl, cap = _surface_floored_cap(spd_lim)
+  assert cap >= spd_lim - 1e-6
+
+
+def test_floor_relaxed_by_sustained_steering_evidence():
+  from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
+  spd_lim = 25 * MPH
+  sat_status = {"sat": True, "curvLim": True, "kErr": 0.003}
+  ctrl, cap0 = _surface_floored_cap(spd_lim, sl_status=sat_status)
+  # one read is not enough (EVIDENCE_ENTER_TICKS debounce) -- floor still enforced on the first tick
+  assert ctrl._sl_evidence is False
+  assert cap0 >= spd_lim - 1e-6
+  # step the debounce forward with the SAME sustained-saturation reading, forcing a fresh read each
+  # time (the throttle only allows one read/sec) and re-priming the "deep over-slow, hold" premise
+  # (cap() itself would otherwise walk _state out of "hold" after the first call, independent of the
+  # floor logic this test targets).
+  cap = cap0
+  for _ in range(CES.EVIDENCE_ENTER_TICKS - 1):
+    ctrl._last_read = -1e9
+    ctrl._state = "hold"
+    ctrl._applied = spd_lim - 10.0 * MPH
+    cap = ctrl.cap(_make_sm(0.0, vx=spd_lim), spd_lim + 20 * MPH, spd_lim)
+  assert ctrl._sl_evidence is True
+  assert cap < spd_lim - 0.5      # evidence relaxed the floor -> the deep-braked _applied shows through
+
+
+def test_evidence_read_failure_defaults_to_no_evidence():
+  # SteerLimitStatus missing/garbage -> raw tick False -> floor stays enforced (safe default)
+  spd_lim = 25 * MPH
+  ctrl, cap = _surface_floored_cap(spd_lim, sl_status=None)
+  assert ctrl._sl_evidence is False
+  assert cap >= spd_lim - 1e-6

@@ -1465,6 +1465,11 @@ class CESController:
     self._sl_k_cmd = None        # commanded curvature this tick (-self.desired_curvature)
     self._sl_k_actl = None       # achieved/measured curvature, derived from CS.yawRate / vEgo
     self._sl_k_err = None        # kCmd - kActl -- sustained large + hands-off = real saturation
+    # curvefloor2pnw: debounced steering-saturation evidence gate (see ces_pnw_constants.py) -- the
+    # ONLY thing allowed to relax the posted-limit curve floor below. Starts at "no evidence" (floor
+    # enforced) -- the safe default until SteerLimitStatus has actually been read.
+    self._sl_evid_count = 0
+    self._sl_evidence = False
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     # mapd220-2pnw PHASE 1: mapd v2.2.0 mapdOut fields (@24/@26), bridged via mem params
     # (MapHighwayClass/MapConditionalSpeedLimit — see mapd_configd.py). PURE OBSERVATION: logged
@@ -1713,6 +1718,14 @@ class CESController:
       self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = None
       self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = None
       self._sl_k_cmd = self._sl_k_actl = self._sl_k_err = None
+    # curvefloor2pnw: step the debounced saturation-evidence gate from THIS read's sl* fields --
+    # same ~1 Hz cadence as the read above. A read-failure above already reset _sl_sat/_sl_curv_lim/
+    # _sl_k_err to their safe defaults (False/False/None), so the raw tick below degrades to "no
+    # evidence" exactly like every other field in this method. See ces_pnw_constants.py for the
+    # threshold/hysteresis rationale.
+    raw = C.steering_saturation_tick(self._sl_sat, self._sl_curv_lim, self._sl_k_err)
+    self._sl_evid_count, self._sl_evidence = C.evidence_gate_step(
+      self._sl_evid_count, self._sl_evidence, raw)
 
   def enabled(self) -> bool:
     return self._enabled
@@ -1976,6 +1989,22 @@ class CESController:
                                                                is_left=is_left), 0.0)
         # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
         target = max(target - self._veh.rain_penalty_ms(), 0.0)
+        # curvefloor2pnw (2026-08-11 field event: 50->29->~15 mph on a 25 mph curve, computed target
+        # ~31 mph — the ICBM path had NO speed-limit floor at all, and IcbmEpisode._min_target only
+        # ever ratchets DOWN within a cap episode, so one over-slow tick latched for the whole curve).
+        # Driver principle: never command below the posted limit unless sustained steering-saturation
+        # evidence says the truck genuinely can't hold the curve at the limit speed (see
+        # ces_pnw_constants.speed_limit_curve_floor / steering_saturation_tick / evidence_gate_step).
+        # Only ever RAISES an under-limit target (never lowers one -> still reduce-only against the
+        # penalty/rain-adjusted target above), then re-clamped to `ref` (the episode ceiling / current
+        # set) so the floor can never push the published target ABOVE what the driver is/was allowed
+        # (covers the edge case where the driver's own set is already below the posted limit).
+        # getattr, not self._sl_evidence directly: several existing unit tests build a bare stand-in
+        # object exposing only what _icbm_step touched BEFORE this branch (see test_icbm_bridge.py
+        # _icbm_stub()) -- default to "no evidence" (the safe/conservative reading, floor enforced)
+        # rather than requiring every one of those stubs to be updated for an unrelated attribute.
+        target = min(C.speed_limit_curve_floor(target, sig.get("spd_lim", 0.0),
+                                               getattr(self, "_sl_evidence", False)), ref)
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
@@ -2149,6 +2178,10 @@ class CESController:
       # the empirical saturation signal to characterize this truck's real curvature limit. Display/log
       # only, same as sl* above. See docs/STEERING-LIMITS.md "Ford curvature interface" section.
       "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+      # curvefloor2pnw: the debounced evidence gate's live state — True rows are exactly the ticks
+      # where the ICBM/VTSC posted-limit curve floor was RELAXED (permitted below spdLim). Display/
+      # log only; the gate's own decision (evidence_gate_step) is what actually feeds the floor.
+      "slEvid": self._sl_evidence,
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
