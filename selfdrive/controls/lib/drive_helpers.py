@@ -41,8 +41,11 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 #
 # THE SCHEDULE (mph -> m/s^2, linearly interpolated, held flat outside the ends) -- ONLY ACTIVE ONCE A
 # VALID FILE IS LOADED FROM DISK
-#   <=30 mph -> 5.0, tapering to 4.0 by 45 mph, tapering to 3.0 (ISO) by 60 mph, flat 3.0 above that.
-#   See docs/pnw/LATACCEL2PNW.md for the full writeup.
+#   <=50 mph -> 5.0, tapering to 4.0 by 60 mph, tapering to 3.0 (ISO) by 70 mph, flat 3.0 above that.
+#   LAYER-2 safety envelope (see docs/pnw/LATACCEL2PNW.md for the full writeup, incl. the 2026-08-11
+#   10:37 PDT Crown Hill left-curve finding that set these anchors): curve-speed slowdown (VTSC/CES)
+#   is layer 1; if it doesn't fire before a curve, this cap is what lets openpilot use the truck's
+#   real steering authority to hold the lane instead of under-turning and departing.
 #
 # FAIL-SAFE DIRECTION: flat ISO 3.0, not the 5/4/3 schedule
 #   Until a VALID lataccel_limits.json has been parsed from disk -- at boot, if the file is missing, or
@@ -119,7 +122,7 @@ LAT_ACCEL_SLEW_RATE = 4.0  # m/s^2 per second
 # the first time it's missing, so a driver has something to edit. It is NOT an in-memory fallback: see
 # the "FAIL-SAFE DIRECTION" note above -- absent/invalid file means flat MAX_LATERAL_ACCEL_NO_ROLL, not
 # this schedule. [speed_mph, accel_mps2] pairs, ascending by speed.
-DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[30, 5.0], [45, 4.0], [60, 3.0]]
+DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 5.0], [60, 4.0], [70, 3.0]]
 
 
 class _LatAccelSchedule:
@@ -156,7 +159,9 @@ class _LatAccelSchedule:
       fd = os.open(LAT_ACCEL_LIMITS_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
       with os.fdopen(fd, "w") as f:
         json.dump({
-          "_comment": ("Speed-scheduled max lateral-accel cap for the curvature clip, ACTIVE ONLY " +
+          "_comment": ("Speed-scheduled max lateral-accel cap for the curvature clip -- LAYER-2 safety " +
+                       "envelope: curve-speed slowdown (VTSC/CES) is layer 1, this is the steering-" +
+                       "authority backstop for when it doesn't fire before a curve. ACTIVE ONLY " +
                        "WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], " +
                        "linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite " +
                        "-> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a " +

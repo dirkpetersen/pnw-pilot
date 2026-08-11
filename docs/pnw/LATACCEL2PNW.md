@@ -31,22 +31,22 @@ min_lat_accel = -lat_accel_cap + roll_compensation
 
 | Speed | Cap |
 |---|---|
-| ≤30 mph | 5.0 m/s² |
-| 30 → 45 mph | tapers 5.0 → 4.0 m/s² (linear) |
-| 45 → 60 mph | tapers 4.0 → 3.0 m/s² (linear) |
-| ≥60 mph | 3.0 m/s² (ISO baseline, unchanged from stock) |
+| ≤50 mph | 5.0 m/s² |
+| 50 → 60 mph | tapers 5.0 → 4.0 m/s² (linear) |
+| 60 → 70 mph | tapers 4.0 → 3.0 m/s² (linear) |
+| ≥70 mph | 3.0 m/s² (ISO baseline, unchanged from stock) |
 
-Breakpoints, held flat outside the ends: `(30 mph, 5.0)`, `(45 mph, 4.0)`, `(60 mph, 3.0)`.
+Breakpoints, held flat outside the ends: `(50 mph, 5.0)`, `(60 mph, 4.0)`, `(70 mph, 3.0)`.
 
 ### Rationale
 
-- **Low-speed authority bump.** At parking-lot / tight-residential / campus speeds, the stock 3.0
-  m/s² ISO cap is more conservative than it needs to be — it can make the car cut a tight turn or
-  U-turn wider than a driver would expect, or need to slow further than necessary to complete a turn
-  within the commanded curvature. Raising the cap to 5.0 m/s² below 30 mph gives the planner more
-  lateral headroom exactly where the consequences of using it are smallest (low speed = low kinetic
-  energy, short stopping distances, more reaction time).
-- **High-speed stays at ISO 3.0.** By highway speed the cap is deliberately left at the same 3.0 m/s²
+- **Low/mid-speed authority bump.** Below the stock 3.0 m/s² ISO cap, the planner is more
+  conservative than it needs to be at parking-lot / residential / campus / most-arterial speeds — it
+  can make the car cut a tight turn or U-turn wider than a driver would expect, or need to slow
+  further than necessary to complete a turn within the commanded curvature. Raising the cap to 5.0
+  m/s² up to 50 mph gives the planner more lateral headroom through this whole range, and it also
+  doubles as the layer-2 safety envelope described below.
+- **High-speed stays at ISO 3.0.** By 70 mph the cap is deliberately back down at the same 3.0 m/s²
   stock openpilot has always used. The reasoning is specific: if the model wants to hold a curve at
   cruise speed that requires *more* than 3.0 m/s² of lateral acceleration, the correct fix is to
   **slow down before the curve**, not to steer harder through it — hard cornering is the wrong
@@ -57,9 +57,29 @@ Breakpoints, held flat outside the ends: `(30 mph, 5.0)`, `(45 mph, 4.0)`, `(60 
 - **Global, not car-gated.** Per this fork's capability-view convention (`selfdrive/controls/lib/
   pnw_vehicle.py`), feature code must never branch on `carFingerprint`. A max-lateral-accel envelope
   is a shared control limit, not a feature — `clip_curvature()` is called for every car, and raising
-  the low-speed cap can only ever give the curvature clamp *more* room to work with; it never makes
-  any car (Tesla or Ford) more restricted than it was before this change. There is nothing here for a
-  fingerprint check to gate.
+  the low/mid-speed cap can only ever give the curvature clamp *more* room to work with; it never
+  makes any car (Tesla or Ford) more restricted than it was before this change. There is nothing here
+  for a fingerprint check to gate.
+
+### Layer-2 safety rationale (2026-08-11 retune: 30/45/60 → 50/60/70)
+
+Curve-speed slowdown is **layer 1** — VTSC (vision/map curvature) and CES are what are supposed to
+get the cruise speed down *before* a curve that needs more lateral authority than the ISO 3.0 m/s²
+baseline provides. This lateral-accel schedule is **layer 2**: the backstop for when layer 1 doesn't
+fire (missed detection, a curve that tightens faster than the model anticipated, a driver-set speed
+that doesn't get reduced, etc.) — at that point the only thing left that can keep the car in its lane
+is actually using the truck's available steering authority, and the old schedule undercut that.
+
+Origin of the new anchors — the **2026-08-11 10:37 PDT Crown Hill left curve** (rlog-reconstructed,
+see `drives/2026-08-11`): at 49 mph the curve demanded ~4.8 m/s² of lateral acceleration. The truck
+was physically capable of it (EPS reached ~55° of wheel angle with authority to spare), but the old
+breakpoint schedule had already tapered the cap down to ~3.5 m/s² by 49 mph, so `clip_curvature()`
+clipped the demand and openpilot under-turned through the curve until the driver took over. The new
+schedule keeps the full 5.0 m/s² cap out to 50 mph specifically so this class of curve is covered,
+tapering to 4.0 by 60 and ISO 3.0 by 70 — i.e. the loosened range now spans the speeds this fork's
+curves are actually driven at, not just parking-lot speeds. This is a values-only retune: the
+fail-safe direction (flat ISO 3.0 on any missing/corrupt file), the `[1.0, 6.0]` hard clamp, and the
+`LAT_ACCEL_SLEW_RATE` transition logic are all unchanged.
 
 ## JSON tuning file
 
@@ -72,8 +92,8 @@ Format:
 
 ```json
 {
-  "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip, ACTIVE ONLY WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite -> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a step). Hot-reloaded (~every few seconds).",
-  "breakpoints": [[30, 5.0], [45, 4.0], [60, 3.0]]
+  "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip -- LAYER-2 safety envelope: curve-speed slowdown (VTSC/CES) is layer 1, this is the steering-authority backstop for when it doesn't fire before a curve. ACTIVE ONLY WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite -> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a step). Hot-reloaded (~every few seconds).",
+  "breakpoints": [[50, 5.0], [60, 4.0], [70, 3.0]]
 }
 ```
 
