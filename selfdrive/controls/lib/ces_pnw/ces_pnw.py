@@ -1389,6 +1389,18 @@ class CESController:
     # vtsctele2pnw: VTSC penalty components actually applied (from VTSCStatus) — logging only
     self._vtsc_pen = self._vtsc_pitch = None
     self._vtsc_dir = ""
+    # lanecenter2pnw telemetry: lane-centering trim status (from LaneCenterStatus, published by
+    # controlsd — see selfdrive/controls/lib/lane_centering.py) — logging only, never gates control
+    # here. Defaulted so a missing/never-published param (feature disabled, or before the first
+    # controlsd tick lands) reads as a clean "no data" row rather than an AttributeError.
+    self._lc_corr = None     # applied correction (1/m)
+    self._lc_act = False     # actively nudging this tick
+    self._lc_gate = None     # why not acting (or "ok")
+    self._lc_err = None      # center error at lookahead (m)
+    self._lc_p1 = self._lc_p2 = None    # laneLineProbs[1]/[2]
+    self._lc_s1 = self._lc_s2 = None    # laneLineStds[1]/[2] (m)
+    self._lc_ystd = None     # E2E path position.yStd at lookahead (m)
+    self._lc_w = None        # apparent lane width at lookahead (m)
     self._speed_limit = 0.0         # OSM speed limit (m/s, 0 = none) from mapd
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
@@ -1541,6 +1553,38 @@ class CESController:
       self._vtsc_cap = self._vtsc_state = None
       self._vtsc_pen = self._vtsc_pitch = None
       self._vtsc_dir = ""
+    # lanecenter2pnw telemetry: lane-centering trim status — logging only (see _event_record).
+    # Same cross-process read as VTSCStatus just above: controlsd (100 Hz) publishes to
+    # /dev/shm/params at ~5 Hz, this reads it at ~1 Hz. Fully defensive — any missing key, wrong
+    # type, or malformed JSON degrades to the same None/"off" defaults set in __init__ rather than
+    # raising; a stale telemetry read can never affect CES's own decisions (this method's output is
+    # display/log-only throughout).
+    try:
+      lc = self.mem_params.get("LaneCenterStatus", return_default=True)
+      if isinstance(lc, (bytes, str)):
+        lc = json.loads(lc)
+      corr = lc.get("corr")
+      self._lc_corr = round(float(corr), 5) if corr is not None else None
+      self._lc_act = bool(lc.get("act", False))
+      self._lc_gate = str(lc.get("gate")) if lc.get("gate") is not None else None
+      err = lc.get("err")
+      self._lc_err = round(float(err), 2) if err is not None else None
+      p1, p2 = lc.get("p1"), lc.get("p2")
+      self._lc_p1 = round(float(p1), 2) if p1 is not None else None
+      self._lc_p2 = round(float(p2), 2) if p2 is not None else None
+      s1, s2 = lc.get("s1"), lc.get("s2")
+      self._lc_s1 = round(float(s1), 2) if s1 is not None else None
+      self._lc_s2 = round(float(s2), 2) if s2 is not None else None
+      ystd = lc.get("yStd")
+      self._lc_ystd = round(float(ystd), 2) if ystd is not None else None
+      w = lc.get("w")
+      self._lc_w = round(float(w), 2) if w is not None else None
+    except Exception:
+      self._lc_corr = self._lc_err = None
+      self._lc_p1 = self._lc_p2 = self._lc_s1 = self._lc_s2 = None
+      self._lc_ystd = self._lc_w = None
+      self._lc_act = False
+      self._lc_gate = None
 
   def enabled(self) -> bool:
     return self._enabled
@@ -1954,6 +1998,12 @@ class CESController:
       # bsm2pnw: blind-spot booleans (carState.left/rightBlindspot) — liveness evidence for the
       # lane-change BSM gate; expect these to flip as traffic passes on real drives.
       "bsL": self._bs_l, "bsR": self._bs_r,
+      # lanecenter2pnw telemetry: lane-centering trim status (from LaneCenterStatus) — display/log
+      # only, same as vtscCap/vtscState above. lcGate explains why lcCorr isn't (fully) applied on
+      # any given tick ("ok" = acting; see lane_centering.py's _finish_status for the full code list).
+      "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
+      "lcP1": self._lc_p1, "lcP2": self._lc_p2, "lcS1": self._lc_s1, "lcS2": self._lc_s2,
+      "lcYStd": self._lc_ystd, "lcW": self._lc_w,
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,

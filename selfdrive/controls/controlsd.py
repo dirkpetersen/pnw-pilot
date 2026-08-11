@@ -72,6 +72,14 @@ class Controls:
     # succeeds, even though the feature is enabled-by-default once that read completes. This avoids
     # ever computing a correction before we've actually confirmed the disable-toggle's live state.
     self._lane_centering_enabled = False
+    # lanecenter2pnw telemetry: mem-param handle for publishing LaneCenterStatus (see the throttled
+    # publish in state_control below), same /dev/shm/params channel VTSCStatus already uses (see
+    # vtsc_pnw/vtsc_controller.py). Best-effort: if the mem store can't be opened for any reason, the
+    # handle stays None and the publish below is a permanent no-op rather than ever raising here.
+    try:
+      self._mem_params = Params("/dev/shm/params")
+    except Exception:
+      self._mem_params = None
 
   def update(self):
     self.sm.update(15)
@@ -182,6 +190,24 @@ class Controls:
     # guarantees finiteness internally; this is the final guard before clip_curvature regardless.
     if math.isfinite(lane_centered_curvature):
       new_desired_curvature = lane_centered_curvature
+
+    # lanecenter2pnw telemetry: publish the controller's status snapshot for the CES event logger
+    # (selfdrived/ces_pnw.py reads it back over /dev/shm/params — same cross-process pattern as
+    # VTSCStatus). PURE side effect, throttled to ~5 Hz (every 20 of these 100 Hz ticks) since this
+    # is diagnostic telemetry, not a control input — it reads self.lane_centering.status, which was
+    # already fully computed by the update() call above, and writes nothing back into
+    # new_desired_curvature/self.desired_curvature or any other control state. put_nonblocking never
+    # blocks the control loop on disk I/O, and the try/except means a param-store hiccup here can
+    # never propagate into this 100 Hz loop. Reuses the existing _lane_centering_frame tick counter
+    # purely as a modulo gate; it has no other coupling to this publish.
+    if self._mem_params is not None and self._lane_centering_frame % 20 == 0:
+      try:
+        # Pass the dict directly (not a json string): put_nonblocking's JSON-typed-key path already
+        # calls json.dumps on a dict (see common/params_pyx.pyx PYTHON_2_CPP), matching exactly how
+        # VTSCStatus is published in vtsc_pnw/vtsc_controller.py._publish_overlay.
+        self._mem_params.put_nonblocking("LaneCenterStatus", self.lane_centering.status)
+      except Exception:
+        pass
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS

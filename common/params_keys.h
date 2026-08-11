@@ -154,6 +154,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"IcbmTarget", {CLEAR_ON_MANAGER_START, JSON}}, // icbm2pnw: stock-ACC set-speed target (ces brain -> ford carcontroller executor), mem-param
     {"FordLatStatus", {CLEAR_ON_MANAGER_START, JSON}}, // fordlatui2pnw: which lateral path is live (opendbc ford carcontroller -> UI mismatch warning), mem-param. Was previously UNREGISTERED (caught by the release-prep params check 2026-07-20) -- the UI read silently swallowed UnknownKeyName, so the mismatch warning was permanently dead.
     {"VTSCStatus", {CLEAR_ON_MANAGER_START, JSON}}, // vtsc: live status (plannerd -> UI overlay). Gated on the CES toggle.
+    {"LaneCenterStatus", {CLEAR_ON_MANAGER_START, JSON}}, // lanecenter2pnw telemetry: per-tick status (controlsd -> CES event logger), ~5 Hz. mem-param, /dev/shm/params, same pattern as VTSCStatus.
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
     {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // master toggle (UI), default ON; daemon idles + overlay hidden when off

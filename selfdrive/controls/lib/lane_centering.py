@@ -164,6 +164,20 @@ _CLAMPS: dict[str, tuple[float, float]] = {
 }
 
 
+def _tele_float(value) -> float | None:
+  """
+  Coerce `value` to a plain finite float for the TELEMETRY-ONLY `status` dict, or None if it isn't
+  one. Used only to populate `LaneCenteringController.status` fields — never read back by any
+  control-path code, so it is deliberately more permissive/lossy than `_clamp` (no envelope, no
+  fallback-to-default; unusable values just become None, meaning "not available this tick").
+  """
+  try:
+    v = float(value)
+  except (TypeError, ValueError):
+    return None
+  return v if math.isfinite(v) else None
+
+
 def _clamp(value, lo: float, hi: float, default: float) -> float:
   """
   Clamp a single scalar into [lo, hi], falling back to `default` for anything unusable.
@@ -248,6 +262,14 @@ class LaneCenteringController:
   itself, carried tick-to-tick so it can ramp instead of stepping) and `self._tuning` (the current
   sanitized tuning dict, refreshed from disk at most once a second). Nothing else persists across
   calls.
+
+  `self.status` is a THIRD, TELEMETRY-ONLY piece of state: a plain dict snapshot of "what happened
+  this tick" (the applied correction, whether it's actively acting, why not if it isn't, and the
+  lane-line/path geometry the gates just checked). It exists purely so an external process (the CES
+  event logger, over a cross-process mem-param — see controlsd.py/ces_pnw.py) can observe this
+  controller for drive analysis. It is written continuously by `update()`/`_raw_correction()` but is
+  NEVER read by any control-path code in this class — it cannot feed back into `self._correction` or
+  any gate, by construction. Treat it as write-only from this class's own perspective.
   """
 
   def __init__(self) -> None:
@@ -259,6 +281,9 @@ class LaneCenteringController:
     # (when the failure starts, and again if the failure message changes) instead of once a second
     # for an entire drive.
     self._last_load_error: str | None = None
+    # Telemetry-only snapshot of the current tick's state (see class docstring). Never read by
+    # control logic.
+    self.status: dict = self._new_status()
 
     # Write-path convenience only: make sure /data/pnw/ exists so a driver (or a future settings
     # UI) that wants to drop a tuning file there doesn't have to create the directory by hand first.
@@ -272,8 +297,67 @@ class LaneCenteringController:
       pass
 
   def reset(self) -> None:
-    """Zero the carried correction. Call this on every lateral disengage (see controlsd.py)."""
+    """
+    Zero the carried correction. Call this on every lateral disengage (see controlsd.py).
+
+    Also resets `self.status` (telemetry-only, see class docstring) to a neutral "not acting"
+    snapshot. `update()` overwrites the `gate`/`corr`/`act`/`v` fields with the specific reason on
+    every one of its own internal reset() calls, so this default is only ever visibly "final" when
+    a caller invokes reset() directly (i.e. on disengage, between update() calls).
+    """
     self._correction = 0.0
+    self.status = self._new_status()
+
+  @staticmethod
+  def _new_status() -> dict:
+    """
+    Fresh telemetry scaffold for one tick. Geometry fields (`err`/`p1`/`p2`/`s1`/`s2`/`yStd`/`w`)
+    start as None ("not computed this tick") and are filled in by `_raw_correction()` only on the
+    code paths that actually reach that math; any tick gated out before then correctly reports them
+    as None rather than carrying over a stale value from a previous tick. Telemetry-only — see the
+    class docstring; nothing here is ever read by control logic.
+    """
+    return {
+      "corr": 0.0,     # applied correction this tick (1/m)
+      "act": False,    # whether that correction is nonzero (actively nudging)
+      "gate": "off",   # why it's not fully acting; see _finish_status for the reason codes
+      "err": None,     # center error at lookahead (m)
+      "p1": None,      # laneLineProbs[1] (left ego line)
+      "p2": None,      # laneLineProbs[2] (right ego line)
+      "s1": None,      # laneLineStds[1] (m)
+      "s2": None,      # laneLineStds[2] (m)
+      "yStd": None,    # E2E path position.yStd at lookahead (m)
+      "w": None,       # apparent lane width at lookahead (m)
+      "v": 0.0,        # v_ego (m/s)
+    }
+
+  def _finish_status(self, gate: str, v_ego) -> None:
+    """
+    Finalize `self.status` for this tick: record the gate reason and the correction actually
+    applied, using whatever `self._correction`/geometry fields are already in place by this point.
+    Called at every `update()` return point, right before returning. Telemetry-only side effect —
+    `self._correction` is already final by the time this runs, so this can never feed back into
+    control. Wrapped so it can never raise into the 100 Hz caller no matter what `v_ego` is.
+
+    Gate reason codes:
+      "ok"       - actively correcting
+      "off"      - feature disabled (not `enabled`)
+      "slow"     - v_ego below min_v_ego
+      "nolat"    - lateral control not active, or modelV2 not valid/fresh
+      "signal"   - turn signal on; correction smoothly releasing
+      "lanechange" - an automatic lane change is in progress (or its state couldn't be read)
+      "lowconf"  - lane-line confidence/geometry failed _raw_correction's checks
+      "err"      - a defensive fallback fired (malformed/non-finite input); should not happen live
+    """
+    try:
+      self.status["gate"] = gate
+      self.status["corr"] = float(self._correction)
+      self.status["act"] = bool(self._correction != 0.0)
+      v = float(v_ego)
+      if math.isfinite(v):
+        self.status["v"] = v
+    except Exception:
+      pass
 
   def _refresh_tuning(self) -> None:
     """
@@ -335,17 +419,28 @@ class LaneCenteringController:
     calls reset() and returns the correction as exactly zero — never a discontinuous jump. This
     function never raises: any unexpected input (NaN, wrong types, malformed model_v2) is treated as
     "can't trust this tick" and degrades to returning model_curvature unchanged.
+
+    Also refreshes `self.status`, a telemetry-only snapshot of this tick's gate/correction/geometry
+    (see class docstring). This is a pure observation side effect: it is written from values already
+    computed for the control decision above, never the other way around, and its own failure modes
+    are fully self-contained (wrapped so they can never raise into this 100 Hz loop).
     """
+    # Fresh telemetry scaffold for this tick (see _new_status). Every return path below finalizes
+    # it via self.reset() and/or self._finish_status() before returning.
+    self.status = self._new_status()
+
     try:
       model_curvature = float(model_curvature)
     except (TypeError, ValueError):
       # The caller (controlsd) always passes a float, but honor the "never raises" contract even so:
       # if the input curvature is somehow un-floatable there is nothing to correct, so drop out.
       self.reset()
+      self._finish_status("err", v_ego)
       return 0.0
     if not math.isfinite(model_curvature):
       # A non-finite input curvature is an upstream problem we can't fix by adding to it; don't try.
       self.reset()
+      self._finish_status("err", v_ego)
       return model_curvature
 
     # Pull current tuning before anything else. This can't fail or block (see _refresh_tuning).
@@ -360,16 +455,27 @@ class LaneCenteringController:
       # Shouldn't happen (t is always a sanitized dict with every key), but if it ever does, fail
       # to the safest state: no correction.
       self.reset()
+      self._finish_status("err", v_ego)
       return model_curvature
 
     if not np.isfinite([v_ego, offset, e2e_authority]).all():
       self.reset()
+      self._finish_status("err", v_ego)
       return model_curvature
 
     # Master gate: not enabled, not actively steering, model not fresh, or too slow to trust the
     # lookahead geometry -> no correction, and don't carry stale state into the next activation.
     if not model_valid or not enabled or not lat_active or v_ego < t["min_v_ego"]:
       self.reset()
+      # Telemetry only: pick the single most-specific reason, in priority order below. This
+      # doesn't change behavior (the gate above already fired) — it just labels *why*.
+      if not enabled:
+        gate = "off"
+      elif not model_valid or not lat_active:
+        gate = "nolat"
+      else:
+        gate = "slow"
+      self._finish_status(gate, v_ego)
       return model_curvature
 
     # Turn signal in progress (about to change lanes, or just indicating): smoothly RELEASE any
@@ -382,17 +488,20 @@ class LaneCenteringController:
     # (StarPilot exposed a `pause_on_signal` switch here; we intentionally dropped it.)
     if turn_signal_active:
       self._correction = float(smooth_value(0.0, self._correction, t["signal_release_tau"], dt=DT_CTRL))
+      self._finish_status("signal", v_ego)
       return model_curvature + self._correction
 
     try:
       if model_v2.meta.laneChangeState != log.LaneChangeState.off:
         # An automatic lane change is in progress (nudgeless or otherwise) — never fight that path.
         self.reset()
+        self._finish_status("lanechange", v_ego)
         return model_curvature
     except (AttributeError, TypeError, ValueError):
       # Malformed modelV2.meta -> can't tell if a lane change is happening -> assume the worst and
       # disable rather than risk correcting during an actual lane change.
       self.reset()
+      self._finish_status("lanechange", v_ego)
       return model_curvature
 
     valid, raw_correction = self._raw_correction(
@@ -407,6 +516,7 @@ class LaneCenteringController:
       # arrays, etc.) — smoothly release toward zero rather than either holding the last correction
       # forever or snapping it off.
       self._correction = float(smooth_value(0.0, self._correction, t["confidence_release_tau"], dt=DT_CTRL))
+      self._finish_status("lowconf", v_ego)
       return model_curvature + self._correction
 
     # Clamp the raw (pre-gain) correction to the hard safety ceiling, THEN apply the gain. Doing the
@@ -419,7 +529,9 @@ class LaneCenteringController:
     # value reach clip_curvature/the actuator. If it somehow is, drop the correction entirely.
     if not math.isfinite(self._correction):
       self._correction = 0.0
+      self._finish_status("err", v_ego)
       return model_curvature
+    self._finish_status("ok", v_ego)
     return model_curvature + self._correction
 
   @staticmethod
@@ -450,6 +562,19 @@ class LaneCenteringController:
       stds = np.asarray(model_v2.laneLineStds, dtype=float)
       if len(lane_lines) < 3 or probs.size < 3 or stds.size < 3:
         return False, 0.0
+
+      # Telemetry only (see class docstring): record the confidence values the gates immediately
+      # below are about to check, BEFORE those gates run — so a "lowconf" tick in the CES log still
+      # shows the p1/p2/s1/s2 that caused the gate to fire, not just that it fired. Wrapped so this
+      # can never influence, or itself throw into, the control decision that follows.
+      try:
+        self.status["p1"] = _tele_float(probs[1])
+        self.status["p2"] = _tele_float(probs[2])
+        self.status["s1"] = _tele_float(stds[1])
+        self.status["s2"] = _tele_float(stds[2])
+      except Exception:
+        pass
+
       # Indices 1 and 2 are the ego lane's immediate left/right lines in openpilot's laneLines
       # convention (0=far-left .. 3=far-right of a 4-line report).
       if not np.isfinite(probs[[1, 2]]).all() or not np.isfinite(stds[[1, 2]]).all():
@@ -477,6 +602,12 @@ class LaneCenteringController:
       left = float(np.interp(lookahead, left_x, left_y))
       right = float(np.interp(lookahead, right_x, right_y))
       width = right - left
+      # Telemetry only: record the apparent width even if the range check below rejects it — that's
+      # the useful diagnostic case (e.g. seeing width collapse to ~0 at a merge/exit ramp).
+      try:
+        self.status["w"] = _tele_float(width)
+      except Exception:
+        pass
       if not t["min_lane_width"] <= width <= t["max_lane_width"]:
         # Apparent lane width outside a plausible range -> the "lane lines" probably aren't a real
         # lane (merge, exit ramp, adjacent-lane line briefly tracked as ours, etc.) -> don't correct.
@@ -504,6 +635,11 @@ class LaneCenteringController:
         pos_y_std = np.asarray(model_v2.position.yStd, dtype=float)
         if self._valid_path(pos_x, pos_y_std):
           path_std = float(np.interp(lookahead, pos_x, pos_y_std))
+          # Telemetry only: record regardless of whether the E2E blend below actually engages.
+          try:
+            self.status["yStd"] = _tele_float(path_std)
+          except Exception:
+            pass
           if 0.0 <= path_std <= t["e2e_max_path_std"]:
             break_in = np.clip(
               (error_abs - t["e2e_break_in_start"]) / (t["e2e_break_in_full"] - t["e2e_break_in_start"]),
@@ -513,6 +649,13 @@ class LaneCenteringController:
             error *= 1.0 - e2e_authority * float(break_in)
       except (AttributeError, TypeError, ValueError):
         # No/invalid yStd -> skip the E2E blend, keep the lane-line-only error. Not a failure.
+        pass
+
+      # Telemetry only: the final (post-deadband, post-E2E-blend) center error that the curvature
+      # conversion below is about to use.
+      try:
+        self.status["err"] = _tele_float(error)
+      except Exception:
         pass
 
       # Small-angle lookahead geometry: for a small lateral error at distance `lookahead`, the
