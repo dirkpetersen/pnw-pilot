@@ -75,11 +75,13 @@ see `drives/2026-08-11`): at 49 mph the curve demanded ~4.8 m/s² of lateral acc
 was physically capable of it (EPS reached ~55° of wheel angle with authority to spare), but the old
 breakpoint schedule had already tapered the cap down to ~3.5 m/s² by 49 mph, so `clip_curvature()`
 clipped the demand and openpilot under-turned through the curve until the driver took over. The new
-schedule keeps the full 5.0 m/s² cap out to 50 mph specifically so this class of curve is covered,
-tapering to 4.0 by 60 and ISO 3.0 by 70 — i.e. the loosened range now spans the speeds this fork's
-curves are actually driven at, not just parking-lot speeds. This is a values-only retune: the
-fail-safe direction (flat ISO 3.0 on any missing/corrupt file), the `[1.0, 6.0]` hard clamp, and the
-`LAT_ACCEL_SLEW_RATE` transition logic are all unchanged.
+schedule keeps the cap **6.0 m/s²** out to 50 mph, tapering to 5.0 by 60 and 4.0 by 70. The cap was
+raised (5/4/3 → 6/5/4, 2026-08-12) deliberately **above the truck's measured hands-off steering
+capability (~4.5 m/s² angle-rate-limited)** so the cap is never the binding constraint during the
+steering-capability measurement phase — i.e. so `peakAchLat` reflects the truck's true angle-rate limit,
+not this ceiling. This is a values-only retune: the fail-safe direction (flat ISO 3.0 on any
+missing/corrupt file), the `[1.0, 6.0]` hard clamp, and the `LAT_ACCEL_SLEW_RATE` transition logic are
+all unchanged.
 
 ## JSON tuning file
 
@@ -93,7 +95,7 @@ Format:
 ```json
 {
   "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip -- LAYER-2 safety envelope: curve-speed slowdown (VTSC/CES) is layer 1, this is the steering-authority backstop for when it doesn't fire before a curve. ACTIVE ONLY WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite -> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a step). Hot-reloaded (~every few seconds).",
-  "breakpoints": [[50, 5.0], [60, 4.0], [70, 3.0]]
+  "breakpoints": [[50, 6.0], [60, 5.0], [70, 4.0]]
 }
 ```
 

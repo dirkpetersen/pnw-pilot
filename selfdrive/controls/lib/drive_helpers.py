@@ -122,7 +122,7 @@ LAT_ACCEL_SLEW_RATE = 4.0  # m/s^2 per second
 # the first time it's missing, so a driver has something to edit. It is NOT an in-memory fallback: see
 # the "FAIL-SAFE DIRECTION" note above -- absent/invalid file means flat MAX_LATERAL_ACCEL_NO_ROLL, not
 # this schedule. [speed_mph, accel_mps2] pairs, ascending by speed.
-DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 5.0], [60, 4.0], [70, 3.0]]
+DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 6.0], [60, 5.0], [70, 4.0]]
 
 
 class _LatAccelSchedule:
