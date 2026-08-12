@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import math
+import time
+from collections import deque
 from numbers import Number
 
 from cereal import car, log
@@ -26,6 +28,20 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
+
+# steerevent2pnw: edge-triggered "flight recorder" tuning (docs/pnw/LANE-DEPARTURE-LOGGING-PROPOSALS.md
+# Proposal 1). All PURE OBSERVATION -- these only gate what gets appended to a local ring buffer and
+# when the rare edge mem-param publish fires; nothing here is read back into any control value.
+FLIGHT_PRE_N = 12          # ring-buffer samples kept at all times (~2.4 s @ the ~5 Hz publish cadence
+                            # steer_limit_status already runs at below -- see the append site for why
+                            # this doesn't sample any faster than that).
+FLIGHT_POST_MAX = 15       # hard cap on post-edge samples appended during one episode (~3 s @ 5 Hz)
+FLIGHT_POST_HOLD_S = 0.75  # keep capturing this long after the trigger clears before emitting once
+FLIGHT_MAX_EVENT_S = 5.0   # defensive ceiling: force-emit (then wait for a clean clear) if a single
+                            # episode somehow runs this long, so an emit can never be starved forever
+FLIGHT_ANG_ERR_TRIG_DEG = 8.0   # Proposal 1's own suggested angErr trigger threshold
+FLIGHT_LANE_CONF_FLOOR = 0.5    # below this, a lane-offset reading is FLAGGED low-confidence, not trusted
+FLIGHT_HALF_VEHICLE_W = 1.0     # m, conservative telemetry-only half-width for the tire-margin estimate
 
 
 class Controls:
@@ -80,6 +96,24 @@ class Controls:
       self._mem_params = Params("/dev/shm/params")
     except Exception:
       self._mem_params = None
+
+    # steerevent2pnw: edge-triggered flight-recorder state (Proposal 1). Fixed-size ring buffer of
+    # cheap already-computed steer/lane samples plus a tiny state machine (idle/armed/cooldown) that
+    # detects the saturation/under-turn edge, holds capture open briefly after it clears, and emits
+    # ONE SteerEvent mem-param burst per episode -- see the append site in state_control() below for
+    # the full design writeup. `deque(maxlen=...)` bounds memory unconditionally; nothing here is
+    # read back into control.
+    self._flight_ring: deque = deque(maxlen=FLIGHT_PRE_N)
+    self._flight_state = "idle"       # "idle" | "armed" | "cooldown"
+    self._flight_start_t = 0.0
+    self._flight_last_trig_t = 0.0
+    self._flight_pre: list = []
+    self._flight_post: list = []
+    self._flight_peak_ang_err = 0.0
+    self._flight_peak_lane_off = None
+    self._flight_min_margin = None
+    self._flight_min_conf = None
+    self._flight_event_id = 0
 
   def update(self):
     self.sm.update(15)
@@ -334,6 +368,149 @@ class Controls:
           "kErr": round(float(k_err), 6),
         }
         self._mem_params.put_nonblocking("SteerLimitStatus", steer_limit_status)
+
+        # steerevent2pnw: PURE OBSERVATION flight-recorder burst (LANE-DEPARTURE-LOGGING-PROPOSALS.md
+        # Proposal 1, combined with #2's near-field lane offset and #3's rlog pointer). Everything
+        # below only READS values already finalized above (steer_limit_status, model_v2, CS,
+        # self.curvature) and appends to a bounded deque / rarely publishes a mem-param -- it never
+        # writes into new_desired_curvature, self.desired_curvature, actuators, or any other control
+        # state. Deliberately runs at THIS already-throttled ~5 Hz cadence (the same `% 20 == 0` gate
+        # as the SteerLimitStatus publish just above), not literally every 100 Hz controlsd tick:
+        # steer_limit_status's own CONTENT only refreshes at this rate (it's computed in this same
+        # gated block), so appending faster would just re-append duplicate values while adding real
+        # per-tick compute for nothing -- the design doc itself notes "ring rate is bounded by how
+        # fast the logger reads SteerLimitStatus ... adequate for a ~2 s event". Steady-state cost is
+        # one deque append + ~2 array reads (near-field lane offset) + a handful of float compares;
+        # the only mem-param WRITE is the rare edge emit, a handful of times per drive at most.
+        try:
+          # --- Proposal 2: cheap near-field lane offset from the ALREADY-DECODED model_v2 (same
+          # laneLines[1]/[2] near-field convention lane_centering.py's own gate uses -- no new model
+          # decode, ~4 array-index reads + 2 arithmetic ops). Any missing/malformed field degrades to
+          # None rather than raising; a low-confidence reading is FLAGGED (laneLowConf below), never
+          # silently trusted (the 15:14 lesson: probs collapsed to 0.05-0.3 through the curve apex).
+          lane_off = lane_margin = lane_p1 = lane_p2 = None
+          try:
+            lines = model_v2.laneLines
+            probs = model_v2.laneLineProbs
+            if len(lines) >= 3 and len(probs) >= 3:
+              y1 = float(lines[1].y[0])
+              y2 = float(lines[2].y[0])
+              p1, p2 = float(probs[1]), float(probs[2])
+              if math.isfinite(y1) and math.isfinite(y2) and math.isfinite(p1) and math.isfinite(p2):
+                lane_p1, lane_p2 = p1, p2
+                lane_off = -(y1 + y2) / 2.0
+                lane_margin = (y2 - y1) / 2.0 - FLIGHT_HALF_VEHICLE_W - abs(lane_off)
+          except Exception:
+            lane_off = lane_margin = lane_p1 = lane_p2 = None
+          lane_conf = min(lane_p1, lane_p2) if (lane_p1 is not None and lane_p2 is not None) else None
+
+          now_mono = time.monotonic()
+          sample = {
+            "dt": round(now_mono, 3),
+            "angDes": steer_limit_status["angDes"], "angAct": steer_limit_status["angAct"],
+            "angErr": steer_limit_status["angErr"],
+            "kCmd": steer_limit_status["kCmd"], "kActl": steer_limit_status["kActl"],
+            "kErr": steer_limit_status["kErr"],
+            "latDem": steer_limit_status["latDem"], "latMax": steer_limit_status["latMax"],
+            "latAct": steer_limit_status["latActive"],
+            "sat": steer_limit_status["sat"], "angSat": steer_limit_status["angSat"],
+            "curvLim": steer_limit_status["curvLim"],
+            "vEgo": round(float(CS.vEgo), 2),
+            "laneOff": round(lane_off, 3) if lane_off is not None else None,
+            "laneMargin": round(lane_margin, 3) if lane_margin is not None else None,
+            "laneP1": round(lane_p1, 3) if lane_p1 is not None else None,
+            "laneP2": round(lane_p2, 3) if lane_p2 is not None else None,
+          }
+          # Always-on rolling history -- O(1) append, bounded by maxlen regardless of state.
+          self._flight_ring.append(sample)
+
+          # --- Proposal 4's trigger, folded into #1: OR of the already-computed saturation signals,
+          # PLUS the exact "undershooting AND turning" triad selfdrived's own steerSaturated alert
+          # gates on (selfdrived.py ~423-426) -- recomputed here from controlsd's OWN already-known
+          # values (self.curvature, model_v2.action.desiredCurvature; no cross-process read) so this
+          # trigger tracks the real audible alert, not just an approximation of it.
+          clipped_v = max(CS.vEgo, 0.3)
+          actual_lat_accel = self.curvature * clipped_v ** 2
+          desired_lat_accel = model_v2.action.desiredCurvature * clipped_v ** 2
+          undershoot_turn = (abs(desired_lat_accel) / (1e-3 + abs(actual_lat_accel)) > 1.2
+                              and abs(desired_lat_accel) > 1.0)
+          trig = bool(steer_limit_status["sat"] or steer_limit_status["angSat"]
+                      or abs(steer_limit_status["angErr"]) > FLIGHT_ANG_ERR_TRIG_DEG
+                      or undershoot_turn)
+
+          # --- Edge-triggered state machine: idle -> armed (rising edge) -> cooldown (after emit,
+          # until a clean clear) -> idle. Debounced: a sustained episode (even with brief flicker,
+          # since `armed` only exits on a real POST_HOLD_S gap or the MAX_EVENT_S safety cap) emits
+          # exactly once; a genuinely separate later episode (idle reached again first) emits again.
+          if self._flight_state == "idle":
+            if trig:
+              self._flight_state = "armed"
+              self._flight_start_t = now_mono
+              self._flight_last_trig_t = now_mono
+              self._flight_pre = list(self._flight_ring)   # snapshot: the pre-edge trace, bounded
+              self._flight_post = []
+              self._flight_peak_ang_err = abs(sample["angErr"] or 0.0)
+              self._flight_peak_lane_off = lane_off
+              self._flight_min_margin = lane_margin
+              self._flight_min_conf = lane_conf
+          elif self._flight_state == "armed":
+            if trig:
+              self._flight_last_trig_t = now_mono
+            if len(self._flight_post) < FLIGHT_POST_MAX:
+              self._flight_post.append(sample)
+            self._flight_peak_ang_err = max(self._flight_peak_ang_err, abs(sample["angErr"] or 0.0))
+            if lane_off is not None and (self._flight_peak_lane_off is None
+                                          or abs(lane_off) > abs(self._flight_peak_lane_off)):
+              self._flight_peak_lane_off = lane_off
+            if lane_margin is not None:
+              self._flight_min_margin = (lane_margin if self._flight_min_margin is None
+                                          else min(self._flight_min_margin, lane_margin))
+            if lane_conf is not None:
+              self._flight_min_conf = (lane_conf if self._flight_min_conf is None
+                                        else min(self._flight_min_conf, lane_conf))
+
+            hold_elapsed = now_mono - self._flight_last_trig_t
+            total_elapsed = now_mono - self._flight_start_t
+            if (not trig and hold_elapsed >= FLIGHT_POST_HOLD_S) or total_elapsed >= FLIGHT_MAX_EVENT_S:
+              self._flight_event_id += 1
+              now_wall = time.time()  # noqa: TID251 -- wall clock + rlog pointer, rare edge emit only
+              low_conf = self._flight_min_conf is None or self._flight_min_conf < FLIGHT_LANE_CONF_FLOOR
+              event = {
+                "evId": self._flight_event_id,
+                "t": round(now_wall, 1),
+                "durationS": round(total_elapsed, 2),
+                "peakAngErr": round(self._flight_peak_ang_err, 2),
+                "peakLaneOff": (round(self._flight_peak_lane_off, 3)
+                                if self._flight_peak_lane_off is not None else None),
+                "minLaneMargin": (round(self._flight_min_margin, 3)
+                                  if self._flight_min_margin is not None else None),
+                "minLaneConf": (round(self._flight_min_conf, 3)
+                                if self._flight_min_conf is not None else None),
+                "laneLowConf": bool(low_conf),   # never silently trust a low-confidence excursion
+                # Proposal 3: rlog pointer -- frameId + the modelV2 logMonoTime anchor, the same
+                # anchor the 2026-08-11 drive report recovered manually from the `clocks` message.
+                # Route/segment id is NOT included: it is owned by loggerd, not exposed to controlsd
+                # via any subscribed message or Params key, so resolving it here would mean adding a
+                # new filesystem/IPC dependency to a control-adjacent process for a rare-edge nicety
+                # -- out of scope for a pure-observation logger. An offline tool correlates wall time
+                # `t` (+ frameId/logMonoTime) to the route, exactly as Proposal 3 describes.
+                # getattr's default only applies when the attribute is ABSENT -- a present-but-None
+                # frameId/logMonoTime (malformed modelV2 / stale SubMaster entry) must still degrade
+                # to 0 rather than raising TypeError out of int(None) and silently swallowing this
+                # entire rare-edge emit (including the mem-param publish) via the except below.
+                "frameId": int(getattr(model_v2, "frameId", None) or 0),
+                "modelLogMonoTime": int(self.sm.logMonoTime.get('modelV2') or 0),
+                # Bounded trace: FLIGHT_PRE_N + FLIGHT_POST_MAX <= 27 samples, ~17 small fields each
+                # -- a few KB at most, nowhere near "dump megabytes".
+                "trace": self._flight_pre + self._flight_post,
+              }
+              self._mem_params.put_nonblocking("SteerEvent", event)
+              self._flight_state = "cooldown"
+          elif self._flight_state == "cooldown":
+            if not trig:
+              self._flight_state = "idle"
+        except Exception:
+          pass
       except Exception:
         pass
 

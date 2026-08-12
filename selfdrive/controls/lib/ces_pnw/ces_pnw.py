@@ -1619,6 +1619,7 @@ class CESController:
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
     self._steer_tick_last = 0.0     # cessteerlog2pnw: monotonic stamp of last CES-off steer breadcrumb
+    self._steer_event_seen_id = None  # steerevent2pnw: last SteerEvent.evId already appended (edge dedup)
     self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
     self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
     self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
@@ -1893,6 +1894,11 @@ class CESController:
     # (the normal tick/adopt path below already logs the same fields), so this only ever adds the
     # CES-off records that were previously missing from the log entirely.
     self._steer_log_step(car_state)
+    # steerevent2pnw: edge-triggered mirror of controlsd's flight-recorder burst into ces_events —
+    # unconditional and NOT throttled to C.TICK_S (see the method docstring for why), independent of
+    # CESMode/_enabled since the underlying saturation edge is a controlsd/steering fact, not a CES
+    # decision.
+    self._steer_event_step()
     if not self._enabled:
       if self._last_mode != "off":
         cloudlog.info("CES disabled (master OFF / no openpilot long) -> Chill baseline")
@@ -2078,6 +2084,63 @@ class CESController:
         "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
         "slSat": self._sl_sat, "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
         "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+      }
+      if clock_bad(now_wall):
+        rec["clockBad"] = True
+      self._append_event(rec)
+    except Exception:
+      pass
+
+  def _steer_event_step(self) -> None:
+    """steerevent2pnw: edge-triggered mirror of controlsd's SteerEvent flight-recorder burst
+    (docs/pnw/LANE-DEPARTURE-LOGGING-PROPOSALS.md Proposal 1) into ces_events.jsonl.
+
+    Unlike _steer_log_step (throttled to ~C.TICK_S, CES-off only), this method runs UNCONDITIONALLY
+    every cycle and is itself edge-triggered — on the SteerEvent mem-param's own `evId` field
+    changing, not on any time-based throttle — so it fires the instant a new burst lands (a rare
+    controlsd-side event, at most a handful per drive) instead of waiting up to a second for the
+    next 1 Hz tick. It runs regardless of CESMode/_enabled: the underlying saturation episode is a
+    controlsd/steering fact, independent of what CES itself is deciding.
+
+    Cost when idle (the overwhelming majority of ticks): one best-effort mem-param GET (same
+    shared-memory read pattern every other _read_map field already uses every cycle) + one dict
+    lookup + one int compare. No file I/O happens unless a genuinely NEW evId is seen — the
+    _append_event write below is itself already best-effort/try-except-isolated.
+
+    Defensive: a missing mem store, an empty/absent SteerEvent (mem_params.get returns the
+    return_default `{}` before controlsd has ever published one, or after a restart), a malformed
+    payload, or any field access failure is treated as 'nothing to log' and swallowed — this runs
+    inside selfdrived's 100 Hz experimental_request() call and must never raise into it."""
+    if self.mem_params is None:
+      return
+    try:
+      ev = self.mem_params.get("SteerEvent", return_default=True)
+      # Same defensive shape-normalization _read_map uses for SteerLimitStatus/LaneCenterStatus:
+      # before controlsd's first publish this reads back as None; put_nonblocking's JSON-typed-key
+      # path publishes dicts directly, but tolerate a bytes/str-encoded fallback too.
+      if isinstance(ev, (bytes, str)):
+        ev = json.loads(ev)
+      if not isinstance(ev, dict) or not ev:
+        return
+      ev_id = ev.get("evId")
+      if ev_id is None or ev_id == self._steer_event_seen_id:
+        return   # either malformed (no evId) or already appended — edge dedup
+      self._steer_event_seen_id = ev_id
+      now_wall = time.time()  # noqa: TID251 -- wall clock, rare edge-triggered append only
+      rec = {
+        "t": round(now_wall, 1),
+        "ev": "steerEvent", "evId": ev_id, "car": self._car, "cesMode": self._mode,
+        "durationS": ev.get("durationS"), "peakAngErr": ev.get("peakAngErr"),
+        "peakLaneOff": ev.get("peakLaneOff"), "minLaneMargin": ev.get("minLaneMargin"),
+        "minLaneConf": ev.get("minLaneConf"),
+        # Never silently trust a low-confidence excursion: default True (flagged) if the source
+        # event is missing the field for any reason, rather than defaulting to "confident".
+        "laneLowConf": bool(ev.get("laneLowConf", True)),
+        "frameId": ev.get("frameId"), "modelLogMonoTime": ev.get("modelLogMonoTime"),
+        "srcT": ev.get("t"),
+        "trace": ev.get("trace") or [],
+        "gps": self._cur_lat is not None and self._cur_lon is not None,
+        "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
