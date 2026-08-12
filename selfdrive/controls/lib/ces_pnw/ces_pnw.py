@@ -1530,6 +1530,11 @@ class CESStub:
   def status(self) -> str:
     return "chill"
 
+  def log_take_control_alert(self, payload) -> None:
+    # takecontrol2pnw: no event log writer exists in this fallback (CESController construction
+    # already failed) -- consistent with every other telemetry method missing here, this is a no-op.
+    pass
+
 
 class CESController:
   """Live wrapper used by selfdrived. Owns the state machine + ~1 Hz param refresh + the 3-state
@@ -2189,6 +2194,72 @@ class CESController:
         "gps": self._cur_lat is not None and self._cur_lon is not None,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       }
+      if clock_bad(now_wall):
+        rec["clockBad"] = True
+      self._append_event(rec)
+    except Exception:
+      pass
+
+  # takecontrol2pnw: as of this feature, ces_events.jsonl carries THREE overlapping steering-related
+  # record families for one physical wheel-saturation episode — each with its own trigger and its own
+  # notion of "duration", so don't treat them as contradictory when digging through the log:
+  #   "ev":"steer"      — steerlimit-log2pnw's ~1 Hz breadcrumb (see _steer_log_step above), samples
+  #                        steer-limit state on a fixed clock regardless of any alert/event.
+  #   "ev":"steerEvent" — steerevent2pnw's controlsd-side flight recorder, its OWN edge trigger
+  #                        (slAngSat-based) sampled at up to 100 Hz around the peak.
+  #   "ev":"alert","name":"steerSaturated" — THIS method: selfdrived's actual "Take Control" / "Turn
+  #                        Exceeds Steering Limit" alert (the undershoot+turning+lac.saturated block
+  #                        in selfdrived.py's update_events()) — the real driver-facing event, edge-
+  #                        triggered + hold-off-debounced (see selfdrived._log_take_control_edge).
+  def log_take_control_alert(self, payload: dict) -> None:
+    """takecontrol2pnw: append one discrete {"ev":"alert","name":"steerSaturated",...} record to
+    ces_events.jsonl. Called ONLY by selfdrived (selfdrive/selfdrived/selfdrived.py
+    _log_take_control_edge/_emit_take_control_alert), on the rare rising/closing edge of ITS OWN
+    steerSaturated ("Take Control" / "Turn Exceeds Steering Limit") decision — never every tick, and
+    unconditionally regardless of CESMode/_enabled (the alert firing is a selfdrived fact, not a CES
+    decision).
+
+    `payload` is plain Python (str/float/bool/list/None only — no cereal/capnp objects), already
+    built by the caller; this method does NOT decide anything and does NOT re-derive the trigger. It
+    only enriches the record with fields ces already has cached from its own ~1 Hz _read_map()
+    refresh (kept fresh regardless of CESMode by _steer_log_step/_read_params — steerlimit-log2pnw/
+    steertele2pnw) and appends via the existing _append_event writer: GPS (self._cur_lat/_cur_lon/
+    _cur_bearing) and steer-limit state (self._sl_ang_des/_sl_ang_act/_sl_ang_err/_sl_lat_dem/
+    _sl_lat_max). No fresh mem-param read happens here.
+
+    NOTE on phase="end" records: vEgo/gps/lat/lon/bearing/slAng*/slLat*/otherEvents here are all a
+    CLOSE-TICK snapshot (~1 s after the episode, delayed by selfdrived's hold-off) — they are NOT the
+    episode's peak/trigger-moment state. durationS (the one field that IS about the episode itself)
+    is computed by the caller from the last frame the alert actually fired, not the close tick.
+
+    See also the "three overlapping steering record families" note above CESController (or search
+    ces_events.jsonl for '"ev":"steer"' / '"ev":"steerEvent"' / '"ev":"alert"') — this "alert" record
+    is one of three different steering-related record types that can appear for one physical
+    saturation episode; they have different triggers/durations and are not contradictory.
+
+    Defensive: a malformed/partial payload or any field-access failure degrades to 'nothing logged'
+    rather than raising — the caller already wraps this call in try/except as well (belt + braces),
+    since this ultimately runs from selfdrived's ~100 Hz control loop."""
+    try:
+      now_wall = time.time()  # noqa: TID251 -- wall clock, rare edge-triggered append only
+      v_ego = payload.get("vEgo")
+      if v_ego is not None and not math.isfinite(v_ego):
+        v_ego = None  # takecontrol2pnw: NaN/inf would serialize to a bare (invalid-JSON) NaN token
+      rec = {
+        "t": round(now_wall, 1),
+        "ev": "alert", "name": payload.get("name", "steerSaturated"), "phase": payload.get("phase"),
+        "car": self._car, "cesMode": self._mode,
+        "vEgo": v_ego,
+        "gps": self._cur_lat is not None and self._cur_lon is not None,
+        "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
+        # steerlimit-log2pnw fields — already-cached, no fresh read here (see docstring above).
+        "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
+        "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max,
+        # co-active onroadEvents this frame (e.g. steerTempUnavailable/ldw), for correlation.
+        "otherEvents": payload.get("otherEvents") or [],
+      }
+      if payload.get("durationS") is not None:
+        rec["durationS"] = payload["durationS"]
       if clock_bad(now_wall):
         rec["clockBad"] = True
       self._append_event(rec)

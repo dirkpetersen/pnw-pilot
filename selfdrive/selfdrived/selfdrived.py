@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import time
 import threading
@@ -16,7 +17,7 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import Events, ET, EVENT_NAME  # EVENT_NAME: takecontrol2pnw
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
@@ -29,6 +30,11 @@ from openpilot.system.hardware import HARDWARE
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
+
+# takecontrol2pnw: "Take Control" (steerSaturated) alert flight-recorder debounce — an episode stays
+# open (no new ces_events record) through any gap in the alert shorter than this; only a continuous
+# absence at least this long closes it and re-arms the next rising edge for a new record.
+STEER_SATURATED_HOLDOFF_S = 1.0
 
 LONGITUDINAL_PERSONALITY_MAP = {v: k for k, v in log.LongitudinalPersonality.schema.enumerants.items()}
 
@@ -120,6 +126,15 @@ class SelfdriveD:
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
     self.last_steering_pressed_frame = 0
+    # takecontrol2pnw: edge-triggered "Take Control" (steerSaturated) alert flight-recorder state —
+    # see the steerSaturated block in update_events() and its use at the ces_pnw call site in step().
+    # None (not 0 or -1): sm.frame legitimately starts at 0 (and could in principle be some other
+    # value pre-sm.update, e.g. -1), so any int sentinel risks a false `sm.frame ==
+    # last_steer_saturated_frame` match -> a bogus "Take Control" log record on boot before any real
+    # alert ever fired. None can never equal an int, so it's sentinel-proof regardless of frame value.
+    self.last_steer_saturated_frame = None  # last frame steerSaturated was added to self.events
+    self.steer_saturated_open = False       # is a logging "episode" currently open (already logged)?
+    self.steer_saturated_start_frame = 0    # frame the currently-open episode's rising edge fired
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
     self.events_prev = []
@@ -427,6 +442,10 @@ class SelfdriveD:
       # TODO: lac.saturated includes speed and other checks, should be pulled out
       if undershooting and turning and lac.saturated:
         self.events.add(EventName.steerSaturated)
+        # takecontrol2pnw: PURE OBSERVATION bookkeeping only — records which frame the decision
+        # above fired, for the edge-triggered ces_events logger in step() below. Never read back
+        # into this decision.
+        self.last_steer_saturated_frame = self.sm.frame
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -569,9 +588,80 @@ class SelfdriveD:
       ces_req = False
     self.experimental_mode = self.CP.openpilotLongitudinalControl and (self.manual_experimental_mode or ces_req)
 
+    self._log_take_control_edge(CS)
+
     self.publish_selfdriveState(CS)
 
     self.CS_prev = CS
+
+  def _log_take_control_edge(self, CS) -> None:
+    """takecontrol2pnw: PURE OBSERVATION — write the "Take Control" (steerSaturated) alert to
+    ces_events.jsonl as a discrete, edge-triggered record, so it doesn't have to be dug out of the
+    rlog. Does NOT re-derive or influence the steerSaturated decision (made above, in update_events)
+    — it only reads whether that decision fired THIS frame (last_steer_saturated_frame == sm.frame,
+    set immediately after self.events.add(EventName.steerSaturated)) and logs it.
+
+    Gentle: per-tick cost is one int compare (this frame vs. last_steer_saturated_frame) + one more
+    for the hold-off window — mirrors the existing recent_steer_pressed idiom in update_events(), no
+    new allocation, no cereal/JSON/file work. Building the record (co-active event names, GPS/steer
+    state via ces_pnw, the JSONL append) only happens on the rare rising or closing edge, via
+    ces_pnw.log_take_control_alert() — this method never touches ces_pnw's file writer directly.
+
+    Debounced: once open, an episode stays open (no new record) through any gap in the alert shorter
+    than STEER_SATURATED_HOLDOFF_S; only a continuous absence at least that long closes it and
+    re-arms the next rising edge for a new record — one record per real episode. durationS on the
+    "end" record is measured to the LAST frame the alert actually fired (last_steer_saturated_frame),
+    not to the close tick — the close tick is delayed by the hold-off, so measuring to it would
+    inflate durationS by up to STEER_SATURATED_HOLDOFF_S (a single-frame alert would read ~1.0 s
+    instead of ~0.0 s). Note this also means the "end" record's vEgo/GPS/steer-limit/otherEvents
+    fields (built by _emit_take_control_alert from the CURRENT CS, at the close tick) reflect that
+    later close-tick snapshot, not the episode's peak/trigger moment — offline analysis should treat
+    them as "state ~1 s after the episode", not "state during the episode".
+
+    Exception-isolated: any failure here (missing ces_pnw method on an older stub, bad CS field,
+    etc.) is swallowed — this runs inside selfdrived's ~100 Hz control loop and must never raise."""
+    try:
+      sat_now = self.last_steer_saturated_frame is not None and self.sm.frame == self.last_steer_saturated_frame
+      if sat_now:
+        if not self.steer_saturated_open:
+          # RISING EDGE — the only per-tick branch that does real (rare) work.
+          self.steer_saturated_open = True
+          self.steer_saturated_start_frame = self.sm.frame
+          self._emit_take_control_alert(CS, "start", None)
+        return
+      if self.steer_saturated_open and self.last_steer_saturated_frame is not None and \
+         (self.sm.frame - self.last_steer_saturated_frame) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S:
+        # Sustained absence past the hold-off -- close the episode and re-arm.
+        self.steer_saturated_open = False
+        # Duration to the LAST frame the alert actually fired, not to this (hold-off-delayed) close
+        # tick -- see docstring. Clamped to >= 0.0 defensively (frame bookkeeping should guarantee
+        # last_steer_saturated_frame >= steer_saturated_start_frame, but never let a clock-ish oddity
+        # log a negative duration).
+        duration_s = max(0.0, (self.last_steer_saturated_frame - self.steer_saturated_start_frame) * DT_CTRL)
+        self._emit_take_control_alert(CS, "end", duration_s)
+    except Exception:
+      cloudlog.exception("takecontrol2pnw: _log_take_control_edge raised")
+
+  def _emit_take_control_alert(self, CS, phase: str, duration_s) -> None:
+    """Builds the (plain-python, no cereal/capnp objects) payload and hands it to ces_pnw to persist.
+    Called ONLY from the rare rising/closing edge above. On phase="end" the CS snapshot here is from
+    the close tick (~1 s after the episode, see _log_take_control_edge docstring), not the peak."""
+    try:
+      other_events = [EVENT_NAME.get(e, str(e)) for e in self.events.names if e != EventName.steerSaturated]
+    except Exception:
+      other_events = []
+    try:
+      v_ego = float(getattr(CS, 'vEgo', None))
+      v_ego = round(v_ego, 2) if math.isfinite(v_ego) else None
+    except (TypeError, ValueError):
+      v_ego = None
+    payload = {"name": "steerSaturated", "phase": phase, "vEgo": v_ego, "otherEvents": other_events}
+    if duration_s is not None:
+      payload["durationS"] = round(duration_s, 2)
+    try:
+      self.ces_pnw.log_take_control_alert(payload)
+    except Exception:
+      cloudlog.exception("ces_pnw: log_take_control_alert raised")
 
   def params_thread(self, evt):
     while not evt.is_set():
