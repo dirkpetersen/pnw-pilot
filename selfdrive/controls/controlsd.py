@@ -48,6 +48,24 @@ FLIGHT_HALF_VEHICLE_W = 1.0     # m, conservative telemetry-only half-width for 
 FLIGHT_OVERRIDE_RECENT_S = 1.0
 
 
+def _ach_lat_ms2(k_actl, v_ego):
+  """steerpower2pnw: PURE OBSERVATION helper -- delivered lateral accel THIS TICK = k_actl * v_ego**2
+  (signed, m/s^2), where k_actl is the yaw-rate-derived ACHIEVED curvature (not the commanded/
+  kinematic one -- see the kActl derivation comment in state_control() below). This is the truck's
+  true hands-off steering capability signal: peak |achLat| while latActive and saturating (under-
+  turning), grouped by heading, gives the max lateral accel openpilot can actually deliver at that
+  compass direction/speed. Used at both call sites (the 100 Hz peak accumulator and the throttled
+  per-sample "achLat" field) so the formula/guards live in exactly one place.
+  No I/O, never raises: None or non-finite k_actl/v_ego degrades to None."""
+  try:
+    if k_actl is None or v_ego is None:
+      return None
+    ach = float(k_actl) * float(v_ego) ** 2
+    return ach if math.isfinite(ach) else None
+  except (TypeError, ValueError):
+    return None
+
+
 class Controls:
   def __init__(self) -> None:
     self.params = Params()
@@ -136,6 +154,12 @@ class Controls:
     # and reset each time one is taken -- see the accumulator + fold-in sites in state_control().
     self._flight_peak_ang_err_acc = 0.0
     self._flight_sat_any_acc = False
+    # steerpower2pnw: PURE OBSERVATION -- parallel 100 Hz running-max accumulator + episode peak for
+    # achLat (delivered lateral accel, m/s^2), same accumulate/fold/reset/latch pattern as
+    # _flight_peak_ang_err_acc/_flight_peak_ang_err directly above. See _ach_lat_ms2() below for the
+    # formula and the two call sites (100 Hz accumulator + throttled per-sample field).
+    self._flight_peak_achlat_acc = 0.0
+    self._flight_peak_achlat = 0.0
 
   def update(self):
     self.sm.update(15)
@@ -306,6 +330,21 @@ class Controls:
     except Exception:
       pass
 
+    # steerpower2pnw: PURE OBSERVATION 100 Hz peak |achLat| accumulator, same rationale/placement as
+    # the angErr accumulator directly above (a throttled ~5 Hz sample would alias the true peak). k_actl
+    # is recomputed here from CS.yawRate/CS.vEgo -- the SAME formula the throttled kActl field below
+    # derives (see the "kActl derivation" comment further down) -- duplicated only because those two
+    # CarState fields are the only inputs available every tick; the throttled steer_limit_status dict
+    # that also carries kActl isn't built until the %20==0 block below. Own try/except: a bad tick here
+    # must never affect the angErr accumulator above or anything else in this control loop.
+    try:
+      k_actl_now = float(CS.yawRate) / max(CS.vEgo, MIN_SPEED)
+      ach_now = _ach_lat_ms2(k_actl_now, CS.vEgo)
+      if ach_now is not None and abs(ach_now) > self._flight_peak_achlat_acc:
+        self._flight_peak_achlat_acc = abs(ach_now)
+    except Exception:
+      pass
+
     # steerlimit-log2pnw telemetry: PURE OBSERVATION snapshot of this tick's steering-limit signals —
     # never read back into any control value, computed entirely from values already finalized above
     # (curvature_limited, self.desired_curvature, lac_log). Mirrors the LaneCenterStatus publish above
@@ -473,6 +512,15 @@ class Controls:
           self._flight_peak_ang_err_acc = 0.0
           self._flight_sat_any_acc = False
 
+          # steerpower2pnw: same fold-then-reset as ang_err_pk directly above, for the achLat 100 Hz
+          # accumulator populated in the standalone try block near the top of this method.
+          ach_lat_pk = round(self._flight_peak_achlat_acc, 3)
+          self._flight_peak_achlat_acc = 0.0
+          # Per-sample instant achLat (this throttled tick's own kActl/vEgo) -- alongside, not instead
+          # of, ach_lat_pk: the PEAK fields (ach_lat_pk / peakAchLat below) capture the true between-
+          # sample max, this is just the trace's own point-in-time reading like angDes/angAct/kActl.
+          ach_lat_now = _ach_lat_ms2(steer_limit_status["kActl"], CS.vEgo)
+
           sample = {
             "tm": round(now_mono, 3),   # N2: this is an absolute time.monotonic() stamp, not a delta
             "angDes": steer_limit_status["angDes"], "angAct": steer_limit_status["angAct"],
@@ -490,6 +538,9 @@ class Controls:
             "laneMargin": round(lane_margin, 3) if lane_margin is not None else None,
             "laneP1": round(lane_p1, 3) if lane_p1 is not None else None,
             "laneP2": round(lane_p2, 3) if lane_p2 is not None else None,
+            # steerpower2pnw: delivered lateral accel this tick (m/s^2, signed) -- the truck's true
+            # hands-off steering-capability signal (see _ach_lat_ms2 docstring). Logging only.
+            "achLat": round(ach_lat_now, 3) if ach_lat_now is not None else None,
           }
           # Always-on rolling history -- O(1) append, bounded by maxlen regardless of state.
           self._flight_ring.append(sample)
@@ -539,6 +590,7 @@ class Controls:
               self._flight_peak_lane_off = lane_off
               self._flight_min_margin = lane_margin
               self._flight_min_conf = lane_conf
+              self._flight_peak_achlat = ach_lat_pk   # steerpower2pnw: same latch-at-onset as peak_ang_err
               # I1: whether an override was already in progress right at the trigger onset (the
               # pre-edge ring can still hold a genuine pre-override departure, so this only tags,
               # never suppresses retroactively).
@@ -551,6 +603,7 @@ class Controls:
             if len(self._flight_post) < FLIGHT_POST_MAX:
               self._flight_post.append(sample)
             self._flight_peak_ang_err = max(self._flight_peak_ang_err, ang_err_pk)
+            self._flight_peak_achlat = max(self._flight_peak_achlat, ach_lat_pk)  # steerpower2pnw
             if lane_off is not None and (self._flight_peak_lane_off is None
                                           or abs(lane_off) > abs(self._flight_peak_lane_off)):
               self._flight_peak_lane_off = lane_off
@@ -581,6 +634,11 @@ class Controls:
                 "capped": bool(capped),   # N5: durationS is a known-truncated lower bound when True
                 "driverOverride": bool(self._flight_had_override),   # I1: tag, never silently drop
                 "peakAngErr": round(self._flight_peak_ang_err, 2),
+                # steerpower2pnw: THE capability number -- the 100 Hz peak |achLat| (m/s^2) over this
+                # episode, same accumulate/fold/latch pattern as peakAngErr above. Meaningful for
+                # offline direction-of-travel capability analysis when driverOverride is False (see
+                # _ach_lat_ms2 docstring / ces_pnw.py's steer/steerEvent records for the heading pairing).
+                "peakAchLat": round(self._flight_peak_achlat, 3),
                 "peakLaneOff": (round(self._flight_peak_lane_off, 3)
                                 if self._flight_peak_lane_off is not None else None),
                 "minLaneMargin": (round(self._flight_min_margin, 3)

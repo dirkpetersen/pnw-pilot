@@ -63,6 +63,42 @@ def clock_bad(t_wall: float) -> bool:
     return True
 
 
+# steerpower2pnw: LOGGING ONLY -- measure the truck's true hands-off steering capability by direction.
+# achLat = achieved curvature (kActl, yaw-rate-derived, already logged as slKActl/kActl elsewhere) *
+# vEgo^2, signed -- the delivered lateral accel this tick. Grouping the steerEvent peakAchLat by the
+# compass heading below (offline) yields max(peakAchLat) per direction -> a capability map ->
+# slowdown target v=sqrt(cap*R). Both helpers are PURE, no I/O, never raise -- controlsd.py carries an
+# independent copy of _ach_lat (as `_ach_lat_ms2`) since the two processes don't share code, only the
+# formula (see that function's docstring for why it's duplicated, not imported).
+def _ach_lat(k_actl, v_ego):
+  """Delivered lateral accel this tick = k_actl * v_ego**2 (signed, m/s^2). None/non-finite k_actl or
+  v_ego degrades to None, never raises."""
+  try:
+    if k_actl is None or v_ego is None:
+      return None
+    ach = float(k_actl) * float(v_ego) ** 2
+    return ach if math.isfinite(ach) else None
+  except (TypeError, ValueError):
+    return None
+
+
+_COMPASS_PTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _compass(bearing):
+  """8-point compass heading from a GPS bearing (deg, 0=N, clockwise). None/non-finite bearing (no
+  GPS fix yet) degrades to None, never raises."""
+  try:
+    if bearing is None:
+      return None
+    b = float(bearing)
+    if not math.isfinite(b):
+      return None
+    return _COMPASS_PTS[int((b + 22.5) // 45) % 8]
+  except (TypeError, ValueError):
+    return None
+
+
 # icbmonset: mapd's curvature calc (Heron's formula on near-collinear OSM nodes, see
 # system/mapd/mapd_configd.py) occasionally emits a FINITE but physically-implausible high target
 # velocity instead of NaN -- the existing NaN guards below don't catch it. Field-observed live
@@ -2077,6 +2113,8 @@ class CESController:
       except Exception:
         v_ego = 0.0
       now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
+      # steerpower2pnw: pure functions, computed from fields already read just above by _read_map().
+      ach_lat = _ach_lat(self._sl_k_actl, v_ego)
       rec = {
         "t": round(now_wall, 1),
         # cesOff: True means self._enabled is False here — this can include CESMode 1/2 (Light/
@@ -2095,6 +2133,10 @@ class CESController:
         "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
         "slSat": self._sl_sat, "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
         "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+        # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass
+        # heading, to measure the truck's true hands-off steering capability by direction.
+        "achLat": round(ach_lat, 3) if ach_lat is not None else None,
+        "heading": _compass(self._cur_bearing),
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -2176,6 +2218,10 @@ class CESController:
         "t": round(now_wall, 1),
         "ev": "steerEvent", "evId": ev_id, "car": self._car, "cesMode": self._mode,
         "durationS": ev.get("durationS"), "peakAngErr": ev.get("peakAngErr"),
+        # steerpower2pnw: THE capability number — pass through controlsd's 100 Hz peak |achLat|
+        # (m/s^2) for this episode as-is (already computed/rounded there — no re-derivation here).
+        # Meaningful for offline direction-of-travel capability analysis when driverOverride is False.
+        "peakAchLat": ev.get("peakAchLat"),
         "peakLaneOff": ev.get("peakLaneOff"), "minLaneMargin": ev.get("minLaneMargin"),
         "minLaneConf": ev.get("minLaneConf"),
         # Never silently trust a low-confidence excursion: default True (flagged) if the source
@@ -2193,6 +2239,7 @@ class CESController:
         "trace": ev.get("trace") or [],
         "gps": self._cur_lat is not None and self._cur_lon is not None,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
+        "heading": _compass(self._cur_bearing),   # steerpower2pnw: 8-pt compass, logging only
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -2486,6 +2533,8 @@ class CESController:
     vego = float(tele.get("vEgo") or 0.0)
     hwy = (self._speed_limit >= C.HWY_SPEED_LIMIT) or (vego >= C.HWY_VEGO)  # coarse; authoritative = GPS+OSM+300ft in analysis
     now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
+    # steerpower2pnw: pure functions, computed from fields already read by _read_map() (see __init__).
+    ach_lat = _ach_lat(self._sl_k_actl, vego)
     rec = {
       "t": round(now_wall, 1),
       "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
@@ -2543,6 +2592,11 @@ class CESController:
       # the empirical saturation signal to characterize this truck's real curvature limit. Display/log
       # only, same as sl* above. See docs/STEERING-LIMITS.md "Ford curvature interface" section.
       "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+      # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass heading,
+      # to measure the truck's true hands-off steering capability by direction (see module docstring
+      # near _ach_lat/_compass).
+      "achLat": round(ach_lat, 3) if ach_lat is not None else None,
+      "heading": _compass(self._cur_bearing),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
