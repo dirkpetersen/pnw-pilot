@@ -167,6 +167,31 @@ class Controls:
     # formula and the two call sites (100 Hz accumulator + throttled per-sample field).
     self._flight_peak_achlat_acc = 0.0
     self._flight_peak_achlat = 0.0
+    # leadrate2pnw: PURE OBSERVATION -- parallel 100 Hz running-max accumulators + episode peaks for
+    # steering RATE (deg/s), same accumulate/fold/reset/latch pattern as the angErr/achLat pairs
+    # above. Motivated by an S-curve reversal where the commanded angle swung ~37 deg/s but the wheel
+    # could only follow ~18 deg/s -- the binding limit is a SLEW RATE, not lateral accel, and a ~5 Hz
+    # sample aliases it exactly like it would alias angErr/achLat. Three accumulators, not one:
+    #   _flight_peak_cmdrate_acc      -- |d(commanded angle)/dt|, from lac_log.steeringAngleDesiredDeg
+    #                                     (the SAME field the angErr accumulator above already reads).
+    #   _flight_peak_actrate_sig_acc  -- |CS.steeringRateDeg|, a real CAN-derived signal on Tesla (see
+    #                                     opendbc_repo/opendbc/car/tesla/carstate.py) -- PREFERRED when
+    #                                     alive.
+    #   _flight_peak_actrate_diff_acc -- |d(CS.steeringAngleDeg)/dt|, the FALLBACK: Ford's carstate.py
+    #                                     never sets steeringRateDeg, so it stays at the capnp default
+    #                                     0.0 on that car. The emit site below picks whichever source
+    #                                     actually moved during THIS episode -- no car-fingerprint
+    #                                     branch anywhere in this file (see the emit-site comment).
+    # Differentiated with the fixed DT_CTRL (controlsd's Ratekeeper holds ~100 Hz) rather than a
+    # measured dt, matching how every other value in this 100 Hz loop assumes the control period.
+    self._flight_prev_cmd_ang = None    # previous tick's commanded steering angle (deg), for the diff
+    self._flight_prev_act_ang = None    # previous tick's achieved steering angle (deg), for the diff
+    self._flight_peak_cmdrate_acc = 0.0
+    self._flight_peak_actrate_sig_acc = 0.0
+    self._flight_peak_actrate_diff_acc = 0.0
+    self._flight_peak_cmdrate = 0.0
+    self._flight_peak_actrate_sig = 0.0
+    self._flight_peak_actrate_diff = 0.0
 
   def update(self):
     self.sm.update(15)
@@ -352,6 +377,36 @@ class Controls:
     except Exception:
       pass
 
+    # leadrate2pnw: PURE OBSERVATION 100 Hz peak steering-RATE accumulators, same rationale/placement
+    # as the angErr/achLat accumulators directly above -- a throttled ~5 Hz sample aliases the true
+    # peak rate exactly like it would alias angErr/achLat. Own try/except, and its own re-read of
+    # lac_log.steeringAngleDesiredDeg (rather than reusing ang_des_raw from the block above) so a bad
+    # tick here can never affect the angErr accumulator or anything else in this control loop -- same
+    # isolation discipline the achLat block above documents for itself.
+    try:
+      cmd_ang_now = getattr(lac_log, "steeringAngleDesiredDeg", None)
+      cmd_ang_now = float(cmd_ang_now) if cmd_ang_now is not None else None
+      if cmd_ang_now is not None and self._flight_prev_cmd_ang is not None:
+        cmd_rate = abs(cmd_ang_now - self._flight_prev_cmd_ang) / DT_CTRL
+        if math.isfinite(cmd_rate) and cmd_rate > self._flight_peak_cmdrate_acc:
+          self._flight_peak_cmdrate_acc = cmd_rate
+      self._flight_prev_cmd_ang = cmd_ang_now
+
+      act_ang_now = float(CS.steeringAngleDeg)
+      if self._flight_prev_act_ang is not None:
+        act_rate_diff = abs(act_ang_now - self._flight_prev_act_ang) / DT_CTRL
+        if math.isfinite(act_rate_diff) and act_rate_diff > self._flight_peak_actrate_diff_acc:
+          self._flight_peak_actrate_diff_acc = act_rate_diff
+      self._flight_prev_act_ang = act_ang_now
+
+      sig_rate = getattr(CS, "steeringRateDeg", None)
+      if sig_rate is not None:
+        sig_rate = abs(float(sig_rate))
+        if math.isfinite(sig_rate) and sig_rate > self._flight_peak_actrate_sig_acc:
+          self._flight_peak_actrate_sig_acc = sig_rate
+    except Exception:
+      pass
+
     # steerlimit-log2pnw telemetry: PURE OBSERVATION snapshot of this tick's steering-limit signals —
     # never read back into any control value, computed entirely from values already finalized above
     # (curvature_limited, self.desired_curvature, lac_log). Mirrors the LaneCenterStatus publish above
@@ -528,6 +583,15 @@ class Controls:
           # sample max, this is just the trace's own point-in-time reading like angDes/angAct/kActl.
           ach_lat_now = _ach_lat_ms2(steer_limit_status["kActl"], CS.vEgo)
 
+          # leadrate2pnw: same fold-then-reset, for the three steering-RATE 100 Hz accumulators
+          # populated in the standalone try block near the top of this method.
+          cmd_rate_pk = round(self._flight_peak_cmdrate_acc, 2)
+          self._flight_peak_cmdrate_acc = 0.0
+          act_rate_sig_pk = round(self._flight_peak_actrate_sig_acc, 2)
+          self._flight_peak_actrate_sig_acc = 0.0
+          act_rate_diff_pk = round(self._flight_peak_actrate_diff_acc, 2)
+          self._flight_peak_actrate_diff_acc = 0.0
+
           sample = {
             "tm": round(now_mono, 3),   # N2: this is an absolute time.monotonic() stamp, not a delta
             "angDes": steer_limit_status["angDes"], "angAct": steer_limit_status["angAct"],
@@ -600,6 +664,11 @@ class Controls:
               self._flight_min_margin = lane_margin
               self._flight_min_conf = lane_conf
               self._flight_peak_achlat = ach_lat_pk   # steerpower2pnw: same latch-at-onset as peak_ang_err
+              # leadrate2pnw: same latch-at-onset as peak_ang_err/peak_achlat above, for the three
+              # steering-RATE peaks.
+              self._flight_peak_cmdrate = cmd_rate_pk
+              self._flight_peak_actrate_sig = act_rate_sig_pk
+              self._flight_peak_actrate_diff = act_rate_diff_pk
               # I1: whether an override was already in progress right at the trigger onset (the
               # pre-edge ring can still hold a genuine pre-override departure, so this only tags,
               # never suppresses retroactively).
@@ -613,6 +682,10 @@ class Controls:
               self._flight_post.append(sample)
             self._flight_peak_ang_err = max(self._flight_peak_ang_err, ang_err_pk)
             self._flight_peak_achlat = max(self._flight_peak_achlat, ach_lat_pk)  # steerpower2pnw
+            # leadrate2pnw: same running max-over-episode as peak_ang_err/peak_achlat above.
+            self._flight_peak_cmdrate = max(self._flight_peak_cmdrate, cmd_rate_pk)
+            self._flight_peak_actrate_sig = max(self._flight_peak_actrate_sig, act_rate_sig_pk)
+            self._flight_peak_actrate_diff = max(self._flight_peak_actrate_diff, act_rate_diff_pk)
             if lane_off is not None and (self._flight_peak_lane_off is None
                                           or abs(lane_off) > abs(self._flight_peak_lane_off)):
               self._flight_peak_lane_off = lane_off
@@ -629,6 +702,14 @@ class Controls:
             if (not trig and hold_elapsed >= FLIGHT_POST_HOLD_S) or capped:
               now_wall = time.time()  # noqa: TID251 -- wall clock + rlog pointer, rare edge emit only
               low_conf = self._flight_min_conf is None or self._flight_min_conf < FLIGHT_LANE_CONF_FLOOR
+              # leadrate2pnw: pick the achieved-rate SOURCE for THIS episode -- prefer the real
+              # CS.steeringRateDeg signal, fall back to the steeringAngleDeg-diff accumulator only if
+              # the signal-based one never moved (the Ford Lightning build: carstate.py never sets
+              # steeringRateDeg, so it stays pinned at the capnp default 0.0 for the whole episode).
+              # Deliberately NOT a carFingerprint/brand check -- purely "did this signal prove itself
+              # alive during this episode", so the same line runs unmodified on every car.
+              act_rate_pk = (self._flight_peak_actrate_sig if self._flight_peak_actrate_sig > 1e-3
+                              else self._flight_peak_actrate_diff)
               # I2 review fix: evId used to restart at 0 every controlsd start, so a respawned
               # instance's first event collided with (and was dropped by) ces's dedup if a pre-crash
               # instance had already logged the same small int. Build the candidate id from the
@@ -653,6 +734,11 @@ class Controls:
                 # offline direction-of-travel capability analysis when driverOverride is False (see
                 # _ach_lat_ms2 docstring / ces_pnw.py's steer/steerEvent records for the heading pairing).
                 "peakAchLat": round(self._flight_peak_achlat, 3),
+                # leadrate2pnw: peak commanded steering-RATE (deg/s, always the lac_log-desired-angle
+                # diff) and peak ACHIEVED steering-RATE (deg/s, act_rate_pk picked just above) over
+                # this episode -- same accumulate/fold/latch pattern as peakAngErr/peakAchLat above.
+                "peakCmdRate": round(self._flight_peak_cmdrate, 2),
+                "peakActRate": round(act_rate_pk, 2),
                 "peakLaneOff": (round(self._flight_peak_lane_off, 3)
                                 if self._flight_peak_lane_off is not None else None),
                 "minLaneMargin": (round(self._flight_min_margin, 3)

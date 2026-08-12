@@ -1990,7 +1990,7 @@ class CESController:
     # cessteerlog2pnw: unconditional steer/lane-centering breadcrumb — no-ops once _enabled is True
     # (the normal tick/adopt path below already logs the same fields), so this only ever adds the
     # CES-off records that were previously missing from the log entirely.
-    self._steer_log_step(car_state)
+    self._steer_log_step(car_state, sm)
     # steerevent2pnw: edge-triggered mirror of controlsd's flight-recorder burst into ces_events —
     # called unconditionally every cycle (NOT gated on C.TICK_S like _steer_log_step above),
     # independent of CESMode/_enabled since the underlying saturation edge is a controlsd/steering
@@ -2133,7 +2133,7 @@ class CESController:
     self.green_light = ev == GL_EV_GREEN
     self.lead_departing = ev == GL_EV_LEAD
 
-  def _steer_log_step(self, car_state) -> None:
+  def _steer_log_step(self, car_state, sm) -> None:
     """cessteerlog2pnw: LOGGING ONLY. The sl*/lc*/vtsc* steering/lane-centering diagnostics in the
     normal tick/adopt records (_event_record) are only ever written while CES is enabled
     (CESMode>0) — _read_params() only calls _read_map() (which refreshes those fields from the
@@ -2150,7 +2150,13 @@ class CESController:
       - does NOT call experimental_request's own decision logic, _publish_status, the ICBM
         executor, CES2, or any mode/actuator path — only reads mem-params and appends one JSONL
         record via the same best-effort _append_event used everywhere else in this file.
-    Any exception here is swallowed; a broken breadcrumb must never affect control."""
+    Any exception here is swallowed; a broken breadcrumb must never affect control.
+
+    leadrate2pnw: `sm` is the SAME SubMaster experimental_request() already holds (it's passed
+    through from there, this call site adds no new subscription) — used ONLY to read
+    sm['radarState'].leadOne, exactly like _green_light_step/experimental_request already do
+    elsewhere in this file, so the CES-off "steer" breadcrumb can carry hasLead/dRel/vLead too
+    (previously only the enabled tick/adopt path had lead telemetry)."""
     if self._enabled:
       return   # the enabled tick/adopt path already logs sl*/lc*/vtsc* once per ~1 Hz — no duplicate
     now = time.monotonic()
@@ -2173,6 +2179,17 @@ class CESController:
       gps_valid = self._cur_lat is not None and self._cur_lon is not None
       # steerpower2pnw: pure functions, computed from fields already read just above by _read_map().
       ach_lat = _ach_lat(self._sl_k_actl, raw_vego)
+      # leadrate2pnw: lead state, read directly from radarState.leadOne (same message CES already
+      # subscribes to and reads elsewhere -- see experimental_request/_green_light_step). Defensive:
+      # any failure here degrades to "no lead" (None dRel/vLead), never raises into this breadcrumb.
+      has_lead = d_rel = v_lead = None
+      try:
+        lead = sm['radarState'].leadOne
+        has_lead = bool(getattr(lead, 'status', False))
+        d_rel = round(float(getattr(lead, 'dRel', 0.0)), 1) if has_lead else None
+        v_lead = round(float(getattr(lead, 'vLead', 0.0)), 1) if has_lead else None
+      except Exception:
+        has_lead = d_rel = v_lead = None
       rec = {
         "t": round(now_wall, 1),
         # cesOff: True means self._enabled is False here — this can include CESMode 1/2 (Light/
@@ -2197,6 +2214,12 @@ class CESController:
         # silently reading a no-fix-defaulted 0.0 bearing as true north.
         "achLat": round(ach_lat, 3) if ach_lat is not None else None,
         "heading": _heading_if_fixed(self._cur_bearing, gps_valid),
+        # leadrate2pnw: LOGGING ONLY — lead-car state alongside this breadcrumb, so offline analysis
+        # can separate "driver holding a speed by choice" from "speed forced by a slow lead" even on
+        # a CES-off drive (previously only the enabled tick/adopt path carried lead telemetry).
+        # dRel/vLead null (not 0.0) when there is no lead -- 0.0 would be indistinguishable from a
+        # genuine lead sitting right at the bumper.
+        "hasLead": has_lead, "dRel": d_rel, "vLead": v_lead,
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -2291,6 +2314,12 @@ class CESController:
         # (m/s^2) for this episode as-is (already computed/rounded there — no re-derivation here).
         # Meaningful for offline direction-of-travel capability analysis when driverOverride is False.
         "peakAchLat": ev.get("peakAchLat"),
+        # leadrate2pnw: pass through controlsd's 100 Hz peak steering-RATE accumulators as-is (already
+        # computed/rounded there, same non-re-derivation contract as peakAchLat above). The S-curve
+        # reversal that motivated this showed the binding limit is a SLEW RATE, not lateral accel --
+        # peakCmdRate is how fast the plan asked to turn, peakActRate is how fast the wheel actually
+        # followed; the gap between them (hands-off, driverOverride False) is the EPS slew ceiling.
+        "peakCmdRate": ev.get("peakCmdRate"), "peakActRate": ev.get("peakActRate"),
         "peakLaneOff": ev.get("peakLaneOff"), "minLaneMargin": ev.get("minLaneMargin"),
         "minLaneConf": ev.get("minLaneConf"),
         # Never silently trust a low-confidence excursion: default True (flagged) if the source
@@ -2374,6 +2403,11 @@ class CESController:
         "vEgo": v_ego,
         "gps": self._cur_lat is not None and self._cur_lon is not None,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
+        # leadrate2pnw: heading was simply MISSING from this record (not gated too strictly -- there
+        # was no "heading" key at all), so it always read back as None even on a valid fix, unlike the
+        # "steer"/"tick"/"adopt" records taken the same moment. Same helper/gate those use: null only
+        # on a genuine no-fix, not a blanket None.
+        "heading": _heading_if_fixed(self._cur_bearing, self._cur_lat is not None and self._cur_lon is not None),
         # steerlimit-log2pnw fields — already-cached, no fresh read here (see docstring above).
         "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
         "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max,
@@ -2640,7 +2674,10 @@ class CESController:
       "condSpdLim": (self._cond_spd_lim[:80] if self._cond_spd_lim else ""),
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
       # vtsctele2pnw: explicit lead-present bool + gap time (s) + lead speed delta (m/s)
-      "lead": tele.get("lead"), "gapS": tele.get("gapS"), "dV": tele.get("dV"),
+      # leadrate2pnw: "hasLead" is an ALIAS of the same value as "lead" below (both come straight from
+      # s["has_lead"] via decision_telemetry's tele dict) -- added under this name so tick/adopt and
+      # the CES-off "steer" record (_steer_log_step) share one field name for the same fact.
+      "lead": tele.get("lead"), "hasLead": tele.get("lead"), "gapS": tele.get("gapS"), "dV": tele.get("dV"),
       "gps": tele.get("gps"), "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
