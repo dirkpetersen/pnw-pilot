@@ -42,6 +42,10 @@ FLIGHT_MAX_EVENT_S = 5.0   # defensive ceiling: force-emit (then wait for a clea
 FLIGHT_ANG_ERR_TRIG_DEG = 8.0   # Proposal 1's own suggested angErr trigger threshold
 FLIGHT_LANE_CONF_FLOOR = 0.5    # below this, a lane-offset reading is FLAGGED low-confidence, not trusted
 FLIGHT_HALF_VEHICLE_W = 1.0     # m, conservative telemetry-only half-width for the tire-margin estimate
+# I1 review fix: a driver steeringPressed within this window is "recent" -- mirrors the
+# not-recently-steer-pressed guard selfdrived's own audible steerSaturated alert requires
+# (selfdrived.py ~421-429) before the trigger below is allowed to fire/emit.
+FLIGHT_OVERRIDE_RECENT_S = 1.0
 
 
 class Controls:
@@ -114,6 +118,24 @@ class Controls:
     self._flight_min_margin = None
     self._flight_min_conf = None
     self._flight_event_id = 0
+    # I2 review fix: evId used to restart at 0 on every controlsd start, so a respawned instance's
+    # first event (evId=1) collided with (and got dropped by) ces's dedup if a pre-crash instance had
+    # already logged evId=1. Salt each emitted id with a per-process stamp derived from this process's
+    # own monotonic-clock origin (effectively unique across restarts, since monotonic counts from
+    # boot, not per-process) -- evId is emitted as the STRING f"{salt}-{n}", not a bare int.
+    self._flight_pid_salt = format(int(time.monotonic() * 1000) & 0xFFFFFF, "x")
+    # I1 review fix: recent-driver-override tracker, mirroring selfdrived's own guard on the audible
+    # steerSaturated alert -- without it, manual/disengaged curvy driving (latActive False, model
+    # still outputs desiredCurvature) and active driver overrides (latActive True, human pushing
+    # through -> angErr>8 deg) both spuriously fire this "openpilot couldn't steer" event.
+    self._flight_last_steer_pressed_t = -1e9   # monotonic stamp of the last observed CS.steeringPressed
+    self._flight_had_override = False          # latched True if steeringPressed anywhere in this episode
+    # I4 review fix: 100 Hz accumulator (updated every control tick, OUTSIDE the ~5 Hz sample gate
+    # below) so the emitted peakAngErr/satAny reflect the true peak within the ~190 ms gaps between
+    # throttled samples, not just the aliased value at the sample instant. Folded into the 5 Hz sample
+    # and reset each time one is taken -- see the accumulator + fold-in sites in state_control().
+    self._flight_peak_ang_err_acc = 0.0
+    self._flight_sat_any_acc = False
 
   def update(self):
     self.sm.update(15)
@@ -262,6 +284,28 @@ class Controls:
         cloudlog.error(f"actuators.{p} not finite {actuators.to_dict()}")
         setattr(actuators, p, 0.0)
 
+    # steerevent2pnw I4 review fix: PURE OBSERVATION 100 Hz peak accumulator, deliberately OUTSIDE the
+    # ~5 Hz `% 20` gate below (steerlimit-log2pnw / the flight-recorder sample both only run every
+    # 20th tick). The flight-recorder's severity fields used to be sampled only at that throttled
+    # cadence, aliasing the TRUE peak that can occur in the ~190 ms gaps between samples -- exactly
+    # the number the emitted event exists to report, and a saturation blip briefer than one throttle
+    # period could be missed by the trigger's own sampling entirely. Reads only values already
+    # finalized this tick (lac_log, CS.steeringAngleDeg, curvature_limited) and updates two local
+    # running-max/OR-latch scalars -- no dict allocation, no I/O, a handful of float ops/tick. Folded
+    # into the throttled sample (and reset) at the gated block below.
+    try:
+      ang_des_raw = getattr(lac_log, "steeringAngleDesiredDeg", None)
+      if ang_des_raw is not None:
+        ang_err_raw = abs(float(ang_des_raw) - float(CS.steeringAngleDeg))
+        if ang_err_raw > self._flight_peak_ang_err_acc:
+          self._flight_peak_ang_err_acc = ang_err_raw
+        if ang_err_raw > STEER_ANGLE_SATURATION_THRESHOLD:
+          self._flight_sat_any_acc = True
+      if getattr(lac_log, "saturated", False) or curvature_limited:
+        self._flight_sat_any_acc = True
+    except Exception:
+      pass
+
     # steerlimit-log2pnw telemetry: PURE OBSERVATION snapshot of this tick's steering-limit signals —
     # never read back into any control value, computed entirely from values already finalized above
     # (curvature_limited, self.desired_curvature, lac_log). Mirrors the LaneCenterStatus publish above
@@ -372,16 +416,17 @@ class Controls:
         # steerevent2pnw: PURE OBSERVATION flight-recorder burst (LANE-DEPARTURE-LOGGING-PROPOSALS.md
         # Proposal 1, combined with #2's near-field lane offset and #3's rlog pointer). Everything
         # below only READS values already finalized above (steer_limit_status, model_v2, CS,
-        # self.curvature) and appends to a bounded deque / rarely publishes a mem-param -- it never
-        # writes into new_desired_curvature, self.desired_curvature, actuators, or any other control
-        # state. Deliberately runs at THIS already-throttled ~5 Hz cadence (the same `% 20 == 0` gate
-        # as the SteerLimitStatus publish just above), not literally every 100 Hz controlsd tick:
-        # steer_limit_status's own CONTENT only refreshes at this rate (it's computed in this same
-        # gated block), so appending faster would just re-append duplicate values while adding real
-        # per-tick compute for nothing -- the design doc itself notes "ring rate is bounded by how
-        # fast the logger reads SteerLimitStatus ... adequate for a ~2 s event". Steady-state cost is
-        # one deque append + ~2 array reads (near-field lane offset) + a handful of float compares;
-        # the only mem-param WRITE is the rare edge emit, a handful of times per drive at most.
+        # self.curvature, plus the I4 100 Hz accumulator populated just above this gated block) and
+        # appends to a bounded deque / rarely publishes a mem-param -- it never writes into
+        # new_desired_curvature, self.desired_curvature, actuators, or any other control state. The
+        # SAMPLE (ring/pre/post trace entries) is built at THIS already-throttled ~5 Hz cadence (the
+        # same `% 20 == 0` gate as the SteerLimitStatus publish just above) because steer_limit_status's
+        # own CONTENT only refreshes at this rate -- appending faster would just re-append duplicate
+        # trace rows for no benefit. The PEAK fields folded into each sample (angErrPk/satAny) are NOT
+        # subject to this aliasing: they come from the true 100 Hz accumulator above, reset each time a
+        # sample is taken here (see I4 review fix). Steady-state cost here is one deque append + ~2
+        # array reads (near-field lane offset) + a handful of float compares; the only mem-param WRITE
+        # is the rare edge emit, a handful of times per drive at most.
         try:
           # --- Proposal 2: cheap near-field lane offset from the ALREADY-DECODED model_v2 (same
           # laneLines[1]/[2] near-field convention lane_centering.py's own gate uses -- no new model
@@ -405,10 +450,35 @@ class Controls:
           lane_conf = min(lane_p1, lane_p2) if (lane_p1 is not None and lane_p2 is not None) else None
 
           now_mono = time.monotonic()
+
+          # I1 review fix: track "was the driver recently overriding steering" from CS.steeringPressed
+          # (already sampled every tick by card/carstate -- no new read). Used below to suppress the
+          # trigger during/just-after an override, mirroring the not-recently-steer-pressed guard
+          # selfdrived's own audible steerSaturated alert requires.
+          if CS.steeringPressed:
+            self._flight_last_steer_pressed_t = now_mono
+          recent_steer_pressed = (now_mono - self._flight_last_steer_pressed_t) < FLIGHT_OVERRIDE_RECENT_S
+
+          # I4 review fix: fold the 100 Hz accumulator (populated above, already includes this tick's
+          # own values) into this sample, then reset it for the next ~190 ms window. angErrPk floors
+          # at this sample's own angErr so a steerControlType without steeringAngleDesiredDeg (the
+          # accumulator no-ops in that case -- see its own comment above) never regresses below the
+          # old 5 Hz-only behavior.
+          self._flight_peak_ang_err_acc = max(self._flight_peak_ang_err_acc,
+                                               abs(steer_limit_status["angErr"] or 0.0))
+          self._flight_sat_any_acc = bool(self._flight_sat_any_acc or steer_limit_status["sat"]
+                                           or steer_limit_status["angSat"] or steer_limit_status["curvLim"])
+          ang_err_pk = round(self._flight_peak_ang_err_acc, 2)
+          sat_any = bool(self._flight_sat_any_acc)
+          self._flight_peak_ang_err_acc = 0.0
+          self._flight_sat_any_acc = False
+
           sample = {
-            "dt": round(now_mono, 3),
+            "tm": round(now_mono, 3),   # N2: this is an absolute time.monotonic() stamp, not a delta
             "angDes": steer_limit_status["angDes"], "angAct": steer_limit_status["angAct"],
             "angErr": steer_limit_status["angErr"],
+            "angErrPk": ang_err_pk,   # I4: true between-sample peak |angErr|, not just this instant's
+            "satAny": sat_any,       # I4: true between-sample OR of sat/angSat/curvLim
             "kCmd": steer_limit_status["kCmd"], "kActl": steer_limit_status["kActl"],
             "kErr": steer_limit_status["kErr"],
             "latDem": steer_limit_status["latDem"], "latMax": steer_limit_status["latMax"],
@@ -427,16 +497,32 @@ class Controls:
           # --- Proposal 4's trigger, folded into #1: OR of the already-computed saturation signals,
           # PLUS the exact "undershooting AND turning" triad selfdrived's own steerSaturated alert
           # gates on (selfdrived.py ~423-426) -- recomputed here from controlsd's OWN already-known
-          # values (self.curvature, model_v2.action.desiredCurvature; no cross-process read) so this
-          # trigger tracks the real audible alert, not just an approximation of it.
+          # values (self.curvature, model_v2.action.desiredCurvature; no cross-process read).
+          #
+          # I1 review fix: the raw OR above used to fire on manual/disengaged curvy driving (latActive
+          # False -- the model still outputs desiredCurvature even though lac isn't controlling, so
+          # undershoot_turn/angErr are meaningless there) and on active driver overrides (latActive
+          # True, human pushing through -> angErr blows past 8 deg even though openpilot isn't failing
+          # to steer). This does NOT literally mirror selfdrived's alert gate (that lives in a
+          # different process and isn't reachable from here); it approximates the same two guards with
+          # values already known in controlsd:
+          #   1. latActive gates the undershoot_turn/angErr branches -- they only mean "openpilot
+          #      wanted more curvature than it got" when lac is actually active.
+          #   2. `not recent_steer_pressed` gates the WHOLE trigger (sat/angSat included) -- none of
+          #      these signals should fire an "openpilot couldn't steer" event during/just after a
+          #      driver override. Any episode that DID have an override somewhere in its window is
+          #      still tagged `driverOverride: true` in the emitted event (see below) so offline
+          #      analysis can tell a genuine departure from an override-adjacent one without losing it.
           clipped_v = max(CS.vEgo, 0.3)
           actual_lat_accel = self.curvature * clipped_v ** 2
           desired_lat_accel = model_v2.action.desiredCurvature * clipped_v ** 2
           undershoot_turn = (abs(desired_lat_accel) / (1e-3 + abs(actual_lat_accel)) > 1.2
                               and abs(desired_lat_accel) > 1.0)
-          trig = bool(steer_limit_status["sat"] or steer_limit_status["angSat"]
-                      or abs(steer_limit_status["angErr"]) > FLIGHT_ANG_ERR_TRIG_DEG
-                      or undershoot_turn)
+          lat_active = bool(steer_limit_status["latActive"])
+          trig_departure = lat_active and (abs(steer_limit_status["angErr"]) > FLIGHT_ANG_ERR_TRIG_DEG
+                                            or undershoot_turn)
+          trig_core = bool(steer_limit_status["sat"] or steer_limit_status["angSat"] or trig_departure)
+          trig = bool(trig_core and not recent_steer_pressed)
 
           # --- Edge-triggered state machine: idle -> armed (rising edge) -> cooldown (after emit,
           # until a clean clear) -> idle. Debounced: a sustained episode (even with brief flicker,
@@ -449,16 +535,22 @@ class Controls:
               self._flight_last_trig_t = now_mono
               self._flight_pre = list(self._flight_ring)   # snapshot: the pre-edge trace, bounded
               self._flight_post = []
-              self._flight_peak_ang_err = abs(sample["angErr"] or 0.0)
+              self._flight_peak_ang_err = ang_err_pk
               self._flight_peak_lane_off = lane_off
               self._flight_min_margin = lane_margin
               self._flight_min_conf = lane_conf
+              # I1: whether an override was already in progress right at the trigger onset (the
+              # pre-edge ring can still hold a genuine pre-override departure, so this only tags,
+              # never suppresses retroactively).
+              self._flight_had_override = bool(CS.steeringPressed) or recent_steer_pressed
           elif self._flight_state == "armed":
             if trig:
               self._flight_last_trig_t = now_mono
+            if CS.steeringPressed:
+              self._flight_had_override = True
             if len(self._flight_post) < FLIGHT_POST_MAX:
               self._flight_post.append(sample)
-            self._flight_peak_ang_err = max(self._flight_peak_ang_err, abs(sample["angErr"] or 0.0))
+            self._flight_peak_ang_err = max(self._flight_peak_ang_err, ang_err_pk)
             if lane_off is not None and (self._flight_peak_lane_off is None
                                           or abs(lane_off) > abs(self._flight_peak_lane_off)):
               self._flight_peak_lane_off = lane_off
@@ -471,14 +563,23 @@ class Controls:
 
             hold_elapsed = now_mono - self._flight_last_trig_t
             total_elapsed = now_mono - self._flight_start_t
-            if (not trig and hold_elapsed >= FLIGHT_POST_HOLD_S) or total_elapsed >= FLIGHT_MAX_EVENT_S:
-              self._flight_event_id += 1
+            capped = total_elapsed >= FLIGHT_MAX_EVENT_S   # N5: force-emitted by the defensive ceiling
+            if (not trig and hold_elapsed >= FLIGHT_POST_HOLD_S) or capped:
               now_wall = time.time()  # noqa: TID251 -- wall clock + rlog pointer, rare edge emit only
               low_conf = self._flight_min_conf is None or self._flight_min_conf < FLIGHT_LANE_CONF_FLOOR
+              # I2 review fix: evId used to restart at 0 every controlsd start, so a respawned
+              # instance's first event collided with (and was dropped by) ces's dedup if a pre-crash
+              # instance had already logged the same small int. Build the candidate id from the
+              # per-process salt (see __init__) + the NEXT sequence number -- N1 review fix: the
+              # sequence number itself is only committed (self._flight_event_id incremented) after a
+              # successful put_nonblocking below, so a failed publish can't burn/skip an id.
+              candidate_ev_id = f"{self._flight_pid_salt}-{self._flight_event_id + 1}"
               event = {
-                "evId": self._flight_event_id,
+                "evId": candidate_ev_id,
                 "t": round(now_wall, 1),
                 "durationS": round(total_elapsed, 2),
+                "capped": bool(capped),   # N5: durationS is a known-truncated lower bound when True
+                "driverOverride": bool(self._flight_had_override),   # I1: tag, never silently drop
                 "peakAngErr": round(self._flight_peak_ang_err, 2),
                 "peakLaneOff": (round(self._flight_peak_lane_off, 3)
                                 if self._flight_peak_lane_off is not None else None),
@@ -500,12 +601,17 @@ class Controls:
                 # entire rare-edge emit (including the mem-param publish) via the except below.
                 "frameId": int(getattr(model_v2, "frameId", None) or 0),
                 "modelLogMonoTime": int(self.sm.logMonoTime.get('modelV2') or 0),
-                # Bounded trace: FLIGHT_PRE_N + FLIGHT_POST_MAX <= 27 samples, ~17 small fields each
+                # Bounded trace: FLIGHT_PRE_N + FLIGHT_POST_MAX <= 27 samples, ~19 small fields each
                 # -- a few KB at most, nowhere near "dump megabytes".
                 "trace": self._flight_pre + self._flight_post,
               }
-              self._mem_params.put_nonblocking("SteerEvent", event)
-              self._flight_state = "cooldown"
+              try:
+                self._mem_params.put_nonblocking("SteerEvent", event)
+              except Exception:
+                pass   # N1: leave _flight_event_id uncommitted + stay armed -- retried next tick
+              else:
+                self._flight_event_id += 1
+                self._flight_state = "cooldown"
           elif self._flight_state == "cooldown":
             if not trig:
               self._flight_state = "idle"

@@ -1619,7 +1619,12 @@ class CESController:
     self._tele_last = 0.0           # monotonic stamp of last CESStatus publish
     self._tick_last = 0.0           # monotonic stamp of last breadcrumb tick
     self._steer_tick_last = 0.0     # cessteerlog2pnw: monotonic stamp of last CES-off steer breadcrumb
-    self._steer_event_seen_id = None  # steerevent2pnw: last SteerEvent.evId already appended (edge dedup)
+    self._steer_event_seen_id = None  # steerevent2pnw: last SteerEvent.evId already appended (edge dedup;
+                                       #   evId is now a per-process-salted STRING, see I2 review fix)
+    self._steer_event_frame = 0       # steerevent2pnw B1: call counter -- throttles the mem-param GET
+                                       #   itself to ~5 Hz instead of every ~100 Hz call
+    self._steer_event_raw_last = None  # steerevent2pnw B1: last raw SteerEvent bytes seen -- skip
+                                        #   json.loads entirely when unchanged since the last GET
     self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
     self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
     self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
@@ -1895,9 +1900,10 @@ class CESController:
     # CES-off records that were previously missing from the log entirely.
     self._steer_log_step(car_state)
     # steerevent2pnw: edge-triggered mirror of controlsd's flight-recorder burst into ces_events —
-    # unconditional and NOT throttled to C.TICK_S (see the method docstring for why), independent of
-    # CESMode/_enabled since the underlying saturation edge is a controlsd/steering fact, not a CES
-    # decision.
+    # called unconditionally every cycle (NOT gated on C.TICK_S like _steer_log_step above),
+    # independent of CESMode/_enabled since the underlying saturation edge is a controlsd/steering
+    # fact, not a CES decision. The method throttles its OWN mem-param GET internally to ~5 Hz and
+    # dedups on the raw payload before parsing (B1 review fix) — see its docstring.
     self._steer_event_step()
     if not self._enabled:
       if self._last_mode != "off":
@@ -2095,38 +2101,72 @@ class CESController:
     """steerevent2pnw: edge-triggered mirror of controlsd's SteerEvent flight-recorder burst
     (docs/pnw/LANE-DEPARTURE-LOGGING-PROPOSALS.md Proposal 1) into ces_events.jsonl.
 
-    Unlike _steer_log_step (throttled to ~C.TICK_S, CES-off only), this method runs UNCONDITIONALLY
-    every cycle and is itself edge-triggered — on the SteerEvent mem-param's own `evId` field
-    changing, not on any time-based throttle — so it fires the instant a new burst lands (a rare
-    controlsd-side event, at most a handful per drive) instead of waiting up to a second for the
-    next 1 Hz tick. It runs regardless of CESMode/_enabled: the underlying saturation episode is a
-    controlsd/steering fact, independent of what CES itself is deciding.
+    Unlike _steer_log_step (throttled to ~C.TICK_S, CES-off only), this method is CALLED
+    unconditionally every cycle from experimental_request() (selfdrived's ~100 Hz loop). It runs
+    regardless of CESMode/_enabled: the underlying saturation episode is a controlsd/steering fact,
+    independent of what CES itself is deciding.
 
-    Cost when idle (the overwhelming majority of ticks): one best-effort mem-param GET (same
-    shared-memory read pattern every other _read_map field already uses every cycle) + one dict
-    lookup + one int compare. No file I/O happens unless a genuinely NEW evId is seen — the
-    _append_event write below is itself already best-effort/try-except-isolated.
+    B1 review fix -- the mem-param GET itself is throttled internally, it is NOT done every call:
+    Params.get() in this fork is a real file read + json.loads on every invocation (not a cached
+    lookup, unlike the pattern _read_map's other fields might suggest -- those are also real reads,
+    just made at _read_map's own ~1 Hz call cadence, not 100 Hz). Two layers keep this cheap:
+      1. self._steer_event_frame counts calls; only every 20th (~5 Hz at this ~100 Hz call site)
+         touches the param store at all. A rare event tolerates the <=~200 ms added latency -- the
+         record carries its own srcT/t so nothing about the event's own timing is lost.
+      2. Even at 5 Hz, the RAW bytes are read directly (mem_params.get_param_path + a plain file
+         read) and compared against self._steer_event_raw_last BEFORE any json.loads -- an unchanged
+         payload (the overwhelming majority of throttled reads, since a new event is rare) returns
+         immediately without ever parsing JSON.
+    Cost when idle: one file stat+read every ~200 ms + a bytes comparison. No JSON parsing and no
+    _append_event write happens unless the raw payload actually changed.
 
-    Defensive: a missing mem store, an empty/absent SteerEvent (mem_params.get returns the
-    return_default `{}` before controlsd has ever published one, or after a restart), a malformed
-    payload, or any field access failure is treated as 'nothing to log' and swallowed — this runs
-    inside selfdrived's 100 Hz experimental_request() call and must never raise into it."""
+    I3 review fix -- mem params are NOT cleared between drives (CLEAR_ON_MANAGER_START only fires on
+    a manager restart, not on ignition), so a SteerEvent left over from a PREVIOUS drive would
+    otherwise be picked up here on the next ignition and appended stamped with the new drive's wall
+    time + current GPS -- wrong on both counts. The event's own wall-clock `t` (when controlsd
+    actually emitted it) is checked against `now`; anything older than ~45 s is marked seen (so it's
+    never reconsidered) but is NOT appended.
+
+    Defensive: a missing mem store, a missing/never-published SteerEvent file, a malformed payload,
+    or any field access failure is treated as 'nothing to log' and swallowed — this runs inside
+    selfdrived's 100 Hz experimental_request() call and must never raise into it."""
     if self.mem_params is None:
       return
+    # B1.1: throttle the GET itself to ~5 Hz -- see docstring.
+    self._steer_event_frame += 1
+    if self._steer_event_frame % 20 != 0:
+      return
     try:
-      ev = self.mem_params.get("SteerEvent", return_default=True)
-      # Same defensive shape-normalization _read_map uses for SteerLimitStatus/LaneCenterStatus:
-      # before controlsd's first publish this reads back as None; put_nonblocking's JSON-typed-key
-      # path publishes dicts directly, but tolerate a bytes/str-encoded fallback too.
-      if isinstance(ev, (bytes, str)):
-        ev = json.loads(ev)
+      path = self.mem_params.get_param_path("SteerEvent")
+      try:
+        with open(path, "rb") as f:
+          raw = f.read()
+      except FileNotFoundError:
+        raw = b""   # never published yet (or a store that predates this key)
+      # B1.2: dedup on the RAW bytes before parsing -- an unchanged payload means nothing new to log.
+      if raw == self._steer_event_raw_last:
+        return
+      self._steer_event_raw_last = raw
+      if not raw:
+        return
+      ev = json.loads(raw)
       if not isinstance(ev, dict) or not ev:
         return
       ev_id = ev.get("evId")
       if ev_id is None or ev_id == self._steer_event_seen_id:
-        return   # either malformed (no evId) or already appended — edge dedup
-      self._steer_event_seen_id = ev_id
+        return   # either malformed (no evId) or already appended — edge dedup (evId is a string,
+                 # salted per controlsd process -- see I2 review fix -- but plain `==` still works)
+      self._steer_event_seen_id = ev_id   # mark seen now: a stale event below must never be
+                                           # reconsidered even though it isn't appended
       now_wall = time.time()  # noqa: TID251 -- wall clock, rare edge-triggered append only
+      # I3 review fix: skip (but keep marked-seen) a leftover event from a previous drive.
+      src_t = ev.get("t")
+      try:
+        stale = src_t is not None and (now_wall - float(src_t)) > 45.0
+      except Exception:
+        stale = False
+      if stale:
+        return
       rec = {
         "t": round(now_wall, 1),
         "ev": "steerEvent", "evId": ev_id, "car": self._car, "cesMode": self._mode,
@@ -2136,6 +2176,13 @@ class CESController:
         # Never silently trust a low-confidence excursion: default True (flagged) if the source
         # event is missing the field for any reason, rather than defaulting to "confident".
         "laneLowConf": bool(ev.get("laneLowConf", True)),
+        # I1 review fix: whether a driver steering override happened anywhere in the episode's own
+        # window -- lets offline analysis separate genuine "openpilot couldn't steer" departures from
+        # override-adjacent ones without silently dropping the latter.
+        "driverOverride": bool(ev.get("driverOverride", False)),
+        # N5 review fix: True only when controlsd's 5 s defensive ceiling force-emitted this event
+        # (still armed, no clean clear) -- durationS is then a known-truncated lower bound.
+        "capped": bool(ev.get("capped", False)),
         "frameId": ev.get("frameId"), "modelLogMonoTime": ev.get("modelLogMonoTime"),
         "srcT": ev.get("t"),
         "trace": ev.get("trace") or [],
