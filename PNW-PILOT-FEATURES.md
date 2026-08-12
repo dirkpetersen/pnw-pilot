@@ -83,8 +83,9 @@ See `docs/CES.md`, `docs/VTSC.md`, `docs/pnw/SHARPCURVE2PNW.md`, `docs/pnw/CES_I
 |---------|--------------|-----|--------|---------|
 | **lebowski model + commaai master modeld stack** | Ported commaai/master's modeld stack and the "lebowski" driving model onto the PNW line (with USB-GPU / LFS handling for the large weights). | Keep the perception stack current with upstream; better model behavior. First drive 2026-07-08. | ✅ | 2026-07-08 |
 | **Upstream cherry-picks** | Selected commaai/master fixes (locationd/lagd timestamps, radar-lead prob filter, camerad driver-cam BPS, cruise-fault-not-silent, athena RPC, etc.). | Fold in upstream stability/safety fixes without a full rebase. | ✅ | 2026-07-08 |
+| **Lane centering (curvature-nudge, ported from StarPilot)** | A **car-agnostic** curvature-layer correction nudges the vehicle toward true lane center from the model's lane lines — gain-capped, offset/center-error deadband, low-confidence & signal-loss release, hard-clamped safety envelope. Tunable live via `/data/pnw/lanecenter_tuning.json`; single `DisableLaneCentering` opt-out (ships **ON**). | The model can settle off-center or hug a line; a gentle centering nudge holds a truer lane position. Ported from firestar5683's StarPilot; credited in `CREDITS.md`. | ✅ deployed | 2026-08-10 |
 
-See `docs/pnw/LEBOWSKI2PNW.md`, `docs/pnw/UPSTREAM2PNW.md`.
+See `docs/pnw/LEBOWSKI2PNW.md`, `docs/pnw/UPSTREAM2PNW.md`, `docs/pnw/LANECENTER2PNW.md`.
 
 ---
 

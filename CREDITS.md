@@ -15,6 +15,7 @@ wherever available.
 | sunnypilot | [@sunnypilot](https://github.com/sunnypilot) / [@sunnyhaibin](https://github.com/sunnyhaibin) (Jason Wen) | Community fork; origin of ICBM, DEC, MADS, and the Vision/Map Turn Speed Control lineage we studied. |
 | BluePilot | [@BluePilotDev](https://github.com/BluePilotDev) / [@alan-polk](https://github.com/alan-polk) | Ford-focused fork; origin of the Ford lateral improvements and the Ford ICBM port, and collaborator on the 2025 F-150 Lightning fingerprint. |
 | FrogPilot | [@FrogAi](https://github.com/FrogAi) | Community fork; origin of the Conditional Experimental Mode concept. |
+| StarPilot | [@firestar5683](https://github.com/firestar5683) | Community openpilot fork; origin of the curvature-nudge lane-centering PNW-pilot ships. |
 
 ## Feature-by-feature attribution
 
@@ -95,7 +96,17 @@ wherever available.
   **[@FrogAi](https://github.com/FrogAi)** and **[@sunnyhaibin](https://github.com/sunnyhaibin)**'s
   derivatives used as references.
 
+### Lane centering (curvature-nudge)
+- **[@firestar5683](https://github.com/firestar5683)** (StarPilot) — author of StarPilot's
+  curvature-nudge lane centering (`selfdrive/controls/lib/lane_centering.py`): a **car-agnostic**
+  curvature-layer correction that nudges toward true lane center from the model's lane lines, with a
+  gain cap (`_MAX_GAIN`), offset/center-error deadband, low-confidence and signal-loss release taus,
+  and an e2e-path-std break-in. PNW-pilot ports it as `lanecenter2pnw` — same math, plus a
+  hard-clamped safety envelope, live JSON tuning at `/data/pnw/lanecenter_tuning.json`, and a single
+  `DisableLaneCentering` opt-out (ships ON). Implementation:
+  `selfdrive/controls/lib/lane_centering.py` on the PNW line.
+
 ## Thank you
 
-To everyone above, the wider sunnypilot, BluePilot, FrogPilot, dragonpilot, and xnor-tech
+To everyone above, the wider sunnypilot, BluePilot, FrogPilot, dragonpilot, StarPilot, and xnor-tech
 communities, and comma.ai for openpilot itself — and all their contributors: thank you.

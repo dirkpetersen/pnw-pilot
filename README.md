@@ -3,13 +3,15 @@
 **PNW Pilot** is a personal production distribution of [openpilot](https://github.com/commaai/openpilot),
 built on the [xnor-tech](https://github.com/xnor-tech) fork for its legacy Tesla (Raven) support and
 tuned for one job: driving the PNW, especially the **I-5 corridor between Seattle, WA and
-central-western Oregon**. It serves exactly two cars — a **2021 Tesla Model S (Raven, HW3)** and a
+central-western Oregon**. It is tuned and tested for two cars — a **2021 Tesla Model S (Raven, HW3)** and a
 **2025 Ford F-150 Lightning** — with one comma 3X that is physically moved between them.
 
 > ### Standing on the shoulders of the openpilot community
 > Nearly every mechanism in this fork was invented by someone else first — comma.ai, xnor-tech,
 > sunnypilot, BluePilot, FrogPilot, pfeiferj/mapd, and more. **See [CREDITS.md](CREDITS.md) for the
 > people behind each feature.** If you like something here, they built the idea; we ported and tuned it.
+
+**📋 Full feature list:** [PNW-PILOT-FEATURES.md](PNW-PILOT-FEATURES.md) — every feature, what it does, why it exists, its param, and when it landed.
 
 <div align="center"> <img width="512" height="432" alt="image" src="https://github.com/user-attachments/assets/5dca7817-02cc-431b-83e3-d7fec3733ada" /> </div>
 
