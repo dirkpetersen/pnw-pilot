@@ -20,6 +20,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -97,6 +98,45 @@ def _compass(bearing):
     return _COMPASS_PTS[int((b + 22.5) // 45) % 8]
   except (TypeError, ValueError):
     return None
+
+
+# steerpower2pnw I4 review fix: a GPS fix that has lat/lon but no computed course (standstill, or the
+# capnp bearingDeg field simply defaulting to 0.0 before the GPS stack has ever computed one) is
+# indistinguishable from a genuine true-north 0.0 reading once it reaches _compass() -- silently
+# biasing the "N" bucket with what are actually no-course-yet samples. Gate at the LOGGING site (not
+# in _read_map -- other consumers of self._cur_bearing still want its 0.0 default) on the record's own
+# `gps` boolean (lat AND lon both present -- the same test every record already uses to populate its
+# "gps" field). A frozen/stale bearing while gps_valid is True is accepted (still logged, not nulled)
+# -- only a genuinely absent fix degrades to None.
+def _heading_if_fixed(bearing, gps_valid: bool):
+  """8-pt compass heading, or None if `gps_valid` is False (no current lat/lon fix). Pure."""
+  return _compass(bearing) if gps_valid else None
+
+
+# steerpower2pnw I3 review fix: a steerEvent is emitted 0.75-5 s AFTER the saturation onset (the
+# post-hold debounce in controlsd's flight-recorder state machine -- see FLIGHT_POST_HOLD_S /
+# FLIGHT_MAX_EVENT_S), but heading was being stamped from self._cur_bearing, the ~1 Hz-refreshed
+# value AT EMIT TIME. Through a curve, heading rotates ~15-20 deg/s, so the peak's true direction can
+# be 45-90 deg off from the emit-time heading -- mis-filing peakAchLat under the wrong compass
+# direction, defeating the by-direction capability map this whole feature exists to build. Fix: keep a
+# small bounded ring of (wall_time, bearing, gps_valid) samples -- appended once per _read_map()
+# refresh (~1 Hz, see its tail) -- and look up the sample NEAREST the episode's actual onset time
+# (controlsd's "onsetT", see the _flight_start_wall comment there) instead of using the live value.
+_BEARING_HIST_MAXLEN = 30   # ~30 s of ~1 Hz samples -- comfortably covers the 0.75-5 s emit lag
+
+
+def _nearest_bearing(hist, t_wall):
+  """Return (bearing, gps_valid) from the (wall_time, bearing, gps_valid) tuple in `hist` whose
+  wall_time is closest to `t_wall`. (None, False) if `hist` is empty or `t_wall` isn't a real number.
+  Pure; never raises."""
+  if not hist:
+    return None, False
+  try:
+    t_wall = float(t_wall)
+  except (TypeError, ValueError):
+    return None, False
+  best = min(hist, key=lambda s: abs(s[0] - t_wall))
+  return best[1], best[2]
 
 
 # icbmonset: mapd's curvature calc (Heron's formula on near-collinear OSM nodes, see
@@ -1608,6 +1648,10 @@ class CESController:
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
     self._cur_lat = self._cur_lon = self._cur_bearing = None
+    # steerpower2pnw I3 review fix: bounded (wall_time, bearing, gps_valid) history, appended once per
+    # _read_map() refresh (~1 Hz) -- see _nearest_bearing() above. Lets a steerEvent record look up
+    # the bearing at its actual saturation ONSET instead of the live value at emit time.
+    self._bearing_hist: deque = deque(maxlen=_BEARING_HIST_MAXLEN)
     self._vtsc_cap = self._vtsc_state = None
     # vtsctele2pnw: VTSC penalty components actually applied (from VTSCStatus) — logging only
     self._vtsc_pen = self._vtsc_pitch = None
@@ -1908,6 +1952,13 @@ class CESController:
       self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = None
       self._sl_k_cmd = self._sl_k_actl = self._sl_k_err = None
       self._sl_lat_active = self._sl_ang_sat = False
+    # steerpower2pnw I3 review fix: append this refresh's (wall_time, bearing, gps_valid) sample to
+    # the bounded history — see _nearest_bearing()/_BEARING_HIST_MAXLEN above. gps_valid mirrors the
+    # exact "gps" test every record already uses (lat AND lon present); a no-fix sample is still
+    # appended (bearing=None, gps_valid=False) so a lookup landing near it correctly resolves to "no
+    # heading data at that time" instead of silently falling through to some other sample.
+    self._bearing_hist.append((time.time(), self._cur_bearing,   # noqa: TID251 -- wall clock, ~1 Hz
+                               self._cur_lat is not None and self._cur_lon is not None))
 
   def enabled(self) -> bool:
     return self._enabled
@@ -2108,19 +2159,26 @@ class CESController:
     self._steer_tick_last = now
     try:
       self._read_map()   # refresh sl*/lc*/vtsc*/GPS fields that _read_params() skips while CES is off
+      # N1 review fix: keep the RAW read separate from the display-friendly v_ego -- a failed/absent
+      # read must degrade achLat to None (not the false "driving straight" of k_actl * 0.0). raw_vego
+      # is None exactly when the read failed; v_ego (the logged field) still defaults to 0.0 for
+      # display continuity, matching controlsd's _ach_lat_ms2 pattern (None in, None out).
       try:
-        v_ego = round(float(getattr(car_state, 'vEgo', 0.0)), 2)
+        raw_vego = getattr(car_state, 'vEgo', None)
+        v_ego = round(float(raw_vego), 2) if raw_vego is not None else 0.0
       except Exception:
+        raw_vego = None
         v_ego = 0.0
       now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
+      gps_valid = self._cur_lat is not None and self._cur_lon is not None
       # steerpower2pnw: pure functions, computed from fields already read just above by _read_map().
-      ach_lat = _ach_lat(self._sl_k_actl, v_ego)
+      ach_lat = _ach_lat(self._sl_k_actl, raw_vego)
       rec = {
         "t": round(now_wall, 1),
         # cesOff: True means self._enabled is False here — this can include CESMode 1/2 (Light/
         # Standard) when the car has neither op-long nor shadow (see _enabled's definition).
         "ev": "steer", "cesOff": True, "cesMode": self._mode, "car": self._car, "vEgo": v_ego,
-        "gps": self._cur_lat is not None and self._cur_lon is not None,
+        "gps": gps_valid,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
         "spdLim": round(self._speed_limit, 1) if self._speed_limit else 0.0,
         # VTSC applied cap + state (from VTSCStatus) — same fields as the enabled-path tick record.
@@ -2134,9 +2192,11 @@ class CESController:
         "slSat": self._sl_sat, "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
         "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
         # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass
-        # heading, to measure the truck's true hands-off steering capability by direction.
+        # heading, to measure the truck's true hands-off steering capability by direction. I4 review
+        # fix: heading nulls (not "N") when there's no current GPS fix, rather than _compass()
+        # silently reading a no-fix-defaulted 0.0 bearing as true north.
         "achLat": round(ach_lat, 3) if ach_lat is not None else None,
-        "heading": _compass(self._cur_bearing),
+        "heading": _heading_if_fixed(self._cur_bearing, gps_valid),
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -2214,6 +2274,15 @@ class CESController:
         stale = False
       if stale:
         return
+      # steerpower2pnw I3 review fix: anchor the heading lookup on the episode's ONSET time
+      # (controlsd's "onsetT", the idle->armed edge -- see the _flight_start_wall comment there), not
+      # the emit time `src_t` used for staleness above. Falls back to src_t for an event emitted by a
+      # pre-fix controlsd build that doesn't carry onsetT yet -- never worse than the old emit-time
+      # behavior, and _nearest_bearing degrades to (None, False) if bearing_anchor_t is also None or
+      # the history is empty (e.g. right at boot before _read_map has run once).
+      onset_t = ev.get("onsetT")
+      bearing_anchor_t = onset_t if onset_t is not None else src_t
+      bearing_at_onset, gps_at_onset = _nearest_bearing(self._bearing_hist, bearing_anchor_t)
       rec = {
         "t": round(now_wall, 1),
         "ev": "steerEvent", "evId": ev_id, "car": self._car, "cesMode": self._mode,
@@ -2237,9 +2306,15 @@ class CESController:
         "frameId": ev.get("frameId"), "modelLogMonoTime": ev.get("modelLogMonoTime"),
         "srcT": ev.get("t"),
         "trace": ev.get("trace") or [],
+        # lat/lon/bearing stay the CURRENT (emit-time) GPS position -- same "close-tick snapshot"
+        # convention as log_take_control_alert's "alert" records (see that docstring's NOTE), fine
+        # for PLACING the episode on the map since position barely moves in a few seconds. heading is
+        # the one field that needs the ONSET-time value (bearing_at_onset above) -- direction, unlike
+        # position, can rotate 45-90 deg in that same window. I4 review fix: null (not "N") when no
+        # GPS fix was current at the buffered onset sample (gps_at_onset).
         "gps": self._cur_lat is not None and self._cur_lon is not None,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
-        "heading": _compass(self._cur_bearing),   # steerpower2pnw: 8-pt compass, logging only
+        "heading": _heading_if_fixed(bearing_at_onset, gps_at_onset),
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -2534,7 +2609,15 @@ class CESController:
     hwy = (self._speed_limit >= C.HWY_SPEED_LIMIT) or (vego >= C.HWY_VEGO)  # coarse; authoritative = GPS+OSM+300ft in analysis
     now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation
     # steerpower2pnw: pure functions, computed from fields already read by _read_map() (see __init__).
-    ach_lat = _ach_lat(self._sl_k_actl, vego)
+    # N1 review fix: `vego` above is the "or 0.0"-defaulted value the `hwy` coarse guess intentionally
+    # tolerates -- but that same fallback fed straight into achLat made a genuine no-data record
+    # (_publish_status's "noData" sentinel tele, or any tele missing "vEgo") indistinguishable from
+    # "driving perfectly straight" (k_actl * 0**2 = 0.0). achLat instead uses the RAW reading, None
+    # when there isn't one (missing key, or the noData sentinel) -- matching controlsd's
+    # _ach_lat_ms2(k_actl, CS.vEgo), which never fakes a 0.0 v_ego in the first place.
+    raw_vego = tele.get("vEgo")
+    no_data = tele.get("reason") == "noData"
+    ach_lat = None if (no_data or raw_vego is None) else _ach_lat(self._sl_k_actl, raw_vego)
     rec = {
       "t": round(now_wall, 1),
       "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
@@ -2595,8 +2678,10 @@ class CESController:
       # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass heading,
       # to measure the truck's true hands-off steering capability by direction (see module docstring
       # near _ach_lat/_compass).
+      # I4 review fix: null (not "N") when there's no current GPS fix, rather than _compass() reading
+      # a no-fix-defaulted 0.0 bearing as true north.
       "achLat": round(ach_lat, 3) if ach_lat is not None else None,
-      "heading": _compass(self._cur_bearing),
+      "heading": _heading_if_fixed(self._cur_bearing, self._cur_lat is not None and self._cur_lon is not None),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,

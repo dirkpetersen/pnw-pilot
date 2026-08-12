@@ -41,22 +41,27 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 #
 # THE SCHEDULE (mph -> m/s^2, linearly interpolated, held flat outside the ends) -- ONLY ACTIVE ONCE A
 # VALID FILE IS LOADED FROM DISK
-#   <=50 mph -> 5.0, tapering to 4.0 by 60 mph, tapering to 3.0 (ISO) by 70 mph, flat 3.0 above that.
+#   <=50 mph -> 6.0, tapering to 5.0 by 60 mph, tapering to 4.0 by 70 mph, tapering to 3.0 (ISO) by
+#   80 mph, flat 3.0 above that. (I2 review fix: the schedule used to hold flat at 4.0 -- the LAST
+#   breakpoint's value -- for every speed above 70 mph, which left the cap ABOVE the ISO 3.0 baseline
+#   at highway speed indefinitely, exactly the "corner harder instead of slowing down" case the
+#   module's own FAIL-SAFE DIRECTION section below argues against. The added 80 mph anchor tapers the
+#   cap back down to ISO by then, same as the schedule always intended above 70.)
 #   LAYER-2 safety envelope (see docs/pnw/LATACCEL2PNW.md for the full writeup, incl. the 2026-08-11
 #   10:37 PDT Crown Hill left-curve finding that set these anchors): curve-speed slowdown (VTSC/CES)
 #   is layer 1; if it doesn't fire before a curve, this cap is what lets openpilot use the truck's
 #   real steering authority to hold the lane instead of under-turning and departing.
 #
-# FAIL-SAFE DIRECTION: flat ISO 3.0, not the 5/4/3 schedule
+# FAIL-SAFE DIRECTION: flat ISO 3.0, not the 6/5/4/3-by-80 schedule
 #   Until a VALID lataccel_limits.json has been parsed from disk -- at boot, if the file is missing, or
 #   any time it becomes unreadable/malformed/non-finite/out-of-range -- lat_accel_limit() returns the
 #   flat MAX_LATERAL_ACCEL_NO_ROLL (3.0 m/s^2) at every speed, i.e. plain upstream behavior. It does
-#   NOT fall back to DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH (the looser 5/4/3 schedule) -- a bad/missing file
+#   NOT fall back to DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH (the looser 6/5/4/3-by-80 schedule) -- a bad/missing file
 #   must never leave the car with a LOOSER cap than a driver's own stricter tune, and a deleted file
 #   must revert immediately rather than latching the last-good schedule forever.
 #   DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH exists only as the content _write_default_once() seeds to
 #   LAT_ACCEL_LIMITS_PATH the first time it's missing -- on the real device that seed write succeeds,
-#   so the 5/4/3 schedule activates within ~_LAT_ACCEL_RELOAD_INTERVAL_S of boot; in a read-only
+#   so the 6/5/4/3-by-80 schedule activates within ~_LAT_ACCEL_RELOAD_INTERVAL_S of boot; in a read-only
 #   test/CI environment the seed write silently fails and the cap stays flat 3.0 (safe, matches stock).
 #
 # HOW TUNING WORKS (mirrors lane_centering.py's LaneCenteringController hot-reload pattern)
@@ -122,7 +127,10 @@ LAT_ACCEL_SLEW_RATE = 4.0  # m/s^2 per second
 # the first time it's missing, so a driver has something to edit. It is NOT an in-memory fallback: see
 # the "FAIL-SAFE DIRECTION" note above -- absent/invalid file means flat MAX_LATERAL_ACCEL_NO_ROLL, not
 # this schedule. [speed_mph, accel_mps2] pairs, ascending by speed.
-DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 6.0], [60, 5.0], [70, 4.0]]
+# I2 review fix: added the [80, 3.0] anchor so the cap tapers back to the ISO baseline by 80 mph
+# instead of holding flat at 4.0 (the old last-breakpoint value) for every speed above 70 forever --
+# see the module docstring's THE SCHEDULE section above.
+DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 6.0], [60, 5.0], [70, 4.0], [80, 3.0]]
 
 
 class _LatAccelSchedule:
@@ -302,7 +310,7 @@ _lat_accel_schedule = _LatAccelSchedule()
 def lat_accel_limit(v_ego: float) -> float:
   """Speed-scheduled maximum lateral acceleration (m/s^2), used by clip_curvature() in place of the
   fixed MAX_LATERAL_ACCEL_NO_ROLL constant. Hot-reloaded from LAT_ACCEL_LIMITS_PATH when a valid file
-  is present; falls back to flat MAX_LATERAL_ACCEL_NO_ROLL (not the 5/4/3 schedule) otherwise -- see
+  is present; falls back to flat MAX_LATERAL_ACCEL_NO_ROLL (not the 6/5/4/3-by-80 schedule) otherwise -- see
   the lataccel2pnw module docstring above and docs/pnw/LATACCEL2PNW.md for the schedule and rationale.
   The return value is additionally slew-rate-limited (LAT_ACCEL_SLEW_RATE) so a schedule swap or the
   fail-safe revert can never step in a single call. Always returns a finite float in

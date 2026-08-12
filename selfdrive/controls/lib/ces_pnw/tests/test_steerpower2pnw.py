@@ -17,13 +17,20 @@ reimplementation of it) is correct, without needing the full package import chai
 "host lacks capnp for full pytest; scenario-test pure modules instead" guidance in the openpilot skill.
 """
 import ast
+import json
 import math
 import textwrap
+import time
 from pathlib import Path
+
+import numpy as np
+
+from openpilot.common.constants import CV   # imports cleanly standalone (no cereal pull-in), verified below
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 CES_PNW_PATH = REPO_ROOT / "selfdrive/controls/lib/ces_pnw/ces_pnw.py"
 CONTROLSD_PATH = REPO_ROOT / "selfdrive/controls/controlsd.py"
+DRIVE_HELPERS_PATH = REPO_ROOT / "selfdrive/controls/lib/drive_helpers.py"
 
 MIN_SPEED = 1.0   # openpilot.selfdrive.controls.lib.drive_helpers.MIN_SPEED (verified by inspection --
                    # this worktree can't import drive_helpers.py either, same cereal-import blocker)
@@ -336,6 +343,322 @@ def test_added_controlsd_statements_never_assign_control_state():
         for t in targets:
           name = t.attr if isinstance(t, ast.Attribute) else (t.id if isinstance(t, ast.Name) else None)
           assert name not in CONTROL_STATE_NAMES, f"unexpected control-state write: {name} in {snippet}"
+
+
+# ---------------------------------------------------------------------------------------------------
+# I2 review fix: DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH must include the [80, 3.0] taper-back-to-ISO anchor
+# -- the schedule used to end at [70, 4.0], which (np.interp holds flat past the last x) pinned the
+# cap at 4.0 m/s^2 -- above the ISO 3.0 baseline -- at every speed above 70 mph forever.
+# ---------------------------------------------------------------------------------------------------
+def _load_default_lat_accel_breakpoints():
+  # DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH is a module-level ANNOTATED assignment
+  # (`NAME: list[list[float]] = [...]`) -- an ast.AnnAssign, not the plain ast.Assign
+  # _extract_module_assign() handles, so extract it directly here.
+  src, tree = _parse(DRIVE_HELPERS_PATH)
+  matches = [n for n in tree.body if isinstance(n, ast.AnnAssign)
+             and isinstance(n.target, ast.Name) and n.target.id == "DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH"]
+  assert len(matches) == 1, f"expected exactly one DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH assign, found {len(matches)}"
+  seg = _segment(src, matches[0])
+  ns: dict = {}
+  exec(compile(seg, "<default_bp>", "exec"), ns)
+  return ns["DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH"]
+
+
+def test_default_breakpoints_taper_to_iso_by_80_mph():
+  bps = _load_default_lat_accel_breakpoints()
+  assert bps == [[50, 6.0], [60, 5.0], [70, 4.0], [80, 3.0]], bps
+
+
+def test_default_breakpoints_interpolation_matches_documented_schedule():
+  # Same conversion + np.interp _LatAccelSchedule.limit() itself uses (mph -> m/s via CV.MPH_TO_MS,
+  # linear interpolation, held flat outside the ends) -- applied to the REAL extracted breakpoints,
+  # not a hand-copied schedule, so this catches a future edit to the list as readily as today's fix.
+  bps = _load_default_lat_accel_breakpoints()
+  xs = np.array([p[0] * CV.MPH_TO_MS for p in bps], dtype=float)
+  ys = np.array([p[1] for p in bps], dtype=float)
+
+  def cap_at_mph(mph: float) -> float:
+    return float(np.interp(mph * CV.MPH_TO_MS, xs, ys))
+
+  assert math.isclose(cap_at_mph(50), 6.0, rel_tol=1e-9)
+  assert math.isclose(cap_at_mph(60), 5.0, rel_tol=1e-9)
+  assert math.isclose(cap_at_mph(70), 4.0, rel_tol=1e-9)
+  assert math.isclose(cap_at_mph(75), 3.5, rel_tol=1e-9)   # I2: the new 70->80 taper leg
+  assert math.isclose(cap_at_mph(80), 3.0, rel_tol=1e-9)   # I2: back at the ISO baseline by 80
+  assert math.isclose(cap_at_mph(85), 3.0, rel_tol=1e-9)   # held flat above the last breakpoint
+
+
+# ---------------------------------------------------------------------------------------------------
+# I3 review fix: a steerEvent's heading must come from the bearing BUFFERED nearest the episode's
+# ONSET time (controlsd's onsetT), not the live self._cur_bearing at emit time (0.75-5 s later, after
+# heading may have rotated 15-20 deg/s through a curve).
+# I4 review fix: heading nulls (not "N") when there's no GPS fix at the bearing sample used.
+# ---------------------------------------------------------------------------------------------------
+def _load_nearest_bearing():
+  src, tree = _parse(CES_PNW_PATH)
+  return _exec_func(_extract_func(src, tree, "_nearest_bearing"))
+
+
+def _load_heading_if_fixed():
+  src, tree = _parse(CES_PNW_PATH)
+  ns = {"math": math}
+  exec(compile(_extract_func(src, tree, "_compass"), "<compass>", "exec"), ns)
+  pts_src = _extract_module_assign(src, tree, "_COMPASS_PTS")
+  exec(compile(pts_src, "<pts>", "exec"), ns)
+  return _exec_func(_extract_func(src, tree, "_heading_if_fixed"), extra_globals=ns)
+
+
+def test_nearest_bearing_picks_closest_sample_by_wall_time():
+  nearest_bearing = _load_nearest_bearing()
+  hist = [(100.0, 10.0, True), (101.0, 20.0, True), (102.0, 30.0, True), (105.0, 40.0, True)]
+  bearing, gps_valid = nearest_bearing(hist, 101.4)
+  assert (bearing, gps_valid) == (20.0, True)   # 101.0 is closer to 101.4 than 102.0
+  bearing, gps_valid = nearest_bearing(hist, 104.9)
+  assert (bearing, gps_valid) == (40.0, True)
+
+
+def test_nearest_bearing_empty_or_invalid_anchor_degrades_to_none_false():
+  nearest_bearing = _load_nearest_bearing()
+  assert nearest_bearing([], 100.0) == (None, False)
+  assert nearest_bearing([(100.0, 10.0, True)], None) == (None, False)
+  assert nearest_bearing([(100.0, 10.0, True)], "garbage") == (None, False)
+
+
+def test_heading_if_fixed_gates_on_gps_valid_not_bearing_value():
+  heading_if_fixed = _load_heading_if_fixed()
+  # I4: a real fix (gps_valid True) with bearing 0.0 is genuinely north -- still reported.
+  assert heading_if_fixed(0.0, True) == "N"
+  assert heading_if_fixed(90.0, True) == "E"
+  # I4: no fix (gps_valid False) must null the heading REGARDLESS of what the bearing value is --
+  # this is the exact "absent bearing defaults to 0.0 -> reads as confident N" bug.
+  assert heading_if_fixed(0.0, False) is None
+  assert heading_if_fixed(90.0, False) is None
+
+
+def _steer_event_harness_globals():
+  src, tree = _parse(CES_PNW_PATH)
+  ns = {"time": time, "json": json, "math": math}
+  # clock_bad() reads the module-level CLOCK_VALID_EPOCH constant -- real source, not invented.
+  exec(compile(_extract_module_assign(src, tree, "CLOCK_VALID_EPOCH"), "<epoch>", "exec"), ns)
+  exec(compile(_extract_func(src, tree, "clock_bad"), "<clock_bad>", "exec"), ns)
+  exec(compile(_extract_func(src, tree, "_nearest_bearing"), "<nearest_bearing>", "exec"), ns)
+  pts_src = _extract_module_assign(src, tree, "_COMPASS_PTS")
+  exec(compile(pts_src, "<pts>", "exec"), ns)
+  exec(compile(_extract_func(src, tree, "_compass"), "<compass>", "exec"), ns)
+  exec(compile(_extract_func(src, tree, "_heading_if_fixed"), "<heading_if_fixed>", "exec"), ns)
+  # _steer_event_step is a real class method (self included) -- ast.walk() finds FunctionDefs nested
+  # in a class body too, so _extract_func grabs its exact body unmodified, same as any top-level def.
+  exec(compile(_extract_func(src, tree, "_steer_event_step"), "<steer_event_step>", "exec"), ns)
+  return ns
+
+
+class _MemParamsStub:
+  def __init__(self, path):
+    self._path = path
+
+  def get_param_path(self, _key):
+    return self._path
+
+
+class _SteerEventHarness:
+  """Stub for `self` -- only the attributes/methods _steer_event_step actually touches."""
+  def __init__(self, mem_params, cur_lat, cur_lon, cur_bearing, bearing_hist):
+    self.mem_params = mem_params
+    self._steer_event_frame = 19        # next += 1 -> 20 -> passes the "% 20 == 0" throttle gate
+    self._steer_event_raw_last = None
+    self._steer_event_seen_id = None
+    self._car = "TESTCAR"
+    self._mode = 1
+    self._cur_lat = cur_lat
+    self._cur_lon = cur_lon
+    self._cur_bearing = cur_bearing
+    self._bearing_hist = bearing_hist
+    self.captured: list = []
+
+  def _append_event(self, rec):
+    self.captured.append(rec)
+
+
+def test_steer_event_heading_uses_onset_bearing_not_emit_time_bearing(tmp_path):
+  """The core I3 scenario: through a curve, the bearing at the episode's ONSET (4 s before emit) is
+  very different from the LIVE bearing at emit time. The old code stamped heading from the live value
+  (self._cur_bearing) -- this asserts the fix uses the buffered onset-time sample instead."""
+  ns = _steer_event_harness_globals()
+  now = time.time()  # noqa: TID251 -- wall clock, matching the real onsetT/t epoch semantics under test
+  onset_t = now - 4.0   # emitted 4 s after the saturation onset (within the 0.75-5 s documented lag)
+  event = {
+    "evId": "salt-1", "t": round(now, 1), "onsetT": round(onset_t, 1), "durationS": 4.0,
+    "peakAngErr": 9.0, "peakAchLat": 4.2, "driverOverride": False, "capped": False,
+    "frameId": 1, "modelLogMonoTime": 1,
+  }
+  event_path = tmp_path / "SteerEvent"
+  event_path.write_bytes(json.dumps(event).encode())
+
+  # Bearing history rotating through a curve: 90 deg (E) right at onset, ending far away (270, W) by
+  # emit time -- exactly the 15-20 deg/s-through-a-curve scenario the I3 fix targets.
+  bearing_hist = [
+    (onset_t - 1.0, 60.0, True),
+    (onset_t, 90.0, True),          # nearest sample to onset_t -> "E"
+    (onset_t + 1.0, 130.0, True),
+    (onset_t + 2.0, 160.0, True),
+    (now, 270.0, True),             # live bearing at emit time -> "W" (the OLD, wrong behavior)
+  ]
+  harness = _SteerEventHarness(_MemParamsStub(str(event_path)), cur_lat=47.6, cur_lon=-122.3,
+                                cur_bearing=270.0, bearing_hist=bearing_hist)
+
+  ns["_steer_event_step"](harness)
+
+  assert len(harness.captured) == 1
+  rec = harness.captured[0]
+  assert rec["heading"] == "E", f"expected onset-time heading 'E', got {rec['heading']!r}"
+  assert rec["heading"] != "W", "must NOT be the live/emit-time bearing's heading"
+  # lat/lon/bearing (position) intentionally stay the CURRENT/emit-time snapshot -- only heading
+  # changes source (see the rec's own comment in ces_pnw.py).
+  assert rec["bearing"] == 270.0
+  assert rec["srcT"] == event["t"]   # unchanged field meaning (still the emit time)
+
+
+def test_steer_event_heading_falls_back_to_emit_time_when_onsett_missing(tmp_path):
+  """A steerEvent from a pre-fix controlsd build (no 'onsetT' key) must not crash -- the anchor falls
+  back to the emit time 't', same as the pre-I3 behavior."""
+  ns = _steer_event_harness_globals()
+  now = time.time()  # noqa: TID251 -- wall clock, matching the real onsetT/t epoch semantics under test
+  event = {
+    "evId": "salt-2", "t": round(now, 1), "durationS": 1.0,   # no onsetT key
+    "peakAngErr": 9.0, "peakAchLat": 4.2, "driverOverride": False, "capped": False,
+  }
+  event_path = tmp_path / "SteerEvent"
+  event_path.write_bytes(json.dumps(event).encode())
+  bearing_hist = [(now, 45.0, True)]
+  harness = _SteerEventHarness(_MemParamsStub(str(event_path)), cur_lat=47.6, cur_lon=-122.3,
+                                cur_bearing=999.0, bearing_hist=bearing_hist)
+
+  ns["_steer_event_step"](harness)
+
+  assert len(harness.captured) == 1
+  assert harness.captured[0]["heading"] == "NE"   # nearest (only) sample, anchored on the emit time
+
+
+def test_steer_event_heading_nulls_when_no_gps_fix_at_onset_sample(tmp_path):
+  """I4: the buffered sample nearest onset has NO fix (gps_valid False) -- heading must be None, not
+  a compass reading of whatever stale/defaulted bearing value happened to be stored."""
+  ns = _steer_event_harness_globals()
+  now = time.time()  # noqa: TID251 -- wall clock, matching the real onsetT/t epoch semantics under test
+  onset_t = now - 2.0
+  event = {
+    "evId": "salt-3", "t": round(now, 1), "onsetT": round(onset_t, 1), "durationS": 2.0,
+    "peakAngErr": 9.0, "peakAchLat": 4.2, "driverOverride": False, "capped": False,
+  }
+  event_path = tmp_path / "SteerEvent"
+  event_path.write_bytes(json.dumps(event).encode())
+  # the sample nearest onset_t has gps_valid=False (bearing defaulted to 0.0, no real fix)
+  bearing_hist = [(onset_t, 0.0, False), (now, 90.0, True)]
+  harness = _SteerEventHarness(_MemParamsStub(str(event_path)), cur_lat=None, cur_lon=None,
+                                cur_bearing=None, bearing_hist=bearing_hist)
+
+  ns["_steer_event_step"](harness)
+
+  assert len(harness.captured) == 1
+  assert harness.captured[0]["heading"] is None
+
+
+# ---------------------------------------------------------------------------------------------------
+# N1 review fix: a failed/absent vEgo read must degrade achLat to None, not the false "driving
+# straight" of k_actl * 0.0**2 == 0.0. A GENUINE 0.0 reading (real standstill, non-noData record)
+# must still compute achLat normally (0.0 is not over-nulled).
+# ---------------------------------------------------------------------------------------------------
+def _match_assign(src, tree, name, extra=lambda n: True):
+  return _extract_stmt(src, tree, ast.Assign,
+                        lambda n: len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                        and n.targets[0].id == name and extra(n))
+
+
+def test_event_record_achlat_none_on_missing_vego_or_nodata_sentinel():
+  """Extracts the EXACT three statements _event_record uses to compute achLat (disambiguated from
+  _steer_log_step's differently-shaped statements via AST node type / source-text predicates) and
+  exec's them against synthetic `tele` dicts."""
+  src, tree = _parse(CES_PNW_PATH)
+  ach_lat_fn = _exec_func(_extract_func(src, tree, "_ach_lat"))
+  raw_vego_src = _match_assign(
+    src, tree, "raw_vego",
+    lambda n: isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+    and n.value.func.attr == "get" and isinstance(n.value.func.value, ast.Name)
+    and n.value.func.value.id == "tele")
+  no_data_src = _match_assign(src, tree, "no_data")
+  ach_lat_src = _match_assign(src, tree, "ach_lat", lambda n: isinstance(n.value, ast.IfExp))
+  combined = raw_vego_src + "\n" + no_data_src + "\n" + ach_lat_src
+
+  def compute(tele: dict, k_actl):
+    ns = {"tele": tele, "self": type("S", (), {"_sl_k_actl": k_actl})(), "_ach_lat": ach_lat_fn}
+    exec(compile(combined, "<event_record_achlat>", "exec"), ns)
+    return ns["ach_lat"]
+
+  # missing vEgo key entirely -> None, regardless of k_actl
+  assert compute({}, 0.02) is None
+  # the _publish_status "noData" sentinel (vEgo present as the literal 0.0 placeholder) -> None
+  assert compute({"vEgo": 0.0, "reason": "noData"}, 0.02) is None
+  # a GENUINE standstill reading (vEgo really is 0.0, NOT the noData sentinel) -> a real 0.0, not None
+  assert compute({"vEgo": 0.0, "reason": "curve"}, 0.02) == 0.0
+  # a real moving reading computes normally
+  assert compute({"vEgo": 20.0, "reason": "curve"}, 0.02) == ach_lat_fn(0.02, 20.0)
+
+
+def test_steer_log_step_achlat_none_on_failed_vego_read():
+  """Same N1 fix, the _steer_log_step copy: getattr(car_state, 'vEgo', None) (not ..., 0.0) feeds
+  achLat, so a car_state missing the attribute degrades achLat to None while the DISPLAYED v_ego field
+  still shows 0.0 (a deliberately different, cosmetic-only default -- see the code's own comment)."""
+  src, tree = _parse(CES_PNW_PATH)
+  ach_lat_fn = _exec_func(_extract_func(src, tree, "_ach_lat"))
+  raw_vego_src = _match_assign(
+    src, tree, "raw_vego",
+    lambda n: isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+    and n.value.func.id == "getattr")
+  v_ego_src = _match_assign(
+    src, tree, "v_ego",
+    lambda n: isinstance(n.value, ast.IfExp))
+
+  class _NoVEgo:
+    pass   # deliberately no vEgo attribute -- simulates a malformed/failed read
+
+  class _WithVEgo:
+    vEgo = 20.0
+
+  def compute(car_state):
+    ns = {"car_state": car_state}
+    exec(compile(raw_vego_src + "\n" + v_ego_src, "<steer_log_step_vego>", "exec"), ns)
+    return ns["raw_vego"], ns["v_ego"]
+
+  raw_vego, v_ego = compute(_NoVEgo())
+  assert raw_vego is None and v_ego == 0.0   # display field still shows 0.0 (cosmetic-only fallback)
+  assert ach_lat_fn(0.02, raw_vego) is None   # but achLat correctly degrades to None, not 0.0
+
+  raw_vego, v_ego = compute(_WithVEgo())
+  assert raw_vego == 20.0 and v_ego == 20.0
+  assert ach_lat_fn(0.02, raw_vego) == ach_lat_fn(0.02, 20.0)
+
+
+# ---------------------------------------------------------------------------------------------------
+# (e) Pure observation, extended: the new I3/I4 helpers take no mutable state, and the bearing-history
+# append in _read_map only ever appends to the bounded deque -- never touches any control-state name.
+# ---------------------------------------------------------------------------------------------------
+def test_new_helpers_are_free_functions_no_self():
+  src, tree = _parse(CES_PNW_PATH)
+  for name in ("_nearest_bearing", "_heading_if_fixed"):
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+    args = [a.arg for a in fn.args.args]
+    assert "self" not in args, f"{name} must stay a free function (no self), got args={args}"
+
+
+def test_steer_event_step_never_assigns_control_state():
+  src, tree = _parse(CES_PNW_PATH)
+  fn_src = _extract_func(src, tree, "_steer_event_step")
+  tree2 = ast.parse(fn_src)
+  for node in ast.walk(tree2):
+    if isinstance(node, (ast.Assign, ast.AugAssign)):
+      targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+      for t in targets:
+        name = t.attr if isinstance(t, ast.Attribute) else (t.id if isinstance(t, ast.Name) else None)
+        assert name not in CONTROL_STATE_NAMES, f"unexpected control-state write: {name} in {fn_src}"
 
 
 def test_ces_pnw_additions_only_read_never_gate_control():

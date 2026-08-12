@@ -31,12 +31,24 @@ min_lat_accel = -lat_accel_cap + roll_compensation
 
 | Speed | Cap |
 |---|---|
-| ≤50 mph | 5.0 m/s² |
-| 50 → 60 mph | tapers 5.0 → 4.0 m/s² (linear) |
-| 60 → 70 mph | tapers 4.0 → 3.0 m/s² (linear) |
-| ≥70 mph | 3.0 m/s² (ISO baseline, unchanged from stock) |
+| ≤50 mph | 6.0 m/s² |
+| 50 → 60 mph | tapers 6.0 → 5.0 m/s² (linear) |
+| 60 → 70 mph | tapers 5.0 → 4.0 m/s² (linear) |
+| 70 → 80 mph | tapers 4.0 → 3.0 m/s² (linear) |
+| ≥80 mph | 3.0 m/s² (ISO baseline, unchanged from stock) |
 
-Breakpoints, held flat outside the ends: `(50 mph, 5.0)`, `(60 mph, 4.0)`, `(70 mph, 3.0)`.
+Breakpoints, held flat outside the ends: `(50 mph, 6.0)`, `(60 mph, 5.0)`, `(70 mph, 4.0)`,
+`(80 mph, 3.0)`.
+
+**I2 review fix (2026-08-12):** the schedule used to end at `(70 mph, 4.0)`, which — held flat outside
+the ends — left the cap pinned at 4.0 m/s² (above the ISO 3.0 baseline) at every speed above 70 mph
+forever. That contradicts this schedule's own high-speed rationale below (slow down before a curve
+that needs more than ISO 3.0, don't corner harder for it): a highway-speed curve that genuinely
+demanded more than ISO would have kept getting 4.0 m/s² of authority indefinitely, no taper back to
+ISO ever happened. The added `(80 mph, 3.0)` anchor restores the taper-to-ISO the schedule always
+intended — 3.0 by 70 was the goal before the 2026-08-11 retune raised the low/mid-speed anchors; now
+that the whole schedule sits one tier higher (6/5/4 instead of 5/4/3), the ISO taper point moves out
+to 80 to match.
 
 ### Rationale
 
@@ -46,7 +58,7 @@ Breakpoints, held flat outside the ends: `(50 mph, 5.0)`, `(60 mph, 4.0)`, `(70 
   further than necessary to complete a turn within the commanded curvature. Raising the cap to 5.0
   m/s² up to 50 mph gives the planner more lateral headroom through this whole range, and it also
   doubles as the layer-2 safety envelope described below.
-- **High-speed stays at ISO 3.0.** By 70 mph the cap is deliberately back down at the same 3.0 m/s²
+- **High-speed stays at ISO 3.0.** By 80 mph the cap is deliberately back down at the same 3.0 m/s²
   stock openpilot has always used. The reasoning is specific: if the model wants to hold a curve at
   cruise speed that requires *more* than 3.0 m/s² of lateral acceleration, the correct fix is to
   **slow down before the curve**, not to steer harder through it — hard cornering is the wrong
@@ -79,9 +91,15 @@ schedule keeps the cap **6.0 m/s²** out to 50 mph, tapering to 5.0 by 60 and 4.
 raised (5/4/3 → 6/5/4, 2026-08-12) deliberately **above the truck's measured hands-off steering
 capability (~4.5 m/s² angle-rate-limited)** so the cap is never the binding constraint during the
 steering-capability measurement phase — i.e. so `peakAchLat` reflects the truck's true angle-rate limit,
-not this ceiling. This is a values-only retune: the fail-safe direction (flat ISO 3.0 on any
-missing/corrupt file), the `[1.0, 6.0]` hard clamp, and the `LAT_ACCEL_SLEW_RATE` transition logic are
-all unchanged.
+not this ceiling.
+
+**I2 review fix (2026-08-12):** the schedule originally shipped as just `50/60/70` (6.0/5.0/4.0), which
+left the cap flat at 4.0 m/s² — above ISO — for every speed above 70 mph, forever (no highway-speed
+taper back to ISO at all). Added the `80 mph → 3.0` anchor so the schedule tapers back to the ISO
+baseline by 80 mph, same as it always did before the 6/5/4 retune moved the whole schedule up a tier.
+This and the anchor raise above are both values-only retunes: the fail-safe direction (flat ISO 3.0 on
+any missing/corrupt file), the `[1.0, 6.0]` hard clamp, and the `LAT_ACCEL_SLEW_RATE` transition logic
+are all unchanged.
 
 ## JSON tuning file
 
@@ -95,7 +113,7 @@ Format:
 ```json
 {
   "_comment": "Speed-scheduled max lateral-accel cap for the curvature clip -- LAYER-2 safety envelope: curve-speed slowdown (VTSC/CES) is layer 1, this is the steering-authority backstop for when it doesn't fire before a curve. ACTIVE ONLY WHILE THIS FILE VALIDLY PARSES. breakpoints=[[speed_mph, accel_mps2],...], linearly interpolated, held flat outside the ends. Missing/corrupt/non-finite -> falls back to flat ISO 3.0 (NOT this schedule), gently (rate-limited, not a step). Hot-reloaded (~every few seconds).",
-  "breakpoints": [[50, 6.0], [60, 5.0], [70, 4.0]]
+  "breakpoints": [[50, 6.0], [60, 5.0], [70, 4.0], [80, 3.0]]
 }
 ```
 
@@ -103,15 +121,15 @@ Breakpoints are `[speed_mph, accel_mps2]` pairs, in **MPH** (not m/s) specifical
 read/edit by hand on the road. Internally they're converted to m/s (`CV.MPH_TO_MS`) once per reload
 and interpolated against `v_ego`, which is already in m/s.
 
-**The 5/4/3 schedule is ACTIVE ONLY WHILE a valid file is loaded.** If the file is missing, unreadable,
-malformed, has fewer than 2 or more than 32 breakpoints, has non-finite/out-of-range/non-strictly-
-increasing values, or hasn't loaded yet (e.g. right at boot), `lat_accel_limit()` falls back to the
-**flat ISO baseline `MAX_LATERAL_ACCEL_NO_ROLL` (3.0 m/s²) at every speed** — i.e. plain upstream
-behavior — NOT the 5/4/3 schedule. `DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH` (the same three breakpoints
-above) exists only as the content best-effort-written out to disk once as a starting point to edit —
-this write is wrapped in a bare `try/except OSError` and its failure is silently ignored (e.g. a
-read-only `/data/pnw` in CI/tests never breaks anything, it just means the cap stays flat 3.0). On the
-real device the seed write succeeds, so the 5/4/3 schedule activates within
+**The 6/5/4/3-by-80 schedule is ACTIVE ONLY WHILE a valid file is loaded.** If the file is missing,
+unreadable, malformed, has fewer than 2 or more than 32 breakpoints, has non-finite/out-of-range/non-
+strictly-increasing values, or hasn't loaded yet (e.g. right at boot), `lat_accel_limit()` falls back
+to the **flat ISO baseline `MAX_LATERAL_ACCEL_NO_ROLL` (3.0 m/s²) at every speed** — i.e. plain
+upstream behavior — NOT the 6/5/4/3-by-80 schedule. `DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH` (the same four
+breakpoints above) exists only as the content best-effort-written out to disk once as a starting point
+to edit — this write is wrapped in a bare `try/except OSError` and its failure is silently ignored
+(e.g. a read-only `/data/pnw` in CI/tests never breaks anything, it just means the cap stays flat 3.0).
+On the real device the seed write succeeds, so the 6/5/4/3-by-80 schedule activates within
 `_LAT_ACCEL_RELOAD_INTERVAL_S` (~5 s) of boot.
 
 ### Hot-reload
@@ -134,7 +152,7 @@ used by `selfdrive/controls/lib/lane_centering.py`'s `LaneCenteringController` (
 also `math.isfinite()`-gated against `json.load()`'s bare `NaN`/`Infinity` parsing):
 
 - Any of the following discards the whole file and **resets to the flat 3.0 fail-safe** (never to the
-  5/4/3 schedule, and never keeping a stale last-good schedule): file missing, parse error, wrong JSON
+  6/5/4/3-by-80 schedule, and never keeping a stale last-good schedule): file missing, parse error, wrong JSON
   shape, fewer than 2 or more than 32 breakpoints, any breakpoint entry that isn't a 2-element
   `[speed, accel]` pair, a `bool`/`str` where a number is required, any non-finite (`NaN`/`Infinity`/
   `-Infinity`) speed or accel value, a negative speed, duplicate/non-increasing speeds, or an accel

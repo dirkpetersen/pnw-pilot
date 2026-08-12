@@ -128,6 +128,13 @@ class Controls:
     self._flight_ring: deque = deque(maxlen=FLIGHT_PRE_N)
     self._flight_state = "idle"       # "idle" | "armed" | "cooldown"
     self._flight_start_t = 0.0
+    # steerpower2pnw I3 review fix: wall-clock onset stamp (time.time() at the SAME idle->armed edge
+    # that sets _flight_start_t above, just in wall time instead of monotonic) -- lets a consumer
+    # (ces_pnw.py's steerEvent buffered-bearing lookup) locate what the GPS bearing actually was at
+    # the moment saturation BEGAN, not at emit time (0.75-5 s later, after the post-hold debounce --
+    # through a curve heading can rotate 15-20 deg/s in that window, misfiling the direction). Purely
+    # additive telemetry: never read by any control/actuator path, only carried in the emitted event.
+    self._flight_start_wall = 0.0
     self._flight_last_trig_t = 0.0
     self._flight_pre: list = []
     self._flight_post: list = []
@@ -583,6 +590,8 @@ class Controls:
             if trig:
               self._flight_state = "armed"
               self._flight_start_t = now_mono
+              # steerpower2pnw I3 review fix: wall-clock onset, same edge as _flight_start_t above.
+              self._flight_start_wall = time.time()  # noqa: TID251 -- wall clock, rare edge-arm only
               self._flight_last_trig_t = now_mono
               self._flight_pre = list(self._flight_ring)   # snapshot: the pre-edge trace, bounded
               self._flight_post = []
@@ -630,6 +639,11 @@ class Controls:
               event = {
                 "evId": candidate_ev_id,
                 "t": round(now_wall, 1),
+                # steerpower2pnw I3 review fix: wall-clock episode ONSET (idle->armed edge), separate
+                # from "t" above (the EMIT time, 0.75-5 s later after the post-hold debounce). ces_pnw
+                # uses this to look up the GPS bearing that was actually current when saturation began,
+                # not the bearing at emit time -- see _flight_start_wall's comment. Logging only.
+                "onsetT": round(self._flight_start_wall, 1) if self._flight_start_wall else None,
                 "durationS": round(total_elapsed, 2),
                 "capped": bool(capped),   # N5: durationS is a known-truncated lower bound when True
                 "driverOverride": bool(self._flight_had_override),   # I1: tag, never silently drop
