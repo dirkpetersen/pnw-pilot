@@ -3,12 +3,25 @@ leadrate2pnw — LOGGING ONLY, three small telemetry additions:
   1. hasLead/dRel/vLead on the CES-off "steer" breadcrumb (_steer_log_step) + a "hasLead" alias on
      the tick/adopt records (_event_record) -- lets offline analysis separate "driver holding a speed
      by choice" from "speed forced by a slow lead".
-  2. peakCmdRate/peakActRate on "steerEvent" -- two new 100 Hz peak accumulators in controlsd.py's
-     flight recorder (same accumulate/fold/latch/reset pattern peakAngErr/peakAchLat already use).
-     The S-curve reversal that motivated this showed a ~37 deg/s commanded swing riding on top of an
-     ~18 deg/s achieved-wheel ceiling -- the binding limit is a SLEW RATE, not lateral accel.
+  2. peakCmdRate/peakActRate on "steerEvent" -- peak steering-RATE (deg/s) telemetry, command vs
+     achieved, in controlsd.py's flight recorder. The S-curve reversal that motivated this showed a
+     ~37 deg/s commanded swing riding on top of an ~18 deg/s achieved-wheel ceiling -- the binding
+     limit is a SLEW RATE, not lateral accel.
   3. The "alert" (Take Control) record was simply missing a "heading" key -- added, same
      _heading_if_fixed gate the steer/tick/adopt/steerEvent records already use.
+
+Fable review fixes (this revision):
+  I-1/I-2: the FIRST version of (2) differentiated every 100 Hz tick by the fixed nominal DT_CTRL --
+    inaccurate for the exact slew number this field exists to measure (a jittered/late tick inflates
+    the rate ~2x and the max-accumulator latches it; Ford's 0.1 deg-LSB steeringAngleDeg quantizes a
+    per-tick diff into ~10 deg/s steps, and dither alone can fake a 10-20 deg/s peak). Reworked to a
+    slope over the existing ~5 Hz FOLD WINDOW using the MEASURED elapsed time between folds (not
+    DT_CTRL) -- see controlsd.py's fold-site comment. The raw CS.steeringRateDeg signal (real on
+    Tesla) is unaffected -- it was always a plain |value| running max, never differentiated, so it
+    never had either problem.
+  N-1: dRel/vLead in the _steer_log_step lead fields are now NaN-guarded (mirrors the existing vEgo
+    NaN guard in log_take_control_alert) -- a NaN would otherwise round-trip into a bare, invalid-JSON
+    NaN token.
 
 Environment note (same as test_steerpower2pnw.py in this directory): this worktree's conftest.py
 requires openpilot.common.params_pyx (compiled Cython) and msgq (compiled), neither of which is built
@@ -27,8 +40,6 @@ import math
 import textwrap
 import time
 from pathlib import Path
-
-from openpilot.common.realtime import DT_CTRL   # imports cleanly standalone (no cereal pull-in)
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 CES_PNW_PATH = REPO_ROOT / "selfdrive/controls/lib/ces_pnw/ces_pnw.py"
@@ -193,7 +204,8 @@ def test_steer_log_step_lead_fields_null_when_no_lead():
 
 def test_steer_log_step_lead_read_failure_degrades_to_none_and_never_raises():
   """A missing/malformed radarState (e.g. the message hasn't arrived yet) must not crash the whole
-  breadcrumb -- the other fields (vEgo/sl*/achLat/heading) must still be logged."""
+  breadcrumb -- the other fields (vEgo/sl*/achLat/heading) must still be logged. Also the N-2
+  three-state contract: a read FAILURE is None, distinct from a genuine False "no lead"."""
   sm = {}   # sm['radarState'] raises KeyError
   harness = _run_steer_log_step(47.6, -122.3, 90.0, sm, v_ego=25.0)
   assert len(harness.captured) == 1, "a lead-read failure must not swallow the whole record"
@@ -213,6 +225,48 @@ def test_steer_log_step_disabled_gate_and_ev_name_unchanged():
   assert rec["ev"] == "steer" and rec["cesOff"] is True
   assert rec["heading"] is None   # no GPS fix -> heading still nulls, unaffected by this feature
   assert harness.read_map_calls == 1
+
+
+# =====================================================================================================
+# (1d) N-1 review fix -- NaN-guard dRel/vLead. A corrupted radarState message can carry a NaN dRel/
+# vLead; round(float(nan), 1) is itself still NaN, which json.dumps serializes as a bare `NaN` token
+# (invalid per the JSON spec, breaks strict parsers). Mirrors the existing vEgo NaN guard.
+# =====================================================================================================
+def test_steer_log_step_lead_nan_drel_degrades_to_none():
+  sm = {"radarState": type("RS", (), {"leadOne": _FakeLead(True, dRel=float("nan"), vLead=18.7)})()}
+  harness = _run_steer_log_step(47.6, -122.3, 90.0, sm)
+  rec = harness.captured[0]
+  assert rec["hasLead"] is True   # the lead itself is still real -- only the poisoned field nulls
+  assert rec["dRel"] is None, "a NaN dRel must degrade to None, never serialize as a bare NaN token"
+  assert rec["vLead"] == 18.7, "the OTHER field must be unaffected by dRel's own NaN"
+
+
+def test_steer_log_step_lead_nan_vlead_degrades_to_none():
+  sm = {"radarState": type("RS", (), {"leadOne": _FakeLead(True, dRel=42.3, vLead=float("nan"))})()}
+  harness = _run_steer_log_step(47.6, -122.3, 90.0, sm)
+  rec = harness.captured[0]
+  assert rec["hasLead"] is True
+  assert rec["dRel"] == 42.3
+  assert rec["vLead"] is None, "a NaN vLead must degrade to None, never serialize as a bare NaN token"
+
+
+def test_steer_log_step_lead_inf_drel_degrades_to_none():
+  """math.isfinite also rejects +/-inf, not just NaN -- a corrupted radarState could plausibly carry
+  either."""
+  sm = {"radarState": type("RS", (), {"leadOne": _FakeLead(True, dRel=float("inf"), vLead=18.7)})()}
+  harness = _run_steer_log_step(47.6, -122.3, 90.0, sm)
+  rec = harness.captured[0]
+  assert rec["dRel"] is None
+
+
+def test_steer_log_step_lead_finite_values_pass_through_unaffected_by_the_guard():
+  """The N-1 guard must be a no-op for ordinary finite readings -- same values() as the original
+  present/correct test, re-asserted here to prove the guard doesn't clip/alter real data."""
+  sm = {"radarState": type("RS", (), {"leadOne": _FakeLead(True, dRel=42.3, vLead=18.7)})()}
+  harness = _run_steer_log_step(47.6, -122.3, 90.0, sm)
+  rec = harness.captured[0]
+  assert rec["dRel"] == 42.3
+  assert rec["vLead"] == 18.7
 
 
 # =====================================================================================================
@@ -236,27 +290,22 @@ def test_event_record_dict_literal_has_lead_alias_sourced_from_tele_lead():
 
 
 # =====================================================================================================
-# (2) peakCmdRate / peakActRate -- controlsd.py's 100 Hz accumulator + fold + onset + armed-running-max
+# (2) peakCmdRate / peakActRate -- controlsd.py's fold-window slope (cmd/act-diff) + the standalone
+# 100 Hz |steeringRateDeg| running max, folded together, then latched-at-onset / running-max over the
+# episode, exactly like peakAngErr/peakAchLat.
 # =====================================================================================================
-class _FakeLacLog:
-  def __init__(self, steeringAngleDesiredDeg):
-    self.steeringAngleDesiredDeg = steeringAngleDesiredDeg
-
-
 class _FakeCS:
-  def __init__(self, steeringAngleDeg, steeringRateDeg=0.0):
-    self.steeringAngleDeg = steeringAngleDeg
+  def __init__(self, steeringRateDeg=0.0):
     self.steeringRateDeg = steeringRateDeg
 
 
 class _RateHarness:
   """Stub for `self` -- only the leadrate2pnw attributes the extracted statements touch."""
   def __init__(self):
-    self._flight_prev_cmd_ang = None
-    self._flight_prev_act_ang = None
-    self._flight_peak_cmdrate_acc = 0.0
+    self._flight_fold_prev_mono = None
+    self._flight_fold_prev_cmd_ang = None
+    self._flight_fold_prev_act_ang = None
     self._flight_peak_actrate_sig_acc = 0.0
-    self._flight_peak_actrate_diff_acc = 0.0
     self._flight_peak_cmdrate = 0.0
     self._flight_peak_actrate_sig = 0.0
     self._flight_peak_actrate_diff = 0.0
@@ -264,21 +313,46 @@ class _RateHarness:
 
 def _load_controlsd_rate_pieces():
   src, tree = _parse(CONTROLSD_PATH)
+
+  # (a) the standalone 100 Hz try block -- now ONLY the |CS.steeringRateDeg| running max (the
+  # command/achieved-diff accumulators the I-1/I-2 review fix removed entirely; that computation
+  # moved to the fold-window slope below).
   accum_src = _extract_stmt(
     src, tree, ast.Try,
-    lambda n: "cmd_ang_now" in (ast.get_source_segment(src, n) or "")
-    and "_flight_peak_cmdrate_acc" in (ast.get_source_segment(src, n) or ""))
-  fold_src = "\n".join([
-    _assign_by_name(src, tree, "cmd_rate_pk"),
-    _attr_assign(src, tree, "_flight_peak_cmdrate_acc",
-                 lambda v: isinstance(v, ast.Constant) and v.value == 0.0, allow_duplicates=True),
+    lambda n: "_flight_peak_actrate_sig_acc" in (ast.get_source_segment(src, n) or "")
+    and "sig_rate" in (ast.get_source_segment(src, n) or "")
+    and "getattr(CS" in (ast.get_source_segment(src, n) or ""))
+
+  # (b) the fold-window slope computation -- assembled from its constituent statements (prelude +
+  # the guarded If block + epilogue), joined in source order, so future comment/doc edits between
+  # them can't break extraction (same technique the original per-tick-accumulator test used).
+  fold_prelude = "\n".join([
+    _assign_by_name(src, tree, "fold_dt"),
+    _assign_by_name(src, tree, "cmd_rate_pk",
+                     lambda n: isinstance(n.value, ast.Constant) and n.value.value == 0.0),
+    _assign_by_name(src, tree, "act_rate_diff_pk",
+                     lambda n: isinstance(n.value, ast.Constant) and n.value.value == 0.0),
+  ])
+  fold_if = _extract_stmt(
+    src, tree, ast.If,
+    lambda n: (ast.get_source_segment(src, n) or "").startswith("if fold_dt"))
+  fold_epilogue = "\n".join([
+    _attr_assign(src, tree, "_flight_fold_prev_mono",
+                 lambda v: isinstance(v, ast.Name) and v.id == "now_mono"),
+    _attr_assign(src, tree, "_flight_fold_prev_cmd_ang",
+                 lambda v: isinstance(v, ast.Call)),
+    _attr_assign(src, tree, "_flight_fold_prev_act_ang",
+                 lambda v: isinstance(v, ast.Name) and v.id == "angle_actual"),
+    _assign_by_name(src, tree, "cmd_rate_pk",
+                     lambda n: isinstance(n.value, ast.Call) and n.value.func.id == "round"),
+    _assign_by_name(src, tree, "act_rate_diff_pk",
+                     lambda n: isinstance(n.value, ast.Call) and n.value.func.id == "round"),
     _assign_by_name(src, tree, "act_rate_sig_pk"),
     _attr_assign(src, tree, "_flight_peak_actrate_sig_acc",
                  lambda v: isinstance(v, ast.Constant) and v.value == 0.0, allow_duplicates=True),
-    _assign_by_name(src, tree, "act_rate_diff_pk"),
-    _attr_assign(src, tree, "_flight_peak_actrate_diff_acc",
-                 lambda v: isinstance(v, ast.Constant) and v.value == 0.0, allow_duplicates=True),
   ])
+  fold_src = "\n".join([fold_prelude, fold_if, fold_epilogue])
+
   onset_src = "\n".join([
     _attr_assign(src, tree, "_flight_peak_cmdrate",
                  lambda v: isinstance(v, ast.Name) and v.id == "cmd_rate_pk"),
@@ -296,141 +370,202 @@ def _load_controlsd_rate_pieces():
                  lambda v: isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "max"),
   ])
   fallback_src = _assign_by_name(src, tree, "act_rate_pk", lambda n: isinstance(n.value, ast.IfExp))
-  return accum_src, fold_src, onset_src, armed_src, fallback_src
+
+  fold_dt_min_src = _extract_module_assign(src, tree, "FLIGHT_RATE_FOLD_DT_MIN")
+  fold_dt_max_src = _extract_module_assign(src, tree, "FLIGHT_RATE_FOLD_DT_MAX")
+  const_ns: dict = {}
+  exec(compile(fold_dt_min_src, "<min>", "exec"), const_ns)
+  exec(compile(fold_dt_max_src, "<max>", "exec"), const_ns)
+  fold_dt_min = const_ns["FLIGHT_RATE_FOLD_DT_MIN"]
+  fold_dt_max = const_ns["FLIGHT_RATE_FOLD_DT_MAX"]
+
+  return accum_src, fold_src, onset_src, armed_src, fallback_src, fold_dt_min, fold_dt_max
 
 
-def test_peak_cmd_and_act_rate_capture_synthetic_37_and_18_deg_per_s_reversal():
-  """The motivating scenario: over one ~5 Hz window, the commanded angle takes one big between-sample
-  step equivalent to a 37 deg/s swing, and the achieved angle (steeringRateDeg dead/0.0, so the diff
-  accumulator is what's exercised) takes a smaller 18 deg/s step -- exactly the S-curve reversal
-  capability gap this feature exists to measure. A throttled ~5 Hz-only sample would alias both peaks
-  away; the 100 Hz accumulator must not."""
-  accum_src, fold_src, onset_src, armed_src, _ = _load_controlsd_rate_pieces()
+def _accum_tick(self_obj, accum_src, sig_rate):
+  ns = {"self": self_obj, "CS": _FakeCS(sig_rate), "math": math}
+  exec(compile(accum_src, "<accum>", "exec"), ns)
+
+
+def _fold(self_obj, fold_src, fold_dt_min, fold_dt_max, now_mono, angle_des, angle_actual):
+  ns = {"self": self_obj, "now_mono": now_mono, "angle_des": angle_des, "angle_actual": angle_actual,
+        "math": math, "FLIGHT_RATE_FOLD_DT_MIN": fold_dt_min, "FLIGHT_RATE_FOLD_DT_MAX": fold_dt_max}
+  exec(compile(fold_src, "<fold>", "exec"), ns)
+  return ns["cmd_rate_pk"], ns["act_rate_sig_pk"], ns["act_rate_diff_pk"]
+
+
+def _onset(self_obj, onset_src, pks):
+  ns = {"self": self_obj, "cmd_rate_pk": pks[0], "act_rate_sig_pk": pks[1], "act_rate_diff_pk": pks[2]}
+  exec(compile(onset_src, "<onset>", "exec"), ns)
+
+
+def _armed(self_obj, armed_src, pks):
+  ns = {"self": self_obj, "cmd_rate_pk": pks[0], "act_rate_sig_pk": pks[1], "act_rate_diff_pk": pks[2]}
+  exec(compile(armed_src, "<armed>", "exec"), ns)
+
+
+# --- (2a) the motivating scenario: the windowed slope reads the true 37 / 18 deg/s rates -------------
+def test_windowed_slope_reads_37_and_18_degs_within_a_few_degs():
+  """Validate item (a): a synthetic 37 deg/s COMMAND ramp and an 18 deg/s ACHIEVED ramp (steeringRateDeg
+  dead -- the Ford-build diff-fallback case) must read back within a few deg/s of the true rate, NOT
+  ~2x off the way the old fixed-DT_CTRL per-tick accumulator could read on a jittered tick."""
+  accum_src, fold_src, onset_src, armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
   self_obj = _RateHarness()
 
-  def accum_tick(cmd_ang, act_ang, sig_rate=0.0):
-    ns = {"self": self_obj, "lac_log": _FakeLacLog(cmd_ang), "CS": _FakeCS(act_ang, sig_rate),
-          "math": math, "DT_CTRL": DT_CTRL}
-    exec(compile(accum_src, "<accum>", "exec"), ns)
-
-  def fold():
-    ns = {"self": self_obj}
-    exec(compile(fold_src, "<fold>", "exec"), ns)
-    return ns["cmd_rate_pk"], ns["act_rate_sig_pk"], ns["act_rate_diff_pk"]
-
-  def onset(pks):
-    ns = {"self": self_obj, "cmd_rate_pk": pks[0], "act_rate_sig_pk": pks[1], "act_rate_diff_pk": pks[2]}
-    exec(compile(onset_src, "<onset>", "exec"), ns)
-
-  def armed(pks):
-    ns = {"self": self_obj, "cmd_rate_pk": pks[0], "act_rate_sig_pk": pks[1], "act_rate_diff_pk": pks[2]}
-    exec(compile(armed_src, "<armed>", "exec"), ns)
-
-  # ---- Episode 1, window #1: steady small motion (1 deg/s) EXCEPT tick #10, a single between-sample
-  # step equivalent to 37 deg/s (cmd) / 18 deg/s (act) -- DT_CTRL=0.01s so that's a 0.37 / 0.18 deg
-  # step in that one tick. steeringRateDeg stays 0.0 the whole time (the Ford-build "dead signal"
-  # case), so act_rate_sig_pk must stay 0.0 and act_rate_diff_pk must carry the real peak.
+  now = 1000.0
   cmd, act = 0.0, 0.0
-  for i in range(20):
-    if i == 10:
-      cmd += 37.0 * DT_CTRL
-      act += 18.0 * DT_CTRL
-    else:
-      cmd += 1.0 * DT_CTRL
-      act += 1.0 * DT_CTRL
-    accum_tick(cmd, act, sig_rate=0.0)
-  cmd_pk1, sig_pk1, diff_pk1 = fold()
-  assert math.isclose(cmd_pk1, 37.0, rel_tol=1e-6), f"expected ~37 deg/s peak cmd rate, got {cmd_pk1}"
-  assert math.isclose(diff_pk1, 18.0, rel_tol=1e-6), f"expected ~18 deg/s peak act rate, got {diff_pk1}"
-  assert sig_pk1 == 0.0, "steeringRateDeg never moved -- its accumulator must stay dead"
-  # accumulators reset after fold
-  assert self_obj._flight_peak_cmdrate_acc == 0.0
-  assert self_obj._flight_peak_actrate_sig_acc == 0.0
-  assert self_obj._flight_peak_actrate_diff_acc == 0.0
+  # first fold: no previous fold yet -> both rates must be exactly 0.0 (no fake reading from nothing)
+  pks0 = _fold(self_obj, fold_src, dt_min, dt_max, now, cmd, act)
+  assert pks0[0] == 0.0 and pks0[2] == 0.0
 
-  # trigger fires -> onset latches the episode peak to this window's fold values
-  onset((cmd_pk1, sig_pk1, diff_pk1))
-  assert self_obj._flight_peak_cmdrate == cmd_pk1
-  assert self_obj._flight_peak_actrate_diff == diff_pk1
+  # nominal ~200 ms fold window, steady 37 / 18 deg/s ramps
+  FOLD_S = 0.2
+  now += FOLD_S
+  cmd += 37.0 * FOLD_S    # 7.4 deg of travel this window
+  act += 18.0 * FOLD_S    # 3.6 deg of travel this window
+  _accum_tick(self_obj, accum_src, sig_rate=0.0)   # steeringRateDeg dead the whole episode
+  cmd_pk, sig_pk, diff_pk = _fold(self_obj, fold_src, dt_min, dt_max, now, cmd, act)
 
-  # ---- window #2: a LOWER peak this window -- episode peak must hold the earlier, higher value.
-  for _ in range(20):
-    cmd += 0.5 * DT_CTRL
-    act += 0.3 * DT_CTRL
-    accum_tick(cmd, act, sig_rate=0.0)
-  pks2 = fold()
-  armed(pks2)
-  assert self_obj._flight_peak_cmdrate == cmd_pk1, "episode peak must hold the earlier higher value"
-  assert self_obj._flight_peak_actrate_diff == diff_pk1
+  assert abs(cmd_pk - 37.0) < 3.0, f"expected ~37 deg/s peak cmd rate (within a few deg/s), got {cmd_pk}"
+  assert abs(diff_pk - 18.0) < 3.0, f"expected ~18 deg/s peak act rate (within a few deg/s), got {diff_pk}"
+  assert sig_pk == 0.0, "steeringRateDeg never moved -- its accumulator must stay dead"
 
-  # ---- a NEW episode (onset again) must NOT inherit episode 1's peak -- onset always LATCHES.
-  # Continue differentiating from the CURRENT cmd/act values (not a fresh 0.0) -- the real angle
-  # signal doesn't teleport at an episode boundary, and resetting the local var here (while
-  # self._flight_prev_cmd_ang still holds the true last-seen angle) would inject a fake discontinuity
-  # that has nothing to do with the state machine under test.
-  for _ in range(20):
-    cmd += 0.2 * DT_CTRL
-    act += 0.2 * DT_CTRL
-    accum_tick(cmd, act, sig_rate=0.0)
-  pks_ep2 = fold()
-  onset(pks_ep2)
-  assert self_obj._flight_peak_cmdrate < cmd_pk1
-  assert self_obj._flight_peak_cmdrate == pks_ep2[0]
+  _onset(self_obj, onset_src, (cmd_pk, sig_pk, diff_pk))
+  assert self_obj._flight_peak_cmdrate == cmd_pk
+  assert self_obj._flight_peak_actrate_diff == diff_pk
 
 
+# --- (2b) jitter robustness: measured dt cancels the jitter, unlike the old fixed-DT_CTRL divide -----
+def test_jittered_fold_with_proportional_motion_does_not_inflate_the_rate():
+  """Validate item (b): a fold that runs 2x the nominal 200 ms window, carrying 2x the motion (both the
+  jittered LATE-TICK case), must still read the SAME true rate -- the measured dt in the denominator
+  cancels the extra time exactly like it cancels the extra travel. This is the I-1 fix under direct
+  test: the old code divided by the FIXED nominal DT_CTRL regardless of how late the tick actually ran,
+  which is what inflated the rate ~2x on a jittered/late tick."""
+  accum_src, fold_src, onset_src, armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
+
+  # Baseline: nominal fold, nominal motion.
+  base = _RateHarness()
+  now = 1000.0
+  _fold(base, fold_src, dt_min, dt_max, now, 0.0, 0.0)
+  now += 0.2
+  base_pks = _fold(base, fold_src, dt_min, dt_max, now, 37.0 * 0.2, 18.0 * 0.2)
+
+  # Jittered: a SINGLE fold that took 2x as long (0.4 s, still inside the sane band) and therefore
+  # carried 2x the motion of a normal window -- the exact "one jittered/late tick sees 2-3x the
+  # motion" scenario the I-1 review comment describes, just expressed at fold granularity.
+  jit = _RateHarness()
+  now_j = 2000.0
+  _fold(jit, fold_src, dt_min, dt_max, now_j, 0.0, 0.0)
+  now_j += 0.4                          # 2x the nominal fold period
+  jit_pks = _fold(jit, fold_src, dt_min, dt_max, now_j, 37.0 * 0.4, 18.0 * 0.4)   # 2x the motion too
+
+  assert math.isclose(jit_pks[0], base_pks[0], rel_tol=0.02), \
+    f"jittered 2x-dt/2x-motion fold must read the SAME rate as the nominal fold: {jit_pks[0]} vs {base_pks[0]}"
+  assert math.isclose(jit_pks[2], base_pks[2], rel_tol=0.02), \
+    f"jittered 2x-dt/2x-motion fold must read the SAME rate as the nominal fold: {jit_pks[2]} vs {base_pks[2]}"
+  assert not (jit_pks[0] > base_pks[0] * 1.5), "must NOT be inflated ~2x by the longer/late fold"
+
+
+def test_fold_outside_sane_dt_band_is_skipped_not_garbage():
+  """A fold_dt outside [FLIGHT_RATE_FOLD_DT_MIN, FLIGHT_RATE_FOLD_DT_MAX] (a stalled/starved loop, or
+  a clock hiccup) must contribute 0.0, not divide-by-a-tiny/huge-number garbage."""
+  accum_src, fold_src, onset_src, armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
+  self_obj = _RateHarness()
+  now = 1000.0
+  _fold(self_obj, fold_src, dt_min, dt_max, now, 0.0, 0.0)
+  # a fold that took 5 seconds (way outside the 0.5 s ceiling) with a big angle jump
+  now += 5.0
+  cmd_pk, sig_pk, diff_pk = _fold(self_obj, fold_src, dt_min, dt_max, now, 50.0, 50.0)
+  assert cmd_pk == 0.0 and diff_pk == 0.0, "an out-of-band fold_dt must be skipped, not divided through"
+
+
+# --- (2c) Ford 0.1 deg-LSB quantization robustness ----------------------------------------------------
+def test_ford_quantized_18_degs_ramp_reads_close_not_floored_or_dithered():
+  """Validate item (c): a Ford-style steeringAngleDeg ramp at 18 deg/s, ROUNDED to the real 0.1 deg
+  LSB (and with +/-1-LSB dither applied at the fold boundary, exactly the noise the I-2 review comment
+  describes), must read back close to 18 -- NOT floored to a ~10 deg/s quantization step and NOT
+  dithered up to ~30 by dither alone. 200 ms of travel at 18 deg/s is 3.6 deg -- ~36 LSBs -- so a single
+  +/-0.1 dither sample is a small fraction of the window's real travel."""
+  accum_src, fold_src, onset_src, armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
+  self_obj = _RateHarness()
+
+  def lsb_round(x):
+    return round(x, 1)   # Ford's real steeringAngleDeg LSB
+
+  now = 1000.0
+  act = 0.0
+  _fold(self_obj, fold_src, dt_min, dt_max, now, 0.0, lsb_round(act))
+  dithers = [+0.1, -0.1, +0.1, -0.1, 0.0]
+  readings = []
+  for dither in dithers:
+    now += 0.2
+    act += 18.0 * 0.2
+    sampled = lsb_round(act + dither)
+    _, _, diff_pk = _fold(self_obj, fold_src, dt_min, dt_max, now, 0.0, sampled)
+    readings.append(diff_pk)
+
+  for r in readings:
+    assert abs(r - 18.0) <= 1.5, f"expected ~18 deg/s (+/- ~1), got {r} -- floored/dithered reading"
+    assert r < 25.0, f"must not be dithered up toward ~30, got {r}"
+    assert r > 12.0, f"must not be floored down toward ~10, got {r}"
+
+
+# --- (2d) steeringRateDeg (Tesla, real 100 Hz signal, never had either problem) -----------------------
 def test_peak_actrate_sig_accumulator_captures_a_live_steeringratedeg_signal():
   """Sanity check the OTHER side of the fallback: when steeringRateDeg genuinely moves (the Tesla
-  case), the signal-based accumulator captures its peak too, independent of the diff accumulator."""
-  accum_src, fold_src, _onset_src, _armed_src, _ = _load_controlsd_rate_pieces()
+  case), the signal-based accumulator captures its peak, independent of the fold-window diff -- and
+  since it's a plain |value| running max (never differentiated), it's unaffected by the I-1/I-2 fixes."""
+  accum_src, fold_src, _onset_src, _armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
   self_obj = _RateHarness()
-
-  def accum_tick(cmd_ang, act_ang, sig_rate):
-    ns = {"self": self_obj, "lac_log": _FakeLacLog(cmd_ang), "CS": _FakeCS(act_ang, sig_rate),
-          "math": math, "DT_CTRL": DT_CTRL}
-    exec(compile(accum_src, "<accum>", "exec"), ns)
 
   for i in range(10):
-    accum_tick(0.0, 0.0, sig_rate=(22.5 if i == 5 else 3.0))
-  ns = {"self": self_obj}
-  exec(compile(fold_src, "<fold>", "exec"), ns)
-  assert math.isclose(ns["act_rate_sig_pk"], 22.5, rel_tol=1e-6)
+    _accum_tick(self_obj, accum_src, sig_rate=(22.5 if i == 5 else 3.0))
+  _, sig_pk, _ = _fold(self_obj, fold_src, dt_min, dt_max, 1000.0, 0.0, 0.0)
+  assert math.isclose(sig_pk, 22.5, rel_tol=1e-6)
 
 
-def test_rate_accumulators_ignore_non_finite_and_none_ticks():
-  accum_src, fold_src, _onset_src, _armed_src, _ = _load_controlsd_rate_pieces()
+def test_sig_accumulator_ignores_non_finite_ticks():
+  accum_src, fold_src, _onset_src, _armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
   self_obj = _RateHarness()
+  _accum_tick(self_obj, accum_src, sig_rate=float("nan"))
+  assert self_obj._flight_peak_actrate_sig_acc == 0.0, "NaN sig_rate must be ignored, not accumulated"
+  _accum_tick(self_obj, accum_src, sig_rate=5.0)
+  assert self_obj._flight_peak_actrate_sig_acc == 5.0
 
-  def accum_tick(cmd_ang, act_ang, sig_rate=0.0):
-    ns = {"self": self_obj, "lac_log": _FakeLacLog(cmd_ang), "CS": _FakeCS(act_ang, sig_rate),
-          "math": math, "DT_CTRL": DT_CTRL}
-    exec(compile(accum_src, "<accum>", "exec"), ns)
 
-  # lac_log without steeringAngleDesiredDeg at all (a steerControlType without it) -> cmd accumulator
-  # must no-op, never raise.
-  class _NoAngDes:
-    pass
-  ns = {"self": self_obj, "lac_log": _NoAngDes(), "CS": _FakeCS(0.0, float("nan")), "math": math,
-        "DT_CTRL": DT_CTRL}
-  exec(compile(accum_src, "<accum>", "exec"), ns)   # must not raise
-  assert self_obj._flight_peak_cmdrate_acc == 0.0
-  assert self_obj._flight_peak_actrate_sig_acc == 0.0   # NaN sig_rate ignored, not accumulated
+def test_episode_peak_holds_earlier_higher_value_and_new_episode_latches_fresh():
+  accum_src, fold_src, onset_src, armed_src, _, dt_min, dt_max = _load_controlsd_rate_pieces()
+  self_obj = _RateHarness()
+  now = 1000.0
+  _fold(self_obj, fold_src, dt_min, dt_max, now, 0.0, 0.0)
+  now += 0.2
+  pks1 = _fold(self_obj, fold_src, dt_min, dt_max, now, 37.0 * 0.2, 18.0 * 0.2)
+  _onset(self_obj, onset_src, pks1)
+  assert self_obj._flight_peak_cmdrate == pks1[0]
 
-  # a genuine finite tick afterward still accumulates normally
-  accum_tick(5.0, 0.0, sig_rate=0.0)
-  accum_tick(5.0 + 1.0, 0.0, sig_rate=0.0)   # +1 deg over DT_CTRL=0.01s -> 100 deg/s
-  ns2 = {"self": self_obj}
-  exec(compile(fold_src, "<fold>", "exec"), ns2)
-  assert math.isclose(ns2["cmd_rate_pk"], 100.0, rel_tol=1e-6)
+  # a LOWER-rate window -- episode peak must hold the earlier, higher value (running max, armed state)
+  now += 0.2
+  pks2 = _fold(self_obj, fold_src, dt_min, dt_max, now, 0.2, 0.1)
+  _armed(self_obj, armed_src, pks2)
+  assert self_obj._flight_peak_cmdrate == pks1[0], "episode peak must hold the earlier higher value"
+
+  # a NEW episode (onset again) must NOT inherit the old episode's peak -- onset always LATCHES fresh.
+  now += 0.2
+  pks3 = _fold(self_obj, fold_src, dt_min, dt_max, now, 0.05, 0.05)
+  _onset(self_obj, onset_src, pks3)
+  assert self_obj._flight_peak_cmdrate == pks3[0]
+  assert self_obj._flight_peak_cmdrate < pks1[0]
 
 
 # =====================================================================================================
-# (2b) The emit-site fallback: prefer the live steeringRateDeg signal, fall back to the steeringAngleDeg
+# (2e) The emit-site fallback: prefer the live steeringRateDeg signal, fall back to the steeringAngleDeg
 # diff only when the signal never moved this episode. Must be a pure numeric comparison -- no
 # carFingerprint/brand check anywhere (the capability-view rule: this file never branches on car
-# identity in feature code).
+# identity in feature code). Unchanged by the I-1/I-2 rework -- re-asserted here for completeness.
 # =====================================================================================================
 def test_actrate_fallback_prefers_live_signal_when_alive():
-  _, _, _, _, fallback_src = _load_controlsd_rate_pieces()
+  _, _, _, _, fallback_src, _, _ = _load_controlsd_rate_pieces()
   ns = {"self": type("S", (), {"_flight_peak_actrate_sig": 22.5, "_flight_peak_actrate_diff": 5.0})()}
   exec(compile(fallback_src, "<fallback>", "exec"), ns)
   assert ns["act_rate_pk"] == 22.5, "a live (non-trivial) steeringRateDeg signal must win"
@@ -440,7 +575,7 @@ def test_actrate_fallback_uses_diff_when_signal_dead():
   """The Ford Lightning case: opendbc_repo/opendbc/car/ford/carstate.py never sets steeringRateDeg,
   so it stays pinned at the capnp default 0.0 for the whole episode -- the diff accumulator must be
   used instead."""
-  _, _, _, _, fallback_src = _load_controlsd_rate_pieces()
+  _, _, _, _, fallback_src, _, _ = _load_controlsd_rate_pieces()
   ns = {"self": type("S", (), {"_flight_peak_actrate_sig": 0.0, "_flight_peak_actrate_diff": 18.0})()}
   exec(compile(fallback_src, "<fallback>", "exec"), ns)
   assert ns["act_rate_pk"] == 18.0, "a dead (0.0) signal must fall back to the diff accumulator"
@@ -449,7 +584,7 @@ def test_actrate_fallback_uses_diff_when_signal_dead():
 def test_actrate_fallback_source_selection_has_no_car_branch():
   """Structural check: the fallback expression itself must not reference carFingerprint/brand -- the
   decision is purely 'did this signal move', evaluated identically on every car."""
-  _, _, _, _, fallback_src = _load_controlsd_rate_pieces()
+  _, _, _, _, fallback_src, _, _ = _load_controlsd_rate_pieces()
   assert "carFingerprint" not in fallback_src
   assert "brand" not in fallback_src
   assert ".CP." not in fallback_src
@@ -521,8 +656,8 @@ def test_alert_heading_key_present_in_dict_literal():
 
 
 # =====================================================================================================
-# (2c) steerEvent pass-through: peakCmdRate/peakActRate appear in _steer_event_step's emitted record,
-# sourced straight from the incoming mem-param payload (no re-derivation in ces_pnw.py).
+# (2c-passthrough) steerEvent pass-through: peakCmdRate/peakActRate appear in _steer_event_step's
+# emitted record, sourced straight from the incoming mem-param payload (no re-derivation in ces_pnw.py).
 # =====================================================================================================
 def test_steer_event_step_passes_through_peak_cmd_and_act_rate():
   import json
@@ -604,7 +739,7 @@ def _assert_no_control_writes(snippet: str):
 
 
 def test_controlsd_rate_additions_never_assign_control_state():
-  accum_src, fold_src, onset_src, armed_src, fallback_src = _load_controlsd_rate_pieces()
+  accum_src, fold_src, onset_src, armed_src, fallback_src, _, _ = _load_controlsd_rate_pieces()
   for snippet in (accum_src, fold_src, onset_src, armed_src, fallback_src):
     _assert_no_control_writes(snippet)
 

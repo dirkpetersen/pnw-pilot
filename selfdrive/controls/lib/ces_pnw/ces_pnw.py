@@ -2181,13 +2181,28 @@ class CESController:
       ach_lat = _ach_lat(self._sl_k_actl, raw_vego)
       # leadrate2pnw: lead state, read directly from radarState.leadOne (same message CES already
       # subscribes to and reads elsewhere -- see experimental_request/_green_light_step). Defensive:
-      # any failure here degrades to "no lead" (None dRel/vLead), never raises into this breadcrumb.
+      # any failure here degrades to "no lead" telemetry-wise, never raises into this breadcrumb.
+      # N-2 (Fable review): hasLead is genuinely THREE-STATE, not a plain bool -- False means "radar
+      # read fine, no lead"; None means "the read itself failed / radarState unavailable this tick"
+      # (the except below). Offline consumers filtering on the hasLead boolean should treat None as
+      # "unknown", not silently coerce it to False -- a read failure is not the same fact as "no lead".
       has_lead = d_rel = v_lead = None
       try:
         lead = sm['radarState'].leadOne
         has_lead = bool(getattr(lead, 'status', False))
-        d_rel = round(float(getattr(lead, 'dRel', 0.0)), 1) if has_lead else None
-        v_lead = round(float(getattr(lead, 'vLead', 0.0)), 1) if has_lead else None
+        if has_lead:
+          d_rel_raw = float(getattr(lead, 'dRel', 0.0))
+          v_lead_raw = float(getattr(lead, 'vLead', 0.0))
+          # N-1 (Fable review): a NaN dRel/vLead from a corrupted radarState message would otherwise
+          # round-trip straight through round()/float() into a bare, invalid-JSON NaN token -- same
+          # guard as the existing vEgo NaN guard in the "alert" record above (search "takecontrol2pnw"
+          # in this file). Gemini review note: this guards dRel/vLead INDEPENDENTLY of has_lead --
+          # a genuinely-present lead (radar's own status bit True) with a corrupted distance reading
+          # logs as hasLead=True, dRel=None (not hasLead=None/False) -- the lead itself is real, only
+          # the poisoned field nulls. Offline consumers must not assume hasLead=True implies dRel is
+          # non-null.
+          d_rel = round(d_rel_raw, 1) if math.isfinite(d_rel_raw) else None
+          v_lead = round(v_lead_raw, 1) if math.isfinite(v_lead_raw) else None
       except Exception:
         has_lead = d_rel = v_lead = None
       rec = {

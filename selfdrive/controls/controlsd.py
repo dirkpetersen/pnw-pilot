@@ -46,6 +46,13 @@ FLIGHT_HALF_VEHICLE_W = 1.0     # m, conservative telemetry-only half-width for 
 # not-recently-steer-pressed guard selfdrived's own audible steerSaturated alert requires
 # (selfdrived.py ~421-429) before the trigger below is allowed to fire/emit.
 FLIGHT_OVERRIDE_RECENT_S = 1.0
+# leadrate2pnw: sane band (s) for the MEASURED fold-to-fold dt the steering-RATE slope divides by
+# (see the fold-site comment). Nominal is ~0.2 s (the nested `% 20 == 0` gate at 100 Hz); below the
+# low bound the divide would itself amplify noise, above the high bound the loop was starved/stalled
+# long enough that a slope over it is not a meaningful "rate" anymore -- either way, skip the fold
+# (leave this fold's contribution at 0.0) rather than publish a garbage number.
+FLIGHT_RATE_FOLD_DT_MIN = 0.05
+FLIGHT_RATE_FOLD_DT_MAX = 0.5
 
 
 def _ach_lat_ms2(k_actl, v_ego):
@@ -167,28 +174,39 @@ class Controls:
     # formula and the two call sites (100 Hz accumulator + throttled per-sample field).
     self._flight_peak_achlat_acc = 0.0
     self._flight_peak_achlat = 0.0
-    # leadrate2pnw: PURE OBSERVATION -- parallel 100 Hz running-max accumulators + episode peaks for
-    # steering RATE (deg/s), same accumulate/fold/reset/latch pattern as the angErr/achLat pairs
-    # above. Motivated by an S-curve reversal where the commanded angle swung ~37 deg/s but the wheel
-    # could only follow ~18 deg/s -- the binding limit is a SLEW RATE, not lateral accel, and a ~5 Hz
-    # sample aliases it exactly like it would alias angErr/achLat. Three accumulators, not one:
-    #   _flight_peak_cmdrate_acc      -- |d(commanded angle)/dt|, from lac_log.steeringAngleDesiredDeg
-    #                                     (the SAME field the angErr accumulator above already reads).
-    #   _flight_peak_actrate_sig_acc  -- |CS.steeringRateDeg|, a real CAN-derived signal on Tesla (see
-    #                                     opendbc_repo/opendbc/car/tesla/carstate.py) -- PREFERRED when
-    #                                     alive.
-    #   _flight_peak_actrate_diff_acc -- |d(CS.steeringAngleDeg)/dt|, the FALLBACK: Ford's carstate.py
-    #                                     never sets steeringRateDeg, so it stays at the capnp default
-    #                                     0.0 on that car. The emit site below picks whichever source
-    #                                     actually moved during THIS episode -- no car-fingerprint
-    #                                     branch anywhere in this file (see the emit-site comment).
-    # Differentiated with the fixed DT_CTRL (controlsd's Ratekeeper holds ~100 Hz) rather than a
-    # measured dt, matching how every other value in this 100 Hz loop assumes the control period.
-    self._flight_prev_cmd_ang = None    # previous tick's commanded steering angle (deg), for the diff
-    self._flight_prev_act_ang = None    # previous tick's achieved steering angle (deg), for the diff
-    self._flight_peak_cmdrate_acc = 0.0
-    self._flight_peak_actrate_sig_acc = 0.0
-    self._flight_peak_actrate_diff_acc = 0.0
+    # leadrate2pnw: PURE OBSERVATION -- peak steering RATE (deg/s) telemetry, command vs achieved.
+    # Motivated by an S-curve reversal where the commanded angle swung ~37 deg/s but the wheel could
+    # only follow ~18 deg/s -- the binding limit is a SLEW RATE, not lateral accel.
+    #
+    # leadrate2pnw Fable review fix (I-1/I-2): the FIRST version of this differentiated every 100 Hz
+    # tick by the FIXED nominal DT_CTRL, same pattern as the angErr/achLat accumulators above. That's
+    # wrong for a RATE specifically:
+    #   I-1 (jitter inflation) -- dividing by the nominal DT_CTRL inflates the value on any
+    #       jittered/late tick: a 20-30 ms tick sees 2-3 frames of motion / 0.01 s -> ~2x the true
+    #       rate, and the max-accumulator LATCHES that one bad tick for the whole episode.
+    #   I-2 (Ford LSB quantization) -- Ford's steeringAngleDeg LSB is 0.1 deg, and Ford's carstate.py
+    #       never sets steeringRateDeg (confirmed dead -- see the emit-site comment), so the achieved
+    #       rate on that car ALWAYS took the steeringAngleDeg-diff path. A per-100Hz-tick diff of a
+    #       0.1 deg-LSB signal is quantized in ~10 deg/s steps, and +/-1-LSB dither alone can fake a
+    #       10-20 deg/s peak out of an otherwise flat signal.
+    # Fix: compute the command/achieved-diff rates as a SLOPE over the existing ~5 Hz FOLD WINDOW (the
+    # same `% 20 == 0` gate angErr/achLat already fold on, ~200 ms nominal) using the MEASURED elapsed
+    # time between folds (FLIGHT_RATE_FOLD_DT_MIN/MAX below), not the fixed DT_CTRL -- a late fold
+    # divides by its own larger measured dt instead of inflating (fixes I-1), and 200 ms of travel
+    # over a 0.1 deg LSB is ~36 LSBs (~0.5 deg/s resolution), comfortably above +/-1-LSB dither while
+    # still resolving the ~18-20 deg/s slew this field targets (fixes I-2; on Ford, don't over-read
+    # peakActRate differences smaller than that ~0.5 deg/s floor). Simpler than the old per-tick
+    # accumulator too -- no more _flight_prev_*_ang/_acc machinery for these two; latch-at-onset /
+    # running-max over the episode is still the same lifecycle peakAngErr/peakAchLat use.
+    # The raw CS.steeringRateDeg signal (real on Tesla, see opendbc_repo/opendbc/car/tesla/
+    # carstate.py) is different: it's already a rate, not something differentiated here, so it never
+    # had either problem -- it's tracked as a plain 100 Hz |value| running max (see the standalone try
+    # block below) and PREFERRED per-episode over the diff fallback only if it proves itself alive
+    # (nonzero) during the episode -- see the emit-site comment. No car-fingerprint branch anywhere.
+    self._flight_fold_prev_mono = None      # monotonic time of the previous fold, for the measured dt
+    self._flight_fold_prev_cmd_ang = None   # commanded angle (deg) at the previous fold
+    self._flight_fold_prev_act_ang = None   # achieved angle (deg) at the previous fold (diff source)
+    self._flight_peak_actrate_sig_acc = 0.0  # 100 Hz |CS.steeringRateDeg| running max (no divide)
     self._flight_peak_cmdrate = 0.0
     self._flight_peak_actrate_sig = 0.0
     self._flight_peak_actrate_diff = 0.0
@@ -377,28 +395,12 @@ class Controls:
     except Exception:
       pass
 
-    # leadrate2pnw: PURE OBSERVATION 100 Hz peak steering-RATE accumulators, same rationale/placement
-    # as the angErr/achLat accumulators directly above -- a throttled ~5 Hz sample aliases the true
-    # peak rate exactly like it would alias angErr/achLat. Own try/except, and its own re-read of
-    # lac_log.steeringAngleDesiredDeg (rather than reusing ang_des_raw from the block above) so a bad
-    # tick here can never affect the angErr accumulator or anything else in this control loop -- same
-    # isolation discipline the achLat block above documents for itself.
+    # leadrate2pnw: PURE OBSERVATION 100 Hz |CS.steeringRateDeg| running max. This is already a rate
+    # signal (real on Tesla), not something differentiated here, so it has neither the DT_CTRL-jitter
+    # nor the LSB-quantization problem the command/achieved-diff rates were rewritten to avoid (see
+    # the __init__ comment + the fold-site comment below). Own try/except, isolated from the
+    # angErr/achLat accumulators above.
     try:
-      cmd_ang_now = getattr(lac_log, "steeringAngleDesiredDeg", None)
-      cmd_ang_now = float(cmd_ang_now) if cmd_ang_now is not None else None
-      if cmd_ang_now is not None and self._flight_prev_cmd_ang is not None:
-        cmd_rate = abs(cmd_ang_now - self._flight_prev_cmd_ang) / DT_CTRL
-        if math.isfinite(cmd_rate) and cmd_rate > self._flight_peak_cmdrate_acc:
-          self._flight_peak_cmdrate_acc = cmd_rate
-      self._flight_prev_cmd_ang = cmd_ang_now
-
-      act_ang_now = float(CS.steeringAngleDeg)
-      if self._flight_prev_act_ang is not None:
-        act_rate_diff = abs(act_ang_now - self._flight_prev_act_ang) / DT_CTRL
-        if math.isfinite(act_rate_diff) and act_rate_diff > self._flight_peak_actrate_diff_acc:
-          self._flight_peak_actrate_diff_acc = act_rate_diff
-      self._flight_prev_act_ang = act_ang_now
-
       sig_rate = getattr(CS, "steeringRateDeg", None)
       if sig_rate is not None:
         sig_rate = abs(float(sig_rate))
@@ -583,14 +585,40 @@ class Controls:
           # sample max, this is just the trace's own point-in-time reading like angDes/angAct/kActl.
           ach_lat_now = _ach_lat_ms2(steer_limit_status["kActl"], CS.vEgo)
 
-          # leadrate2pnw: same fold-then-reset, for the three steering-RATE 100 Hz accumulators
-          # populated in the standalone try block near the top of this method.
-          cmd_rate_pk = round(self._flight_peak_cmdrate_acc, 2)
-          self._flight_peak_cmdrate_acc = 0.0
+          # leadrate2pnw: fold-window steering-RATE peaks -- see the __init__ comment for the full
+          # I-1/I-2 Fable review rationale. cmd_rate_pk/act_rate_diff_pk are a SLOPE across this fold
+          # window using the MEASURED elapsed time since the PREVIOUS fold (angle_des/angle_actual are
+          # already finalized above at this point, this tick's own values), guarded to a sane dt band
+          # so a stalled/starved loop or a clock hiccup skips the fold (contributes 0.0) instead of
+          # dividing by a garbage dt. act_rate_sig_pk folds the standalone 100 Hz |steeringRateDeg|
+          # running max exactly like the angErr/achLat accumulators fold themselves.
+          # Gemini review note (accepted tradeoff, not a bug): this is a NET slope over the ~200 ms
+          # window, not an instantaneous 100 Hz peak -- a reversal that swings out and fully back
+          # WITHIN one window (e.g. +2 deg then -2 deg) nets to ~0 rate for that fold, same way it
+          # would net to ~0 lateral travel. This is the intentional low-pass tradeoff that removes
+          # the I-1 jitter/I-2 quantization noise; sustained slews (the ~18-20 deg/s case this field
+          # targets) are unaffected. It also means act_rate_sig_pk (Tesla, instantaneous |signal| max)
+          # and act_rate_diff_pk (Ford, this windowed net slope) are measured on different bases --
+          # expected/documented at the emit-site comment (search "Resolution (Fable review)" below),
+          # not something to compare directly car-to-car.
+          fold_dt = (now_mono - self._flight_fold_prev_mono
+                     if self._flight_fold_prev_mono is not None else None)
+          cmd_rate_pk = 0.0
+          act_rate_diff_pk = 0.0
+          if fold_dt is not None and FLIGHT_RATE_FOLD_DT_MIN <= fold_dt <= FLIGHT_RATE_FOLD_DT_MAX:
+            if self._flight_fold_prev_cmd_ang is not None:
+              r = abs(float(angle_des) - self._flight_fold_prev_cmd_ang) / fold_dt
+              cmd_rate_pk = r if math.isfinite(r) else 0.0
+            if self._flight_fold_prev_act_ang is not None:
+              r = abs(angle_actual - self._flight_fold_prev_act_ang) / fold_dt
+              act_rate_diff_pk = r if math.isfinite(r) else 0.0
+          self._flight_fold_prev_mono = now_mono
+          self._flight_fold_prev_cmd_ang = float(angle_des)
+          self._flight_fold_prev_act_ang = angle_actual
+          cmd_rate_pk = round(cmd_rate_pk, 2)
+          act_rate_diff_pk = round(act_rate_diff_pk, 2)
           act_rate_sig_pk = round(self._flight_peak_actrate_sig_acc, 2)
           self._flight_peak_actrate_sig_acc = 0.0
-          act_rate_diff_pk = round(self._flight_peak_actrate_diff_acc, 2)
-          self._flight_peak_actrate_diff_acc = 0.0
 
           sample = {
             "tm": round(now_mono, 3),   # N2: this is an absolute time.monotonic() stamp, not a delta
@@ -734,9 +762,21 @@ class Controls:
                 # offline direction-of-travel capability analysis when driverOverride is False (see
                 # _ach_lat_ms2 docstring / ces_pnw.py's steer/steerEvent records for the heading pairing).
                 "peakAchLat": round(self._flight_peak_achlat, 3),
-                # leadrate2pnw: peak commanded steering-RATE (deg/s, always the lac_log-desired-angle
-                # diff) and peak ACHIEVED steering-RATE (deg/s, act_rate_pk picked just above) over
-                # this episode -- same accumulate/fold/latch pattern as peakAngErr/peakAchLat above.
+                # leadrate2pnw: peak commanded steering-RATE (deg/s, the ~5 Hz fold-window slope of
+                # lac_log's desired angle -- see the __init__ comment) and peak ACHIEVED steering-RATE
+                # (deg/s, act_rate_pk picked just above) over this episode -- same latch-at-onset /
+                # running-max lifecycle as peakAngErr/peakAchLat above.
+                #   Resolution (Fable review): on Ford, peakActRate is the fold-window slope of a
+                #   0.1 deg-LSB signal (steeringRateDeg is dead on that carstate.py) -- ~0.5 deg/s
+                #   resolution at the nominal ~200 ms fold. Don't over-read sub-1 deg/s differences
+                #   between two Ford peakActRate readings; they're within this field's own noise floor.
+                #   Engage-edge caveat (Fable review): an implausibly large peakCmdRate (hundreds of
+                #   deg/s) adjacent to an ENGAGE is an artifact, not a real demand -- the desired angle
+                #   steps straight to the model's plan in one tick when lateral control first engages,
+                #   which this fold-window slope (like the old per-tick one) will read as a huge
+                #   one-fold rate. Cross-check onsetT/durationS against a nearby engage before treating
+                #   a big peakCmdRate as a genuine slew-rate reading; no latActive gate is applied here
+                #   (this is pure observation) -- filter for it offline instead.
                 "peakCmdRate": round(self._flight_peak_cmdrate, 2),
                 "peakActRate": round(act_rate_pk, 2),
                 "peakLaneOff": (round(self._flight_peak_lane_off, 3)
