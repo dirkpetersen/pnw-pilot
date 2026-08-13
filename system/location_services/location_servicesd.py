@@ -127,10 +127,12 @@ POLICE_RECEDE_MI = 0.3                     # once we've receded this far past cl
 POLICE_TIMEOUT_S = 20
 POLICE_MAX_BACKOFF_S = 15 * 60
 # wazespeedgate2pnw: cost control — the Waze proxy poll is a PAID upstream call, so only run it while
-# actually driving the highway. Hysteresis (arm >=45 mph, disarm <43 mph) avoids flapping start/stop
+# actually driving the highway. Hysteresis (arm at POLICE_GATE_MPH, disarm 2 mph below) avoids flapping
 # right around a single threshold speed. Supersedes the earlier parked-gate approach (policeparkgate2pnw).
-POLICE_MIN_SPEED_MS = 45 * 0.44704   # 20.12 m/s -- arm polling at/above 45 mph
-POLICE_RESUME_SPEED_MS = 43 * 0.44704  # 19.22 m/s -- disarm below 43 mph (hysteresis, avoids flapping)
+POLICE_GATE_MPH = 20                                       # arm the police poll at/above this speed --
+                                                          # single tuning knob (lowered 45->20 for testing)
+POLICE_MIN_SPEED_MS = POLICE_GATE_MPH * 0.44704           # arm threshold (m/s)
+POLICE_RESUME_SPEED_MS = (POLICE_GATE_MPH - 2) * 0.44704  # disarm 2 mph below (hysteresis, avoids flapping)
 POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this (GPS dropout -> fail-closed)
 
 
@@ -519,7 +521,7 @@ class PoliceUpdater(threading.Thread):
         self._speed_ok = self._speed_gate(self._cur_speed(), self._speed_ok)
         if not self._speed_ok:
           with self._lock:
-            self._alerts, self._state, self._err = [], "nodata", "speed <45mph"
+            self._alerts, self._state, self._err = [], "nodata", f"speed <{POLICE_GATE_MPH}mph"
           self._stop.wait(POLICE_POLL_S)
           continue
         gps = self._cur_gps()
@@ -1206,7 +1208,7 @@ def main():
       else:
         out["ev"] = {"state": "nodata"}
 
-    # reason-everywhere (driver req 2026-08-13): the police-POLL state reason (speed <45mph / budget
+    # reason-everywhere (driver req 2026-08-13): the police-POLL state reason (speed <Nmph / budget
     # exceeded / daily limit / no source) is a diagnostic -- surface it on the police line even off a
     # freeway or without a POI. The "N mi ahead" ALERT stays freeway-only (set above); here we only
     # fill in a reason when the line would otherwise be a blank nodata.

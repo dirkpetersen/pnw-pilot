@@ -134,25 +134,23 @@ class TestParseProxyBody:
 
 
 class TestSpeedGate:
-  """wazespeedgate2pnw: hysteresis gate on GPS speed (m/s) for the paid Waze poll. Arm >=45 mph
-  (20.12 m/s), disarm <43 mph (19.22 m/s), hold prev state in the 43-45mph band, fail-closed on
-  unknown speed."""
-  MPH = 0.44704
+  """wazespeedgate2pnw: hysteresis gate on GPS speed (m/s) for the paid Waze poll. Arm at
+  POLICE_MIN_SPEED_MS, disarm below POLICE_RESUME_SPEED_MS (2 mph lower), hold prev state inside the
+  band, fail-closed on unknown speed. Threshold-agnostic -- reads the module constants so the tuning
+  knob (POLICE_GATE_MPH) can change without touching these tests."""
 
-  def test_at_or_above_45mph_arms(self):
-    assert PoliceUpdater._speed_gate(45.0 * self.MPH, False) is True
-    assert PoliceUpdater._speed_gate(20.2, False) is True   # ~45.2 mph
+  def test_at_or_above_threshold_arms(self):
+    assert PoliceUpdater._speed_gate(lsd.POLICE_MIN_SPEED_MS, False) is True
+    assert PoliceUpdater._speed_gate(lsd.POLICE_MIN_SPEED_MS + 1.0, False) is True
 
-  def test_below_43mph_disarms(self):
-    assert PoliceUpdater._speed_gate(43.0 * self.MPH - 0.01, True) is False
-    assert PoliceUpdater._speed_gate(19.0, True) is False   # ~42.5 mph
+  def test_below_resume_disarms(self):
+    assert PoliceUpdater._speed_gate(lsd.POLICE_RESUME_SPEED_MS - 0.01, True) is False
+    assert PoliceUpdater._speed_gate(0.0, True) is False
 
-  def test_between_43_and_45mph_holds_previous_true(self):
-    # 19.7 m/s ~= 44.06 mph: inside the hysteresis band -> keep whatever state we were already in
-    assert PoliceUpdater._speed_gate(19.7, True) is True
-
-  def test_between_43_and_45mph_holds_previous_false(self):
-    assert PoliceUpdater._speed_gate(19.7, False) is False
+  def test_inside_band_holds_previous(self):
+    mid = (lsd.POLICE_MIN_SPEED_MS + lsd.POLICE_RESUME_SPEED_MS) / 2   # inside the hysteresis band
+    assert PoliceUpdater._speed_gate(mid, True) is True
+    assert PoliceUpdater._speed_gate(mid, False) is False
 
   def test_none_speed_fails_closed(self):
     assert PoliceUpdater._speed_gate(None, True) is False

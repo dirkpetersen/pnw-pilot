@@ -121,10 +121,10 @@ class LocationServicesStatusRenderer(Widget):
       return "Police   Clear", _C.GREEN
     err = p.get("err")
     if err:
-      # "speed <45mph" is a NORMAL operating state (poll gated by speed), not a poll error -> neutral
-      # grey, so it never reads as a fault. Genuine poll errors / cap hits (quota, HTTP, timeout,
-      # budget exceeded, daily limit) stay RED so they stand out.
-      color = _C.GREY if err == "speed <45mph" else _C.RED
+      # a "speed <Nmph" reason is a NORMAL operating state (poll gated by speed), not a poll error ->
+      # neutral grey, so it never reads as a fault. Prefix-match so the threshold can change freely.
+      # Genuine poll errors / cap hits (quota, HTTP, timeout, budget exceeded, daily limit) stay RED.
+      color = _C.GREY if err.startswith("speed <") else _C.RED
       return f"Police   {err}", color
     return "Police   -", _C.DIM            # nodata: never conflated with Clear
 
