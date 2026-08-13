@@ -15,6 +15,7 @@ import json
 import math
 import os
 import subprocess
+import time
 import cereal.messaging as messaging
 from cereal import log
 from openpilot.common.gps import get_gps_location_service
@@ -89,7 +90,8 @@ def main():
         mem.put_nonblocking("LastGPSPosition", json.dumps({
           "latitude": float(g.latitude), "longitude": float(g.longitude),
           "bearing": float(getattr(g, "bearingDeg", 0.0)),
-          "speed": float(getattr(g, "speed", 0.0))}))  # m/s, for the location-services >45mph police gate
+          "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
+          "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
       if sm.alive['mapdOut']:
         mo = sm['mapdOut']
         mem.put_nonblocking("MapSpeedLimit", str(float(mo.speedLimit)))  # m/s; 0 = none

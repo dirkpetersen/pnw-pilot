@@ -129,6 +129,7 @@ POLICE_MAX_BACKOFF_S = 15 * 60
 # right around a single threshold speed. Supersedes the earlier parked-gate approach (policeparkgate2pnw).
 POLICE_MIN_SPEED_MS = 45 * 0.44704   # 20.12 m/s -- arm polling at/above 45 mph
 POLICE_RESUME_SPEED_MS = 43 * 0.44704  # 19.22 m/s -- disarm below 43 mph (hysteresis, avoids flapping)
+POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this (GPS dropout -> fail-closed)
 
 
 def _now_epoch() -> float:
@@ -385,6 +386,13 @@ class PoliceUpdater(threading.Thread):
       pos = self._mem.get("LastGPSPosition", return_default=True)
       if isinstance(pos, (bytes, str)):
         pos = json.loads(pos)
+      # freshness guard: mapd_configd stops rewriting LastGPSPosition when GPS dies, so a stale blob
+      # would keep a >=45mph reading armed. Reject speed older than POLICE_SPEED_MAX_AGE_S -> None
+      # (fail-closed). "ts" is time.monotonic() (system-wide clock, comparable across processes);
+      # tolerate its absence (pre-bridge blob) rather than reject on it.
+      ts = pos.get("ts")
+      if ts is not None and (time.monotonic() - float(ts)) > POLICE_SPEED_MAX_AGE_S:
+        return None
       return float(pos["speed"])
     except (KeyError, TypeError, ValueError):
       return None
@@ -504,6 +512,11 @@ class PoliceUpdater(threading.Thread):
               alerts = self._poll_proxy(cfg, gps[0], gps[1])
             except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
                     _ProxyUpstreamErr) as pe:
+              # A proxy 402 (monthly budget) / 429 (per-device daily) is a POLICY DENIAL, not an
+              # outage -- never fall back to direct RapidAPI (that would bypass the cost caps and hit
+              # the retired key). Re-raise to the outer except for the reason display + max backoff.
+              if isinstance(pe, urllib.error.HTTPError) and pe.code in (402, 429):
+                raise
               if not self._fallback_allowed(cfg):
                 raise
               # phase-1 resilience: the proxy (website) being down must not lose the police feed
