@@ -124,6 +124,11 @@ POLICE_RECEDE_MI = 0.3                     # once we've receded this far past cl
                                            # increasing = moving away -> give it a clear"). Matches POI_RECEDE_MI.
 POLICE_TIMEOUT_S = 20
 POLICE_MAX_BACKOFF_S = 15 * 60
+# wazespeedgate2pnw: cost control — the Waze proxy poll is a PAID upstream call, so only run it while
+# actually driving the highway. Hysteresis (arm >=45 mph, disarm <43 mph) avoids flapping start/stop
+# right around a single threshold speed. Supersedes the earlier parked-gate approach (policeparkgate2pnw).
+POLICE_MIN_SPEED_MS = 45 * 0.44704   # 20.12 m/s -- arm polling at/above 45 mph
+POLICE_RESUME_SPEED_MS = 43 * 0.44704  # 19.22 m/s -- disarm below 43 mph (hysteresis, avoids flapping)
 
 
 def _now_epoch() -> float:
@@ -293,6 +298,7 @@ class PoliceUpdater(threading.Thread):
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
     self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "quota (429)", "HTTP 403", "no key")
     self._stop = threading.Event()
+    self._speed_ok = False          # wazespeedgate2pnw: hysteresis state for the >=45mph poll gate (fail-closed)
 
   def snapshot(self):
     with self._lock:
@@ -340,6 +346,32 @@ class PoliceUpdater(threading.Thread):
       if isinstance(pos, (bytes, str)):
         pos = json.loads(pos)
       return float(pos["latitude"]), float(pos["longitude"])
+    except (KeyError, TypeError, ValueError):
+      return None
+
+  @staticmethod
+  def _speed_gate(speed_ms, prev_ok):
+    """Hysteresis gate on GPS speed for the paid Waze poll: >=45mph -> True (arm); <43mph -> False
+    (disarm); in the 43-45mph band -> keep prev_ok (avoids flapping right at one threshold). Unknown
+    speed (None) -> False, fail-closed (never poll on missing data). Pure/static for unit tests."""
+    if speed_ms is None:
+      return False
+    if speed_ms >= POLICE_MIN_SPEED_MS:
+      return True
+    if speed_ms < POLICE_RESUME_SPEED_MS:
+      return False
+    return prev_ok
+
+  def _cur_speed(self):
+    """GPS speed (m/s) from the mapd_configd LastGPSPosition bridge, mirroring _cur_gps's JSON-parse
+    pattern. HARD RULE: this daemon does NOT subscribe to carState via msgq (2026-07-13 commIssue
+    cascade lesson) -- speed comes from this mem param only. Missing/unparseable "speed" -> None
+    (fail-closed: _speed_gate then disarms polling rather than guessing)."""
+    try:
+      pos = self._mem.get("LastGPSPosition", return_default=True)
+      if isinstance(pos, (bytes, str)):
+        pos = json.loads(pos)
+      return float(pos["speed"])
     except (KeyError, TypeError, ValueError):
       return None
 
@@ -435,6 +467,16 @@ class PoliceUpdater(threading.Thread):
             self._err = "no source" if (nosrc and enabled) else ""   # surface the actionable case; disabled = plain "-"
           self._stop.wait(POLICE_POLL_S)
           continue
+        # wazespeedgate2pnw: gate the paid upstream poll on highway speed (cost control) -- only poll
+        # while actually driving >=45 mph, with hysteresis down to <43 mph before disarming. Speed is
+        # read from the LastGPSPosition mem param (never carState msgq -- HARD RULE above); an unknown
+        # speed fails CLOSED (no poll). Supersedes the earlier parked-gate approach.
+        self._speed_ok = self._speed_gate(self._cur_speed(), self._speed_ok)
+        if not self._speed_ok:
+          with self._lock:
+            self._alerts, self._state, self._err = [], "nodata", "speed <45mph"
+          self._stop.wait(POLICE_POLL_S)
+          continue
         gps = self._cur_gps()
         if gps is None:
           self._stop.wait(POLICE_POLL_S)
@@ -468,7 +510,15 @@ class PoliceUpdater(threading.Thread):
           if isinstance(e, _ProxyUpstreamErr):
             emsg = str(e)                                    # the proxy's upstream tag, e.g. "upstream 429"
           elif isinstance(e, urllib.error.HTTPError):
-            emsg = "quota (429)" if e.code == 429 else f"HTTP {e.code}"
+            # wazespeedgate2pnw: 402 = our edge proxy's monthly RapidAPI budget is exhausted (distinct
+            # from 429 per-window quota). Surface it distinctly and jump straight to the max backoff
+            # below -- a budget-capped month must not keep re-polling every minute.
+            if e.code == 429:
+              emsg = "quota (429)"
+            elif e.code == 402:
+              emsg = "budget exceeded"
+            else:
+              emsg = f"HTTP {e.code}"
           elif isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
             emsg = "timeout"                                # urlopen timeouts can arrive wrapped in URLError.reason
           elif isinstance(e, ValueError):
@@ -479,7 +529,10 @@ class PoliceUpdater(threading.Thread):
                            type(e).__name__, emsg, int(backoff))
           with self._lock:
             self._state, self._err = "nodata", emsg         # NEVER a false 'clear' on failure (decision #4)
-          backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
+          if isinstance(e, urllib.error.HTTPError) and e.code == 402:
+            backoff = POLICE_MAX_BACKOFF_S                  # budget exhausted -> stop hammering, max backoff now
+          else:
+            backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
       except Exception:
         cloudlog.exception("location_services: police thread loop error (continuing)")  # HARD RULE: never die silently
       self._stop.wait(backoff)

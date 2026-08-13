@@ -88,7 +88,8 @@ def main():
         g = sm[gps_service]
         mem.put_nonblocking("LastGPSPosition", json.dumps({
           "latitude": float(g.latitude), "longitude": float(g.longitude),
-          "bearing": float(getattr(g, "bearingDeg", 0.0))}))
+          "bearing": float(getattr(g, "bearingDeg", 0.0)),
+          "speed": float(getattr(g, "speed", 0.0))}))  # m/s, for the location-services >45mph police gate
       if sm.alive['mapdOut']:
         mo = sm['mapdOut']
         mem.put_nonblocking("MapSpeedLimit", str(float(mo.speedLimit)))  # m/s; 0 = none
