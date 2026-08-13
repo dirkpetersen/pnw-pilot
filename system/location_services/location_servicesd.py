@@ -296,9 +296,23 @@ class PoliceUpdater(threading.Thread):
     self._lock = threading.Lock()
     self._alerts: list = []         # cached raw POLICE alerts (lat, lon, magvar, ts, uuid, street)
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
-    self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "quota (429)", "HTTP 403", "no key")
+    self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "daily limit", "HTTP 403", "no key")
     self._stop = threading.Event()
     self._speed_ok = False          # wazespeedgate2pnw: hysteresis state for the >=45mph poll gate (fail-closed)
+    # wazespeedgate2pnw: stable per-device id sent to the proxy so IT can enforce a per-device daily
+    # limit (750/day). Read ONCE at startup (not per-poll) -- HardwareSerial (the comma serial, e.g.
+    # "eb1f2f7") first, DongleId as fallback, "noid" if neither is set.
+    self._device_id = self._resolve_device_id(self._params.get)
+
+  @staticmethod
+  def _resolve_device_id(get_fn) -> str:
+    """Pure id-resolution: HardwareSerial -> DongleId -> "noid", bytes decoded, whitespace-stripped,
+    empty-after-strip also falls back to "noid". `get_fn` is a callable(key) -> value|None (normally
+    Params().get); isolated as a static method so it's testable without a real Params store."""
+    sid = get_fn("HardwareSerial") or get_fn("DongleId") or "noid"
+    if isinstance(sid, bytes):
+      sid = sid.decode("utf-8", "replace")
+    return str(sid).strip() or "noid"
 
   def snapshot(self):
     with self._lock:
@@ -404,7 +418,9 @@ class PoliceUpdater(threading.Thread):
     # wazeproxy2pnw: keyless GET of the caching edge proxy for the CURRENT position. Returns the
     # SAME raw-alert shape _poll() returns, so snapshot()/_line_police()/the UI are untouched.
     q = urllib.parse.urlencode({"lat": f"{lat:.4f}", "lon": f"{lon:.4f}"})
-    headers = {"User-Agent": "pnw-location/1.0"}
+    headers = {"User-Agent": "pnw-location/1.0", "x-device-id": self._device_id}   # wazespeedgate2pnw:
+    # per-device daily limit (750/day) enforced BY THE PROXY, keyed on this id -- proxy-path only,
+    # never sent on the legacy direct RapidAPI path below.
     if cfg.get("proxy_auth"):
       headers["x-pnw-auth"] = cfg["proxy_auth"]
     req = urllib.request.Request(f"{cfg['proxy_url']}?{q}", headers=headers)
@@ -505,16 +521,18 @@ class PoliceUpdater(threading.Thread):
           backoff = POLICE_POLL_S                            # success -> reset backoff
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
                 _ProxyUpstreamErr) as e:
-          # Surface the real cause on-screen. HTTPError carries the status code (429 = Waze quota exceeded);
-          # HTTPError subclasses URLError so it must be checked first. Non-200 status -> "HTTP <code>".
+          # Surface the real cause on-screen. HTTPError carries the status code; HTTPError subclasses
+          # URLError so it must be checked first. Non-200 status -> "HTTP <code>".
           if isinstance(e, _ProxyUpstreamErr):
             emsg = str(e)                                    # the proxy's upstream tag, e.g. "upstream 429"
           elif isinstance(e, urllib.error.HTTPError):
-            # wazespeedgate2pnw: 402 = our edge proxy's monthly RapidAPI budget is exhausted (distinct
-            # from 429 per-window quota). Surface it distinctly and jump straight to the max backoff
-            # below -- a budget-capped month must not keep re-polling every minute.
+            # wazespeedgate2pnw: with OpenWebNinja PAYG the old upstream-quota-429 no longer occurs --
+            # 429 now means OUR proxy's per-device daily cap (750/day, keyed on x-device-id above); 402
+            # is the proxy's monthly $25 budget exhausted. Both are distinct from a per-window rate
+            # limit and both jump straight to the max backoff below -- a capped device/month must not
+            # keep re-polling every minute.
             if e.code == 429:
-              emsg = "quota (429)"
+              emsg = "daily limit"
             elif e.code == 402:
               emsg = "budget exceeded"
             else:
@@ -529,8 +547,8 @@ class PoliceUpdater(threading.Thread):
                            type(e).__name__, emsg, int(backoff))
           with self._lock:
             self._state, self._err = "nodata", emsg         # NEVER a false 'clear' on failure (decision #4)
-          if isinstance(e, urllib.error.HTTPError) and e.code == 402:
-            backoff = POLICE_MAX_BACKOFF_S                  # budget exhausted -> stop hammering, max backoff now
+          if isinstance(e, urllib.error.HTTPError) and e.code in (402, 429):
+            backoff = POLICE_MAX_BACKOFF_S                  # budget/daily-limit hit -> stop hammering, max backoff now
           else:
             backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
       except Exception:

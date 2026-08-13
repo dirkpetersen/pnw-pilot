@@ -157,3 +157,30 @@ class TestSpeedGate:
   def test_none_speed_fails_closed(self):
     assert PoliceUpdater._speed_gate(None, True) is False
     assert PoliceUpdater._speed_gate(None, False) is False
+
+
+class TestResolveDeviceId:
+  """wazespeedgate2pnw: the x-device-id sent to the proxy for its per-device daily limit (750/day).
+  _resolve_device_id is a pure static helper (get_fn: callable(key) -> value|None) so it's testable
+  without a real Params store."""
+
+  def test_hardware_serial_wins(self):
+    vals = {"HardwareSerial": "eb1f2f7", "DongleId": "someDongle"}
+    assert PoliceUpdater._resolve_device_id(vals.get) == "eb1f2f7"
+
+  def test_falls_back_to_dongle_id(self):
+    vals = {"HardwareSerial": None, "DongleId": "someDongle"}
+    assert PoliceUpdater._resolve_device_id(vals.get) == "someDongle"
+
+  def test_neither_set_falls_back_to_noid(self):
+    vals = {"HardwareSerial": None, "DongleId": None}
+    assert PoliceUpdater._resolve_device_id(vals.get) == "noid"
+
+  def test_empty_string_falls_back_to_noid(self):
+    # an empty/whitespace-only serial must not ship as a blank x-device-id
+    vals = {"HardwareSerial": "   ", "DongleId": None}
+    assert PoliceUpdater._resolve_device_id(vals.get) == "noid"
+
+  def test_bytes_are_decoded(self):
+    vals = {"HardwareSerial": b"eb1f2f7", "DongleId": None}
+    assert PoliceUpdater._resolve_device_id(vals.get) == "eb1f2f7"
