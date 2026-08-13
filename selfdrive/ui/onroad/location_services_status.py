@@ -120,8 +120,12 @@ class LocationServicesStatusRenderer(Widget):
     if s == "clear":
       return "Police   Clear", _C.GREEN
     err = p.get("err")
-    if err:                                # surface the real poll error (quota (429), HTTP 403, timeout, no key)
-      return f"Police   {err}", _C.RED
+    if err:
+      # "speed <45mph" is a NORMAL operating state (poll gated by speed), not a poll error -> neutral
+      # grey, so it never reads as a fault. Genuine poll errors / cap hits (quota, HTTP, timeout,
+      # budget exceeded, daily limit) stay RED so they stand out.
+      color = _C.GREY if err == "speed <45mph" else _C.RED
+      return f"Police   {err}", color
     return "Police   -", _C.DIM            # nodata: never conflated with Clear
 
   def _rest_dist_text(self, d):

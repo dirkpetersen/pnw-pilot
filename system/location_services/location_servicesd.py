@@ -1206,6 +1206,15 @@ def main():
       else:
         out["ev"] = {"state": "nodata"}
 
+    # reason-everywhere (driver req 2026-08-13): the police-POLL state reason (speed <45mph / budget
+    # exceeded / daily limit / no source) is a diagnostic -- surface it on the police line even off a
+    # freeway or without a POI. The "N mi ahead" ALERT stays freeway-only (set above); here we only
+    # fill in a reason when the line would otherwise be a blank nodata.
+    if out.get("police", {}).get("state") == "nodata" and not out["police"].get("err"):
+      _, _pstate, _perr = police.snapshot()
+      if _pstate != "ok" and _perr:
+        out["police"] = {"state": "nodata", "err": _perr}
+
     mem.put_nonblocking("LocationServices", out)
     rk.keep_time()
 
