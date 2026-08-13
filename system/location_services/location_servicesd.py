@@ -68,8 +68,10 @@ DEFAULT_PROXY = {
   "proxy_url": "https://jh69za4byd.execute-api.us-west-2.amazonaws.com/alerts",  # keyless AWS proxy
   "proxy_auth": "",                                 # rotatable x-pnw-auth gate value (guards OUR quota shield,
                                                     # not the RapidAPI key; fine to ship in-distribution)
-  "url": "https://waze-api.p.rapidapi.com/alerts",  # legacy direct upstream (used only with a key)
-  "host": "waze-api.p.rapidapi.com",
+  "url": "https://api.openwebninja.com/waze/alerts-and-jams",  # direct OpenWebNinja upstream, used only
+                                                    # with a user-supplied key. NO budget/per-device
+                                                    # tracking in direct mode -- that lives only in the
+                                                    # AWS proxy; a direct-key user owns their own spend.
   "key": "",                                        # NOT shipped — supplied by the PROXY_CFG override file
 }
 POLICE_PROXY_MAX_AGE_S = 30 * 60                    # ignore a proxy body older than this -> empty (never stale alerts)
@@ -136,6 +138,22 @@ def _now_epoch() -> float:
   """Wall-clock epoch seconds — needed to age crowd reports against Waze's epoch-ms timestamps
   (time.monotonic is banned-for-good-reason for intervals but is NOT a wall clock; datetime is)."""
   return datetime.now(UTC).timestamp()
+
+
+def _iso_to_epoch_ms(s):
+  """Parse an OpenWebNinja UTC timestamp ('2026-08-13T14:49:09.000Z') to epoch MILLISECONDS -- what
+  _age_min expects (Waze's own timestamps are epoch-ms). Tolerates fractional seconds / a trailing 'Z'
+  or their absence; returns None on any parse failure (a bad ts -> skippable alert, never a crash)."""
+  if not isinstance(s, str) or not s:                       # non-str (int/bool/null) -> None, don't .strip() it
+    return None
+  try:
+    s = s.strip().replace("Z", "+00:00")
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+      dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1000)
+  except (ValueError, TypeError):
+    return None
 
 
 def _is_supercharger(c):
@@ -398,15 +416,18 @@ class PoliceUpdater(threading.Thread):
       return None
 
   def _poll(self, cfg, lat, lon):
-    bl = f"{lat - POLICE_BBOX_DEG},{lon - POLICE_BBOX_DEG}"
-    tr = f"{lat + POLICE_BBOX_DEG},{lon + POLICE_BBOX_DEG}"
-    q = urllib.parse.urlencode({"bottom-left": bl, "top-right": tr})
-    headers = {"x-rapidapi-host": cfg.get("host", ""), "x-rapidapi-key": cfg["key"]}
-    req = urllib.request.Request(f"{cfg['url']}?{q}", headers=headers)
+    # Direct OpenWebNinja (a user managing their OWN key via police_proxy.json {"source":"direct",
+    # "key":"ak_..."}). Same transform as the AWS proxy (data.alerts, magvar=None, ISO->epoch-ms), so
+    # snapshot()/_line_police()/the UI are untouched. NOTE: direct mode has NO budget / per-device
+    # tracking -- that exists only in the AWS proxy; a direct-key user owns their own OpenWebNinja spend.
+    q = urllib.parse.urlencode({"bottom_left": f"{lat - POLICE_BBOX_DEG},{lon - POLICE_BBOX_DEG}",
+                                "top_right": f"{lat + POLICE_BBOX_DEG},{lon + POLICE_BBOX_DEG}",
+                                "alert_types": "POLICE", "max_jams": 0, "max_alerts": 20})
+    req = urllib.request.Request(f"{cfg['url']}?{q}", headers={"x-api-key": cfg["key"]})
     with urllib.request.urlopen(req, timeout=POLICE_TIMEOUT_S) as resp:
       raw = resp.read()
     data = json.loads(raw)                                  # defensive: HTML-error-200 -> ValueError below
-    alerts = data if isinstance(data, list) else data.get("alerts", [])
+    alerts = (data.get("data") or {}).get("alerts", []) if isinstance(data, dict) else []  # data:null -> {}
     if not isinstance(alerts, list):
       raise ValueError("unexpected alerts payload")
     out = []
@@ -414,9 +435,9 @@ class PoliceUpdater(threading.Thread):
       if not isinstance(a, dict) or a.get("type") != "POLICE":
         continue
       try:
-        out.append({"lat": float(a["locationY"]), "lon": float(a["locationX"]),
-                    "magvar": a.get("magvar"), "ts": a.get("timestamp"),
-                    "uuid": a.get("uuid") or a.get("id"), "street": a.get("street") or "",
+        out.append({"lat": float(a["latitude"]), "lon": float(a["longitude"]),
+                    "magvar": None, "ts": _iso_to_epoch_ms(a.get("publish_datetime_utc")),
+                    "uuid": a.get("alert_id"), "street": a.get("street") or "",
                     "town": a.get("city") or ""})
       except (KeyError, TypeError, ValueError):
         continue
