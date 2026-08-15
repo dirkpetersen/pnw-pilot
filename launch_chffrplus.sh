@@ -5,6 +5,11 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 source "$DIR/launch_env.sh"
 
 function agnos_init {
+  # agnos19-compat: clear a stale SCons CacheDir lock (0.11.2 does this in agnos_init).
+  # The device ran 0.11.2 builds before pnw; a killed build can leave this lock and
+  # stall `scons --cache-populate`.
+  rm -f /data/scons_cache/config.lock
+
   # TODO: move this to agnos
   sudo rm -f /data/etc/NetworkManager/system-connections/*.nmmeta
 
@@ -67,7 +72,12 @@ function launch {
 
   # handle pythonpath
   ln -sfn $(pwd) /data/pythonpath
-  export PYTHONPATH="$PWD"
+  # agnos19-compat: overlay of 17.2-era wheels this 0.11.1 tree needs but AGNOS 19.6's
+  # baked venv dropped (bzip2/libjpeg/libyuv/casadi/raylib/... — see AGNOS19-COMPAT.md).
+  # Overlay lives in /data (survives reflash). PYTHONPATH is searched before the venv
+  # site-packages, so the overlay intentionally shadows 19.6's newer builds (raylib 6.x,
+  # shared ffmpeg) with the 5.5 / static builds this 0.11.1 tree is written against.
+  export PYTHONPATH="$PWD:/data/pnw/agnos19-compat/site-packages"
 
   # hardware specific init
   if [ -f /AGNOS ]; then

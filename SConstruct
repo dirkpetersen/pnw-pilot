@@ -92,7 +92,10 @@ def _libflags(target, source, env, for_signature):
 env = Environment(
   ENV={
     "PATH": os.environ['PATH'],
-    "PYTHONPATH": Dir("#").abspath + ':' + Dir(f"#third_party/acados").abspath,
+    # agnos19-compat: scons replaces the env for its codegen subprocesses (e.g. the MPC
+    # `python3 lat_mpc.py` which does `from casadi import ...`), so the overlay must be on
+    # THIS PYTHONPATH too, not just launch_chffrplus.sh's. See AGNOS19-COMPAT.md.
+    "PYTHONPATH": Dir("#").abspath + ':' + Dir(f"#third_party/acados").abspath + ':/data/pnw/agnos19-compat/site-packages',
     "ACADOS_SOURCE_DIR": Dir("#third_party/acados").abspath,
     "ACADOS_PYTHON_INTERFACE_PATH": Dir("#third_party/acados/acados_template").abspath,
     "TERA_PATH": Dir("#").abspath + f"/third_party/acados/{arch}/t_renderer"
