@@ -112,7 +112,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // the GPS-driven auto-download (mapd_configd.py) re-fetches it fresh. Replaces the old on-demand
     // "Get map for this location" toggle now that coverage downloads itself automatically.
     {"RefreshLocationMap", {PERSISTENT, BOOL, "0"}},      // the toggle — ON deletes+re-arms the download for the current region
-    {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_configd.py writes True when current GPS is already covered by a downloaded map (UI enables the Refresh toggle only when covered)
+    {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_configd.py writes True only when there IS a GPS fix AND it's already covered by a downloaded map (UI enables the Refresh toggle only then — no fix greys it out too)
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // LEGACY (toggles-invert2pnw): superseded by NudgeForLaneChange below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
     // toggles-invert2pnw: opt-out sibling of NudgelessLaneChange -- default OFF = nudge NOT required,

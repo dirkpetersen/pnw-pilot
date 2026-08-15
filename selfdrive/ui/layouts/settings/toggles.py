@@ -70,10 +70,11 @@ DESCRIPTIONS = {
   # it detects you're uncovered) — this toggle's only job now is to force a re-download of a map that's
   # gone stale, by deleting it so the automatic downloader picks it back up.
   "RefreshLocationMap": tr_noop(
-    "Delete the downloaded offline OSM map for the state (or country) you're currently in, so openpilot " +
-    "re-downloads it fresh. Maps download automatically as soon as you enter a state with no map data — " +
+    "Delete the downloaded offline OSM map for the state (or country) you're currently in, and immediately " +
+    "re-request it fresh — maps also download automatically as soon as you enter a state with no map data — " +
     "use this only if you suspect the map for your current location is stale or corrupted. Enabled only " +
-    "when there is a downloaded map here to refresh; requires a GPS fix."
+    "when there is a downloaded map here to refresh; requires a GPS fix, and is a no-op if a download is " +
+    "already in progress."
   ),
   # mapd2pnw / toggles-invert2pnw: OSM speed-limit display is ON by default; this is the opt-OUT toggle.
   "NoSpeedLimitDisplay": tr_noop(
@@ -503,12 +504,13 @@ class TogglesLayout(Widget):
     if "AutoSpeedReduce" in self._toggles:
       self._toggles["AutoSpeedReduce"].action_item.set_enabled(True)
 
-    # mapdstate2pnw: "Refresh this location map" is greyed out (inactive) UNLESS the current GPS is
-    # already covered by a downloaded map — inverted from the old "Get map for this location" logic,
-    # since there's nothing to refresh where nothing has been downloaded yet (MapForLocationCovered is
-    # written by system/mapd/mapd_configd.py from the official mapd tileLoaded + GPS fix; same param,
-    # repurposed). It enables only when we're somewhere already covered, so the driver can force a
-    # fresh re-download of that region's map.
+    # mapdstate2pnw: "Refresh this location map" is greyed out (inactive) UNLESS the current GPS fix
+    # is already covered by a downloaded map — inverted from the old "Get map for this location"
+    # logic, since there's nothing to refresh where nothing has been downloaded yet. MapForLocationCovered
+    # is written by system/mapd/mapd_configd.py's `map_here` (has_fix AND tileLoaded — NOT just
+    # "no fix", which used to make this button enabled with no fix at all; bug fixed 2026-08-15).
+    # It enables only when we're somewhere already covered, so the driver can force a fresh
+    # re-download of that region's map.
     if "RefreshLocationMap" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["RefreshLocationMap"].action_item.set_enabled(covered)

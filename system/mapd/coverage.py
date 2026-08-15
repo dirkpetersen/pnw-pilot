@@ -128,13 +128,27 @@ def region_full_name(code: str | None) -> str:
   return (reg.get("states", {}).get(code) or reg.get("nations", {}).get(code) or {}).get("full_name", code)
 
 
-def region_bbox(code: str | None) -> list[float] | None:
+def region_bbox(code: str | None, is_us_state: bool | None = None) -> list[float] | None:
   """[min_lon, min_lat, max_lon, max_lat] for `code`, or None if unknown. Used to locate the offline
-  tile directories on disk for a "Refresh this location map" delete."""
+  tile directories on disk for a "Refresh this location map" delete.
+
+  `is_us_state`, when given, picks the table directly instead of guessing states-first — REQUIRED for
+  correctness on any of the 20 collision codes (e.g. "CA" = California the US state AND Canada the
+  nation): a states-first guess silently returns California's bbox for a fix that was actually
+  resolved as Canada, which is exactly what made "Refresh this location map" delete the wrong
+  region's tiles for a fix in Whistler BC. Callers that resolved the code via _locate() /
+  region_and_key_for_gps() have this flag already (region_and_key_for_gps()'s key prefix
+  "us_state."/"nation." tells you which) and MUST pass it through. Omitting it falls back to the old
+  states-first guess — only safe for a code the caller already knows is unambiguous."""
   if not code:
     return None
   reg = _regions()
-  e = reg.get("states", {}).get(code) or reg.get("nations", {}).get(code)
+  if is_us_state is True:
+    e = reg.get("states", {}).get(code)
+  elif is_us_state is False:
+    e = reg.get("nations", {}).get(code)
+  else:
+    e = reg.get("states", {}).get(code) or reg.get("nations", {}).get(code)
   return e.get("bbox") if e else None
 
 
