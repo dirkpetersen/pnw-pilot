@@ -21,7 +21,7 @@ the deeper per-feature design/rationale docs.
 | [LATACCEL2PNW.md](LATACCEL2PNW.md) | Speed-scheduled, JSON-hot-reloadable max-lateral-accel cap for `clip_curvature()` (low-speed authority up, highway stays ISO 3.0) |
 | [FORDREGEN2PNW.md](FORDREGEN2PNW.md) | EV regen over-decel design (Ford long PID damping Fix A + regen-bite Fix B) |
 | [MAPD-SYSTEM.md](MAPD-SYSTEM.md) | **As-deployed mapd** — pfeiferj v2.0.6 binary, `mapd_configd`, `MapdOut`, full param table |
-| [MAPD2PNW.md](MAPD2PNW.md) | The pnw mapd foundation (WA/OR/ID default; implementation superseded by MAPD-SYSTEM) |
+| [MAPD2PNW.md](MAPD2PNW.md) | ⛔ Historical: the original pnw mapd foundation (fixed default state list, priority-WiFi gate); superseded by MAPD-SYSTEM's GPS-driven on-demand whole-state download |
 | [DM-CURRENT.md](DM-CURRENT.md) | Source of truth for the as-deployed DM config (tiers + GLARE knobs) |
 | [GLARE.md](GLARE.md) | Layer-C DM glare band-aid (deployed 2026-07-06) |
 | [ONROAD-CHARGING.md](ONROAD-CHARGING.md) | EV parked-while-charging reads as onroad — `gearShifter=park` is the real parked signal |
