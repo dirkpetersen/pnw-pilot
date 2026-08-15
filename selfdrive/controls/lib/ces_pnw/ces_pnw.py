@@ -1351,9 +1351,9 @@ class ConditionalExperimentalSwitching:
                                  #   lead=False; only a SEEN gap > CLEAR_DREL clears it)
     self._release_hold = False   # armed at the release tick when _ss_close_lead; holds Experimental
                                  #   until v > STANDSTILL_RELEASE_V or the gap opens past CLEAR_DREL
-    # cesnochill2pnw: True while the direction-aware latch is armed (see the constants block) —
-    # starts False (a fresh machine at cruise is not "stopping"; the first genuine decel-to-a-stop
-    # arms it on its own from live v_ego/a_ego).
+    # cesnochill2pnw: True while the pure-v_ego Schmitt-trigger latch is armed (see the constants
+    # block) — starts False (a fresh machine at cruise is not "stopping"; the first genuine
+    # decel-to-a-stop arms it on its own from live v_ego).
     self._nochill_armed = False
 
   def reset(self):
@@ -1379,33 +1379,27 @@ class ConditionalExperimentalSwitching:
     a FINAL override so it wins over every internal path (dwell expiry, A2, filter decay, a
     model_should_stop flicker, or any future addition) — closing the ordering gap that let a
     transient `chill` decision through anywhere in the stopping/stopped speed band (see the
-    constants block for the field incident + the Gemini-review direction-aware design + the
-    correctness argument). Behavior-neutral once genuinely moving away: the latch is a no-op there
-    and the unmodified core governs exactly as before."""
+    constants block for the field incident, the round-2 a_ego revert, and the wedge-impossibility
+    proof). Behavior-neutral once genuinely moving away: the latch is a no-op there and the
+    unmodified core governs exactly as before."""
     self._update_decision_core(signals, dt)
-    v_now = float(signals.get("v_ego", 0.0))
-    a_now = signals.get("a_ego", 0.0)
-    try:
-      a_now = float(a_now)
-      if not math.isfinite(a_now):
-        a_now = 0.0                  # cesnochill2pnw: bad/missing reading -> "not accelerating",
-    except (TypeError, ValueError):  # the fail-safe direction (can only make the latch hold
-      a_now = 0.0                    # longer, never release early on garbage data)
-    self._apply_nochill_latch(v_now, a_now)
+    self._apply_nochill_latch(float(signals.get("v_ego", 0.0)))
     return self.mode()
 
-  def _apply_nochill_latch(self, v_now: float, a_now: float) -> None:
-    """cesnochill2pnw: direction-aware latch — a pure v_ego threshold cannot tell "decelerating/
-    creeping toward a stop" from "accelerating away on a launch" at the same speed (Gemini review
-    catch), so both ARM and RELEASE are gated on v_ego AND a_ego together. See the constants block
-    for the full ARM/STAY/RELEASE spec. No stored timer (only one bit of armed/not memory), so it
-    cannot leak/freeze — see that block's no-wedge argument. While armed, status is UNCONDITIONALLY
-    "stopLatch" for the whole episode (Gemini review: avoids flapping between a stale core-computed
-    reason and the latch tag every time the core's own dwell machinery cycles underneath)."""
+  def _apply_nochill_latch(self, v_now: float) -> None:
+    """cesnochill2pnw: PURE v_ego Schmitt-trigger latch — no acceleration term (round 2's a_ego
+    direction gate was reverted: Gemini review found it could wedge Experimental permanently on a
+    gentle/leveling-off launch, and flapped on a_ego noise near the release band). One bit of
+    armed/not memory, re-evaluated every tick from live v_ego alone — see the constants block for
+    the full ARM/RELEASE spec and the wedge-impossibility proof (RELEASE depends on v_ego ALONE, so
+    any tick above NOCHILL_RELEASE_V clears it unconditionally — a real launch cannot avoid producing
+    such a tick). While armed, status is UNCONDITIONALLY "stopLatch" for the whole episode (Gemini
+    review, round 1: avoids flapping between a stale core-computed reason and the latch tag every
+    time the core's own dwell machinery cycles underneath) — `_dwell` is never touched here."""
     if self._nochill_armed:
-      if v_now > C.NOCHILL_RELEASE_V and a_now > C.NOCHILL_LAUNCH_A:
+      if v_now > C.NOCHILL_RELEASE_V:
         self._nochill_armed = False
-    elif v_now < C.NOCHILL_ARM_V and a_now <= C.NOCHILL_LAUNCH_A:
+    elif v_now < C.NOCHILL_ARM_V:
       self._nochill_armed = True
     if self._nochill_armed:
       self._is_experimental = True

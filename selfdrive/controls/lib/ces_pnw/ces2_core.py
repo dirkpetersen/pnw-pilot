@@ -318,23 +318,17 @@ class Ces2Core:
     return self._ev.urgency
 
   def update_decision(self, signals: dict, dt: float = DT_CTRL) -> str:
-    """Public entry point: runs the CES2 core, then applies the SAME cesnochill2pnw direction-aware
+    """Public entry point: runs the CES2 core, then applies the SAME cesnochill2pnw PURE-v_ego
     latch as CES v1 (see ces_pnw.ConditionalExperimentalSwitching.update_decision /
-    _apply_nochill_latch for the full spec) so Ces2Core carries the identical fix if it ever goes
-    live (Ces2Core param). Behavior-neutral once genuinely moving away."""
+    _apply_nochill_latch for the full spec, incl. the round-2 a_ego revert and the
+    wedge-impossibility proof) so Ces2Core carries the identical fix if it ever goes live (Ces2Core
+    param). Behavior-neutral once genuinely moving away."""
     self._update_decision_core(signals, dt)
     v_now = float(signals.get("v_ego", 0.0))
-    a_now = signals.get("a_ego", 0.0)
-    try:
-      a_now = float(a_now)
-      if not math.isfinite(a_now):
-        a_now = 0.0                  # cesnochill2pnw: bad/missing -> "not accelerating" (fail-safe)
-    except (TypeError, ValueError):
-      a_now = 0.0
     if self._nochill_armed:
-      if v_now > C.NOCHILL_RELEASE_V and a_now > C.NOCHILL_LAUNCH_A:
+      if v_now > C.NOCHILL_RELEASE_V:
         self._nochill_armed = False
-    elif v_now < C.NOCHILL_ARM_V and a_now <= C.NOCHILL_LAUNCH_A:
+    elif v_now < C.NOCHILL_ARM_V:
       self._nochill_armed = True
     if self._nochill_armed:
       self._is_experimental = True

@@ -87,10 +87,10 @@ def test_a1_rearms_stopintent_fast_path_from_chill():
   shouldStop: ONE cycle to Experimental via the fast path. Pre-A1 this geometry had
   raw_active=False (stop masked by the lead), so the fast path was unreachable and Chill launched.
 
-  cesnochill2pnw: lead_creeps() is v_ego=0.4 with no a_ego (steady creep) -- squarely inside the
-  new latch's arm band too, so it arms on this SAME tick. Status is unconditionally "stopLatch"
-  while armed (see the review note in ces_pnw_constants.py's cesnochill2pnw block), which now wins
-  over the one-tick "stopIntent" diagnostic tag here -- mode is still "experimental" either way."""
+  cesnochill2pnw: lead_creeps() is v_ego=0.4 -- inside the latch's ARM band (< NOCHILL_ARM_V) too,
+  so it arms on this SAME tick. Status is unconditionally "stopLatch" while armed (see the review
+  note in ces_pnw_constants.py's cesnochill2pnw block), which now wins over the one-tick
+  "stopIntent" diagnostic tag here -- mode is still "experimental" either way."""
   sm = ConditionalExperimentalSwitching()
   assert sm.update_decision(lead_creeps(model_should_stop=True), DT) == "experimental"
   assert sm.status() == "stopLatch"
@@ -114,19 +114,19 @@ def test_lurch_replay_red_light_holds_then_green_releases():
   # (1) the pre-lurch hold (no stop intent yet — now entered via the standstill slowLead promotion)
   assert run(sm, stopped_at_light(), 15.0) == "experimental"
   # (2) the lurch tick, red still governing: must STAY Experimental for as long as the red lasts.
-  # cesnochill2pnw: lead_creeps() is a steady v_ego=0.4 creep (no a_ego) -- inside the new latch's
-  # arm band, so status is unconditionally "stopLatch" (not the A1 "stop" tag) for the whole hold.
+  # cesnochill2pnw: lead_creeps() is a steady v_ego=0.4 creep -- inside the latch's ARM band, so
+  # status is unconditionally "stopLatch" (not the A1 "stop" tag) for the whole hold.
   assert run(sm, lead_creeps(model_should_stop=True), 5.0) == "experimental"
   assert sm.status() == "stopLatch"
   # (3) green at a creep (0.4 m/s, lead 7 m): the new latch (and, underneath it, the standstill
   # latch/close-lead hold) holds through A2's window AND beyond — no Chill handoff into a 7 m gap
   assert run(sm, lead_creeps(model_should_stop=False), 3.0) == "experimental"
   assert sm.status() == "stopLatch"                 # cesnochill2pnw: unconditional while armed
-  # (4) rolling: a_ego=2.0 -- this IS the real launch (v 0.4 -> 3.0) -- releases the new latch,
-  # handing off to the OLDER close-lead release hold (unmasked): still model-governed below the
-  # release speed, tagged "standstillHold" as before.
+  # (4) rolling: v_ego=3.0 is well past NOCHILL_RELEASE_V -- releases the new latch, handing off to
+  # the OLDER close-lead release hold (unmasked): still model-governed below the release speed,
+  # tagged "standstillHold" as before.
   assert run(sm, sig(v_ego=3.0, has_lead=True, lead_vlead=4.0, lead_drel=12.0, v_set=13.4,
-                     spd_lim=25.0, a_ego=2.0), 2.0) == "experimental"
+                     spd_lim=25.0), 2.0) == "experimental"
   assert sm.status() == "standstillHold"
   # (5) launch complete (v > STANDSTILL_RELEASE_V, gap opening): normal, dwelled exit to Chill
   assert run(sm, sig(v_ego=6.0, has_lead=True, lead_vlead=7.0, lead_drel=22.0, v_set=13.4,
@@ -134,12 +134,31 @@ def test_lurch_replay_red_light_holds_then_green_releases():
 
 
 def a2_creep(**kw):
-  """standstill2pnw: an A2-band creep — v 1.0 (above the 0.5 standstill latch, below A2's 1.5),
-  lead FAR (dRel 30 > STANDSTILL_RELEASE_CLEAR_DREL so the close-lead release hold disarms at the
-  release tick) — isolates the A2 machinery from the new standstill latch/hold in these tests."""
-  base = dict(v_ego=1.0, has_lead=True, lead_vlead=2.0, lead_drel=30.0, v_set=13.4, spd_lim=25.0)
+  """standstill2pnw: an A2-band creep — v 1.4 (above cesnochill2pnw's NOCHILL_RELEASE_V=1.3, so
+  the new hard latch has already released here; below A2's own STANDSTILL_HOLD_V=1.5), lead FAR
+  (dRel 30 > STANDSTILL_RELEASE_CLEAR_DREL so the close-lead release hold disarms at the release
+  tick) — isolates the A2 machinery from BOTH the standstill latch/hold AND the new nochill latch
+  in these tests, so A2's own timer is observed unmasked."""
+  base = dict(v_ego=1.4, has_lead=True, lead_vlead=2.0, lead_drel=30.0, v_set=13.4, spd_lim=25.0)
   base.update(kw)
   return sig(**base)
+
+
+def test_nochill_latch_holds_steady_creep_inside_its_own_arm_band():
+  """cesnochill2pnw: a steady creep INSIDE the new latch's own ARM band (v < NOCHILL_ARM_V=1.0,
+  e.g. 0.7) with model_should_stop dropped for well over A2's 2 s window now NEVER releases,
+  regardless of A2's own timer — exactly the field bug class (drives/2026-08-15/tesla-redlight-
+  jolt) the latch exists to close. This is the case a2_creep() (v=1.4, above the latch's own
+  release speed) deliberately does NOT exercise — see test_a2_timer_resets_on_shouldstop_flicker
+  below for A2's own mechanism, observed unmasked once past the latch's release speed."""
+  sm = ConditionalExperimentalSwitching()
+  run(sm, stopped_at_light(model_should_stop=True), 10.0)
+  assert sm.mode() == "experimental"
+  creep = sig(v_ego=0.7, has_lead=True, lead_vlead=2.0, lead_drel=30.0, v_set=13.4, spd_lim=25.0,
+             model_should_stop=False)
+  modes = [sm.update_decision(creep, DT) for _ in range(int(round(5.0 / DT)))]
+  assert all(m == "experimental" for m in modes)
+  assert sm.status() == "stopLatch"
 
 
 def test_a2_timer_resets_on_shouldstop_flicker():
@@ -147,41 +166,26 @@ def test_a2_timer_resets_on_shouldstop_flicker():
   (standstill2pnw: moved from the 0.4 m/s lead_creeps geometry — that is now inside the standstill
   latch, which holds regardless of A2; the A2 band under test is 0.5..1.5 m/s with an open gap.)
 
-  cesnochill2pnw: a2_creep() with NO a_ego is a STEADY creep in the new latch's own arm band
-  (v < NOCHILL_ARM_V, a_ego <= NOCHILL_LAUNCH_A) — exactly the field bug geometry (a
-  model_should_stop dropout at a steady 0.5-1.5 m/s creep) the fix exists to close, so it now NEVER
-  releases regardless of A2's own timer, however long model_should_stop stays clear. A2's own
-  timer-reset property is verified separately, underneath a GENUINE launch (a_ego > the launch
-  threshold), where the new latch releases immediately and A2 governs exactly as before."""
+  cesnochill2pnw: a2_creep() is v_ego=1.4 -- ABOVE the new latch's NOCHILL_RELEASE_V(1.3), so the
+  latch has already released by the time this runs (see test_nochill_latch_holds_steady_creep_
+  inside_its_own_arm_band above for the v<1.0 case the latch itself now owns) — A2's own 2 s
+  timer-reset property is observed unmasked, exactly as before."""
   sm = ConditionalExperimentalSwitching()
   run(sm, stopped_at_light(model_should_stop=True), 10.0)   # enters via fast path, dwell builds
   assert sm.mode() == "experimental"
-  # steady creep, no accel: the new latch holds regardless of A2's own timer or how long clear
-  modes = [sm.update_decision(a2_creep(model_should_stop=False), DT) for _ in range(int(round(5.0 / DT)))]
-  assert all(m == "experimental" for m in modes)
-  assert sm.status() == "stopLatch"
-
-  # A2's own 2 s timer-reset, observed underneath a genuine launch (a_ego confirms real movement,
-  # so the new latch releases on the first tick and the OLDER A2 machinery governs, unmasked)
-  sm2 = ConditionalExperimentalSwitching()
-  run(sm2, stopped_at_light(model_should_stop=True), 10.0)
-  run(sm2, a2_creep(model_should_stop=False, a_ego=2.0), 1.5)         # 1.5 s clear (still held by A2)
-  assert sm2.status() == "stopHold"                                  # ...and it IS A2 holding
-  sm2.update_decision(a2_creep(model_should_stop=True, a_ego=2.0), DT)   # red flicker: timer resets
-  assert run(sm2, a2_creep(model_should_stop=False, a_ego=2.0), 1.5) == "experimental"  # held again
-  assert run(sm2, a2_creep(model_should_stop=False, a_ego=2.0), 1.0) == "chill"   # full 2 s clear: out
+  run(sm, a2_creep(model_should_stop=False), 1.5)           # 1.5 s clear (still held by A2)
+  assert sm.status() == "stopHold"                          # ...and it IS A2 holding, not the latch
+  sm.update_decision(a2_creep(model_should_stop=True), DT)  # red flicker: timer resets
+  assert run(sm, a2_creep(model_should_stop=False), 1.5) == "experimental"  # 1.5 s again: held
+  assert run(sm, a2_creep(model_should_stop=False), 1.0) == "chill"         # full 2 s clear: out
 
 
 def test_a2_no_hold_above_standstill():
   """Same recent-stop history, but ego above STANDSTILL_HOLD_V: A2 does not apply — the exit
   happens on the normal filter decay (well under 2 s). Highway spd_lim isolates from lowSpeed;
-  dRel 30 (open gap) keeps the standstill release hold disarmed (standstill2pnw).
-
-  cesnochill2pnw: green() carries a_ego=2.0 (a genuine departure) so the new latch releases and A2
-  governs unmasked, exactly reproducing the pre-existing A2 timing this test verifies."""
+  dRel 30 (open gap) keeps the standstill release hold disarmed (standstill2pnw)."""
   def green(v):
-    return sig(v_ego=v, has_lead=True, lead_vlead=v + 0.5, lead_drel=30.0, v_set=13.4, spd_lim=25.0,
-               a_ego=2.0)
+    return sig(v_ego=v, has_lead=True, lead_vlead=v + 0.5, lead_drel=30.0, v_set=13.4, spd_lim=25.0)
   # below the A2 floor: held at 1.5 s (A2; at 0.4 the standstill latch would hold it too)
   sm = ConditionalExperimentalSwitching()
   run(sm, stopped_at_light(model_should_stop=True), 10.0)
@@ -195,25 +199,13 @@ def test_a2_no_hold_above_standstill():
 def test_a2_respects_stops_toggle():
   """Driver disabled the stops condition: A2 (like the fast path) must not hold. (standstill2pnw:
   run in the A2 band above the latch with an open gap — the latch itself is deliberately NOT
-  gated on the stops toggle, it is mode-flap hygiene at 0 mph, not stop machinery.)
-
-  cesnochill2pnw: the NEW latch is likewise deliberately NOT gated on the stops toggle (same
-  rationale) — a steady creep (no a_ego) holds regardless of the toggle. A2's own stops-toggle
-  respect is verified underneath a genuine launch, where the new latch releases and A2 governs
-  unmasked."""
+  gated on the stops toggle, it is mode-flap hygiene at 0 mph, not stop machinery.)"""
   toggles = {**ALL_ON, "stops": False}
   sm = ConditionalExperimentalSwitching()
   run(sm, stopped_at_light(), 15.0)                          # slowLead entry (no stop machinery)
   assert sm.mode() == "experimental"
   sm.update_decision(stopped_at_light(model_should_stop=True, toggles=toggles), DT)  # arm the timer
-  modes = [sm.update_decision(a2_creep(model_should_stop=False, toggles=toggles), DT)
-           for _ in range(int(round(1.5 / DT)))]
-  assert all(m == "experimental" for m in modes)             # the new latch holds regardless
-
-  sm2 = ConditionalExperimentalSwitching()
-  run(sm2, stopped_at_light(), 15.0)
-  sm2.update_decision(stopped_at_light(model_should_stop=True, toggles=toggles), DT)
-  assert run(sm2, a2_creep(model_should_stop=False, toggles=toggles, a_ego=2.0), 1.5) == "chill"
+  assert run(sm, a2_creep(model_should_stop=False, toggles=toggles), 1.5) == "chill"
 
 
 # --- precedence: A1/A2 vs the pullaway exception -----------------------------------------------

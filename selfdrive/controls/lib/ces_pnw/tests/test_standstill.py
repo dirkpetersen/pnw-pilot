@@ -56,16 +56,9 @@ def ss_dropout(**kw):
 
 def rolling(v, drel, vlead=None, **kw):
   """Moving behind a lead, raw-INACTIVE (matched lead speed, highway spd_lim kills lowSpeed) —
-  only the standstill machinery can keep Experimental here.
-
-  cesnochill2pnw: defaults a_ego=2.0 — this helper represents the car ALREADY moving/launched to
-  `v` (every caller uses it as a post-stop or in-motion state, never a decel-to-a-stop), so a
-  positive a_ego is the physically honest signal for the new direction-aware latch (see
-  ces_pnw_constants.py's cesnochill2pnw block) and lets it release into whatever the OLDER,
-  already-tested standstill/release-hold machinery below decides — exactly mirroring what a real
-  CarState.aEgo reading would show during an actual launch."""
+  only the standstill machinery can keep Experimental here."""
   base = dict(v_ego=v, has_lead=True, lead_vlead=v if vlead is None else vlead, lead_drel=drel,
-              v_set=15.2, spd_lim=25.0, a_ego=2.0)
+              v_set=15.2, spd_lim=25.0)
   base.update(kw)
   return sig(**base)
 
@@ -106,10 +99,10 @@ def test_flapping_replay_standstill_lead_dropouts_zero_flips():
   flips = run_count_flips(sm, seq)
   assert sm.mode() == "experimental"
   assert flips == 1                      # exactly the one chill->experimental promotion
-  # cesnochill2pnw: v_ego is 0.0 for this whole replay, so the new direction-aware latch is armed
-  # from tick 1 and stays armed throughout — status is unconditionally "stopLatch" for the whole
-  # episode (masking the older slowLead/standstillHold tags underneath, by design: see the review
-  # note in ces_pnw_constants.py's cesnochill2pnw block on why status is unconditional while armed).
+  # cesnochill2pnw: v_ego is 0.0 for this whole replay, so the new pure-v_ego latch arms on tick 1
+  # and stays armed throughout — status is unconditionally "stopLatch" for the whole episode
+  # (masking the older slowLead/standstillHold tags underneath, by design: see the review note in
+  # ces_pnw_constants.py's cesnochill2pnw block on why status is unconditional while armed).
   assert sm.status() == "stopLatch"
 
 
@@ -184,10 +177,11 @@ def test_release_no_lead_keeps_stophold_behavior():
   red = sig(v_ego=0.0, model_should_stop=True, v_set=11.0)
   run(sm, red, 12.0)                                        # stopIntent fast-path entry + dwell
   assert sm.mode() == "experimental"
-  # cesnochill2pnw: a_ego=2.0 -- this IS a genuine departure (green, creeping away), so the new
-  # latch's own release condition (v > 0.8 AND a_ego > 0.1) fires on the very first tick, handing
-  # off to the OLDER A2 machinery below (unmasked) to prove ITS timing is intact underneath.
-  green = sig(v_ego=1.0, v_set=11.0, spd_lim=25.0, a_ego=2.0)   # rolling green: no lead, above the latch
+  # cesnochill2pnw: v_ego=1.4 is ABOVE NOCHILL_RELEASE_V(1.3) -- the new latch releases on the
+  # very first green tick, handing off to the OLDER A2 machinery below (unmasked) to prove ITS
+  # timing is intact underneath (a v=1.0 "rolling green" would still be inside the new latch's own
+  # hold band and could never independently demonstrate A2's timer).
+  green = sig(v_ego=1.4, v_set=11.0, spd_lim=25.0)          # rolling green: no lead, above the latch
   assert run(sm, green, 1.5) == "experimental"              # A2 window still holding
   assert sm.status() == "stopHold"                          # ...and it is A2, not the new machinery
   assert run(sm, green, 1.0) == "chill"                     # full 2 s clear: released as before
@@ -221,11 +215,11 @@ def test_promotion_bypasses_cooldown_at_standstill():
 
   cesnochill2pnw: superseded the old first assertion here. Pre-fix this read "chill" for the first
   ~0.3 s while the PROMOTE_LEAD_S debounce charged — a genuine chill tick at v_ego=0, exactly the
-  field bug class (drives/2026-08-15/tesla-redlight-jolt) the hard latch now closes. The latch (v_ego
-  and a_ego, no lead/debounce dependency) forces `experimental` from the very first tick instead,
-  tagged "stopLatch" UNCONDITIONALLY for the whole armed episode (v_ego stays 0 throughout, so the
-  latch never releases here — status no longer surfaces the underlying "slowLead" reason while
-  armed; see the review note in ces_pnw_constants.py's cesnochill2pnw block)."""
+  field bug class (drives/2026-08-15/tesla-redlight-jolt) the hard latch now closes. The latch (pure
+  v_ego predicate, no lead/debounce dependency) forces `experimental` from the very first tick
+  instead, tagged "stopLatch" UNCONDITIONALLY for the whole armed episode (v_ego stays 0 throughout,
+  so the latch never releases here — status no longer surfaces the underlying "slowLead" reason
+  while armed; see the review note in ces_pnw_constants.py's cesnochill2pnw block)."""
   sm = ConditionalExperimentalSwitching()
   assert sm.update_decision(ss_lead(), DT) == "experimental"   # latched immediately (v_ego == 0)
   assert run(sm, ss_lead(), 0.5) == "experimental"
@@ -272,16 +266,14 @@ def test_pullaway_deferred_while_release_hold_then_proceeds():
   sm = ConditionalExperimentalSwitching()
   run(sm, ss_lead(drel=12.0), 12.0)
   assert sm.mode() == "experimental"
-  # launch, lead opening (evidence-complete pullaway geometry) but gap still short: HELD.
-  # cesnochill2pnw: a_ego=2.0 -- a genuine launch to 3.0 m/s -- releases the new latch immediately,
-  # handing off to the OLDER release-hold machinery (unmasked) which is what this test verifies.
+  # launch, lead opening (evidence-complete pullaway geometry) but gap still short: HELD
   pull_near = sig(v_ego=3.0, has_lead=True, lead_vlead=5.5, lead_drel=15.0, v_set=15.2,
-                  lead_opening=True, a_ego=2.0)
+                  lead_opening=True)
   assert run(sm, pull_near, 1.5) == "experimental"
   assert sm.status() == "standstillHold"
   # gap opens past CLEAR_DREL at the same speed: hold disarms, pullaway Chill adoption proceeds
   pull_open = sig(v_ego=3.0, has_lead=True, lead_vlead=5.5, lead_drel=27.0, v_set=15.2,
-                  lead_opening=True, a_ego=2.0)
+                  lead_opening=True)
   assert run(sm, pull_open, 1.0) == "chill"
 
 
@@ -295,19 +287,16 @@ def test_latch_is_pure_speed_predicate_never_sticks_at_speed():
   run(sm, ss_dropout(), 2.0)   # nothing active
   run(sm, ss_lead(), 20.0)     # long latched standstill (dwell >> EXP_MIN, filter cycles)
   assert sm.mode() == "experimental"
-  # teleport to open-road cruise (worst case for a stuck latch): released within the filter decay.
-  # cesnochill2pnw: a_ego=2.0 -- a bare v_ego teleport with NO accompanying acceleration would (by
-  # design, fail-safe) leave the new latch armed forever; a real teleport-to-cruise in the field
-  # always comes with a genuine aEgo reading, which is what this represents.
-  assert run(sm, sig(v_ego=25.0, v_set=25.0, a_ego=2.0), 1.0) == "chill"
+  # teleport to open-road cruise (worst case for a stuck latch): released within the filter decay
+  assert run(sm, sig(v_ego=25.0, v_set=25.0), 1.0) == "chill"
 
 
 def test_latch_boundary():
   """Strictly below STANDSTILL_LATCH_V: the OLDER standstill2pnw latch itself would hold (still
   true underneath), but it's now masked by the cesnochill2pnw latch (armed the whole time here,
-  since v never exceeds its own, higher, RELEASE_V) -- status reads "stopLatch". At/above (moving,
-  with real a_ego via rolling()'s default): both latches release, and A2/the release hold may still
-  hold — isolated here with an open gap and a cleared A2 timer, same as before."""
+  since v never exceeds its own, higher, NOCHILL_RELEASE_V) -- status reads "stopLatch". At/above
+  NOCHILL_RELEASE_V (moving for real): both latches release, and A2/the release hold may still hold
+  — isolated here with an open gap and a cleared A2 timer, same as before."""
   below = rolling(C.STANDSTILL_LATCH_V - 0.01, drel=30.0, vlead=1.5)   # vlead > STOPPED_LEAD_V so
   at = rolling(C.STANDSTILL_LATCH_V + 1.2, drel=30.0)   # slowLead stays raw-inactive; `at` is
                                                         # above A2's STANDSTILL_HOLD_V too
