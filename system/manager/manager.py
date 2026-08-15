@@ -2,6 +2,7 @@
 import datetime
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -136,19 +137,27 @@ def manager_init() -> None:
   # ~20 MB map TILE set is Wi-Fi-gated (mapd_configd); the binary must always come back so
   # mapd can run, regardless of which network the device happens to be on.
   def _install_mapd():
-    from openpilot.system.mapd.installer import ensure_mapd, is_installed
+    from openpilot.system.mapd.installer import is_installed
     backoff = 10
     while True:
       try:
-        ensure_mapd()
-        cloudlog.warning("mapd installer: binary present")
-        return
+        # Run the installer in a SEPARATE PROCESS, not this thread. ensure_mapd() holds the
+        # download temp file open for writing for the whole fetch, and manager forks its Python
+        # children (multiprocessing) CONCURRENTLY with this background install. A forked child
+        # inherits that write-fd (fork copies fds; O_CLOEXEC only fires on exec, not fork), and
+        # after os.replace(tmp -> mapd) the child keeps the *binary* open for writing -> permanent
+        # ETXTBSY -> manager can never exec mapd (exit 126) on a fresh-install boot (the delete-
+        # everything-and-reboot recovery). A subprocess keeps that fd out of manager's fd table.
+        rc = subprocess.run([sys.executable, "-m", "openpilot.system.mapd.installer"],
+                            check=False, timeout=600).returncode
+        if rc == 0 or is_installed():
+          cloudlog.warning("mapd installer: binary present")
+          return
+        cloudlog.warning(f"mapd installer: exited {rc}; retrying in {backoff}s")
       except Exception as e:
         cloudlog.warning(f"mapd installer: {e}; retrying in {backoff}s")
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 300)   # cap at 5 min; network will come up eventually
-        if is_installed():                # another path installed it (or it appeared) -> done
-          return
+      time.sleep(backoff)
+      backoff = min(backoff * 2, 300)   # cap at 5 min; network will come up eventually
   threading.Thread(target=_install_mapd, name="mapd_installer", daemon=True).start()
 
   # Create folders needed for msgq
