@@ -78,8 +78,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // mapd2pnw: settings store for the official pfeiferj mapd v2.0.6 binary (JSON; the binary
     // reads/writes this directly and reloads it on a mapdIn reloadSettings message).
     {"MapdSettings", {PERSISTENT, JSON}},
-    // mapd2pnw: one-shot guard so the PNW map auto-download (WA/OR/ID) is requested only once.
-    {"MapdPnwMapsRequested", {PERSISTENT, BOOL}},
     // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, JSON}},
@@ -110,10 +108,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // DisableLaneCentering). manager_init() migrates an existing device's ShowSpeedLimit value into
     // this key once (see TogglesInvertedMigrated) so upgrading never flips anyone's live behavior.
     {"NoSpeedLimitDisplay", {PERSISTENT, BOOL, "0"}},
-    // mapd2pnw: "Get map for this location" on-demand download
-    {"GetMapForLocation", {PERSISTENT, BOOL, "0"}},      // the toggle — ON downloads the region under current GPS
-    {"MapForLocationRegion", {CLEAR_ON_MANAGER_START, STRING}},  // mapd_manager writes the region code under current GPS (for the UI to display/gate); "" = covered/unknown
-    {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_manager writes True when current GPS is already covered by a downloaded map (UI greys the toggle)
+    // mapdstate2pnw: "Refresh this location map" — deletes the current region's downloaded tiles so
+    // the GPS-driven auto-download (mapd_configd.py) re-fetches it fresh. Replaces the old on-demand
+    // "Get map for this location" toggle now that coverage downloads itself automatically.
+    {"RefreshLocationMap", {PERSISTENT, BOOL, "0"}},      // the toggle — ON deletes+re-arms the download for the current region
+    {"MapForLocationCovered", {CLEAR_ON_MANAGER_START, BOOL}},   // mapd_configd.py writes True when current GPS is already covered by a downloaded map (UI enables the Refresh toggle only when covered)
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},  // mapd2xnor: OSM map download needed alert
     {"NudgelessLaneChange", {PERSISTENT, BOOL, "0"}},  // LEGACY (toggles-invert2pnw): superseded by NudgeForLaneChange below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
     // toggles-invert2pnw: opt-out sibling of NudgelessLaneChange -- default OFF = nudge NOT required,

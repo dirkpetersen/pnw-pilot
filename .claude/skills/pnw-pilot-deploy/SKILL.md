@@ -497,7 +497,8 @@ never-persist-MOCK fix in `card.py` keeps a flaky read from overwriting the good
   `CLEAR_ON_MANAGER_START`. Reading a PERSISTENT key from the mem store returns False forever.
 - **soundd is safety-critical**: only guarded, isolated additions; deploy sound changes WITH the user
   (can't audio-verify remotely).
-- **mapd boot-wedge** = usually INCOMPLETE OSM data; completing the WA/OR/ID download fixes it.
+- **mapd boot-wedge** = usually INCOMPLETE OSM data; letting the current-state auto-download finish
+  (or triggering "Refresh this location map" to force a clean re-download) fixes it.
 - Map DATA (`/data/media/0/osm`) + caches (`/data/pnw/location/`, incl. the police-proxy KEY file that
   must never enter the repo) live OUTSIDE the tree and survive resets; a FACTORY reset wipes them.
 

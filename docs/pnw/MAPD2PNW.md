@@ -1,5 +1,19 @@
 # MAPD2PNW — foundational mapd infrastructure for PNW (on-demand per-location download)
 
+> # ⛔ SUPERSEDED — see `MAPD-SYSTEM.md`
+> Everything below is a **historical record** of the original `mapd2pnw` branch (v0.11.2 lineage,
+> never deployed): the bundled v1 binary, the `sunnypilot/mapd/mapd_manager.py` bridge, its fixed
+> `OsmStateName="WA,OR,ID"` default, and its Priority-WiFi-gated download. **None of that ships
+> today.** The deployed system is the v2.0.6 binary + `system/mapd/mapd_configd.py` (see
+> `MAPD-SYSTEM.md`), and as of `mapdstate2pnw` the download policy itself has also changed: coverage
+> is no longer a fixed default state list — `mapd_configd` downloads whichever state (or, outside the
+> US, nation) the car's GPS fix is currently uncovered in, on any network, every time it detects a new
+> uncovered region. `GetMapForLocation` / `MapForLocationRegion` (the params this doc describes below)
+> are gone; `RefreshLocationMap` (repurposed from `GetMapForLocation`) now means "delete my current
+> map so it re-downloads", not "let me request a download". The `coverage.py` / `regions.json` design
+> described here DID get re-ported (`system/mapd/coverage.py`), verbatim in its GPS-resolution logic —
+> that part of this doc is still an accurate description of how region lookup works.
+
 **Branch:** `mapd2pnw` (off `pnwtest3`, openpilot v0.11.2). **Foundational** — CES (map-curve half) and
 the speed-limit warning **depend on this branch**. Built but NOT deployed; device untouched.
 
@@ -54,10 +68,15 @@ on-demand toggle sidesteps this: you download whatever region you're physically 
   Verified coverage logic: Seattle→WA, Portland→OR, Boise→ID(Idaho), Vancouver/Calgary→CA(Canada),
   mid-Pacific→None(inactive).
 
-## Params added
+## Params added (historical — see the SUPERSEDED banner above for current names)
 `GetMapForLocation` (BOOL, the toggle) · `MapForLocationRegion` (STRING, cleared on manager start) ·
 `MapForLocationCovered` (BOOL, cleared on manager start) · `ShowSpeedLimit` (BOOL "0", registered here
 as the foundation; consumed by the speed-limit display).
+
+**Today:** `GetMapForLocation` and `MapForLocationRegion` no longer exist (removed, mapdstate2pnw —
+nothing read `MapForLocationRegion` even before removal). `MapForLocationCovered` survives, repurposed
+as the greyout for `RefreshLocationMap`. `ShowSpeedLimit` survives only as a migration source for its
+opt-out successor `NoSpeedLimitDisplay`.
 
 ## Dependency chain
 `network2xnor` (priority WiFi) → **`mapd2pnw`** (this) → CES map-curve half + speed-limit warning.

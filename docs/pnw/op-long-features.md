@@ -118,7 +118,7 @@ Rows marked **[long-independent]** behave the same regardless of Alpha Long.
 | Feature | Notes |
 |---|---|
 | **Driver monitoring** — `DmMode` Default/Highway(road-gated via mapd)/Relaxed(hidden until CLI-unlocked), dual-counter architecture, `/data/pnw/dm.json` magnitudes, glare Layer-C knobs | identical on both cars; independent of who owns gas/brake |
-| **mapd / OSM** — speed-limit + road-name display, PNW auto-download (WA/OR/ID), persistent binary + self-heal watchdog, NaN guards, OSM-limit change flash (speedlimitdebug) | display + data source for MTSC/ICBM/speedadjust/DM road gate |
+| **mapd / OSM** — speed-limit + road-name display, GPS-driven on-demand whole-state auto-download (whatever state you're currently in), persistent binary + self-heal watchdog, NaN guards, OSM-limit change flash (speedlimitdebug) | display + data source for MTSC/ICBM/speedadjust/DM road gate |
 | **"Happening Ahead"** — police (keyless Waze proxy), rest areas, EV chargers | display-only daemon |
 | **Uploads / networking** — two-pass, firehose, defer-HD, tethering, captive portal, locator | no control surface |
 | **Auto-recalibrate on car swap, fingerprint hardening, card crash-restart, auto-update channel** | infrastructure, both cars |

@@ -24,9 +24,9 @@ commaai/openpilot          upstream
 
 ### Focus
 
-- **Region:** map data ships for **Washington, Oregon, and Idaho** by default — the first map
-  download auto-arms on a fresh device, no settings page required. (British Columbia is optional
-  and can be added to the state list.)
+- **Region:** map data downloads automatically for whatever state (or, outside the US, country) you're
+  currently in, the moment you're somewhere uncovered — no fixed default region, no settings page
+  required, works anywhere you actually drive.
 - **Drives:** predominantly **Seattle ↔ central-western Oregon** on I-5; curve and
   longitudinal behavior is calibrated against real drive logs from that corridor (plus I-90
   Snoqualmie Pass and US-12).
@@ -116,8 +116,8 @@ commaai/openpilot          upstream
 
 - **OSM speed limits + curve speeds** — [pfeiferj/mapd](https://github.com/pfeiferj/mapd) provides
   posted speed limits (with lower-limit warnings on screen) and the map-curvature feed used by the
-  curve slow-down features. Map data for **Washington, Oregon, and Idaho** downloads automatically
-  on first launch.
+  curve slow-down features. Map data for whichever state (or country, outside the US) you're
+  currently driving in downloads automatically the moment it's needed.
 - **"Happening Ahead" overlay** — on freeways, a lower-left panel shows the nearest **police
   report** (Waze), **rest area**, and **EV fast charger** ahead along your route (nearest-anything
   within 3 mi on surface streets). Display-only — it never affects steering or speed.

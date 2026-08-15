@@ -1,10 +1,28 @@
 # MAPD-SYSTEM.md — the AS-DEPLOYED mapd architecture (PNW production)
 
-> # 🟢 DEPLOYED — `4devpnw` branch (`~/gh/comma/pnw/pnw-pilot`)
+> # 🟢 DEPLOYED — `mapdstate2pnw` branch (`~/gh/comma/pnw/pnw-pilot`)
 > Official **pfeiferj `mapd` v2.0.6** binary, downloaded-at-launch to a persistent path, publishing
-> everything over **cereal** (`mapdOut` / `mapdExtendedOut`), with a thin `mapd_configd` bridge that
-> re-exports the legacy in-memory params CES/VTSC/overlays still read. Speed-limit **display** works as
-> soon as maps are on disk; speed/curve **control** is opt-in and defaults OFF.
+> everything over **cereal** (`mapdOut` / `mapdExtendedOut`), with a `mapd_configd` bridge that
+> re-exports the legacy in-memory params CES/VTSC/overlays still read AND drives the map-DOWNLOAD
+> policy: GPS-driven, on-demand, whole-STATE. Speed-limit **display** works as soon as maps are on
+> disk; speed/curve **control** is opt-in and defaults OFF.
+
+## Download policy (mapdstate2pnw, supersedes the fixed-state auto-download below)
+
+Coverage is no longer a fixed default state set. Each loop, `mapd_configd.py` checks whether mapd has
+a tile loaded for the car's current GPS fix. As soon as it doesn't (a fresh device, or the car just
+crossed into a state with no map data), it downloads the **whole state the car is currently in** — on
+any network, metered or not. It never downloads a tiny per-tile area (that would leave the driver
+stranded a few miles outside the tile) and never downloads the whole US as a single "country" (a US
+fix always resolves to its enclosing state, never the national box). A fix outside the US falls back
+to the enclosing **nation** (mapd has no province-level granularity, so e.g. British Columbia pulls
+the whole-Canada nation download). Region resolution is done in openpilot
+(`system/mapd/coverage.py` + `regions.json` — see below), not by the binary.
+
+The old "Get map for this location" on-demand toggle is gone; its param is repurposed as **"Refresh
+this location map"** — an action that deletes the current region's downloaded tiles so the automatic
+uncovered-state download re-fetches them (for a stale/corrupted map), rather than a way to request a
+download that now happens automatically.
 
 ## Supersedes `MAPD2XNOR.md` / `MAPD2PNW.md`
 
@@ -12,13 +30,13 @@ Those docs describe an **obsolete** architecture and should not be trusted for t
 
 | Old (MAPD2XNOR / MAPD2PNW) | Now (this doc) |
 |---|---|
-| `sunnypilot/mapd/mapd_manager.py` bridge + `coverage.py`/`regions.json` | `system/mapd/mapd_configd.py` bridge; region resolution moved **into** the v2 binary |
+| `sunnypilot/mapd/mapd_manager.py` bridge + `coverage.py`/`regions.json` | `system/mapd/mapd_configd.py` bridge; `system/mapd/coverage.py` + `regions.json` (re-ported, mapdstate2pnw) resolve GPS -> region + download key in openpilot; the binary still owns tile storage/download protocol and `tileLoaded` |
 | Bundled ~9.4 MB **v1** binary in `third_party/mapd_pfeiferj/mapd` (committed to git) | **v2.0.6** binary NOT in git; downloaded-at-launch, sha256-verified, pinned in `mapd_release.json` |
 | Wrote `liveMapDataSP` (cereal `CustomReserved8 → LiveMapDataSP`) | Publishes `mapdOut` / `mapdExtendedOut`; **legacy `liveMapDataSP` removed** (`cereal/services.py:109`) |
 | Path: `sunnypilot/mapd/` | Path: `system/mapd/` (symlinked into the `openpilot` package on-device) |
-| Sunnypilot coverage writer computed map coverage in Python | Coverage comes from the binary's `mapdOut.tileLoaded`; `mapd_configd` just relays it |
+| Sunnypilot coverage writer computed map coverage in Python | `mapdOut.tileLoaded` still tells `mapd_configd` whether the current fix is covered; `mapd_configd` now ALSO decides (in Python, via `coverage.py`) which state/nation to request or delete when it isn't |
 
-Everything below reflects the code actually on `4devpnw`. Where the code is ambiguous I say so.
+Everything below reflects the code actually on the branch. Where the code is ambiguous I say so.
 
 ---
 
@@ -36,7 +54,8 @@ mapd_release.json  ──(url+sha256)──►  installer.py  ──►  /data/m
                                                               │
                         writes /dev/shm/params: LastGPSPosition, MapSpeedLimit,
                         RoadName, WayRef, RoadContext, MapTargetVelocities, MapDownloadStatus
-                        writes /data/params:   MapForLocationCovered, MapdPnwMapsRequested
+                        writes /data/params:   MapForLocationCovered
+                        reads system/mapd/coverage.py + regions.json (GPS -> region + download key)
                                                               │
    consumers ──►  speed_limit.py (UI, reads mapdOut)   ·   longitudinal_planner (mapdOut.suggestedSpeed cap)
                   vtsc_pnw (reads MapTargetVelocities)  ·   ces_pnw (reads mem map params)
@@ -74,11 +93,14 @@ NativeProcess("mapd", "selfdrive", ["/usr/bin/env", "USE_MSGQ_PREFIX=true", MAPD
 ```
 
 Self-contained Go binary (upstream source for context/link only: `~/gh/comma/mapd`,
-`github.com/pfeiferj/mapd`). It owns OSM tile storage (`/data/media/0/osm/offline`), the download
-protocol, and **region resolution** (previously done in the deleted sunnypilot `coverage.py`). It
-publishes `mapdOut` (primary driving output, 20 Hz) and `mapdExtendedOut` (download progress + curve
-path, 1 Hz), and subscribes `mapdIn` (settings + download/trigger commands). All ship with speed/curve
-**control disabled** by default; it downloads no maps on its own.
+`github.com/pfeiferj/mapd`). It owns OSM tile storage (`/data/media/0/osm/offline`) and the download
+protocol (fetch + extract a `download_menu.json` region key, e.g. `us_state.WA` / `nation.CA`, into
+2°-grid tile directories under `offline/<lat>/<lon>/`); openpilot's `coverage.py` (mapdstate2pnw) does
+GPS -> region + download-key resolution and decides WHEN to ask for a download or delete. It publishes
+`mapdOut` (primary driving output, 20 Hz, incl. `tileLoaded` — whether it has a tile for the current
+fix) and `mapdExtendedOut` (download progress + curve path, 1 Hz), and subscribes `mapdIn` (settings +
+download/trigger commands). All ship with speed/curve **control disabled** by default; it downloads no
+maps on its own — every download is a `mapdIn` request from `mapd_configd`.
 
 ### 3. The bridge — `system/mapd/mapd_configd.py`
 
@@ -91,16 +113,22 @@ A small `always_run` daemon (`process_config.py:122`, TICI-only) that does three
    `MapTargetVelocities` (from `mapdExtendedOut.path` — the per-point curve list VTSC/CES consume)
    (`mapd_configd.py:63-84`).
 2. **Download status + coverage.** Publishes `MapDownloadStatus` (`"OK"`/`"downloading X/Y"`/`"incomplete
-   X/Y"`/`"none"`) for the debug overlay (`mapd_configd.py:86-103`), and `MapForLocationCovered` — the
-   greyout for the "Get map for this location" toggle: covered = no GPS fix OR `mapdOut.tileLoaded`,
-   written only on change (`mapd_configd.py:105-116`). **This replaces the deleted sunnypilot coverage
-   writer.**
-3. **One-shot PNW map auto-download.** On the first unmetered Wi-Fi connection it sends a `mapdIn`
-   download for `us_state.WA,us_state.OR,us_state.ID` (`PNW_DOWNLOAD`, `mapd_configd.py:24`), guarded by
-   `MapdPnwMapsRequested` so it fires once. It re-sends each loop until `mapdExtendedOut.downloadProgress`
-   shows the pull started (messages can be missed before mapd's `mapdIn` socket is up), then sets the
-   guard (`mapd_configd.py:119-141`). It is the **only** `mapdIn` publisher, and it **never enables
-   control** — only display/download.
+   X/Y"`/`"none"`) for the debug overlay, and `MapForLocationCovered` — now the greyout for the
+   **"Refresh this location map"** toggle (enabled only when covered, since there's nothing to refresh
+   otherwise): covered = no GPS fix OR `mapdOut.tileLoaded`, written only on change. **This replaces the
+   deleted sunnypilot coverage writer.**
+3. **GPS-driven, on-demand, whole-STATE auto-download (mapdstate2pnw).** Each loop, if there's a GPS
+   fix but no tile loaded ("uncovered"), it resolves the region under the fix via `coverage.
+   region_and_key_for_gps()` (`system/mapd/coverage.py` + `regions.json`, ported from the deleted
+   sunnypilot module) and sends a `mapdIn` download for that region's key (`us_state.<CODE>` for a US
+   state, `nation.<CODE>` for a non-US fix — **never** the whole US as a country: `region_for_gps`
+   structurally excludes the "US" nation box). It requests on **any** network — no unmetered-Wi-Fi gate
+   — and re-arms whenever a *different* region goes uncovered, or the region has been uncovered for over
+   `REGION_RESEND_INTERVAL_S` (60 s, a bounded retry in case a request got missed), but never while a
+   download is already `active`. It is the **only** `mapdIn` publisher, and it **never enables control**
+   — only display/download. The **"Refresh this location map" toggle** (`RefreshLocationMap` param)
+   deletes the current region's tile directories (via `_grid_cells_for_bbox` — mirrors the binary's own
+   2°-grid tile layout) when triggered, so this same auto-download logic re-fetches it.
 
 ### 4. Consumers
 
@@ -118,17 +146,15 @@ A small `always_run` daemon (`process_config.py:122`, TICI-only) that does three
 | Key | Type / default | Purpose |
 |---|---|---|
 | `MapdSettings` | JSON, no default | The v2 binary's settings store — **the binary reads/writes it directly** and reloads on a `mapdIn reloadSettings`. All speed/curve controls live here and default OFF (`params_keys.h:77-79`) |
-| `MapdPnwMapsRequested` | BOOL, unset(false) | One-shot guard: the PNW WA/OR/ID auto-download is requested only once (`params_keys.h:80-81`) |
 | `RoadName` | STRING | mapd road name, bridged to mem params (`params_keys.h:85`) |
 | `WayRef` | STRING | mapd road ref (e.g. `"I 5"`) bridged to mem (`params_keys.h:86`) |
 | `RoadContext` | STRING | Road class `'freeway'`/`'city'`/`'unknown'` — freeway-gates location lookups (`params_keys.h:87`). NB: `mapd_configd` writes `str(mo.roadContext)`, i.e. the enum's numeric value, not the name — see gotcha |
 | `MapDownloadStatus` | STRING, CLEAR_ON_MANAGER_START | Live OSM DB download state for the debug overlay (`params_keys.h:88`) |
-| `OsmStateName` | STRING, **`"WA,OR,ID"`** | Default coverage — **2-letter codes** (the binary's STATE_BOXES key), NOT full names (`params_keys.h:92`) |
+| `OsmStateName` | STRING, **`"WA,OR,ID"`** | **Dead param** — leftover from the pre-v2.0.6 `mapd_manager` era; nothing in the current tree reads it. Coverage is now decided per-fix by `coverage.region_and_key_for_gps()`, not by a configured default list |
 | `OSMDownloadLocations` | JSON | Requested OSM download locations (`params_keys.h:95`) |
 | `ShowSpeedLimit` | BOOL, **`"0"`** | Speed-limit display toggle; default OFF (`params_keys.h:99`) |
-| `GetMapForLocation` | BOOL, **`"0"`** | "Get map for this location" — ON downloads the region under current GPS (`params_keys.h:101`) |
-| `MapForLocationRegion` | STRING, CLEAR_ON_MANAGER_START | Region code under current GPS; `""` = covered/unknown (`params_keys.h:102`) |
-| `MapForLocationCovered` | BOOL, CLEAR_ON_MANAGER_START | True when current GPS is already covered → UI greys the toggle. Written by `mapd_configd` (`params_keys.h:103`) |
+| `RefreshLocationMap` | BOOL, **`"0"`** | "Refresh this location map" — ON deletes the current region's downloaded tiles so the auto-download re-fetches it. Repurposed from the old "Get map for this location" (`params_keys.h:113`) |
+| `MapForLocationCovered` | BOOL, CLEAR_ON_MANAGER_START | True when current GPS is already covered → UI enables the Refresh toggle only then (inverted from the old on-demand-download greyout). Written by `mapd_configd` (`params_keys.h:116`) |
 | `OsmLocationName` | STRING | Named OSM location (`params_keys.h:91`) |
 | `OsmDbUpdatesCheck` | BOOL | OSM DB update check flag (`params_keys.h:89`) |
 | `OsmDownloadedDate` | STRING | Last OSM download date (`params_keys.h:90`) |
@@ -186,10 +212,10 @@ binary's `settings/const.go` `QUEUE_SIZE_MEDIUM`:
 - **Arming control:** `MapdSettings` (JSON, all controls default OFF) is what enables speed-limit / map
   / vision curve *control*. Display (`ShowSpeedLimit`) and map curves in VTSC (`VtscMapCurves`) are
   independent of it.
-- **First-run map download:** `mapd_configd` fires the WA/OR/ID one-shot on first unmetered Wi-Fi,
-  guarded by `MapdPnwMapsRequested`. Re-arm by resetting that param to 0 (re-read each loop, no restart
-  needed). On-demand region download is driven by `GetMapForLocation` (greyed via `MapForLocationCovered`
-  when already covered).
+- **Map download:** `mapd_configd` downloads the state (or nation) the car is currently in as soon as it
+  detects it's uncovered — no settings-page action needed, on any network. Re-arms automatically on
+  every fresh uncovered region; "Refresh this location map" (`RefreshLocationMap`, enabled only when
+  `MapForLocationCovered`) deletes the current region's tiles to force a clean re-download.
 
 ---
 
@@ -201,10 +227,15 @@ binary's `settings/const.go` `QUEUE_SIZE_MEDIUM`:
    context (observed I-82, 2026-07-06). Fixed by forcing `USE_MSGQ_PREFIX=true` in the exec
    (`process_config.py:117-121`), which matches this tree's `msgq.cc` (`/dev/shm/msgq_<name>`). Fix
    commit: **`2fc78f0fbd`** ("glare2pnw + mapd msgq prefix: … force mapd shm prefix").
-2. **Region resolution moved into the binary.** The old sunnypilot `coverage.py` / `regions.json` (US
-   states vs. nations, the BC-is-whole-of-Canada problem) is gone from openpilot; the v2 binary owns the
-   region table and download protocol. Openpilot only passes `us_state.XX` download keys and reads
-   `tileLoaded`/`downloadProgress` back.
+2. **Region resolution is back in openpilot (mapdstate2pnw).** `system/mapd/coverage.py` +
+   `regions.json` (US states vs. nations, the BC-is-whole-of-Canada problem) are re-ported from the
+   deleted sunnypilot module — the binary still owns tile storage/the download protocol/`tileLoaded`,
+   but openpilot now decides WHICH region to request or delete. **Collision gotcha:** the states and
+   nations tables share 20 two-letter codes (`CA` = California AND Canada, `ID` = Idaho AND Indonesia,
+   …) — `coverage.region_and_key_for_gps()` resolves this correctly by tracking which table matched
+   during the lookup; re-deriving "is this a US state?" from a bare region code afterward (e.g. via
+   `is_us_state(code)`) silently picks the wrong one for those 20 codes and is deliberately documented
+   as unsafe to use that way.
 3. **`RoadContext` param is the enum's numeric value, not its name.** `mapd_configd` writes
    `str(mo.roadContext)` (`mapd_configd.py:76`), so the `RoadContext` param holds `"0"`/`"1"`/`"2"`
    (freeway/city/unknown), while the `params_keys.h:87` comment describes it as
