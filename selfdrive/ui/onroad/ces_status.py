@@ -152,6 +152,21 @@ def _i(v, d: int = 0) -> int:
     return d
 
 
+def _dl_pct(mdl: str) -> str:
+  """mapd2pnw: format MapDownloadStatus 'downloading X/Y' / 'incomplete X/Y' as a compact
+  'dl NN%' / 'inc NN%'. The raw 'dl X/Y' overflowed the width budget (_GRID_L_VALUES 'dl 000%')
+  and got chopped to garbage ('dl 234/4'); a percentage fits and reads cleanly. Non-download
+  states ('OK'/'none'/'down') pass through unchanged."""
+  for word, tag in (("downloading", "dl"), ("incomplete", "inc")):
+    if mdl.startswith(word):
+      try:
+        done, total = mdl.split(" ", 1)[1].split("/")
+        return f"{tag} {round(int(done) / int(total) * 100)}%" if int(total) else tag
+      except (ValueError, IndexError, ZeroDivisionError):
+        return tag
+  return mdl
+
+
 def _dots_w(fs: float, n: int) -> float:
   """Width the health-dot strip adds after a line's text (lead gap + n dots + gaps between)."""
   if n <= 0:
@@ -542,7 +557,7 @@ class CesStatusRenderer(Widget):
     if pts == 0:
       mdl = self._mapdl
       if mdl.startswith("downloading"):
-        out.append((f"map-DB {mdl.replace('downloading', 'dl')[:8]}", _C.ORANGE, self.font, None))
+        out.append((f"map-DB {_dl_pct(mdl)}", _C.ORANGE, self.font, None))
       else:
         out.append(("map no-data", _C.RED, self.font, None))
     elif not bool(st.get("gps", False)):
@@ -583,7 +598,7 @@ class CesStatusRenderer(Widget):
       db_cell = ("DB", "--", _C.GREY)
     else:
       col = _C.GREEN if mdl == "OK" else (_C.ORANGE if mdl.startswith("downloading") else _C.RED)
-      disp = mdl.replace("downloading", "dl")
+      disp = _dl_pct(mdl)
       if len(disp) > 7:
         disp = disp[:6] + "…"                 # visible ellipsis, never a silent mid-word chop
       db_cell = ("DB", disp, col)
