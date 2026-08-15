@@ -47,7 +47,12 @@ PYTHONPATH precedes the venv site-packages, so the overlay intentionally shadows
 native-dep wheels (bzip2 1.0.8, capnproto 1.0.1, eigen 3.4.0, libjpeg 3.1.0, libyuv 1922.0,
 ncurses 6.5, zeromq 4.3.5, zstd 1.5.6 — static libs+headers), raylib 5.5.0.2
 (commaai/raylib-python-cffi release 8 — the exact 17.2 artifact), casadi 3.7.2, crcmod-plus 2.3.1,
-xattr 1.3.0, pyserial 3.5, json-rpc 1.15.0.
+xattr 1.3.0, pyserial 3.5, json-rpc 1.15.0, **plus the aiohttp 3.13.3 + av 16.1.0 closure**
+(multidict/yarl/frozenlist/aiosignal/attrs/propcache/aiohappyeyeballs + typing_extensions 4.15.0):
+manager's `prepare()` pre-imports `webrtcd`/`bodyteleop` (notcar, but `enabled=True`) which do
+`from aiohttp import web` at module top, so those must import even though they never *run* on a car.
+(`webcamerad`→cv2 needs nothing — it's `enabled=WEBCAM=False`, and `PythonProcess.prepare()` skips
+disabled procs.)
 
 > **⚠️ ffmpeg is deliberately NOT overlaid** (learned on the first on-car build). The
 > commaai/dependencies ffmpeg wheel is the *off-device* build with VAAPI compiled into
@@ -103,6 +108,15 @@ ssh comma@$COMMA_IP 'sudo rm -rf /data/safe_staging/finalized; touch /tmp/booted
 - manager PIDs stable (not cycling); UI up; no exception in `tmux capture-pane -t comma -p`.
 - `du -h selfdrive/modeld/models/*.onnx` — MB-scale, not byte-size LFS pointers (else `git lfs pull`).
 - `git submodule status` — no `-` (uninitialized) or `+` (wrong SHA) rows; all six at pnw SHAs.
+
+## First-boot gotchas (observed on the real deploy)
+- **`/data/dirk/` is absent after an installer reinstall** (it's normally created by the root deploy
+  toolchain, not the installer). `system/location_services/location_servicesd.py` (NON_ESSENTIAL
+  overlay) hard-opens `/data/dirk/net_events.jsonl` and crash-loops if it's missing. Quick unblock:
+  `mkdir -p /data/dirk && touch /data/dirk/net_events.jsonl`. (Proper fix belongs in that daemon —
+  tolerate a missing file — and is unrelated to AGNOS.)
+- **First build takes ~10–20 min** and the screen stays on the AGNOS splash the whole time — that is
+  the build, not a hang. `pgrep scons` on the device confirms progress.
 
 ## Caveats / follow-ups
 - **Auto-update:** this must stay merged into `3devpnw` (the one own-car device, already on 19.6), or

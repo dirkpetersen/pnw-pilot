@@ -56,6 +56,19 @@ for u in "${URLS[@]}"; do
   curl -fsSL "$u" -o "$f"
   unzip -oq "$f" -d "$SP"
 done
+# PyPI closure that needs DEP resolution: aiohttp + av are imported by the notcar/dev processes
+# (webrtcd/bodyteleop/webcamerad) that manager still preimports in prepare(). pip resolves
+# aiohttp's tree (multidict/yarl/frozenlist/aiosignal/attrs/propcache/aiohappyeyeballs) +
+# typing_extensions. Versions pinned to 3devpnw's uv.lock.
+python3 -m pip download --only-binary=:all: --no-deps \
+  --platform manylinux2014_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux_2_28_aarch64 --platform any \
+  --python-version 3.12 --implementation cp --implementation py --abi cp312 --abi abi3 --abi none \
+  aiohttp==3.13.3 av==16.1.0 multidict==6.7.1 yarl==1.23.0 frozenlist==1.8.0 aiosignal==1.4.0 \
+  attrs==25.4.0 propcache==0.4.1 aiohappyeyeballs==2.6.1 typing_extensions==4.15.0 -d "$WHEELS"
+for f in "$WHEELS"/{aiohttp,av,multidict,yarl,frozenlist,aiosignal,attrs,propcache,aiohappyeyeballs,typing_extensions}*.whl; do
+  [ -f "$f" ] && unzip -oq "$f" -d "$SP"
+done
+
 # Replicate the wheel .data scheme (what pip does): hoist purelib/platlib to the root
 shopt -s nullglob
 for d in "$SP"/*.data; do
@@ -67,7 +80,8 @@ rm -rf "$SP"/*.dist-info "$SP/dummy.txt"
 # Sanity: every module SConstruct/UI/MPC/runtime needs must resolve at top level
 missing=0
 # ffmpeg intentionally excluded (comes from the venv — see NOTE above)
-for m in bzip2 capnproto eigen libjpeg libyuv ncurses zeromq zstd casadi crcmod jsonrpc pyray raylib serial xattr; do
+for m in bzip2 capnproto eigen libjpeg libyuv ncurses zeromq zstd casadi crcmod jsonrpc pyray raylib \
+         serial xattr aiohttp av multidict yarl frozenlist aiosignal attr propcache aiohappyeyeballs typing_extensions; do
   [ -e "$SP/$m" ] || [ -e "$SP/$m.py" ] || { echo "MISSING module: $m"; missing=1; }
 done
 [ "$missing" = 0 ] || { echo "!! overlay incomplete — aborting"; exit 1; }
