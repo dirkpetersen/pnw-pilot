@@ -79,6 +79,17 @@ function launch {
   # shared ffmpeg) with the 5.5 / static builds this 0.11.1 tree is written against.
   export PYTHONPATH="$PWD:/data/pnw/agnos19-compat/site-packages"
 
+  # agnos19-compat: SELF-PROVISION the overlay on a from-scratch install (a factory reset wipes
+  # /data, and there is no SSH to stage it by hand). The overlay tarball is bundled in the repo
+  # via git-LFS, so the installer's clone already carries it; extract it here — BEFORE build.py
+  # imports bzip2/casadi/pyray — if /data has no overlay yet. No network, no pip. See AGNOS19-COMPAT.md.
+  if [ ! -d /data/pnw/agnos19-compat/site-packages ] && [ -f "$DIR/agnos19-compat/overlay.tar.zst" ]; then
+    echo "agnos19-compat: staging venv overlay from bundled tarball..."
+    mkdir -p /data/pnw/agnos19-compat
+    tar --zstd -xf "$DIR/agnos19-compat/overlay.tar.zst" -C /data/pnw/agnos19-compat 2>/dev/null \
+      || zstd -dc "$DIR/agnos19-compat/overlay.tar.zst" | tar -xf - -C /data/pnw/agnos19-compat
+  fi
+
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
