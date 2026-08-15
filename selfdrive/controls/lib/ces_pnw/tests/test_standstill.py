@@ -201,20 +201,40 @@ def test_dwell_expiry_works_again_at_speed_after_standstill_episode():
 
 def test_promotion_bypasses_cooldown_at_standstill():
   """Fresh Chill machine (dwell 0 — the 5 s cooldown blocks every normal entry) stopped behind a
-  lead: promoted in ~PROMOTE_LEAD_S, not CHILL_MIN_DWELL_S + filter."""
+  lead: promoted in ~PROMOTE_LEAD_S, not CHILL_MIN_DWELL_S + filter.
+
+  cesnochill2pnw: superseded the old first assertion here. Pre-fix this read "chill" for the first
+  ~0.3 s while the PROMOTE_LEAD_S debounce charged — a genuine chill tick at v_ego=0, exactly the
+  field bug class (drives/2026-08-15/tesla-redlight-jolt) the hard latch now closes. The latch (pure
+  v_ego predicate, no lead/debounce dependency) forces `experimental` from the very first tick
+  instead, tagged "stopLatch" until the real trigger (slowLead) takes over the tag once the ladder
+  itself agrees."""
   sm = ConditionalExperimentalSwitching()
-  assert run(sm, ss_lead(), 0.3) == "chill"                 # debounce still charging
-  assert run(sm, ss_lead(), 0.5) == "experimental"          # promoted at ~0.5-0.8 s total
+  assert sm.update_decision(ss_lead(), DT) == "experimental"   # latched immediately (v_ego == 0)
+  assert run(sm, ss_lead(), 0.5) == "experimental"
   assert sm.status() == "slowLead"                          # tagged with the real trigger
 
 
 def test_promotion_requires_sustained_lead_not_radar_ghost():
-  """A flickering radar ghost at standstill (lead alternating every tick) must NOT promote:
-  the debounce needs CONTINUOUS presence, and the normal path's filter never charges at 50% duty."""
+  """A flickering radar ghost at standstill (lead alternating every tick) must NOT spuriously
+  promote VIA THE LEAD-EVIDENCE PATH — the debounce needs CONTINUOUS presence, and the normal
+  path's filter never charges at 50% duty.
+
+  cesnochill2pnw: mode() itself can no longer be "chill" here regardless — v_ego is 0.0 in BOTH
+  ss_lead() and ss_dropout(), so the hard speed-only latch forces `experimental` on tick 1 (the
+  standstill PROMOTE debounce never gets the chance to run: driver directive is never chill while
+  stopped, full stop). Once latched, the state machine's own "already experimental" pass-through
+  (update_decision_core: `if status != "chill": self._status = status`) legitimately re-tags every
+  ss_lead() tick "slowLead" — that tag is real (decide_active does see a raw slowLead condition
+  every other tick), just reached a different way (the latch, not the PROMOTE_LEAD_S debounce).
+  The debounce-defeat property the old assertion protected is now: mode is NEVER chill, and dwell
+  never reaches EXP_MIN_DWELL_S from this 50%-duty flicker alone (verified below) — i.e. nothing
+  about the ghost's timing could independently sustain Experimental without the latch."""
   sm = ConditionalExperimentalSwitching()
   for i in range(int(8.0 / DT)):
     sm.update_decision(ss_lead() if i % 2 == 0 else ss_dropout(), DT)
-  assert sm.mode() == "chill"
+  assert sm.mode() == "experimental"          # latched (v_ego == 0 throughout) -- never chill
+  assert sm._dwell < C.EXP_MIN_DWELL_S        # the flicker itself never built real dwell evidence
 
 
 def test_promotion_only_at_standstill():

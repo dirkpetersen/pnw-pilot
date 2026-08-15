@@ -1351,6 +1351,10 @@ class ConditionalExperimentalSwitching:
                                  #   lead=False; only a SEEN gap > CLEAR_DREL clears it)
     self._release_hold = False   # armed at the release tick when _ss_close_lead; holds Experimental
                                  #   until v > STANDSTILL_RELEASE_V or the gap opens past CLEAR_DREL
+    # cesnochill2pnw: True while the pure speed Schmitt-trigger latch is engaged (see the constants
+    # block) — starts False (a fresh machine at cruise is not "stopped"; the first genuine stop sets
+    # it on its own from live v_ego).
+    self._nochill_stopped = False
 
   def reset(self):
     self._cond.reset()
@@ -1362,6 +1366,7 @@ class ConditionalExperimentalSwitching:
     self._at_standstill = False
     self._ss_close_lead = False
     self._release_hold = False
+    self._nochill_stopped = False             # cesnochill2pnw
 
   def mode(self) -> str:
     return "experimental" if self._is_experimental else "chill"
@@ -1370,6 +1375,32 @@ class ConditionalExperimentalSwitching:
     return self._status
 
   def update_decision(self, signals: dict, dt: float = DT_CTRL) -> str:
+    """Public entry point: run the full decision core, then apply the cesnochill2pnw hard latch as
+    a FINAL override so it wins over every internal path (dwell expiry, A2, filter decay, or any
+    future addition) — closing the ordering gap that let a transient `chill` decision through at a
+    near-zero creep speed (see the constants block for the field incident + correctness argument).
+    Behavior-neutral above the release threshold: the latch is a no-op there and the unmodified
+    core governs exactly as before."""
+    self._update_decision_core(signals, dt)
+    self._apply_nochill_latch(float(signals.get("v_ego", 0.0)))
+    return self.mode()
+
+  def _apply_nochill_latch(self, v_now: float) -> None:
+    """cesnochill2pnw: pure per-tick Schmitt-trigger predicate on live v_ego — no stored timer, so
+    it cannot leak/freeze. While latched, force Experimental; only ever touches `_status` when it is
+    actually overriding a would-be-chill decision (leaves the core's own richer telemetry tag, e.g.
+    "stopHold"/"standstillHold"/"stop", alone whenever the core already agrees)."""
+    if self._nochill_stopped:
+      if v_now > C.NOCHILL_RELEASE_V:
+        self._nochill_stopped = False
+    elif v_now < C.NOCHILL_STOP_V:
+      self._nochill_stopped = True
+    if self._nochill_stopped and not self._is_experimental:
+      self._is_experimental = True
+      self._status = "stopLatch"   # cesnochill2pnw telemetry tag: the core wanted chill, latch won
+      self._dwell = 0.0
+
+  def _update_decision_core(self, signals: dict, dt: float = DT_CTRL) -> str:
     """Advance the state machine one cycle from an extracted `signals` dict (see decide_active).
     `dt` is the MEASURED loop period (selfdrived runs at 100 Hz) so the dwell/debounce are real
     seconds. Separated from `update(sm)` so it is unit-testable without cereal messages."""
@@ -2586,7 +2617,9 @@ class CESController:
       # standstill2pnw: the hold tags too — while a hold is the ONLY thing keeping Experimental,
       # decide_active's reason reads "chill", which made the 11:34 flapping forensics blind to WHY
       # the mode was held. Overlay/log now shows the state machine's authoritative reason.
-      elif self._sm.status() in ("stopIntent", "stopHold", "standstillHold"):
+      # cesnochill2pnw: "stopLatch" added — the hard latch's own override tag, so field telemetry
+      # can never again show "reason": "chill" while mode is actually experimental.
+      elif self._sm.status() in ("stopIntent", "stopHold", "standstillHold", "stopLatch"):
         tele["reason"] = self._sm.status()
     # ces2core2pnw shadow A/B channel: CES2's would-be decision + graded urgency + the cumulative
     # divergence-edge counter, on EVERY record (the replay/acceptance dataset).

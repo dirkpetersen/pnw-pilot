@@ -296,6 +296,7 @@ class Ces2Core:
     self._status = "chill"
     self._exp_min = exp_min_dwell
     self._chill_min = chill_min_dwell
+    self._nochill_stopped = False   # cesnochill2pnw (parity with CES v1 — see ces_pnw.py)
 
   def reset(self):
     self._ev.reset()
@@ -304,6 +305,7 @@ class Ces2Core:
     self._is_experimental = False
     self._dwell = 0.0
     self._status = "chill"
+    self._nochill_stopped = False   # cesnochill2pnw
 
   def mode(self) -> str:
     return "experimental" if self._is_experimental else "chill"
@@ -316,6 +318,24 @@ class Ces2Core:
     return self._ev.urgency
 
   def update_decision(self, signals: dict, dt: float = DT_CTRL) -> str:
+    """Public entry point: runs the CES2 core, then applies the SAME cesnochill2pnw hard latch as
+    CES v1 (see ces_pnw.ConditionalExperimentalSwitching.update_decision) so Ces2Core carries the
+    identical fix if it ever goes live (Ces2Core param). Behavior-neutral above the release
+    threshold."""
+    self._update_decision_core(signals, dt)
+    v_now = float(signals.get("v_ego", 0.0))
+    if self._nochill_stopped:
+      if v_now > C.NOCHILL_RELEASE_V:
+        self._nochill_stopped = False
+    elif v_now < C.NOCHILL_STOP_V:
+      self._nochill_stopped = True
+    if self._nochill_stopped and not self._is_experimental:
+      self._is_experimental = True
+      self._status = "stopLatch"   # cesnochill2pnw telemetry tag
+      self._dwell = 0.0
+    return self.mode()
+
+  def _update_decision_core(self, signals: dict, dt: float = DT_CTRL) -> str:
     v = signals["v_ego"]
     should_stop = bool(signals.get("model_should_stop"))
     lvl = self._ev.update(v, signals.get("mdl_end_x", 0.0), should_stop, dt)

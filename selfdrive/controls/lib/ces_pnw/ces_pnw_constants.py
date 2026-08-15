@@ -157,6 +157,37 @@ STANDSTILL_RELEASE_CLEAR_DREL = 25.0  # m: gap opened past this disarms the hold
 STANDSTILL_PROMOTE_LEAD_S     = 0.5   # s of continuous lead presence at standstill required by the
                                       #   no-cooldown promotion (single-tick radar ghosts excluded)
 
+# --- cesnochill2pnw (Tesla red-light jolt, drive 2026-08-15: drives/2026-08-15/tesla-redlight-jolt) --
+# Field evidence: stopped 11.1 s at a red light with NO lead, `reason` sequence stop -> chill ->
+# standstillHold -> stopHold -> lowSpeed. The `chill` tick handed longitudinal to the ACC/MPC path
+# (which does not stop for lights) for one cycle at v~=0, and Chill's MPC accelerated toward the
+# 12.5 m/s set speed before stopHold/standstillHold caught back up -> the jolt (aEgo 1.8 m/s^2).
+# Root cause: BOTH standstill demotion paths above (the STANDSTILL_LATCH_V gate and the A2
+# STANDSTILL_HOLD_V/STOP_CLEAR_HOLD_S gate) are conditional — a model_should_stop dropout that
+# outlasts STOP_CLEAR_HOLD_S at a creep speed between the two thresholds (or any other tick that
+# slips through the ladder/dwell/filter machinery) can still fall through to the `else: chill`
+# branch while the car has not genuinely moved.
+#
+# Driver directive (verbatim): "CES is allowed to go to chill as soon as the car is moving to
+# ensure smooth acceleration but NEVER before." Fix: an UNCONDITIONAL, purely-speed-based Schmitt-
+# trigger latch, applied as a final override AFTER the whole existing decision (v1: see
+# ConditionalExperimentalSwitching.update_decision's wrapper; CES2: Ces2Core.update_decision) so it
+# WINS over any chill decision from ANY internal path, timer, or model signal — not just the two
+# gates above. Correctness argument: Experimental only ever HOLDS a stop (never launches on its
+# own), so while latched the car cannot move except via a model-commanded, held launch; therefore
+# ANY v_ego crossing above the release threshold is BY CONSTRUCTION a genuine launch, at which
+# point handing back to Chill (smoother acceleration) is exactly what is wanted and the existing
+# ladder/dwell machinery resumes unmodified. This cannot wedge Experimental forever: the latch is a
+# pure per-tick predicate on live v_ego, re-evaluated every cycle, with no timer to leak/freeze.
+#
+# NOT the same knobs as STANDSTILL_LATCH_V/STANDSTILL_RELEASE_V above (that machinery is about
+# holding through a close-lead LAUNCH, wide 5.0 m/s release); this latch is about never leaving
+# Experimental before ANY movement at all, so the release margin is deliberately small — just
+# enough that a 0.1-0.2 m/s sensor twitch at rest can't be mistaken for "moving" (Schmitt-trigger
+# gap; RELEASE_V > STOP_V so the two thresholds can't chatter at the boundary).
+NOCHILL_STOP_V    = 0.5   # m/s: enter/stay latched below this (matches "at standstill" elsewhere)
+NOCHILL_RELEASE_V = 0.8   # m/s: latch releases once v_ego exceeds this (real launch, not noise)
+
 # --- debounce / dwell (de-flap) ---------------------------------------------
 # Drive log showed heavy flapping in stop&go (median 2.3 s between switches, 30 flips/min). Two
 # asymmetric dwell gates kill the sawtooth: once in Experimental, hold it EXP_MIN before returning to
