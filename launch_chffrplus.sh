@@ -79,6 +79,14 @@ function launch {
   # shared ffmpeg) with the 5.5 / static builds this 0.11.1 tree is written against.
   export PYTHONPATH="$PWD:/data/pnw/agnos19-compat/site-packages"
 
+  # agnos19-compat: loggerd/encoderd/bootlog link the venv's SHARED comma_deps_ffmpeg
+  # (libavformat/avcodec/avutil.so.NN). On 17.2 that dep was static; on 19.6 it is shared and its
+  # lib dir is NOT on the default loader path, so loggerd dies at start with "libavformat.so.61:
+  # cannot open shared object" -> manager reports "process not running loggerd" the moment you
+  # engage. Put the venv ffmpeg lib dir on the loader path. (av/PyAV never runs on the car, so this
+  # can't shadow its bundled libs.)
+  export LD_LIBRARY_PATH="/usr/local/venv/lib/python3.12/site-packages/ffmpeg/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
   # agnos19-compat: SELF-PROVISION the overlay on a from-scratch install (a factory reset wipes
   # /data, and there is no SSH to stage it by hand). The overlay tarball is bundled in the repo
   # via git-LFS, so the installer's clone already carries it; extract it here — BEFORE build.py
