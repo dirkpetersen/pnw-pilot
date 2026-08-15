@@ -193,17 +193,22 @@ def test_standstill_hold_keeps_experimental_at_red_light():
   # v1 had only the 8 s dwell here; CES2 holds explicitly for as long as the model says stopped.
   s_stand = base(v_ego=0.0, standstill=True, model_should_stop=False, mdl_end_x=5.0)
   assert _run(core, s_stand, 30.0) == "experimental"
-  assert core.status() == "standstill"
+  # cesnochill2pnw: v_ego=0 is inside the new latch's arm band (a_ego defaults 0, "not
+  # accelerating"), so status is unconditionally "stopLatch" -- not the CEM "standstill" tag --
+  # for the whole hold (see the review note in ces_pnw_constants.py's cesnochill2pnw block).
+  assert core.status() == "stopLatch"
   # light turns green: model plans ahead again (endpoint long) -- but v_ego is STILL 0 -> the hard
   # latch must hold regardless of what the model says.
   s_go = base(v_ego=0.0, standstill=True, model_should_stop=False, mdl_end_x=150.0)
   assert _run(core, s_go, 15.0) == "experimental"
   assert core.status() == "stopLatch"
-  # the REAL launch: v_ego actually rises -> the latch releases instantly and the core's own
-  # (unmodified) dwell-gated exit resumes normally -- mdl_end_x well past the STOP_DIST_M table's
-  # last breakpoint (165 m @ 60 kph) so no residual stop evidence masks the release; give it enough
-  # time for that ordinary dwell exit (observed ~3.4 s in this exact scenario), not an instant one.
-  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, model_should_stop=False, mdl_end_x=500.0)
+  # the REAL launch: v_ego actually rises AND a_ego confirms real acceleration (a_ego=2.0) -- the
+  # latch releases instantly and the core's own (unmodified) dwell-gated exit resumes normally --
+  # mdl_end_x well past the STOP_DIST_M table's last breakpoint (165 m @ 60 kph) so no residual
+  # stop evidence masks the release; give it enough time for that ordinary dwell exit (observed
+  # ~3.4 s in this exact scenario), not an instant one.
+  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, model_should_stop=False, mdl_end_x=500.0,
+                  a_ego=2.0)
   assert _run(core, s_launch, 8.0) == "chill"
 
 
@@ -219,8 +224,8 @@ def test_standstill_without_stop_evidence_does_not_hold():
   s = base(v_ego=0.0, standstill=True, mdl_end_x=150.0)
   assert _run(core, s, 15.0) == "experimental"
   assert core.status() == "stopLatch"
-  # only a genuine v_ego rise releases it (see the sibling test above for the mdl_end_x/timing note)
-  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, mdl_end_x=500.0)
+  # only a genuine v_ego rise WITH real a_ego releases it (see the sibling test above)
+  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, mdl_end_x=500.0, a_ego=2.0)
   assert _run(core, s_launch, 8.0) == "chill"
 
 

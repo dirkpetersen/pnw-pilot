@@ -1351,10 +1351,10 @@ class ConditionalExperimentalSwitching:
                                  #   lead=False; only a SEEN gap > CLEAR_DREL clears it)
     self._release_hold = False   # armed at the release tick when _ss_close_lead; holds Experimental
                                  #   until v > STANDSTILL_RELEASE_V or the gap opens past CLEAR_DREL
-    # cesnochill2pnw: True while the pure speed Schmitt-trigger latch is engaged (see the constants
-    # block) — starts False (a fresh machine at cruise is not "stopped"; the first genuine stop sets
-    # it on its own from live v_ego).
-    self._nochill_stopped = False
+    # cesnochill2pnw: True while the direction-aware latch is armed (see the constants block) —
+    # starts False (a fresh machine at cruise is not "stopping"; the first genuine decel-to-a-stop
+    # arms it on its own from live v_ego/a_ego).
+    self._nochill_armed = False
 
   def reset(self):
     self._cond.reset()
@@ -1366,7 +1366,7 @@ class ConditionalExperimentalSwitching:
     self._at_standstill = False
     self._ss_close_lead = False
     self._release_hold = False
-    self._nochill_stopped = False             # cesnochill2pnw
+    self._nochill_armed = False               # cesnochill2pnw
 
   def mode(self) -> str:
     return "experimental" if self._is_experimental else "chill"
@@ -1376,29 +1376,40 @@ class ConditionalExperimentalSwitching:
 
   def update_decision(self, signals: dict, dt: float = DT_CTRL) -> str:
     """Public entry point: run the full decision core, then apply the cesnochill2pnw hard latch as
-    a FINAL override so it wins over every internal path (dwell expiry, A2, filter decay, or any
-    future addition) — closing the ordering gap that let a transient `chill` decision through at a
-    near-zero creep speed (see the constants block for the field incident + correctness argument).
-    Behavior-neutral above the release threshold: the latch is a no-op there and the unmodified
-    core governs exactly as before."""
+    a FINAL override so it wins over every internal path (dwell expiry, A2, filter decay, a
+    model_should_stop flicker, or any future addition) — closing the ordering gap that let a
+    transient `chill` decision through anywhere in the stopping/stopped speed band (see the
+    constants block for the field incident + the Gemini-review direction-aware design + the
+    correctness argument). Behavior-neutral once genuinely moving away: the latch is a no-op there
+    and the unmodified core governs exactly as before."""
     self._update_decision_core(signals, dt)
-    self._apply_nochill_latch(float(signals.get("v_ego", 0.0)))
+    v_now = float(signals.get("v_ego", 0.0))
+    a_now = signals.get("a_ego", 0.0)
+    try:
+      a_now = float(a_now)
+      if not math.isfinite(a_now):
+        a_now = 0.0                  # cesnochill2pnw: bad/missing reading -> "not accelerating",
+    except (TypeError, ValueError):  # the fail-safe direction (can only make the latch hold
+      a_now = 0.0                    # longer, never release early on garbage data)
+    self._apply_nochill_latch(v_now, a_now)
     return self.mode()
 
-  def _apply_nochill_latch(self, v_now: float) -> None:
-    """cesnochill2pnw: pure per-tick Schmitt-trigger predicate on live v_ego — no stored timer, so
-    it cannot leak/freeze. While latched, force Experimental; only ever touches `_status` when it is
-    actually overriding a would-be-chill decision (leaves the core's own richer telemetry tag, e.g.
-    "stopHold"/"standstillHold"/"stop", alone whenever the core already agrees)."""
-    if self._nochill_stopped:
-      if v_now > C.NOCHILL_RELEASE_V:
-        self._nochill_stopped = False
-    elif v_now < C.NOCHILL_STOP_V:
-      self._nochill_stopped = True
-    if self._nochill_stopped and not self._is_experimental:
+  def _apply_nochill_latch(self, v_now: float, a_now: float) -> None:
+    """cesnochill2pnw: direction-aware latch — a pure v_ego threshold cannot tell "decelerating/
+    creeping toward a stop" from "accelerating away on a launch" at the same speed (Gemini review
+    catch), so both ARM and RELEASE are gated on v_ego AND a_ego together. See the constants block
+    for the full ARM/STAY/RELEASE spec. No stored timer (only one bit of armed/not memory), so it
+    cannot leak/freeze — see that block's no-wedge argument. While armed, status is UNCONDITIONALLY
+    "stopLatch" for the whole episode (Gemini review: avoids flapping between a stale core-computed
+    reason and the latch tag every time the core's own dwell machinery cycles underneath)."""
+    if self._nochill_armed:
+      if v_now > C.NOCHILL_RELEASE_V and a_now > C.NOCHILL_LAUNCH_A:
+        self._nochill_armed = False
+    elif v_now < C.NOCHILL_ARM_V and a_now <= C.NOCHILL_LAUNCH_A:
+      self._nochill_armed = True
+    if self._nochill_armed:
       self._is_experimental = True
-      self._status = "stopLatch"   # cesnochill2pnw telemetry tag: the core wanted chill, latch won
-      self._dwell = 0.0
+      self._status = "stopLatch"   # cesnochill2pnw telemetry tag: unconditional for the whole hold
 
   def _update_decision_core(self, signals: dict, dt: float = DT_CTRL) -> str:
     """Advance the state machine one cycle from an extracted `signals` dict (see decide_active).
