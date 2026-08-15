@@ -75,16 +75,21 @@ def _grid_cells_for_bbox(bbox: list[float]) -> list[tuple[int, int]]:
   return cells
 
 
-def _delete_region_tiles(region: str) -> int:
+def _delete_region_tiles(region: str, is_us_state: bool) -> int:
   """Delete for the "Refresh this location map" toggle: removes the offline tile directories mapd
   downloaded for `region`, so the uncovered-state auto-download logic below re-fetches it fresh next
   loop. Returns the number
   of directories actually removed (0 if the region is unknown or nothing was on disk).
 
+  `is_us_state` MUST come from the same _locate()/region_and_key_for_gps() lookup that produced
+  `region` — region_bbox() needs it to pick the right table for the 20 state/nation collision codes
+  (e.g. "CA" = California the US state AND Canada the nation). Without it, a Whistler BC ("CA" =
+  Canada) refresh would delete California's tiles instead (region_bbox()'s old states-first guess).
+
   Every delete target is re-derived from mapd_configd-computed integers (never user/param input) via
   _grid_cells_for_bbox, and is still re-checked against OSM_OFFLINE_DIR's realpath before rmtree —
   belt-and-suspenders so this can never remove anything outside the offline-tiles directory."""
-  bbox = coverage.region_bbox(region)
+  bbox = coverage.region_bbox(region, is_us_state)
   if bbox is None:
     return 0
   base = os.path.realpath(OSM_OFFLINE_DIR)
@@ -241,18 +246,21 @@ def main():
         cloudlog.exception("mapd_configd: self-heal relaunch failed")
       mapd_down = 0
 
-    # mapdstate2pnw: "covered" now drives TWO things off the same has_fix/tile_here read: the
-    # "Refresh this location map" grey-out (param MapForLocationCovered — repurposed: this toggle is
-    # an ACTION button that only makes sense when there IS a downloaded map here to refresh, so it's
-    # enabled when covered, not when uncovered like the old "Get map for this location" toggle was)
-    # and the region-tracking reset for the auto-download logic below. covered = no GPS fix (can't
-    # tell where we are, e.g. parked offroad) OR mapd has a map tile loaded for the current position.
+    # mapdstate2pnw: "covered" drives the region-tracking reset for the auto-download logic below;
+    # a SEPARATE "map_here" drives the "Refresh this location map" grey-out (param
+    # MapForLocationCovered — repurposed: this toggle is an ACTION button that only makes sense when
+    # there IS a downloaded map here to refresh). covered = no GPS fix (can't tell where we are, e.g.
+    # parked offroad) OR mapd has a map tile loaded for the current position — "no fix" counts as
+    # covered here so the tracker stays inert rather than treating GPS-loss as a fresh uncovered spot.
+    # map_here is stricter: it's the signal exposed to the UI, and there is nothing to refresh without
+    # an actual fix, so (unlike `covered`) a missing fix must grey the button out, not enable it.
     has_fix = sm.alive[gps_service]
     tile_here = sm.alive['mapdOut'] and sm['mapdOut'].tileLoaded
     covered = (not has_fix) or tile_here
-    if covered != last_covered:
-      params.put_bool("MapForLocationCovered", covered)
-      last_covered = covered
+    map_here = has_fix and tile_here
+    if map_here != last_covered:
+      params.put_bool("MapForLocationCovered", map_here)
+      last_covered = map_here
     if covered:
       # Left (or never entered) uncovered ground: forget the last-requested region so the NEXT
       # uncovered spot — a genuinely new state/nation, OR this same one again right after a
@@ -264,16 +272,39 @@ def main():
     # of the CURRENT region's tiles, so the uncovered-state auto-download below re-fetches it fresh.
     # One-shot: consumed and cleared every loop it's seen set. No fix / unknown region -> no-op (still
     # clears the flag) rather than guessing at a region to delete.
+    #
+    # bug2: must resolve the region WITH its is-state/is-nation flag (region_and_key_for_gps(), not
+    # the bare region_for_gps()) and pass it through to _delete_region_tiles() -> region_bbox() — for
+    # the 20 state/nation collision codes (e.g. "CA" = California AND Canada), the bare code alone
+    # can't say which table it came from, and region_bbox()'s old states-first guess deleted
+    # California's tiles for a fix in Whistler BC (nation Canada, code "CA").
+    #
+    # bug3: mapd's tileLoaded is in-memory and only re-reads disk on a 0.25-degree area crossing or a
+    # restart (mapd/main.go:95-103), so after deleting the tiles it stays True -> "covered"/"map_here"
+    # stay True -> the uncovered-triggers-download block below never fires while parked, defeating the
+    # button. Directly (re)send the download request for this region right here instead of waiting on
+    # that path, gated on downloadProgress.active so this never stacks a pull on top of one already
+    # running (also gates the delete itself -- no point deleting tiles for a region mid-download).
     if params.get_bool("RefreshLocationMap"):
-      if has_fix:
+      dl_active = sm.alive['mapdExtendedOut'] and sm['mapdExtendedOut'].downloadProgress.active
+      if has_fix and not dl_active:
         g = sm[gps_service]
-        region = coverage.region_for_gps(float(g.latitude), float(g.longitude))
-        if region is not None:
-          n = _delete_region_tiles(region)
+        region, key = coverage.region_and_key_for_gps(float(g.latitude), float(g.longitude))
+        if region is not None and key is not None:
+          is_us_state = key.startswith("us_state.")
+          n = _delete_region_tiles(region, is_us_state)
           cloudlog.warning(f"mapd_configd: RefreshLocationMap deleted {n} tile dir(s) for {region}")
-          last_requested_region = None  # let the now-uncovered spot re-arm the download below
+          msg = messaging.new_message('mapdIn')
+          msg.mapdIn.type = 'download'
+          msg.mapdIn.str = key
+          pm.send('mapdIn', msg)
+          last_requested_region = region
+          last_request_ts = time.monotonic()
+          cloudlog.warning(f"mapd_configd: RefreshLocationMap re-requested download {key}")
         else:
           cloudlog.warning("mapd_configd: RefreshLocationMap: no region under current GPS fix; no-op")
+      elif dl_active:
+        cloudlog.warning("mapd_configd: RefreshLocationMap: download already in progress; no-op")
       else:
         cloudlog.warning("mapd_configd: RefreshLocationMap: no GPS fix; no-op")
       params.put_bool("RefreshLocationMap", False)
