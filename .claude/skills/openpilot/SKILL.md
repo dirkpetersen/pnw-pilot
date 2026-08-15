@@ -105,7 +105,7 @@ actually cost time or nearly bricked hardware (kept additive; newest era at the 
   the commit message.
 
 - **Telemetry-driven tuning loop.** The car logs a per-second CES event stream
-  (`/data/dirk/ces_events.jsonl`: mode/reason, vEgo/vSet/vLead/dRel, curve%, vtscCap/State, gas) and
+  (`/data/pnw/ces_events.jsonl`: mode/reason, vEgo/vSet/vLead/dRel, curve%, vtscCap/State, gas) and
   qlogs carry `onroadEvents`. The proven workflow: driver reports a moment → extract the window →
   name the exact mechanism → fix with a scenario-replay test built from the real telemetry → deploy
   at the next stop. Every drive analysis goes in `~/gh/comma/drives/<date>/<name>/DRIVE_REPORT.md`

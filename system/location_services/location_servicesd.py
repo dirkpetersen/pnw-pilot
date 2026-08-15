@@ -962,7 +962,7 @@ class L2Downloader:
 
 
 # ----------------------------- network (LTE) coverage logger ---------------------------------------
-NET_EVENT_LOG = "/data/dirk/net_events.jsonl"
+NET_EVENT_LOG = "/data/pnw/net_events.jsonl"
 NET_EVENT_LOG_MAX_BYTES = 10 * 1024 * 1024   # rotate at 10 MB, one .1 generation (~20 MB cap)
 NET_LOG_PERIOD_S = 15.0                       # one sample / 15 s (~240 points/hr of driving)
 
@@ -1024,6 +1024,10 @@ class NetLogger(threading.Thread):
       sock = messaging.sub_sock("deviceState", conflate=True)
     except Exception:
       sock = None
+    try:
+      os.makedirs(os.path.dirname(NET_EVENT_LOG), exist_ok=True)   # ensure /data/pnw exists (was /data/dirk)
+    except OSError:
+      pass
     while not self._stop.is_set():
       try:
         lat, lon = self._gps()

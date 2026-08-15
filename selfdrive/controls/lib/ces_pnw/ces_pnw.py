@@ -46,7 +46,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
 # One JSON line per CES mode transition, with GPS so we can map where each adoption happened.
-CES_EVENT_LOG = "/data/dirk/ces_events.jsonl"
+CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB; one .1 generation kept -> ~40 MB cap
                                              # (was unbounded — 43 MB and growing on a 90%-full disk)
 # stophold2pnw (D): the comma 3X RTC battery is dead (RTC reads 1970) — every cold boot writes

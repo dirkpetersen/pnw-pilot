@@ -47,12 +47,12 @@ counters + monotonic timestamps and converted to ring offsets only at slice time
 timestamp-based, never index*DT (the loop is decimated to 20 Hz from a 100 Hz carState stream, and
 must stay correct even if the achieved rate drifts).
 
-OUTPUT (both under /data/dirk/angle_curves/):
+OUTPUT (both under /data/pnw/angle_curves/):
   curves.jsonl              one SUMMARY line per curve + session markers — the aggregatable dataset
   traces/<id>.jsonl         full 20 Hz trace for that curve (pre-roll + curve + post-roll)
 
 Run detached on the device:
-  setsid /usr/local/venv/bin/python3 /data/dirk/angle_curve_logger.py >> /data/dirk/angle_curves.log 2>&1 &
+  setsid /usr/local/venv/bin/python3 /data/pnw/angle_curve_logger.py >> /data/pnw/angle_curves.log 2>&1 &
 """
 import atexit
 import importlib
@@ -86,7 +86,7 @@ try:
 except ImportError:
   from common.params import Params
 
-OUT_DIR = "/data/dirk/angle_curves"
+OUT_DIR = "/data/pnw/angle_curves"
 TRACE_DIR = os.path.join(OUT_DIR, "traces")
 SUMMARY = os.path.join(OUT_DIR, "curves.jsonl")
 LOCK = os.path.join(OUT_DIR, "logger.lock")
