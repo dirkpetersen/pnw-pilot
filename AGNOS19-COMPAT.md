@@ -30,9 +30,11 @@ The device has **no per-tree Python env** — every process runs on the image-ba
 | `json-rpc` | athenad | athena/remote dead |
 
 Post-pin the symptom is unchanged (logo forever) because scons now dies at `import bzip2` instead of
-the flash loop. (Present on 19.6 and therefore NOT overlaid: capnproto/eigen/ffmpeg/ncurses/zeromq/
-zstd via renamed `comma-deps-*`, psutil, cffi, pillow, sympy, cython, pycapnp 2.1.0 — same on both
-images. `/TICI` is still created by 19.6, so the `larch64`/scons-cache path is fine — verified.)
+the flash loop. (Also present on 19.6 via renamed `comma-deps-*`: capnproto/eigen/ffmpeg/ncurses/
+zeromq/zstd, plus psutil/cffi/pillow/sympy/cython/pycapnp 2.1.0 — same on both images. We still
+overlay capnproto/eigen/ncurses/zeromq/zstd with 0.11.1's static builds, but take **ffmpeg from the
+venv** — see the ffmpeg note below. `/TICI` is still created by 19.6, so the `larch64`/scons-cache
+path is fine — verified.)
 
 ## Fix: a /data package overlay (survives reflash) + 3 tree edits
 
@@ -41,11 +43,20 @@ Do **not** touch the RO OS image. Stage the exact 17.2-era **aarch64** wheels 0.
 PYTHONPATH precedes the venv site-packages, so the overlay intentionally shadows 19.6's newer builds
 (raylib 6.x, shared ffmpeg) with the 5.5 / static builds this tree is written against.
 
-**Overlay contents** (all verified downloadable, no on-device compiling): the 9 commaai/dependencies
-native-dep wheels (bzip2 1.0.8, capnproto 1.0.1, eigen 3.4.0, ffmpeg 7.1.0, libjpeg 3.1.0,
-libyuv 1922.0, ncurses 6.5, zeromq 4.3.5, zstd 1.5.6 — static libs+headers), raylib 5.5.0.2
+**Overlay contents** (all verified downloadable, no on-device compiling): 8 commaai/dependencies
+native-dep wheels (bzip2 1.0.8, capnproto 1.0.1, eigen 3.4.0, libjpeg 3.1.0, libyuv 1922.0,
+ncurses 6.5, zeromq 4.3.5, zstd 1.5.6 — static libs+headers), raylib 5.5.0.2
 (commaai/raylib-python-cffi release 8 — the exact 17.2 artifact), casadi 3.7.2, crcmod-plus 2.3.1,
 xattr 1.3.0, pyserial 3.5, json-rpc 1.15.0.
+
+> **⚠️ ffmpeg is deliberately NOT overlaid** (learned on the first on-car build). The
+> commaai/dependencies ffmpeg wheel is the *off-device* build with VAAPI compiled into
+> `libavutil.a`; on larch64, `system/loggerd/SConscript` intentionally does **not** link
+> libva/libva-drm (the device ffmpeg has no VAAPI), so shadowing it makes `loggerd` fail to link
+> with undefined `va*` symbols. The venv's `comma_deps_ffmpeg` (shared, no-VAAPI, device build) is
+> the correct one — 0.11.1 imports it from the venv. Same principle didn't bite the other 5
+> dual-present deps (capnproto/eigen/ncurses/zeromq/zstd): their static overlay builds match what
+> 0.11.1 expects and compile clean.
 
 **Tree edits (this branch):**
 1. `launch_chffrplus.sh` — append the overlay to the launcher `PYTHONPATH` (covers build.py, scons,

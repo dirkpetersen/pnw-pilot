@@ -28,7 +28,11 @@ URLS=(
   "https://github.com/commaai/dependencies/releases/download/bzip2/v1.0.8/bzip2-1.0.8-py3-none-linux_aarch64.whl"
   "https://github.com/commaai/dependencies/releases/download/capnproto/v1.0.1/capnproto-1.0.1-py3-none-linux_aarch64.whl"
   "https://github.com/commaai/dependencies/releases/download/eigen/v3.4.0/eigen-3.4.0-py3-none-linux_aarch64.whl"
-  "https://github.com/commaai/dependencies/releases/download/ffmpeg/v7.1.0/ffmpeg-7.1.0-py3-none-linux_aarch64.whl"
+  # NOTE: ffmpeg is deliberately NOT overlaid. The commaai/dependencies ffmpeg wheel is the
+  # OFF-DEVICE build with VAAPI compiled into libavutil.a; on larch64 loggerd/SConscript does
+  # not link libva/libva-drm, so shadowing the venv's device ffmpeg breaks the loggerd link
+  # (undefined va* symbols). The venv's comma_deps_ffmpeg (shared, no-VAAPI, device build) is
+  # correct — let 0.11.1 import it from the venv. Do NOT re-add ffmpeg here.
   "https://github.com/commaai/dependencies/releases/download/libjpeg/v3.1.0/libjpeg-3.1.0-py3-none-linux_aarch64.whl"
   "https://github.com/commaai/dependencies/releases/download/libyuv/v1922.0/libyuv-1922.0-py3-none-linux_aarch64.whl"
   "https://github.com/commaai/dependencies/releases/download/ncurses/v6.5/ncurses-6.5-py3-none-linux_aarch64.whl"
@@ -62,7 +66,8 @@ rm -rf "$SP"/*.dist-info "$SP/dummy.txt"
 
 # Sanity: every module SConstruct/UI/MPC/runtime needs must resolve at top level
 missing=0
-for m in bzip2 capnproto eigen ffmpeg libjpeg libyuv ncurses zeromq zstd casadi crcmod jsonrpc pyray raylib serial xattr; do
+# ffmpeg intentionally excluded (comes from the venv — see NOTE above)
+for m in bzip2 capnproto eigen libjpeg libyuv ncurses zeromq zstd casadi crcmod jsonrpc pyray raylib serial xattr; do
   [ -e "$SP/$m" ] || [ -e "$SP/$m.py" ] || { echo "MISSING module: $m"; missing=1; }
 done
 [ "$missing" = 0 ] || { echo "!! overlay incomplete — aborting"; exit 1; }
