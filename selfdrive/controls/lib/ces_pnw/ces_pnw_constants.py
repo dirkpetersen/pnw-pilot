@@ -157,6 +157,96 @@ STANDSTILL_RELEASE_CLEAR_DREL = 25.0  # m: gap opened past this disarms the hold
 STANDSTILL_PROMOTE_LEAD_S     = 0.5   # s of continuous lead presence at standstill required by the
                                       #   no-cooldown promotion (single-tick radar ghosts excluded)
 
+# --- cesnochill2pnw (Tesla red-light jolt, drive 2026-08-15: drives/2026-08-15/tesla-redlight-jolt) --
+# Field evidence: stopped 11.1 s at a red light with NO lead, `reason` sequence stop -> chill ->
+# standstillHold -> stopHold -> lowSpeed. The `chill` tick handed longitudinal to the ACC/MPC path
+# (which does not stop for lights) for one cycle at v~=0, and Chill's MPC accelerated toward the
+# 12.5 m/s set speed before stopHold/standstillHold caught back up -> the jolt (aEgo 1.8 m/s^2).
+# Root cause: BOTH standstill demotion paths above (the STANDSTILL_LATCH_V gate and the A2
+# STANDSTILL_HOLD_V/STOP_CLEAR_HOLD_S gate) are conditional — a model_should_stop dropout that
+# outlasts STOP_CLEAR_HOLD_S at a creep speed between the two thresholds (or any other tick that
+# slips through the ladder/dwell/filter machinery) can still fall through to the `else: chill`
+# branch while the car has not genuinely moved.
+#
+# Driver directive (verbatim): "CES is allowed to go to chill as soon as the car is moving to
+# ensure smooth acceleration but NEVER before." Fix: an UNCONDITIONAL latch, applied as a final
+# override AFTER the whole existing decision (v1: see ConditionalExperimentalSwitching's
+# update_decision wrapper; CES2: Ces2Core.update_decision) so it WINS over any chill decision from
+# ANY internal path, timer, or model signal — not just the two gates above.
+#
+# Gemini review (round 1) catch: a PURE speed threshold cannot tell "decelerating/creeping through
+# 0.9 m/s toward a stop" from "accelerating away through 0.9 m/s on a launch" — the original design
+# only armed below NOCHILL_STOP_V(0.5), leaving the WHOLE A2 creep band (0.5-1.5 m/s) open to the
+# exact field bug if approached from ABOVE without ever dipping under 0.5 (e.g. a steady creep that
+# settles at 0.7-1.4 m/s and stays there).
+#
+# Round 2 tried fixing this with an a_ego (acceleration) direction gate on top of the speed
+# threshold. REVERTED (Gemini review, round 2 — CRITICAL, two separate bugs): requiring v_ego >
+# RELEASE_V AND a_ego > a floor SIMULTANEOUSLY is not equivalent to "eventually launches" — a_ego
+# is not required to STAY positive once the car is moving, so a gentle/gradual launch, or one that
+# happens to level off (e.g. cruise catching the target speed) right around the release band, can
+# sit at v > RELEASE_V with a_ego <= the floor indefinitely: a genuine, PERMANENT wedge stuck in
+# Experimental to highway speed, not a hypothetical corner case. Separately, a_ego dithering across
+# the floor in the 0.8-1.5 m/s band (ordinary accelerometer/estimator noise) flapped the release
+# condition at up to 100 Hz. Both are correctness bugs in the AND-of-two-live-conditions shape
+# itself, not tuning issues, so a_ego is REMOVED ENTIRELY — no acceleration term anywhere below.
+#
+# Fix (round 3): back to a PURE v_ego Schmitt trigger — the round-1 shape, proven wedge-free and
+# flap-free — just with the ARM threshold RAISED to cover the creep band directly, instead of trying
+# to distinguish approach direction:
+#   ARM     v_ego < NOCHILL_ARM_V — force Experimental, unconditionally.
+#   STAY    once armed, stays armed regardless of model_should_stop flicker, dwell timers, or
+#           intermediate v_ego wobble — only v_ego rising past RELEASE_V can clear it.
+#   RELEASE v_ego > NOCHILL_RELEASE_V — hand back to Chill, unconditionally.
+# NOCHILL_ARM_V(1.0) < NOCHILL_RELEASE_V(1.3) is the ONLY thing preventing flap (a twitch at the
+# boundary can't oscillate across a two-sided gap) and is now the ENTIRE anti-flap mechanism — no
+# other condition gates either transition.
+#
+# WEDGE-IMPOSSIBILITY PROOF (the property that matters most): RELEASE depends on v_ego ALONE —
+# checked every ~10 ms tick against one fixed threshold, no AND term, no debounce, no memory beyond
+# the single armed/not bit. So ANY tick where v_ego > NOCHILL_RELEASE_V releases the latch, full
+# stop, with no further condition to simultaneously satisfy. A real launch is, by definition, a
+# monotonic (over the relevant span) rise in v_ego from ~0 through every intermediate speed
+# including RELEASE_V, so it MUST produce at least one such tick — the latch cannot fail to see it,
+# and cannot require a second, independently-timed signal to also be true on that same tick. This is
+# the identical one-sided-predicate shape as the original, already-proven round-1 design (only the
+# two threshold VALUES changed) — no new wedge surface exists, and the a_ego wedge/flap class is
+# structurally impossible now that a_ego does not appear in the predicate at all.
+#
+# Residual (accepted, documented trade-off): a steady creep WITH A STALE model_should_stop strictly
+# inside [ARM_V, RELEASE_V] (1.0-1.3 m/s here) approached FROM ABOVE without ever dipping under
+# ARM_V is not caught by this latch alone. This is covered instead by the pre-existing A2 stopHold
+# gate (STANDSTILL_HOLD_V=1.5, STOP_CLEAR_HOLD_S=2.0 — see stophold2pnw above), which already holds
+# Experimental through a genuine BRAKING approach (model_should_stop True, v < 1.5) independent of
+# this latch. The residual gap is a real stop's model_should_stop dropping and staying clear >2 s
+# while creeping in a <=0.3 m/s-wide band — narrower than the original field incident (which
+# reproduced at v~0.7, inside ARM_V=1.0 and thus now fully covered directly) — and is the smallest
+# gap the ARM_V<RELEASE_V hysteresis geometry allows.
+#
+# Correctness argument (no-wedge proof, restated for the final design): Experimental only ever
+# HOLDS a stop (never launches on its own), so while latched the car cannot move away except via a
+# model-commanded, held launch; ANY v_ego crossing above RELEASE_V is BY CONSTRUCTION part of that
+# launch (guaranteed to be observed — see the wedge-impossibility proof above), at which point
+# handing back to Chill (smoother acceleration) is exactly what is wanted and the existing
+# ladder/dwell machinery resumes unmodified. The latch is a pure per-tick predicate on live v_ego
+# plus one bit of Schmitt-trigger memory (armed/not) — no timer, no second live signal in the
+# release condition — so it cannot wedge Experimental forever.
+#
+# Telemetry (Gemini review, round 1 — kept in round 3): while armed, status is UNCONDITIONALLY
+# "stopLatch" for the WHOLE armed episode (not just the ticks where the internal core would
+# otherwise show chill), and the override never touches `_dwell` — the earlier (round-1) design let
+# the core's own dwell-driven status show through in between overrides, which could flap between a
+# stale ladder reason and "stopLatch" every ~EXP_MIN_DWELL_S. A consistent tag for the entire hold
+# is worth more to field forensics than surfacing the (now largely redundant, since the latch is
+# doing the actual holding) internal ladder reason underneath it.
+#
+# NOT the same knobs as STANDSTILL_LATCH_V/STANDSTILL_RELEASE_V above (that machinery is about
+# holding through a close-lead LAUNCH, wide 5.0 m/s release); this latch is about never leaving
+# Experimental before a genuine launch at ALL, so its release margin is deliberately small.
+NOCHILL_ARM_V     = 1.0   # m/s: below this -> arm, unconditionally (covers the field creep, ~0.7)
+NOCHILL_RELEASE_V = 1.3   # m/s: above this -> release, unconditionally (hysteresis vs ARM_V is the
+                          #   ENTIRE anti-flap mechanism; no other condition gates either edge)
+
 # --- debounce / dwell (de-flap) ---------------------------------------------
 # Drive log showed heavy flapping in stop&go (median 2.3 s between switches, 30 flips/min). Two
 # asymmetric dwell gates kill the sawtooth: once in Experimental, hold it EXP_MIN before returning to

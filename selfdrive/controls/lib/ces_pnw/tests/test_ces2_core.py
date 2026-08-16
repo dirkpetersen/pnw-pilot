@@ -176,6 +176,14 @@ def _run(core, s, seconds, dt=0.1):
 
 
 def test_standstill_hold_keeps_experimental_at_red_light():
+  """cesnochill2pnw (drive 2026-08-15, tesla-redlight-jolt): the CEM standstill-hold's own release
+  ("model plans ahead again -> normal exit resumes") is exactly the model-agreement release class
+  the field bug came from -- a model/endpoint signal saying "go" while v_ego is STILL 0 is not
+  evidence the car has actually moved. Driver directive (verbatim): "CES is allowed to go to chill
+  as soon as the car is moving ... but NEVER before" -- purely speed-based, no green-light detector.
+  So the "endpoint long" tick below must NOT release while v_ego stays 0; only a genuine v_ego rise
+  past the latch's release threshold may. Pre-cesnochill2pnw this test asserted the opposite
+  (release on model agreement alone) -- exactly the bug class this fix closes."""
   core = Ces2Core()
   # roll to a stop for a light: shouldStop asserts -> fast path
   s_stop = base(v_ego=5.0, model_should_stop=True)
@@ -185,19 +193,38 @@ def test_standstill_hold_keeps_experimental_at_red_light():
   # v1 had only the 8 s dwell here; CES2 holds explicitly for as long as the model says stopped.
   s_stand = base(v_ego=0.0, standstill=True, model_should_stop=False, mdl_end_x=5.0)
   assert _run(core, s_stand, 30.0) == "experimental"
-  assert core.status() == "standstill"
-  # light turns green: model plans ahead again (endpoint long) -> normal exit path resumes
+  # cesnochill2pnw: v_ego=0 is inside the new latch's arm band, so status is unconditionally
+  # "stopLatch" -- not the CEM "standstill" tag -- for the whole hold (see the review note in
+  # ces_pnw_constants.py's cesnochill2pnw block).
+  assert core.status() == "stopLatch"
+  # light turns green: model plans ahead again (endpoint long) -- but v_ego is STILL 0 -> the hard
+  # latch must hold regardless of what the model says.
   s_go = base(v_ego=0.0, standstill=True, model_should_stop=False, mdl_end_x=150.0)
-  assert _run(core, s_go, 15.0) == "chill"
+  assert _run(core, s_go, 15.0) == "experimental"
+  assert core.status() == "stopLatch"
+  # the REAL launch: v_ego actually rises -> the latch releases instantly and the core's own
+  # (unmodified) dwell-gated exit resumes normally -- mdl_end_x well past the STOP_DIST_M table's
+  # last breakpoint (165 m @ 60 kph) so no residual stop evidence masks the release; give it enough
+  # time for that ordinary dwell exit (observed ~3.4 s in this exact scenario), not an instant one.
+  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, model_should_stop=False, mdl_end_x=500.0)
+  assert _run(core, s_launch, 8.0) == "chill"
 
 
 def test_standstill_without_stop_evidence_does_not_hold():
+  """cesnochill2pnw: same correction as test_standstill_hold_keeps_experimental_at_red_light --
+  "the model does NOT say stopped" is a model-agreement signal, not a v_ego one; the hard latch
+  does not care why the car is at rest, only that it hasn't moved yet."""
   core = Ces2Core()
   core.update_decision(base(v_ego=5.0, model_should_stop=True), 0.01)
   assert core.mode() == "experimental"
-  # stopped, but the model does NOT say stopped (e.g. parked with a clear road) -> normal decay
+  # stopped, but the model does NOT say stopped (e.g. parked with a clear road) -- v_ego is still 0,
+  # so the latch holds regardless.
   s = base(v_ego=0.0, standstill=True, mdl_end_x=150.0)
-  assert _run(core, s, 15.0) == "chill"
+  assert _run(core, s, 15.0) == "experimental"
+  assert core.status() == "stopLatch"
+  # only a genuine v_ego rise releases it (see the sibling test above for the mdl_end_x/timing note)
+  s_launch = base(v_ego=25.0, v_set=25.0, standstill=False, mdl_end_x=500.0)
+  assert _run(core, s_launch, 8.0) == "chill"
 
 
 # ---------------------------------------------------------------------------
