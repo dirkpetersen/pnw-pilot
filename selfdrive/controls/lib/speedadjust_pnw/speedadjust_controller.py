@@ -69,10 +69,15 @@ factually wrong about the mechanism, though its conclusion held): BOTH fleet car
 `CP.pcmCruise=True` (neither sets it False) — the non-pcm `VCruiseHelper` branch (`CS.buttonEvents`
 button-press tracking) NEVER runs on this fleet. `v_cruise_set` actually comes from the PCM branch of
 `selfdrive/car/cruise.py` (`v_cruise_kph = CS.cruiseState.speed`, i.e. `DI_digitalSpeed` on the Tesla) —
-but it is STILL feedback-safe on an op-long car: nothing openpilot transmits ever feeds
-`DI_digitalSpeed`, and `longitudinal_planner.py:151-153` only folds `cap()`'s return value LOCALLY into
-its own `v_cruise` variable for the MPC target — it is never written back to any CAN signal or param,
-so it can never loop back into next tick's `CS.cruiseState.speed`.
+but it is STILL feedback-safe on an op-long car. CORRECTED again (Fable review pass 3, F3 — the prior
+wording overclaimed "nothing openpilot transmits ever feeds DI_digitalSpeed": openpilot DOES transmit
+`DAS_setSpeed` on the Raven, see `teslacan_legacy.py`). The actual, empirically-grounded point is
+narrower: the DI does not ECHO `DAS_setSpeed` back into `DI_digitalSpeed` — if it did, `vCruise` would
+flap between 0 and the ~145 kph sentinel every time openpilot's own longitudinal loop wrote a set
+speed, and that would already be visibly breaking the cruise pipeline (months of sane vSet telemetry
+say otherwise). `longitudinal_planner.py:151-153` also only folds `cap()`'s return value LOCALLY into
+its own `v_cruise` variable for the MPC target — it is never written back to any CAN signal or param —
+so it can never loop back into next tick's `CS.cruiseState.speed` either way.
   * op-long cars: SAFE by construction, per the above — every real `v_cruise_set` change there IS the
     driver (or, on the Tesla specifically, an ENGAGE transition off the `cruiseState.speed` standby
     floor — see FIX A / `_cruise_engaged()` below, which is why the detector additionally requires ACC
@@ -605,12 +610,26 @@ class SpeedAdjustController:
         # FIX D: only dismiss an alert the driver could actually perceive acting on -- a routine set
         # nudge with a report still minutes away (not latched, no active cap) must not silently kill
         # the eventual slowdown.
-        if self._police_latched or self._cap_out is not None:
+        # FIX 1 (Fable F2 / Gemini #2, review pass 3): gate on _police_latched ALONE, not
+        # "_police_latched or _cap_out is not None" -- a police-sourced _cap_out always implies
+        # _police_latched already (the latch precedes any returned police target), so the
+        # "or _cap_out is not None" disjunct only ever added LIMIT-DROP (mode 2) caps. That wrongly
+        # suppressed a pending, not-yet-latched police alert whenever the driver overrode an active
+        # limit trim. The limit-drop cap itself still releases unconditionally below (_sl_ref/_ratio
+        # re-anchor + _cap_out=None are OUTSIDE this gate).
+        if self._police_latched:
           self._police_suppressed = True
         # speed limit: re-anchor the baseline to the new set (speedanchor2pnw's own F2 formula) so
         # the current trim releases; a FURTHER drop below this new baseline will still re-cap.
         self._sl_ref = self._sl
         self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
+        # FIX 3 (Gemini, review pass 3): stamp the actuation-transition grace window BEFORE releasing
+        # an active cap here -- an in-flight own SET- tap from the dying cap can otherwise land the
+        # NEXT tick (after _cap_out already went None) and phantom-trigger a second override. Mirrors
+        # the same edge-guarded pattern as the other three stamp sites (stock-ACC only; op-long has no
+        # executor taps in flight).
+        if not self._long_ok and self._cap_out is not None:
+          self._last_actuation_transition_t = now
         # release any active emitted cap so speed resumes immediately (MPC/executor bounds the accel).
         self._cap_out = None
         self._release_t = None
@@ -650,6 +669,13 @@ class SpeedAdjustController:
     intervening = self._driver_intervening(sm)
     if intervening:
       self._pub_ceiling = None
+      # FIX 2 (Fable F1, review pass 3): stamp the transition, edge-guarded on a restore having
+      # actually been active, BEFORE nulling it -- on stock-ACC (e.g. a gas press that keeps ACC
+      # enabled on the Ford) an in-flight own SET+ tap from the just-cleared restore can otherwise
+      # land next tick with no grace window and get misread as a driver override. Same pattern as the
+      # existing preempt-site stamp.
+      if self._restore_ceiling is not None:
+        self._last_actuation_transition_t = now
       self._restore_ceiling = None
       self._restore_deadline = None
       self._min_pub_target = None

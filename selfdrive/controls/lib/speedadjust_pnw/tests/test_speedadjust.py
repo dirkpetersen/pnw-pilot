@@ -1016,3 +1016,55 @@ def test_fixe_engaged_cleared_on_manual_override_release():
   bumped = V75 + 5 * MPH
   _cap(c, bumped, V60, v_cruise_set=bumped)
   assert c._engaged is False
+
+
+# ---- speedadjustreset2pnw hardening (2026-08-16, third review pass) --------------------------------
+
+# FIX 1 (Fable F2 / Gemini #2): the police-suppression gate must key off _police_latched ALONE. A
+# police-sourced _cap_out always implies _police_latched already, so "or _cap_out is not None" only
+# ever added LIMIT-DROP (mode 2) caps -- wrongly suppressing a pending, not-yet-latched police alert
+# whenever the driver overrode an active limit trim.
+
+def test_fix1_override_releases_limit_drop_but_does_not_suppress_pending_police():
+  c = _drop(mode=2, police={"state": "alert", "dist_mi": 15.0})   # far away, ttr >> 30s -- NOT latched
+  settled = _settle(c, V75, V60)
+  assert settled < V75                          # confirm it's actively trimming via the limit-drop cap
+  assert c._police_latched is False             # the pending alert genuinely hasn't latched yet
+  v_new = 50 * MPH                              # driver nudges the set -- explicit override
+  out = _cap(c, v_new, V60, v_cruise_set=v_new)
+  assert out == v_new                           # limit trim released immediately
+  assert c._cap_out is None
+  assert c._police_suppressed is False          # FIX 1: NOT suppressed -- this was a limit-drop cap, not police
+  # later, the SAME report closes into the approach window -- must still engage normally. c._sl stays
+  # V45 throughout this test (never changed), so the police target is V45 + POLICE_MARGIN, not V60's.
+  c._police = {"state": "alert", "dist_mi": 0.4}
+  out2 = _settle(c, v_new, V60, v_cruise_set=v_new)
+  assert c._police_latched is True
+  assert abs(out2 - (V45 + POLICE_MARGIN)) < 1e-6
+
+
+# FIX 2 (Fable F1): the driver-intervening (gas/brake/ACC-off) block that clears an in-progress
+# restore must ALSO stamp the actuation-transition grace window (edge-guarded on a restore having
+# actually been active), or a late in-flight own SET+ tap from the just-cleared restore can land after
+# a brand-new cap has engaged and get misread as a driver override, suppressing it.
+
+def test_fix2_late_tap_after_driver_intervening_clears_restore_does_not_self_cancel():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins (stamps the unrelated release transition)
+  assert c._restore_ceiling is not None
+  # age out that earlier, unrelated stamp so ONLY FIX 2's own stamp can protect the late tap below
+  c._last_actuation_transition_t -= (SA_ACTUATION_GRACE_S + 0.5)
+  c.cap(_sm(gas=True), c._last_v_set, c._last_v_set, V60, True)   # driver gas mid-restore -- FIX 2 stamps here
+  assert c._restore_ceiling is None
+  # a NEW alert appears, engaging a fresh dec-cap
+  c._police = {"state": "alert", "dist_mi": 0.4}
+  _tick(c, sm=_sm(gas=False))
+  assert c._cap_out is not None
+  # an in-flight own SET+ tap from the just-cleared restore lands now
+  late_tap_set = c._last_v_set + 1.0 * MPH
+  c.cap(None, late_tap_set, late_tap_set, V60, True)
+  assert c._police_suppressed is False                    # NOT mistaken for a driver override
