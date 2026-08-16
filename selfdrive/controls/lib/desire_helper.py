@@ -1,3 +1,5 @@
+import time
+
 from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
@@ -18,10 +20,21 @@ AUTO_LANE_CHANGE_DELAY = 0.75  # seconds (driver feedback: 1.5 felt too slow to 
 # into cross-traffic. The manual steering-torque nudge path is UNCHANGED and still works everywhere;
 # only the no-touch auto path is restricted here.
 HIGHWAY_MIN_SPEED = 45 * CV.MPH_TO_MS  # speed floor: allowed even with no/stale map data (fail-open on speed alone)
+# fail-review fix: hysteresis disarm floor for HIGHWAY_MIN_SPEED — arm the speed-alone path at
+# HIGHWAY_MIN_SPEED, only disarm once BELOW this lower floor. Debounces a v_ego reading oscillating
+# right at the 45 mph line from repeatedly toggling on_highway (compounds with FIX 2's continuous-hold
+# requirement below, but the latch alone also protects the "stayed just above 45" case).
+HIGHWAY_DISARM_SPEED = 42 * CV.MPH_TO_MS
 # mapd's HighwayClass enum (cereal/custom.capnp), freeway-grade values only. Deliberately excludes
 # primary/secondary/tertiary/unclassified/residential/livingStreet — those carry city arterials with
 # cross-traffic, which is exactly the road class the driver report happened on.
 FREEWAY_CLASSES = frozenset({"motorway", "motorwayLink", "trunk", "trunkLink"})
+# fail-review fix: MapHighwayClass is a PERSISTENT mem-param that mapd_configd only overwrites while
+# mapdOut is alive -- a dead/stalled mapd otherwise latches whatever freeway class it last saw, which
+# would re-enable the exact city-turn auto-lane-change this branch exists to prevent (drive from a
+# freeway onto a city street with mapd wedged). Reject the class as unknown once its bridged write-
+# timestamp (MapHighwayClassTs, mapd_configd.py) is older than this.
+MAP_CLASS_TTL_S = 5.0
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -72,7 +85,9 @@ class DesireHelper:
     # mapd's bridged road class, same guarded-import pattern speedadjust_controller.py uses (a mem
     # Params("/dev/shm/params") read, NOT a msgq/carState subscription).
     self._map_highway_class = ""  # "" == unknown/no data -> fail-safe: only the speed floor can allow auto
+    self._map_class_ts = -1e9    # fail-review fix: monotonic write-ts of the class above; -1e9 = never seen -> always stale until the first successful read
     self._map_class_read_counter = 0
+    self._speed_armed = False    # fail-review fix: hysteresis latch for the HIGHWAY_MIN_SPEED floor
     import platform
     try:
       from openpilot.common.params import Params as _P
@@ -89,17 +104,30 @@ class DesireHelper:
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
+    # fail-review fix: hysteresis latch for the HIGHWAY_MIN_SPEED floor — arm at/above HIGHWAY_MIN_SPEED,
+    # only disarm once below HIGHWAY_DISARM_SPEED. Runs every tick (not just while a lane change is
+    # pending) so it reflects the car's actual recent speed the moment a blinker goes up.
+    if v_ego >= HIGHWAY_MIN_SPEED:
+      self._speed_armed = True
+    elif v_ego < HIGHWAY_DISARM_SPEED:
+      self._speed_armed = False
+
     # auto2xnor: refresh the nudgeless toggle ~ every 3s so changing it doesn't need a restart
     # (still gated by nudgeless_supported — Tesla + F-150 Lightning only)
     self._param_read_counter += 1
     if self._param_read_counter % 60 == 0:
       self.nudgeless_lane_change = self.nudgeless_supported and not self.params.get_bool("NudgeForLaneChange")
 
-    # nudgelesshighway2pnw: refresh the map-derived road class ~ every 1s (20 cycles @ 20Hz). Fail-safe
-    # to "" (unknown) on any missing/unparseable read — never raise, never let a bad read widen the gate.
+    # nudgelesshighway2pnw: refresh the map-derived road class ~ every 0.5s (10 cycles @ 20Hz — FIX 3:
+    # tightened from 1s so a freeway->city change can't be missed for longer than the AUTO_LANE_CHANGE_DELAY
+    # hold). Fail-safe to "" / very-stale ts on any missing/unparseable read — never raise, never let a
+    # bad read widen the gate. Reads BOTH the class and its bridged write-timestamp (mapd_configd.py) —
+    # the ts is what mapd_configd stamped, not when WE last read it, so a dead/stalled mapd (which stops
+    # advancing the ts) is caught even though our own read keeps happening on schedule.
     self._map_class_read_counter += 1
-    if self._map_class_read_counter % 20 == 0:
+    if self._map_class_read_counter % 10 == 0:
       hwy_class = ""
+      hwy_ts = -1e9
       if self.mem_params is not None:
         try:
           raw = self.mem_params.get("MapHighwayClass", return_default=True)
@@ -107,7 +135,21 @@ class DesireHelper:
           hwy_class = raw if raw else ""
         except Exception:
           hwy_class = ""
+        try:
+          raw_ts = self.mem_params.get("MapHighwayClassTs", return_default=True)
+          raw_ts = raw_ts.decode() if isinstance(raw_ts, bytes) else raw_ts
+          hwy_ts = float(raw_ts) if raw_ts else -1e9
+        except Exception:
+          hwy_ts = -1e9
       self._map_highway_class = hwy_class
+      self._map_class_ts = hwy_ts
+
+    # fail-review fix: the freeway-class half of the gate only counts if the bridged write-ts is FRESH
+    # (mapd_configd is alive and actually publishing) — a dead/stalled mapd can no longer latch a stale
+    # freeway reading. Computed every tick (not just while pending) so FIX 2's continuous-hold
+    # requirement below sees a stable, up-to-date value.
+    map_class_fresh = (time.monotonic() - self._map_class_ts) <= MAP_CLASS_TTL_S
+    on_highway = (map_class_fresh and self._map_highway_class in FREEWAY_CLASSES) or self._speed_armed
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -136,16 +178,21 @@ class DesireHelper:
         # auto2xnor: nudgeless — accumulate time while the blinker is held with no
         # blindspot; once past the delay, allow the lane change without a wheel nudge.
         # Reset the timer whenever a blindspot is present so the hold must be clear.
-        if self.nudgeless_lane_change and not blindspot_detected:
+        # nudgelesshighway2pnw FIX 2: also require on_highway (computed above) for EVERY tick the timer
+        # accumulates — not just at the moment it crosses the delay threshold. Without this, the timer
+        # could arm fully during a city-street blinker hold (nudgeless_lane_change true, no blindspot,
+        # off-highway) and then fire on the very first tick on_highway flips true (a single-tick 45.0 mph
+        # speed blip, or a momentary mapd way-match flicker to "motorway"). Gating accumulation itself
+        # means a full continuous AUTO_LANE_CHANGE_DELAY of on_highway is required, not just one tick.
+        if self.nudgeless_lane_change and not blindspot_detected and on_highway:
           self.auto_lane_change_timer += DT_MDL
         else:
           self.auto_lane_change_timer = 0.0
 
-        # nudgelesshighway2pnw: the auto path only fires on a highway/freeway — a mapd freeway-grade
-        # road class, OR (fail-safe when map data is missing/stale) v_ego at/above the speed floor.
-        # City streets with no map data and low speed are always blocked, matching the manual-nudge-
-        # only behavior a driver would expect making an ordinary city turn.
-        on_highway = self._map_highway_class in FREEWAY_CLASSES or v_ego >= HIGHWAY_MIN_SPEED
+        # City streets with no fresh map data and low speed are always blocked, matching the manual-
+        # nudge-only behavior a driver would expect making an ordinary city turn. `and on_highway` here
+        # is redundant with the accumulation gate above (the timer can't exceed the delay without it) but
+        # kept as defense-in-depth against a future refactor of the accumulation block.
         auto_lane_change = self.nudgeless_lane_change and self.auto_lane_change_timer > AUTO_LANE_CHANGE_DELAY and on_highway
 
         if not one_blinker or below_lane_change_speed:

@@ -89,6 +89,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // mapd220-2pnw PHASE 1: mapd v2.2.0 mapdOut fields (@24-@26) bridged to mem params; telemetry/
     // observation only, no consumer reads these yet (see docs/MAPD-V220-UPGRADE.md).
     {"MapHighwayClass", {PERSISTENT, STRING}},          // HighwayClass enum name, e.g. "motorway"
+    // nudgelesshighway2pnw: monotonic write-timestamp (seconds, as string) mapd_configd stamps alongside
+    // MapHighwayClass -- desire_helper.py's freeway/city auto-lane-change gate rejects the class as
+    // unknown once this ages past its freshness window, so a dead/stalled mapd can't latch a stale
+    // freeway reading. Mem-only (tmpfs /dev/shm/params); never touched by the on-disk clear_all() passes.
+    {"MapHighwayClassTs", {PERSISTENT, STRING}},
     {"MapWayId", {PERSISTENT, STRING}},                 // OSM way id (int64 as string)
     {"MapConditionalSpeedLimit", {PERSISTENT, STRING}}, // raw OSM maxspeed:conditional text; "" = none
     {"MapDownloadStatus", {CLEAR_ON_MANAGER_START, STRING}},  // mapd2pnw: live OSM DB download state ("OK"/"downloading X/Y"/"incomplete X/Y"/"none") for the debug overlay (updates ~1Hz -> not PERSISTENT)

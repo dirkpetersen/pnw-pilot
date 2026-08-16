@@ -144,6 +144,8 @@ def main():
 
   last_covered = None
   mapd_down = 0            # consecutive loops mapd (mapdExtendedOut) has been silent — debounces "down"
+  mapd_out_down = 0        # nudgelesshighway2pnw: consecutive loops mapdOut has been silent — debounces
+                            # the MapHighwayClass self-clear below the same way mapd_down debounces "down"
   last_requested_region = None   # region code mapd_configd last sent a download request for
   last_request_ts = -1e9         # monotonic ts of that request (resend-interval retry, see below)
 
@@ -165,6 +167,7 @@ def main():
           "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
           "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
       if sm.alive['mapdOut']:
+        mapd_out_down = 0
         mo = sm['mapdOut']
         mem.put_nonblocking("MapSpeedLimit", str(float(mo.speedLimit)))  # m/s; 0 = none
         # location2pnw: bridge the road identity/class so pnw_location_services can name the road and
@@ -177,12 +180,27 @@ def main():
         mem.put_nonblocking("MapOneWay", "1" if mo.oneWay else "0")
         mem.put_nonblocking("MapLanes", str(int(mo.lanes)))
         # mapd220-2pnw PHASE 1 (plumbing/telemetry only): bridge the three v2.2.0 mapdOut fields as
-        # mem-params, mirroring the RoadContext/MapOneWay pattern above. No consumer reads these yet —
-        # this only makes the data flow + observable (ces_pnw telemetry) so a later phase can gate
-        # curve-tiering / freeway-floor / posted-limit logic on them once validated against real drives.
+        # mem-params, mirroring the RoadContext/MapOneWay pattern above.
+        # nudgelesshighway2pnw: MapHighwayClass now GATES the nudgeless auto-lane-change (desire_helper.py)
+        # in addition to the ces_pnw telemetry read. A dead/stalled mapd must not latch a stale freeway
+        # class forever, so bridge a monotonic write-timestamp alongside it (same pattern as the
+        # LastGPSPosition "ts" field above) — the reader rejects the class as unknown once this ages past
+        # its freshness window, and the else-branch below explicitly self-clears it when mapdOut dies.
         mem.put_nonblocking("MapHighwayClass", str(mo.highwayClass))
+        mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
         mem.put_nonblocking("MapWayId", str(int(mo.wayId)))
         mem.put_nonblocking("MapConditionalSpeedLimit", mo.conditionalSpeedLimit or "")
+      else:
+        # nudgelesshighway2pnw: mapdOut is not alive (mapd crashed / binary wiped / never started, or
+        # simply not publishing this field yet on an old mapd version). Self-clear the bridged highway
+        # class so desire_helper's freeway gate can't keep using the last value it saw before exiting the
+        # freeway onto a city street. Debounced like the MapDownloadStatus "down" state below so one 1 Hz
+        # gap doesn't flicker it — sustained silence clears it (and stamps a fresh ts so a reader checking
+        # the ts alone still sees "" promptly rather than waiting out the staleness window too).
+        mapd_out_down += 1
+        if mapd_out_down == 5:
+          mem.put_nonblocking("MapHighwayClass", "")
+          mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point
