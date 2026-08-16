@@ -62,19 +62,26 @@ class _Params:
     return False
 
 
+_UNSET = object()  # sentinel: "compute the ts from ts_age normally" vs. an explicit override (incl. None)
+
+
 class _FakeMem:
   """Fake of the /dev/shm/params mem-Params mapd bridges MapHighwayClass (+ its bridged write-ts,
   MapHighwayClassTs) into. `ts_age` is how many seconds old the bridged write-ts should read as --
-  0.0 (default) = fresh/just-written; > MAP_CLASS_TTL_S simulates a dead/stalled mapd (FIX 1)."""
-  def __init__(self, highway_class="", ts_age=0.0):
+  0.0 (default) = fresh/just-written; > MAP_CLASS_TTL_S simulates a dead/stalled mapd (FIX 1);
+  negative simulates a ts AHEAD of time.monotonic() (Gemini re-review). `ts_value`, if given,
+  overrides the computed ts string entirely -- None simulates the key being absent/unset, a
+  non-numeric string simulates a corrupted read (both exercise the reader's fail-safe parsing)."""
+  def __init__(self, highway_class="", ts_age=0.0, ts_value=_UNSET):
     self.highway_class = highway_class
     self._ts = time.monotonic() - ts_age
+    self._ts_value = ts_value
 
   def get(self, key, return_default=True):
     if key == "MapHighwayClass":
       return self.highway_class
     if key == "MapHighwayClassTs":
-      return str(self._ts)
+      return self._ts_value if self._ts_value is not _UNSET else str(self._ts)
     return None
 
 
@@ -90,7 +97,7 @@ class _CS:
     self.rightBlindspot = right_blindspot
 
 
-def _dh(monkeypatch, highway_class="", nudge_required=False, brand="tesla", fp="", ts_age=0.0):
+def _dh(monkeypatch, highway_class="", nudge_required=False, brand="tesla", fp="", ts_age=0.0, mem=None):
   # __init__ constructs both self.params = Params() and (locally) mem-Params("/dev/shm/params");
   # patch both call sites to the no-op so construction can't blow up on this host, then swap in the
   # real per-test fakes below.
@@ -99,6 +106,12 @@ def _dh(monkeypatch, highway_class="", nudge_required=False, brand="tesla", fp="
   d = DesireHelper(CP=_CP(brand, fp))
   d.params = _Params(nudge_required)
   d.nudgeless_lane_change = d.nudgeless_supported and not nudge_required
+  if mem is not None:
+    # explicit fake supplied (e.g. a raw/overridden ts) -- leave the __init__ defaults ("" / -1e9) in
+    # place so the test exercises the REAL periodic-read/parse path (_run must run >= 10 ticks, the
+    # 0.5s refresh cadence, for this to matter) instead of the immediate-prime shortcut below.
+    d.mem_params = mem
+    return d
   d.mem_params = _FakeMem(highway_class, ts_age)
   d._map_highway_class = highway_class          # prime immediately -- skip the ~0.5s (10-cycle) read cadence
   d._map_class_ts = time.monotonic() - ts_age    # matches the fake's own bridged write-ts
@@ -273,3 +286,39 @@ def test_timer_fires_after_continuous_on_highway_hold(monkeypatch):
   cs = _CS(V30, left_blinker=True)
   state = _run(d, cs, AUTO_LANE_CHANGE_DELAY + 0.2)
   assert state == LaneChangeState.laneChangeStarting
+
+
+# Gemini re-review -- bound the freshness age both ways -----------------------------------------
+# These three exercise the REAL periodic-read/parse path (mem=... skips the immediate-prime
+# shortcut in _dh(), so _run() must cross the ~0.5s/10-cycle refresh cadence for the fake's value
+# to actually be read and parsed).
+
+def test_future_ts_rejected(monkeypatch):
+  # A bridged ts AHEAD of time.monotonic() -- a negative age -- must NOT be trusted as fresh. Only
+  # reachable in practice via the Darwin/sim on-disk mem_params fallback (a real /dev/shm tmpfs ts
+  # can't outlive the reboot that resets time.monotonic()), but the age bound must hold unconditionally.
+  future_ts = str(time.monotonic() + 100.0)
+  mem = _FakeMem(highway_class="motorway", ts_value=future_ts)
+  d = _dh(monkeypatch, mem=mem)
+  cs = _CS(V35, left_blinker=True)
+  state = _run(d, cs, 3.0)
+  assert state == LaneChangeState.preLaneChange
+
+
+def test_absent_ts_with_class_present(monkeypatch):
+  # MapHighwayClass reads "motorway" but MapHighwayClassTs is missing/unset (None) -- e.g. an old
+  # mapd_configd build that bridges the class without the new ts field. Fail-safe: treated as unknown.
+  mem = _FakeMem(highway_class="motorway", ts_value=None)
+  d = _dh(monkeypatch, mem=mem)
+  cs = _CS(V35, left_blinker=True)
+  state = _run(d, cs, 3.0)
+  assert state == LaneChangeState.preLaneChange
+
+
+def test_unparseable_ts(monkeypatch):
+  # A corrupted/non-numeric ts must hit the float() parse-exception path and fail safe, not raise.
+  mem = _FakeMem(highway_class="motorway", ts_value="not-a-number")
+  d = _dh(monkeypatch, mem=mem)
+  cs = _CS(V35, left_blinker=True)
+  state = _run(d, cs, 3.0)
+  assert state == LaneChangeState.preLaneChange

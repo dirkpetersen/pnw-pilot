@@ -148,7 +148,12 @@ class DesireHelper:
     # (mapd_configd is alive and actually publishing) — a dead/stalled mapd can no longer latch a stale
     # freeway reading. Computed every tick (not just while pending) so FIX 2's continuous-hold
     # requirement below sees a stable, up-to-date value.
-    map_class_fresh = (time.monotonic() - self._map_class_ts) <= MAP_CLASS_TTL_S
+    # Gemini re-review: bound the age BOTH ways. A ts ahead of "now" (negative age) would otherwise
+    # pass `age <= MAP_CLASS_TTL_S` and wrongly trust a stale class. Unreachable via the real
+    # /dev/shm tmpfs mem-param path (wiped by the same reboot that resets time.monotonic()), but the
+    # Darwin/sim fallback (mem_params = self.params, on-disk) can surface a pre-reboot ts.
+    map_class_age = time.monotonic() - self._map_class_ts
+    map_class_fresh = 0.0 <= map_class_age <= MAP_CLASS_TTL_S
     on_highway = (map_class_fresh and self._map_highway_class in FREEWAY_CLASSES) or self._speed_armed
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
