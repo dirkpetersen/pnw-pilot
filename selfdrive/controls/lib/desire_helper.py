@@ -13,6 +13,16 @@ LANE_CHANGE_TIME_MAX = 10.
 # auto-start the lane change without a steering-wheel nudge.
 AUTO_LANE_CHANGE_DELAY = 0.75  # seconds (driver feedback: 1.5 felt too slow to commit the change)
 
+# nudgelesshighway2pnw: gate the AUTO (nudgeless) lane change to highways only. Driver report — a
+# family member flipped the turn signal to make an ordinary CITY turn and openpilot auto-lane-changed
+# into cross-traffic. The manual steering-torque nudge path is UNCHANGED and still works everywhere;
+# only the no-touch auto path is restricted here.
+HIGHWAY_MIN_SPEED = 45 * CV.MPH_TO_MS  # speed floor: allowed even with no/stale map data (fail-open on speed alone)
+# mapd's HighwayClass enum (cereal/custom.capnp), freeway-grade values only. Deliberately excludes
+# primary/secondary/tertiary/unclassified/residential/livingStreet — those carry city arterials with
+# cross-traffic, which is exactly the road class the driver report happened on.
+FREEWAY_CLASSES = frozenset({"motorway", "motorwayLink", "trunk", "trunkLink"})
+
 DESIRES = {
   LaneChangeDirection.none: {
     LaneChangeState.off: log.Desire.none,
@@ -58,6 +68,18 @@ class DesireHelper:
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
 
+    # nudgelesshighway2pnw: highway/freeway gate for the auto (nudgeless) path — mem-param read of
+    # mapd's bridged road class, same guarded-import pattern speedadjust_controller.py uses (a mem
+    # Params("/dev/shm/params") read, NOT a msgq/carState subscription).
+    self._map_highway_class = ""  # "" == unknown/no data -> fail-safe: only the speed floor can allow auto
+    self._map_class_read_counter = 0
+    import platform
+    try:
+      from openpilot.common.params import Params as _P
+      self.mem_params = _P("/dev/shm/params") if platform.system() != "Darwin" else self.params
+    except Exception:
+      self.mem_params = None
+
   @staticmethod
   def get_lane_change_direction(CS):
     return LaneChangeDirection.left if CS.leftBlinker else LaneChangeDirection.right
@@ -72,6 +94,20 @@ class DesireHelper:
     self._param_read_counter += 1
     if self._param_read_counter % 60 == 0:
       self.nudgeless_lane_change = self.nudgeless_supported and not self.params.get_bool("NudgeForLaneChange")
+
+    # nudgelesshighway2pnw: refresh the map-derived road class ~ every 1s (20 cycles @ 20Hz). Fail-safe
+    # to "" (unknown) on any missing/unparseable read — never raise, never let a bad read widen the gate.
+    self._map_class_read_counter += 1
+    if self._map_class_read_counter % 20 == 0:
+      hwy_class = ""
+      if self.mem_params is not None:
+        try:
+          raw = self.mem_params.get("MapHighwayClass", return_default=True)
+          raw = raw.decode() if isinstance(raw, bytes) else raw
+          hwy_class = raw if raw else ""
+        except Exception:
+          hwy_class = ""
+      self._map_highway_class = hwy_class
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -104,7 +140,13 @@ class DesireHelper:
           self.auto_lane_change_timer += DT_MDL
         else:
           self.auto_lane_change_timer = 0.0
-        auto_lane_change = self.nudgeless_lane_change and self.auto_lane_change_timer > AUTO_LANE_CHANGE_DELAY
+
+        # nudgelesshighway2pnw: the auto path only fires on a highway/freeway — a mapd freeway-grade
+        # road class, OR (fail-safe when map data is missing/stale) v_ego at/above the speed floor.
+        # City streets with no map data and low speed are always blocked, matching the manual-nudge-
+        # only behavior a driver would expect making an ordinary city turn.
+        on_highway = self._map_highway_class in FREEWAY_CLASSES or v_ego >= HIGHWAY_MIN_SPEED
+        auto_lane_change = self.nudgeless_lane_change and self.auto_lane_change_timer > AUTO_LANE_CHANGE_DELAY and on_highway
 
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off

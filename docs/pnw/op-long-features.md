@@ -107,7 +107,7 @@ Rows marked **[long-independent]** behave the same regardless of Alpha Long.
 |---|---|---|
 | **Lateral control** | ✅ angle control via `tesla_legacy` panda safety (strong EPS — holds fast sweepers) | ✅ **BP 4-signal lateral** (curvature + rate + path_offset + path_angle) with the hardened custom panda safety (reflash-deployed 07-11; reset-latch hole fixed). Fallback to stock curvature-only on any exception, proven by fault injection |
 | **Predicted-curvature blend / human-turn reset** | ➖ | ✅ embedded in `LateralCurvExt` (turn-exit wind-up fix; no post-override lurch) |
-| **Nudgeless lane change** (`NudgelessLaneChange`, default OFF) | ✅ supported, **BSM-gated** (blindspot blocks/resets the hold timer) | ✅ same |
+| **Nudgeless lane change** (`NudgelessLaneChange`, default OFF) | ✅ supported, **BSM-gated** (blindspot blocks/resets the hold timer), **highway/freeway-gated** (nudgelesshighway2pnw: mapd freeway-grade road class, or ≥45 mph fail-safe when map data is missing/stale — city streets always require the manual steering-wheel nudge) | ✅ same |
 | **BSM source** | ✅ Raven `AutopilotStatus`/`DAS_status` 0x399 explicit parser (bsm2pnw; walk-by flip test still pending) | ✅ Ford native BLIS (`Side_Detect_L/R_Stat`) |
 | **No disengage on brake** (`NoDisengageOnBrake`, default OFF) | ✅ | ✅ under op-long; with Alpha OFF a brake press also cancels the stock ACC itself (Ford behavior — openpilot can't override that; **verify** exact interaction on the truck) |
 | **Ford lateral status indicators** (CALIBRATING x% / STEER: STOCK / NO 4SIG PANDA) | ➖ | 🖥 surfaces silent 4-signal fallback or panda-flash mismatch |

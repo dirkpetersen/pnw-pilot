@@ -108,12 +108,17 @@ DESCRIPTIONS = {
   ),
   # auto2pnw / toggles-invert2pnw: nudgeless lane change is ON by default (Tesla + F-150 Lightning);
   # this is the opt-OUT toggle.
+  # nudgelesshighway2pnw: the no-touch auto path is now highway-only (driver report: a city-street
+  # turn-signal flip triggered an unwanted auto lane change into cross-traffic) — the description
+  # below documents that; the steering-wheel nudge itself is unaffected and still works everywhere.
   "NudgeForLaneChange": tr_noop(
-    "By default, a lane change starts from the turn signal alone, without nudging the steering wheel — " +
-    "hold the blinker for about 0.75 seconds above 20 mph (32 km/h) and openpilot will change lanes " +
-    "(blocked while the blind spot monitor detects a vehicle). Turn this ON to require a steering-wheel " +
-    "nudge before every lane change instead. Keep your hands on the wheel and check your surroundings. " +
-    "Tesla and the Ford F-150 Lightning only — other cars always require the steering-wheel nudge."
+    "By default, on a highway/freeway (or above about 45 mph), a lane change starts from the turn " +
+    "signal alone, without nudging the steering wheel — hold the blinker for about 0.75 seconds and " +
+    "openpilot will change lanes (blocked while the blind spot monitor detects a vehicle). On city " +
+    "streets below 45 mph, the turn signal alone does NOT start a lane change — nudge the steering " +
+    "wheel to change lanes there, same as making an ordinary turn. Turn this ON to require a " +
+    "steering-wheel nudge everywhere, highway included. Keep your hands on the wheel and check your " +
+    "surroundings. Tesla and the Ford F-150 Lightning only — other cars always require the nudge."
   ),
   "NoDisengageOnBrake": tr_noop(
     "Keep openpilot engaged when you press the brake pedal instead of disengaging. " +
