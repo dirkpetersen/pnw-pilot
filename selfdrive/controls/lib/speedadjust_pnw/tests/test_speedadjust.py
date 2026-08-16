@@ -12,7 +12,7 @@ import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
-  SA_DRIVER_LOWER_TOL)
+  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S)
 
 MPH = MPH_TO_MS
 V75 = 75 * MPH
@@ -717,3 +717,302 @@ def test_uninitialized_cruise_cancels_pending_restore():
   c.cap(None, V75, V60, V60, False)                      # cruise goes uninitialized
   assert c._restore_ceiling is None
   assert c.mem_params.last == {}
+
+
+# ---- speedadjustreset2pnw (2026-08-16): manual set-change = override, resets BOTH latches ----------
+# Driver directive: ANY change to the cruise SET speed (up or down) is an explicit "resume — don't
+# slow me for this" override — more intuitive for a novice than hunting the AutoSpeedReduce toggle.
+# These tests use op-long controllers (self._long_ok=True) unless noted, matching the module
+# docstring's proof that v_cruise_set is feedback-safe there (cap()'s own return value never writes
+# back into CS.vCruise, so _is_own_actuation() is always False / a no-op on that path — see the
+# separate stock-ACC section below for the case where it actually matters).
+
+V80 = 80 * MPH
+
+
+def test_manual_bump_up_releases_police_cap_and_does_not_relatch():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})   # ttr ~24 s < 30 -> latches
+  settled = _settle(c, V75, V60)
+  assert abs(settled - (V60 + POLICE_MARGIN)) < 1e-6
+  assert c._police_latched is True
+  # driver bumps the set UP -- explicit override
+  out = _cap(c, V80, V60, v_cruise_set=V80)
+  assert out == V80                              # released immediately, no debounce wait
+  assert c._cap_out is None
+  assert c._police_suppressed is True
+  # same alert persists (still well within the 30 s approach window) -- must NOT re-latch/re-cap
+  for _ in range(5):
+    c._last_t -= 0.5
+    out = c.cap(None, V80, V80, V60, True)
+  assert out == V80
+  assert c._cap_out is None
+
+
+def test_manual_bump_down_releases_police_cap_and_does_not_relatch():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  assert c._police_latched is True
+  v_new = 55 * MPH                                # driver bumps DOWN, still an explicit override
+  out = _cap(c, v_new, V60, v_cruise_set=v_new)
+  assert out == v_new
+  assert c._police_suppressed is True
+  for _ in range(5):
+    c._last_t -= 0.5
+    out = c.cap(None, v_new, v_new, V60, True)
+  assert out == v_new                             # not re-capped while the same alert persists
+  assert c._cap_out is None
+
+
+def test_manual_change_then_alert_clears_and_new_alert_rearms():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  out = _cap(c, V80, V60, v_cruise_set=V80)         # dismiss via manual bump
+  assert out == V80
+  assert c._police_suppressed is True
+  # the SAME report clears
+  c._police = {"state": "clear"}
+  _cap(c, V80, V60, v_cruise_set=V80)
+  assert c._police_latched is False
+  assert c._police_suppressed is False              # re-armed
+  # a NEW alert appears -- must cap again, normally
+  c._police = {"state": "alert", "dist_mi": 0.4}
+  out = _settle(c, V80, V60, v_cruise_set=V80)
+  assert abs(out - (V60 + POLICE_MARGIN)) < 1e-6
+
+
+def test_tiny_jitter_in_set_does_not_reset():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  settled = _settle(c, V75, V60)
+  assert c._police_latched is True
+  jitter = V75 + (SET_CHANGE_EPS * 0.5)             # well under the epsilon
+  out = _cap(c, jitter, V60, v_cruise_set=jitter)
+  assert abs(out - settled) < 1e-6                  # cap still fully engaged, unchanged
+  assert c._police_suppressed is False
+  assert c._cap_out is not None
+
+
+def test_manual_change_releases_active_limit_drop_cap():
+  c = _drop(mode=2)                                 # sl_ref=V60, ratio=V75/V60, sl=V45 -> target 56.25
+  settled = _settle(c, V75, V60)
+  assert settled < V75                              # confirm it's actively trimming
+  v_new = 50 * MPH                                  # driver nudges the set -- explicit override
+  out = _cap(c, v_new, V60, v_cruise_set=v_new)
+  assert out == v_new                               # released immediately
+  assert c._cap_out is None
+  assert abs(c._sl_ref - c._sl) < 1e-6               # baseline re-anchored to the current (dropped) limit
+  # future FURTHER drops below this new baseline still re-cap (not permanently disabled)
+  c._sl = 40 * MPH
+  out2 = _settle(c, v_new, V60, v_cruise_set=v_new)
+  assert out2 < v_new
+
+
+def test_no_reset_across_uninitialized_to_initialized_transition():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  V90 = 90 * MPH
+  _cap(c, V90, V60, v_cruise_set=V90, v_cruise_initialized=False)   # not set yet
+  assert c._last_v_set is None
+  out = _cap(c, V75, V60, v_cruise_set=V75, v_cruise_initialized=True)   # driver sets cruise
+  assert c._police_suppressed is False              # NOT treated as a manual override reset
+  assert c._last_v_set == V75
+  # the police cap engages normally on the very next tick(s)
+  out = _settle(c, V75, V60)
+  assert abs(out - (V60 + POLICE_MARGIN)) < 1e-6
+
+
+# ---- speedadjustreset2pnw + stock-ACC: our OWN button taps must never self-cancel the feature ------
+# See _is_own_actuation()'s docstring: on a pcmCruise=True car, CS.vCruise mirrors the truck's live
+# stock ACC dial, which speedadjust-exec2pnw's own SET-/SET+ taps actually move. Without the guard,
+# every one of our own taps would look identical to a driver override.
+
+def test_own_dec_taps_do_not_self_cancel_stock_cap():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _cap(c, V75, V60)                                 # tick 1: engage, _cap_out seeded at V75, _last_v_set=V75
+  assert c._cap_out is not None
+  # simulate the truck's OWN reported set moving DOWN toward our _cap_out (our own SET- taps landing)
+  for _ in range(6):
+    c._last_t -= 0.5
+    new_set = max(c._cap_out - 0.01, MIN_CAP)        # stays at/just above our own current target
+    c.cap(None, new_set, new_set, V60, True)
+  assert c._police_suppressed is False              # never mistaken for a manual override
+  assert c._cap_out is not None                     # still actively capping
+
+
+def test_own_restore_taps_do_not_self_cancel_stock_restore():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                          # cap engages + fully slews, ceiling latched V75
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                          # restore begins, _restore_ceiling ~= V75
+  assert c._restore_ceiling is not None
+  ceiling = c._restore_ceiling
+  # simulate the truck's OWN reported set moving UP toward the restore ceiling (our own SET+ taps)
+  cur = c._last_v_set
+  for _ in range(6):
+    cur = min(cur + 0.4 * MPH, ceiling)
+    c._last_t -= 0.5
+    c._pub_last -= 0.5
+    c.cap(None, cur, cur, V60, True)
+  assert c._police_suppressed is False              # never mistaken for a manual override
+  assert c._restore_ceiling is not None             # restore still in progress, not cancelled
+
+
+def test_genuine_driver_bump_on_stock_car_still_resets():
+  # a stock-ACC driver bump that is NOT explainable by our own commanded target (a big jump well past
+  # what we ourselves would ever ask for) must still be treated as a real manual override.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  assert c._pub_ceiling is not None
+  driver_set = V80                                  # far above anything a dec-cap would ever command
+  _tick(c, v_cruise=driver_set, v_cruise_set=driver_set, sm=None)
+  assert c._police_suppressed is True
+  assert c._cap_out is None
+
+
+# ---- speedadjustreset2pnw hardening (2026-08-16, second Fable + Gemini review pass) -----------------
+
+# FIX A (Fable major): the Tesla's cruiseState.speed is floored at max(DI_digitalSpeed·conv, 1e-3),
+# never exactly 0, so v_cruise_initialized stays True straight through STANDBY -- the uninit guard
+# alone never protects it. _cruise_engaged() additionally gates on cruiseState.enabled.
+
+def test_engage_transition_near_latched_alert_does_not_suppress():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})   # ttr ~24 s < 30 -> latches
+  floor_val = 1e-3                                    # Tesla standby floor (m/s) -- never exactly 0
+  c.cap(_sm(cruise_enabled=False), floor_val, floor_val, V60, True)      # disengaged tick
+  assert c._police_latched is True                    # latching doesn't check engagement
+  assert c._last_v_set is None                         # FIX A: not-engaged -> no baseline recorded
+  c._last_t -= 0.5
+  c.cap(_sm(cruise_enabled=True), V75, V75, V60, True)  # ENGAGE transition: set jumps floor -> V75
+  assert c._police_suppressed is False                  # must NOT read as a manual override
+  assert c._last_v_set == V75
+  out = None
+  for _ in range(400):
+    c._last_t -= 0.5
+    out = c.cap(_sm(cruise_enabled=True), V75, V75, V60, True)
+  assert abs(out - (V60 + POLICE_MARGIN)) < 1e-6        # the cap engages normally afterward
+
+
+def test_two_engaged_ticks_with_no_delta_after_engage_does_not_misfire():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  c.cap(_sm(cruise_enabled=False), V75, V75, V60, True)
+  c.cap(_sm(cruise_enabled=True), V75, V75, V60, True)   # engage, same set as before disengage
+  assert c._police_suppressed is False
+  c._last_t -= 0.5
+  c.cap(_sm(cruise_enabled=True), V75, V75, V60, True)   # second engaged tick, still unchanged
+  assert c._police_suppressed is False
+
+
+def test_not_engaged_tick_never_records_baseline_even_mid_drive():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  c.cap(_sm(cruise_enabled=True), V75, V75, V60, True)
+  assert c._last_v_set == V75
+  c._last_t -= 0.5
+  c.cap(_sm(cruise_enabled=False), V75, V75, V60, True)  # driver disengages (no set change)
+  assert c._last_v_set is None                           # baseline forgotten while disengaged
+
+
+# FIX B (Fable major): _is_own_actuation() reads _cap_out/_restore_ceiling at OBSERVATION time, but
+# our own SET+/SET- taps have real actuation->CAN->carState latency while those fields null INSTANTLY
+# at phase transitions -- an in-flight tap can land 1-2 ticks after and get misread as an override.
+
+def test_inflight_tap_after_restore_preempted_does_not_self_cancel():
+  # mirrors the exact bug scenario: a NEW alert preempts an in-progress restore (_restore_ceiling
+  # nulled, fresh _cap_out seeded, same tick) -- but a SET+ tap issued just before the preemption can
+  # still land afterward, moving v_cruise_set UP right as the new cap is trying to hold it down.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins
+  assert c._restore_ceiling is not None
+  c._police = {"state": "alert", "dist_mi": 0.4}          # a NEW alert preempts the restore
+  _tick(c)
+  assert c._restore_ceiling is None
+  assert c._cap_out is not None
+  late_tap_set = c._last_v_set + 1.0 * MPH                # in-flight SET+ tap lands one tick later
+  c.cap(None, late_tap_set, late_tap_set, V60, True)
+  assert c._police_suppressed is False                    # NOT mistaken for a driver override
+
+
+def test_actuation_grace_window_expires_then_detects_real_change():
+  # negative control for the above: once the grace window has genuinely elapsed, the SAME kind of
+  # delta must still register as a real driver override -- the grace window is time-bounded, not a
+  # permanent hole.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._police = {"state": "clear"}
+  _tick(c)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c)                                                # restore begins
+  c._police = {"state": "alert", "dist_mi": 0.4}          # a NEW alert preempts the restore
+  _tick(c)
+  assert c._cap_out is not None
+  c._last_actuation_transition_t -= (SA_ACTUATION_GRACE_S + 0.5)   # grace window elapses
+  driver_set = c._last_v_set + 5 * MPH
+  c.cap(None, driver_set, driver_set, V60, True)
+  assert c._police_suppressed is True
+
+
+# FIX C (Gemini BLOCKER): on stock-ACC, a value-tolerance check can't distinguish our own tap from a
+# driver's SAME-direction tap -- _is_own_actuation() is now direction-only there. Only an OPPOSITE-
+# direction move is unambiguous. Op-long keeps full any-direction detection (no actuator sharing).
+
+def test_fixc_stock_acc_opposite_direction_during_dec_cap_resets():
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  assert c._cap_out is not None
+  bumped = c._last_v_set + 5 * MPH                        # SET+ -- opposite our own SET- dec taps
+  c.cap(None, bumped, bumped, V60, True)
+  assert c._police_suppressed is True
+
+
+def test_fixc_stock_acc_same_direction_during_dec_cap_does_not_reset():
+  # accepted limitation (documented in _is_own_actuation()): a single same-direction SET- during an
+  # active dec-cap is indistinguishable from our own tap, even a large one.
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  assert c._cap_out is not None
+  nudged_down = c._last_v_set - 5 * MPH
+  c.cap(None, nudged_down, nudged_down, V60, True)
+  assert c._police_suppressed is False
+
+
+def test_fixc_op_long_either_direction_resets():
+  c_up = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c_up, V75, V60)
+  bumped_up = V75 + 5 * MPH
+  out_up = _cap(c_up, bumped_up, V60, v_cruise_set=bumped_up)
+  assert c_up._police_suppressed is True
+  assert out_up == bumped_up
+
+  c_down = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c_down, V75, V60)
+  bumped_down = 55 * MPH
+  _cap(c_down, bumped_down, V60, v_cruise_set=bumped_down)
+  assert c_down._police_suppressed is True
+
+
+# FIX D (Fable minor): only dismiss an alert the driver could actually perceive acting on.
+
+def test_fixd_pre_latch_set_change_does_not_suppress_future_alert():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 15.0})   # ttr >> 30 s, not latched
+  _cap(c, V75, V60)
+  assert c._police_latched is False
+  bumped = V75 + 5 * MPH
+  _cap(c, bumped, V60, v_cruise_set=bumped)
+  assert c._police_suppressed is False                    # FIX D: nothing to dismiss yet
+  c._police = {"state": "alert", "dist_mi": 0.4}           # the report gets close later
+  out = _settle(c, bumped, V60, v_cruise_set=bumped)
+  assert abs(out - (V60 + POLICE_MARGIN)) < 1e-6           # caps normally, unaffected by the earlier nudge
+
+
+# FIX E (Fable minor, telemetry only): the override-release block must clear _engaged too.
+
+def test_fixe_engaged_cleared_on_manual_override_release():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V75, V60)
+  assert c._engaged is True
+  bumped = V75 + 5 * MPH
+  _cap(c, bumped, V60, v_cruise_set=bumped)
+  assert c._engaged is False

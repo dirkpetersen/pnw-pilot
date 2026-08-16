@@ -59,6 +59,70 @@ reduce-only envelope, all conservative):
   F_uninit  anchoring/seeding is skipped entirely while `v_cruise_initialized` is False (cruise never
       set — `v_cruise`/`v_cruise_set` are the `V_CRUISE_UNSET` sentinel, ~145 km/h) — anchoring off
       that would inflate `_ratio` and seed `_cap_out` far above the real set.
+
+speedadjustreset2pnw (2026-08-16, driver directive): ANY manual change to the cruise SET speed (up or
+down) is treated as an explicit "resume — don't slow me for this" override, resetting BOTH the police
+latch/suppression and the limit-drop baseline (see `cap()` + `_is_own_actuation()`). This relies on
+`v_cruise_set` being feedback-safe — i.e. that cap()'s own output can never be mistaken for a driver
+change on the NEXT tick. CORRECTED (2026-08-16, Fable review pass 2 — the original text below was
+factually wrong about the mechanism, though its conclusion held): BOTH fleet cars are
+`CP.pcmCruise=True` (neither sets it False) — the non-pcm `VCruiseHelper` branch (`CS.buttonEvents`
+button-press tracking) NEVER runs on this fleet. `v_cruise_set` actually comes from the PCM branch of
+`selfdrive/car/cruise.py` (`v_cruise_kph = CS.cruiseState.speed`, i.e. `DI_digitalSpeed` on the Tesla) —
+but it is STILL feedback-safe on an op-long car: nothing openpilot transmits ever feeds
+`DI_digitalSpeed`, and `longitudinal_planner.py:151-153` only folds `cap()`'s return value LOCALLY into
+its own `v_cruise` variable for the MPC target — it is never written back to any CAN signal or param,
+so it can never loop back into next tick's `CS.cruiseState.speed`.
+  * op-long cars: SAFE by construction, per the above — every real `v_cruise_set` change there IS the
+    driver (or, on the Tesla specifically, an ENGAGE transition off the `cruiseState.speed` standby
+    floor — see FIX A / `_cruise_engaged()` below, which is why the detector additionally requires ACC
+    to be engaged on two consecutive ticks before trusting a delta).
+  * stock-ACC cars (e.g. the Lightning off Alpha-Long): NOT safe by construction — THIS module's
+    speedadjust-exec2pnw SET-/SET+ button-tap executor actually moves the same `CS.cruiseState.speed`
+    dial that `v_cruise_set` reads. Without a guard, our own dec taps while capping (or inc taps while
+    restoring) would look identical to a driver override and self-cancel the feature after a single
+    tap. `_is_own_actuation()` filters this out DIRECTION-ONLY (see FIX C below — a value-tolerance
+    check can't distinguish our own tap from a driver's SAME-direction tap, since one tap step is
+    smaller than the tolerance needed to absorb our own actuation noise); `SA_ACTUATION_GRACE_S` (FIX
+    B below) additionally covers the actuation-latency race at phase boundaries, where `_cap_out`/
+    `_restore_ceiling` null instantly but an already-in-flight tap can still land 1-2 ticks later.
+
+speedadjustreset2pnw hardening (2026-08-16, second Fable + Gemini review pass — Fable passed with 2
+majors, Gemini blocked on FIX C; all addressed below):
+  FIX A  (Fable major — Tesla engage-time false suppression) the `v_cruise_initialized` guard alone
+      never protects the Tesla: `cruiseState.speed` is floored at `max(DI_digitalSpeed·conv, 1e-3)`,
+      never exactly 0, so the PCM branch's `speed==0 -> V_CRUISE_UNSET` escape never fires and
+      `v_cruise_initialized` stays True even in STANDBY — engaging cruise near a latched police report
+      makes the set "jump" (e.g. ~0.004 -> 26.8 m/s), reading as a manual override and silently
+      defeating the cap at the exact moment it should engage. Fixed: `_cruise_engaged()` gates the
+      detector on `sm['carState'].cruiseState.enabled`, and `_last_v_set` is force-reset to None on
+      every NOT-engaged tick — mirroring the existing uninit-sentinel treatment — so two consecutive
+      ENGAGED ticks with a real delta are required before anything counts as an override.
+  FIX B  (Fable major — stock-ACC boundary-race self-cancel) `_is_own_actuation()` reads `_cap_out`/
+      `_restore_ceiling` at OBSERVATION time, but our own SET+/SET- taps have 0.3-2 s actuation->CAN->
+      carState latency while those fields null INSTANTLY at phase transitions (cap releases, restore
+      expires/cancels, a new cap preempts a restore) — an already-in-flight tap can land 1-2 ticks
+      AFTER the field went None and get misread as a driver override. Fixed: `SA_ACTUATION_GRACE_S`
+      (stock-ACC only — op-long has no physical actuation latency to race) suppresses the detector for
+      a short grace window after any such transition, stamped at each of the three transition sites.
+  FIX C  (Gemini BLOCKER) on stock-ACC, our own tap and a driver's SAME-direction tap are physically
+      indistinguishable by value alone (one 1-mph step is smaller than the tolerance needed to absorb
+      our own tap noise) — the old value-tolerance check therefore MASKED a genuine driver SET- during
+      an active dec-cap. Fixed: `_is_own_actuation()` on stock-ACC is now DIRECTION-ONLY — any
+      SAME-direction move during active actuation (down while dec-capping, up while restoring) is
+      treated as ours (not attributable, never resets); only an OPPOSITE-direction move (driver wants
+      to go faster than a dec cap, or slower than a restore ceiling) is unambiguous and still resets.
+      KNOWN LIMITATION: a single same-direction driver tap during active actuation will not register as
+      an override on stock-ACC — an opposite-direction tap (or fully disengaging) still works. Op-long
+      keeps full any-direction detection (clean — our own output never moves the dial there).
+  FIX D  (Fable minor) the suppression used to fire on ANY set change whenever `state=="alert"`
+      existed, even with the report minutes away (`_police_latched` False, no cap active) — a routine
+      speed adjustment could silently kill an eventual slowdown the driver never even perceived. Fixed:
+      gated on `self._police_latched or self._cap_out is not None` — only dismiss an alert the driver
+      could actually perceive acting on.
+  FIX E  (Fable minor, telemetry only) the override-release block cleared `_cap_out` but not
+      `_engaged`, swallowing the "released" cloudlog and the next engage's log. Fixed: mirrors the
+      normal release block's `if self._engaged: ...` bookkeeping.
 """
 import json
 import math
@@ -106,6 +170,21 @@ SA_IN_CURVE_LAT_ACCEL = 1.3               # m/s^2; mirrors ces_pnw.ces_pnw_const
                                            # constant rather than an import so this module stays fully
                                            # decoupled from ces_pnw (no cross-feature coupling)
 
+# speedadjustreset2pnw (driver directive 2026-08-16): ANY manual cruise-set change (up OR down) is an
+# explicit "resume — stop slowing me for THIS" override. Nudging the physical set dial is a far more
+# intuitive override for a novice driver than hunting down the AutoSpeedReduce toggle. 0.15 m/s sits
+# below the smallest real driver increment (1 kph = 0.278 m/s, 1 mph = 0.447 m/s) but comfortably above
+# float noise, so it can't misfire on a no-op re-read of the same set speed.
+SET_CHANGE_EPS = 0.15                     # m/s
+# speedadjustreset2pnw hardening FIX B (2026-08, Gemini + Fable review pass 2): matches
+# opendbc/car/ford/icbm_pnw.STALE_LIMIT_S (see PUB_THROTTLE_S's comment above — kept as a LOCAL
+# constant, no cross-feature import, same rationale as SA_IN_CURVE_LAT_ACCEL). An in-flight SET+/SET-
+# tap can land up to this long AFTER _cap_out/_restore_ceiling null at a phase boundary (cap releases,
+# restore expires/cancels, a new cap preempts a restore) — stock-ACC set-change detection is
+# suppressed for this long after any such transition so a late-landing tap of OUR OWN can't be
+# misread as a driver override.
+SA_ACTUATION_GRACE_S = 2.0                # s; stock-ACC only
+
 
 class SpeedAdjustController:
   def __init__(self, CP, params=None):
@@ -130,6 +209,20 @@ class SpeedAdjustController:
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
     self._police = None          # last LocationServices["police"] dict
     self._police_latched = False # once within the approach window, hold until the report clears
+    # speedadjustreset2pnw: True after a detected manual set-change dismisses the CURRENT police
+    # alert — suppresses _police_cap() (so it can't simply re-latch next tick) until the report
+    # clears (state != "alert"), at which point it clears alongside _police_latched and the feature
+    # re-arms for the NEXT alert. See _is_own_actuation()/cap() for why this exists.
+    self._police_suppressed = False
+    # speedadjustreset2pnw: last observed driver v_cruise_set (m/s), used to detect a manual cruise
+    # nudge (see cap()). None = not yet tracked — also forced back to None whenever
+    # v_cruise_initialized is False OR ACC is not engaged (FIX A) so the uninitialized->initialized
+    # transition, the ~145 km/h V_CRUISE_UNSET sentinel, AND an engage transition (Tesla
+    # cruiseState.speed's 1e-3 floor) never count as a "change".
+    self._last_v_set = None
+    # speedadjustreset2pnw hardening FIX B: monotonic time of the last _cap_out/_restore_ceiling
+    # None-ness transition (cap released, restore ended/preempted) — see SA_ACTUATION_GRACE_S.
+    self._last_actuation_transition_t = -1e9
     self._last_read = -1e9
     self._engaged = False        # for engage/release logging only
     self._cap_out = None         # the SLEWED cap currently emitted (None = not capping)
@@ -208,7 +301,10 @@ class SpeedAdjustController:
     p = self._police
     if not isinstance(p, dict) or p.get("state") != "alert":
       self._police_latched = False           # cleared/passed report → release
+      self._police_suppressed = False        # speedadjustreset2pnw: report gone → re-arm for the next one
       return None
+    if self._police_suppressed:              # speedadjustreset2pnw: driver dismissed THIS alert via a
+      return None                            # manual set change — stay off until it clears (see cap())
     try:
       dist_m = float(p.get("dist_mi", 0.0)) * MILE_M
     except (TypeError, ValueError):
@@ -364,6 +460,9 @@ class SpeedAdjustController:
       self._restore_ceiling = None
       self._restore_deadline = None
       self._restore_last_stock = None
+      # FIX B: an in-flight SET+ tap of our own may still land after this transition -- stamp it so
+      # the set-change detector gives it a grace window instead of misreading it as an override.
+      self._last_actuation_transition_t = now
       self._publish_target(None)
       return
     # restore-hardening #3: never BEGIN or CONTINUE raising the set while laterally loaded in a curve
@@ -388,6 +487,56 @@ class SpeedAdjustController:
         self._restore_ceiling = min(self._restore_ceiling, stock_now)
       self._restore_last_stock = stock_now
     self._publish_target(self._restore_ceiling, self._restore_ceiling, "inc")
+
+  # ---- speedadjustreset2pnw: manual set-change = override detection ---------
+  @staticmethod
+  def _cruise_engaged(sm) -> bool:
+    """speedadjustreset2pnw hardening FIX A: whether ACC is actually engaged right now. Required
+    BEFORE trusting any v_cruise_set delta as a manual override — `v_cruise_initialized` alone does
+    NOT protect the Tesla: `selfdrive/car/cruise.py`'s PCM branch only maps `cruiseState.speed==0` to
+    the V_CRUISE_UNSET sentinel, but the Raven's `cruiseState.speed` is floored at
+    `max(DI_digitalSpeed·conv, 1e-3)` — never exactly 0 — so `v_cruise_initialized` stays True straight
+    through STANDBY. Without this gate, the ENGAGE transition itself (the set jumping from the ~0.004
+    floor to a real value, e.g. 26.8 m/s) reads as a manual override and can silently suppress a
+    police cap at the exact moment it should be engaging. sm may be None (unit tests without a
+    SubMaster, or missing carState) -> True: on the real car sm is always live, so this is the same
+    "assume the permissive default when we truly cannot tell" convention `_driver_intervening()`
+    already uses (there, missing sm defaults to "not intervening"; here it defaults to "engaged" —
+    both let the rest of this module behave as if the plumbing were present)."""
+    if sm is None:
+      return True
+    try:
+      return bool(sm['carState'].cruiseState.enabled)
+    except Exception:
+      return True
+
+  def _is_own_actuation(self, prev: float, new: float) -> bool:
+    """True iff an observed v_cruise_set delta is NOT reliably attributable to a genuine driver
+    override — i.e. it could plausibly be THIS module's own commanded actuation. On an op-long car
+    this is always False: cap()'s RETURN value never writes back into CS.vCruise (see the module
+    docstring's v_cruise_set feedback-safety note), so every real change there IS the driver.
+
+    On a stock-ACC car, `selfdrive/car/cruise.py`'s PCM branch sets `CS.vCruise = CS.cruiseState.speed`
+    directly — the truck's OWN live ACC dial — and THIS module's speedadjust-exec2pnw SET-/SET+
+    button-tap executor actually moves that dial.
+
+    speedadjustreset2pnw hardening FIX C (Gemini BLOCKER): this is DIRECTION-ONLY, not value-based.
+    A value-tolerance check (the original design) cannot distinguish our own tap from a driver's
+    SAME-direction tap — one 1-mph step is smaller than the tolerance needed to absorb our own tap's
+    lag/latency — so it MASKED a genuine driver SET- during an active dec-cap. Any SAME-direction move
+    while we are actively actuating in that direction is therefore treated as "ours" (not attributable
+    -> no reset), full stop, regardless of magnitude; only an OPPOSITE-direction move (driver wants to
+    go FASTER than an active dec cap, or SLOWER than an active restore ceiling) is unambiguous — we
+    NEVER command that direction ourselves in that phase — and still resets. KNOWN LIMITATION: a
+    single same-direction driver tap during active actuation will not register as an override on
+    stock-ACC; an opposite-direction tap (or fully disengaging) still works."""
+    if self._long_ok:
+      return False
+    if new < prev and self._cap_out is not None:
+      return True    # actively dec-capping: WE only ever press SET- (down) -- same direction, not attributable
+    if new > prev and self._restore_ceiling is not None:
+      return True    # actively restoring: WE only ever press SET+ (up) -- same direction, not attributable
+    return False
 
   # ---- the cap the planner folds (reduce-only) ------------------------------
   def cap(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float, v_cruise_initialized: bool) -> float:
@@ -415,6 +564,7 @@ class SpeedAdjustController:
     if not v_cruise_initialized:
       self._engaged = False
       self._police_latched = False
+      self._police_suppressed = False        # speedadjustreset2pnw
       self._cap_out = None
       self._release_t = None
       # speedadjust-exec2pnw: an uninitialized cruise can't be a valid restore ceiling either.
@@ -423,12 +573,59 @@ class SpeedAdjustController:
       self._restore_deadline = None
       self._min_pub_target = None
       self._restore_last_stock = None
+      # speedadjustreset2pnw (F_uninit parity): the V_CRUISE_UNSET sentinel is not a real driver set —
+      # forget it so the eventual uninitialized->initialized transition can't read as a "change".
+      self._last_v_set = None
       self._publish_target(None)
       return v_cruise
+
+    # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either
+    # direction) is an explicit "resume — don't slow me for this" override. Must run BEFORE
+    # _police_cap()/_update_baseline() below so a detected change takes effect the SAME tick.
+    # _is_own_actuation() filters out this module's OWN stock-ACC button taps (see its docstring) so
+    # this can never self-cancel the feature it's supposed to be overriding.
+    #
+    # FIX A: only trust a delta while ACC is engaged on BOTH this tick and the previous one -- see
+    # _cruise_engaged()'s docstring for why v_cruise_initialized alone doesn't protect the Tesla
+    # (cruiseState.speed's 1e-3 floor keeps it "initialized" straight through standby). Forcing
+    # _last_v_set back to None on every not-engaged tick means the FIRST engaged tick after any
+    # not-engaged stretch (including a fresh enable) only establishes a new baseline -- it can never
+    # itself be read as a change, exactly mirroring the uninit-sentinel treatment above.
+    engaged = self._cruise_engaged(sm)
+    if not engaged:
+      self._last_v_set = None
+    elif self._last_v_set is not None and abs(v_cruise_set - self._last_v_set) > SET_CHANGE_EPS:
+      # FIX B: a stock-ACC tap of OUR OWN can still be in flight (0.3-2 s actuation->CAN->carState
+      # latency) for a short window after _cap_out/_restore_ceiling already nulled at a phase
+      # boundary -- suppress detection entirely for that grace window rather than let a late-landing
+      # own-tap fall through _is_own_actuation() (which needs the field to still be non-None).
+      in_grace = (not self._long_ok
+                  and now - self._last_actuation_transition_t < SA_ACTUATION_GRACE_S)
+      if not in_grace and not self._is_own_actuation(self._last_v_set, v_cruise_set):
+        # FIX D: only dismiss an alert the driver could actually perceive acting on -- a routine set
+        # nudge with a report still minutes away (not latched, no active cap) must not silently kill
+        # the eventual slowdown.
+        if self._police_latched or self._cap_out is not None:
+          self._police_suppressed = True
+        # speed limit: re-anchor the baseline to the new set (speedanchor2pnw's own F2 formula) so
+        # the current trim releases; a FURTHER drop below this new baseline will still re-cap.
+        self._sl_ref = self._sl
+        self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
+        # release any active emitted cap so speed resumes immediately (MPC/executor bounds the accel).
+        self._cap_out = None
+        self._release_t = None
+        # FIX E (telemetry only): mirror the normal release block's engaged-bookkeeping so the
+        # "released" log actually fires and the next real engage's log isn't swallowed.
+        if self._engaged:
+          self._engaged = False
+          cloudlog.info("speedadjust: released -> cruise (manual override)")
+    if engaged:
+      self._last_v_set = v_cruise_set
 
     if self._mode == 0:
       self._engaged = False
       self._police_latched = False
+      self._police_suppressed = False        # speedadjustreset2pnw
       self._cap_out = None
       self._release_t = None
       self._pub_ceiling = None
@@ -509,6 +706,9 @@ class SpeedAdjustController:
       self._release_t = None
       self._pub_ceiling = None
       self._min_pub_target = None
+      # FIX B: an in-flight SET- tap of our own may still land after this transition -- stamp it so
+      # the set-change detector gives it a grace window instead of misreading it as an override.
+      self._last_actuation_transition_t = now
       if self._engaged:
         self._engaged = False
         cloudlog.info("speedadjust: released -> cruise")
@@ -518,6 +718,12 @@ class SpeedAdjustController:
     self._release_t = None
     # speedadjust-exec2pnw: a NEW cap always preempts any in-progress restore (DEC ALWAYS WINS, same
     # principle icbm2pnw's episode machine uses for its own new-cap-vs-restore conflicts).
+    # FIX B: only stamp the transition when a restore was ACTUALLY in progress and is being preempted
+    # here -- an in-flight SET+ tap of our own may still land after this. Must check BEFORE nulling
+    # _restore_ceiling; stamping unconditionally on every engaged-capping tick would keep the grace
+    # window perpetually "fresh" and silently defeat override detection for the entire cap duration.
+    if self._restore_ceiling is not None:
+      self._last_actuation_transition_t = now
     self._restore_ceiling = None
     self._restore_deadline = None
     self._restore_last_stock = None
