@@ -59,6 +59,25 @@ reduce-only envelope, all conservative):
   F_uninit  anchoring/seeding is skipped entirely while `v_cruise_initialized` is False (cruise never
       set — `v_cruise`/`v_cruise_set` are the `V_CRUISE_UNSET` sentinel, ~145 km/h) — anchoring off
       that would inflate `_ratio` and seed `_cap_out` far above the real set.
+
+speedadjustreset2pnw (2026-08-16, driver directive): ANY manual change to the cruise SET speed (up or
+down) is treated as an explicit "resume — don't slow me for this" override, resetting BOTH the police
+latch/suppression and the limit-drop baseline (see `cap()` + `_is_own_actuation()`). This relies on
+`v_cruise_set` being feedback-safe — i.e. that cap()'s own output can never be mistaken for a driver
+change on the NEXT tick:
+  * op-long cars: SAFE by construction. `longitudinal_planner.py` sources `v_cruise_set` from
+    `sm['carState'].vCruise` BEFORE either vtsc.cap()/speedadjust.cap() run, and never writes either
+    cap's return value back into it. `card.py`'s `VCruiseHelper` (non-pcm branch) only advances
+    `v_cruise_kph` off real `CS.buttonEvents` — this module's return value is consumed purely locally
+    by the planner's MPC target, so it can never loop back into `v_cruise_set`.
+  * stock-ACC cars (`CP.pcmCruise=True`, e.g. the Lightning off Alpha-Long): NOT safe by construction —
+    `selfdrive/car/cruise.py` sets `CS.vCruise = CS.cruiseState.speed` directly (the truck's own live
+    ACC dial), and THIS module's speedadjust-exec2pnw SET-/SET+ button-tap executor actually moves that
+    dial. Without a guard, our own dec taps while capping (or inc taps while restoring) would look
+    identical to a driver override and self-cancel the feature after a single tap. `_is_own_actuation()`
+    filters exactly this case out using the same SA_DRIVER_LOWER_TOL tap-lag band the restore-hardening
+    logic already established, so only a change inconsistent with what we ourselves are commanding ever
+    counts as a manual override.
 """
 import json
 import math
@@ -106,6 +125,13 @@ SA_IN_CURVE_LAT_ACCEL = 1.3               # m/s^2; mirrors ces_pnw.ces_pnw_const
                                            # constant rather than an import so this module stays fully
                                            # decoupled from ces_pnw (no cross-feature coupling)
 
+# speedadjustreset2pnw (driver directive 2026-08-16): ANY manual cruise-set change (up OR down) is an
+# explicit "resume — stop slowing me for THIS" override. Nudging the physical set dial is a far more
+# intuitive override for a novice driver than hunting down the AutoSpeedReduce toggle. 0.15 m/s sits
+# below the smallest real driver increment (1 kph = 0.278 m/s, 1 mph = 0.447 m/s) but comfortably above
+# float noise, so it can't misfire on a no-op re-read of the same set speed.
+SET_CHANGE_EPS = 0.15                     # m/s
+
 
 class SpeedAdjustController:
   def __init__(self, CP, params=None):
@@ -130,6 +156,16 @@ class SpeedAdjustController:
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
     self._police = None          # last LocationServices["police"] dict
     self._police_latched = False # once within the approach window, hold until the report clears
+    # speedadjustreset2pnw: True after a detected manual set-change dismisses the CURRENT police
+    # alert — suppresses _police_cap() (so it can't simply re-latch next tick) until the report
+    # clears (state != "alert"), at which point it clears alongside _police_latched and the feature
+    # re-arms for the NEXT alert. See _is_own_actuation()/cap() for why this exists.
+    self._police_suppressed = False
+    # speedadjustreset2pnw: last observed driver v_cruise_set (m/s), used to detect a manual cruise
+    # nudge (see cap()). None = not yet tracked — also forced back to None whenever
+    # v_cruise_initialized is False so the uninitialized->initialized transition (and the
+    # ~145 km/h V_CRUISE_UNSET sentinel) never counts as a "change".
+    self._last_v_set = None
     self._last_read = -1e9
     self._engaged = False        # for engage/release logging only
     self._cap_out = None         # the SLEWED cap currently emitted (None = not capping)
@@ -208,7 +244,10 @@ class SpeedAdjustController:
     p = self._police
     if not isinstance(p, dict) or p.get("state") != "alert":
       self._police_latched = False           # cleared/passed report → release
+      self._police_suppressed = False        # speedadjustreset2pnw: report gone → re-arm for the next one
       return None
+    if self._police_suppressed:              # speedadjustreset2pnw: driver dismissed THIS alert via a
+      return None                            # manual set change — stay off until it clears (see cap())
     try:
       dist_m = float(p.get("dist_mi", 0.0)) * MILE_M
     except (TypeError, ValueError):
@@ -389,6 +428,32 @@ class SpeedAdjustController:
       self._restore_last_stock = stock_now
     self._publish_target(self._restore_ceiling, self._restore_ceiling, "inc")
 
+  # ---- speedadjustreset2pnw: manual set-change = override detection ---------
+  def _is_own_actuation(self, prev: float, new: float) -> bool:
+    """True iff an observed v_cruise_set delta is fully explained by a command THIS module is
+    itself currently issuing — never a genuine driver override. On an op-long car this is always
+    False: cap()'s RETURN value never writes back into CS.vCruise (v_cruise_set is sourced fresh
+    from the driver's real dial every planner tick via card.py's non-pcm VCruiseHelper, which only
+    reacts to real CS.buttonEvents — see the module docstring's v_cruise_set feedback-safety note),
+    so every real change there IS the driver.
+
+    On a stock-ACC car (CP.pcmCruise=True), though, `selfdrive/car/cruise.py` sets
+    `CS.vCruise = CS.cruiseState.speed` directly — the truck's OWN live ACC dial — and THIS module's
+    speedadjust-exec2pnw SET-/SET+ button-tap executor actually moves that dial. Without this guard,
+    every one of our own dec taps during an active cap (or inc taps during an active restore) would
+    look identical to a manual override and immediately self-cancel the feature after a single tap.
+    Reuses SA_DRIVER_LOWER_TOL as the same tap-lag/step fuzz band the restore-hardening logic already
+    established, rather than inventing a new constant."""
+    if self._long_ok:
+      return False
+    if new < prev and self._cap_out is not None:
+      # actively dec-capping: WE only ever press SET- toward self._cap_out
+      return new >= self._cap_out - SA_DRIVER_LOWER_TOL
+    if new > prev and self._restore_ceiling is not None:
+      # actively restoring: WE only ever press SET+ toward self._restore_ceiling
+      return new <= self._restore_ceiling + SA_DRIVER_LOWER_TOL
+    return False
+
   # ---- the cap the planner folds (reduce-only) ------------------------------
   def cap(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float, v_cruise_initialized: bool) -> float:
     """
@@ -415,6 +480,7 @@ class SpeedAdjustController:
     if not v_cruise_initialized:
       self._engaged = False
       self._police_latched = False
+      self._police_suppressed = False        # speedadjustreset2pnw
       self._cap_out = None
       self._release_t = None
       # speedadjust-exec2pnw: an uninitialized cruise can't be a valid restore ceiling either.
@@ -423,12 +489,35 @@ class SpeedAdjustController:
       self._restore_deadline = None
       self._min_pub_target = None
       self._restore_last_stock = None
+      # speedadjustreset2pnw (F_uninit parity): the V_CRUISE_UNSET sentinel is not a real driver set —
+      # forget it so the eventual uninitialized->initialized transition can't read as a "change".
+      self._last_v_set = None
       self._publish_target(None)
       return v_cruise
+
+    # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either
+    # direction) is an explicit "resume — don't slow me for this" override. Must run BEFORE
+    # _police_cap()/_update_baseline() below so a detected change takes effect the SAME tick.
+    # _is_own_actuation() filters out this module's OWN stock-ACC button taps (see its docstring) so
+    # this can never self-cancel the feature it's supposed to be overriding.
+    if self._last_v_set is not None and abs(v_cruise_set - self._last_v_set) > SET_CHANGE_EPS:
+      if not self._is_own_actuation(self._last_v_set, v_cruise_set):
+        # police: suppress the CURRENT alert (latching alone would just re-latch next tick while
+        # still inside the ~30 s approach window — see _police_cap()); re-arms when it clears.
+        self._police_suppressed = True
+        # speed limit: re-anchor the baseline to the new set (speedanchor2pnw's own F2 formula) so
+        # the current trim releases; a FURTHER drop below this new baseline will still re-cap.
+        self._sl_ref = self._sl
+        self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
+        # release any active emitted cap so speed resumes immediately (MPC/executor bounds the accel).
+        self._cap_out = None
+        self._release_t = None
+    self._last_v_set = v_cruise_set
 
     if self._mode == 0:
       self._engaged = False
       self._police_latched = False
+      self._police_suppressed = False        # speedadjustreset2pnw
       self._cap_out = None
       self._release_t = None
       self._pub_ceiling = None
