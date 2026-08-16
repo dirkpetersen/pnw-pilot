@@ -1,11 +1,11 @@
 {
-  "_comment": "PNW mapd binary release pin. The ~20 MB pfeiferj `mapd` binary is intentionally NOT vendored in git (keeps clones and device updates small). system/mapd/installer.py downloads it at launch to the PERSISTENT /data/mapd/mapd (outside the git tree, survives auto-update git clean) and verifies `sha256` -- `install_path` below is NOT that live location, it's a legacy in-tree fallback only used off-device where /data isn't writable. To upgrade mapd: change version + url + sha256 + size here (get the sha with `sha256sum mapd`), nothing else -- BUT first check the device for a leftover /data/mapd/.override flag (`ssh comma@<ip> 'python3 -m openpilot.system.mapd.installer --check'`): while that flag exists, installer.py freezes the installed binary and silently ignores every pin bump (by design, for hand-deployed test builds -- see docs/GOMSGQ-SHADOW-FIX.md). Clear it with `rm /data/mapd/.override` on the device before expecting a version bump here to take effect.",
+  "_comment": "PNW mapd binary release pin. The ~20 MB pfeiferj `mapd` binary is intentionally NOT vendored in git (keeps clones and device updates small). system/mapd/installer.py downloads it at launch to the PERSISTENT /data/mapd/mapd (outside the git tree, survives auto-update git clean) and verifies `sha256` -- `install_path` below is NOT that live location, it's a legacy in-tree fallback only used off-device where /data isn't writable. To upgrade mapd: change version + url + sha256 + size here (get the sha with `sha256sum mapd`), nothing else -- BUT first check the device for a leftover /data/mapd/.override flag (`ssh comma@<ip> 'python3 -m openpilot.system.mapd.installer --check'`): while that flag exists, installer.py freezes the installed binary and silently ignores every pin bump (by design, for hand-deployed test builds -- see docs/GOMSGQ-SHADOW-FIX.md). Clear it with `rm /data/mapd/.override` on the device before expecting a version bump here to take effect. SHADOW-RACE NOTE (mapd230pin2pnw, 2026-08-16): v2.3.0 pins gomsgq v0.1.10 which PREDATES the shadow-reader race fix, and its default settings shadow-subscribe carState (same as the prior v2.2.0 pin), so the latent `Invalid Msgq message size` drive-load panic is UNCHANGED from before this bump -- not introduced by it. If that panic ever shows in a drive log, the definitive fix is a PATCHED build (mapd v2.3.0 + gomsgq bumped past commit fd495fe 'validate shadow reads against publisher laps') via the dirkpetersen/mapd arm64 CI, re-verified with the on-device A/B harness (docs/GOMSGQ-SHADOW-FIX.md). v2.3.0 also exposes a per-message shadow toggle (setShadowCarState), but forcing it off reliably requires clearing the device's persisted MapdSettings param because the v1->v2 settings migration hard-codes shadow_car_state=true.",
   "name": "mapd",
   "repo": "pfeiferj/mapd",
-  "version": "v2.2.0",
-  "url": "https://github.com/pfeiferj/mapd/releases/download/v2.2.0/mapd",
-  "sha256": "9b92c1bb70d85821f1a6641df87ddb550e82085a8334aea2da467121785daac9",
-  "size": 21407248,
+  "version": "v2.3.0",
+  "url": "https://github.com/pfeiferj/mapd/releases/download/v2.3.0/mapd",
+  "sha256": "a08f0a9bea3ec099738932964d8dbf066f6f47539395ecb979530cbc99b748a1",
+  "size": 21806000,
   "arch": "aarch64",
   "install_path": "selfdrive/mapd"
 }
