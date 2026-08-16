@@ -129,8 +129,8 @@ POLICE_MAX_BACKOFF_S = 15 * 60
 # wazespeedgate2pnw: cost control — the Waze proxy poll is a PAID upstream call, so only run it while
 # actually driving the highway. Hysteresis (arm at POLICE_GATE_MPH, disarm 2 mph below) avoids flapping
 # right around a single threshold speed. Supersedes the earlier parked-gate approach (policeparkgate2pnw).
-POLICE_GATE_MPH = 20                                       # arm the police poll at/above this speed --
-                                                          # single tuning knob (lowered 45->20 for testing)
+POLICE_GATE_MPH = 45                                       # arm the police poll at/above this speed --
+                                                          # single tuning knob
 POLICE_MIN_SPEED_MS = POLICE_GATE_MPH * 0.44704           # arm threshold (m/s)
 POLICE_RESUME_SPEED_MS = (POLICE_GATE_MPH - 2) * 0.44704  # disarm 2 mph below (hysteresis, avoids flapping)
 POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this (GPS dropout -> fail-closed)
@@ -406,6 +406,12 @@ class PoliceUpdater(threading.Thread):
       pos = self._mem.get("LastGPSPosition", return_default=True)
       if isinstance(pos, (bytes, str)):
         pos = json.loads(pos)
+      # LastGPSPosition unset -> self._mem.get returns None (not bytes/str, so the json.loads above is
+      # skipped and pos stays None); a bad blob can also json.loads() to a non-dict (e.g. a bare string
+      # or a list). Guard BEFORE pos.get("ts") -- an AttributeError there used to escape the except
+      # tuple below and abort the whole police-thread poll cycle every tick GPS was missing.
+      if not isinstance(pos, dict):
+        return None
       # freshness guard: mapd_configd stops rewriting LastGPSPosition when GPS dies, so a stale blob
       # would keep a >=45mph reading armed. Reject speed older than POLICE_SPEED_MAX_AGE_S -> None
       # (fail-closed). "ts" is time.monotonic() (system-wide clock, comparable across processes);
@@ -414,7 +420,7 @@ class PoliceUpdater(threading.Thread):
       if ts is not None and (time.monotonic() - float(ts)) > POLICE_SPEED_MAX_AGE_S:
         return None
       return float(pos["speed"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
       return None
 
   def _poll(self, cfg, lat, lon):

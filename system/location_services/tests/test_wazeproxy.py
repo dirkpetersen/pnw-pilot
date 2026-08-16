@@ -157,6 +157,57 @@ class TestSpeedGate:
     assert PoliceUpdater._speed_gate(None, False) is False
 
 
+class _FakeMem:
+  """Stand-in for the /dev/shm Params store `_cur_speed` reads -- just enough of the `.get()`
+  contract (return_default=True never raises) to drive PoliceUpdater._cur_speed without a real
+  Params instance."""
+  def __init__(self, value):
+    self._value = value
+
+  def get(self, key, return_default=False):
+    return self._value
+
+
+class TestCurSpeed:
+  """_cur_speed root-cause regression (on-device traceback 2026-08-16): LastGPSPosition unset ->
+  Params.get returns None -> pos stays None (not bytes/str, so json.loads is skipped) ->
+  pos.get("ts") raised AttributeError, which escaped the (KeyError, TypeError, ValueError) except
+  tuple and aborted the whole police-thread poll cycle every tick GPS was missing. Fixed by an
+  isinstance(pos, dict) guard before any pos.get(...), plus AttributeError in the except tuple as
+  belt-and-suspenders. _cur_speed is only ever called via `self._mem`, so drive it through a bare
+  PoliceUpdater instance (no threading.Thread.__init__/Params needed) with _mem swapped for a fake."""
+
+  @staticmethod
+  def _updater(mem_value):
+    upd = object.__new__(PoliceUpdater)   # skip __init__ (no real Params/thread needed)
+    upd._mem = _FakeMem(mem_value)
+    return upd
+
+  def test_missing_param_returns_none_not_raise(self):
+    # LastGPSPosition unset -> Params.get(..., return_default=True) returns None
+    assert self._updater(None)._cur_speed() is None
+
+  def test_non_dict_json_returns_none_not_raise(self):
+    # a parsed-but-non-dict blob (e.g. a bare JSON string or a list) must not raise either
+    assert self._updater('"just a string"')._cur_speed() is None
+    assert self._updater("[1, 2, 3]")._cur_speed() is None
+
+  def test_bare_string_non_json_returns_none(self):
+    # not valid JSON at all -> json.loads raises ValueError, caught same as before
+    assert self._updater("not json")._cur_speed() is None
+
+  def test_valid_dict_still_returns_speed(self):
+    # freshness guard must still work for the normal dict case (unchanged behavior)
+    import time
+    pos = {"speed": 12.3, "ts": time.monotonic()}
+    assert self._updater(json.dumps(pos))._cur_speed() == pytest.approx(12.3)
+
+  def test_stale_dict_still_returns_none(self):
+    import time
+    pos = {"speed": 12.3, "ts": time.monotonic() - lsd.POLICE_SPEED_MAX_AGE_S - 1.0}
+    assert self._updater(json.dumps(pos))._cur_speed() is None
+
+
 class TestResolveDeviceId:
   """wazespeedgate2pnw: the x-device-id sent to the proxy for its per-device daily limit (750/day).
   _resolve_device_id is a pure static helper (get_fn: callable(key) -> value|None) so it's testable
