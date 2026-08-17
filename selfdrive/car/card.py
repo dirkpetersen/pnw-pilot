@@ -280,6 +280,20 @@ class Car:
     (op_long_native True on both old and new), `not PnwVehicle(self.CP).op_long_native` still
     correctly skips the reset for it — but if a future native car's swap partner is non-native, the
     non-native side's swap-in still cycles it (wasteful, not wrong: it's a real reset, not a loop).
+    See also the INFO note at the `needs_reset` line below re: a hypothetical future non-Tesla native
+    car under persistent fp_fixed.
+
+    Fix B (Gemini F2, SHOULD-FIX, review pass 3): a failed reset must not be a PERMANENT skip. If the
+    AlphaLongitudinalEnabled write itself raises, `oplong_reset_ok` (set just below) goes False,
+    which gates the CalibrationCar advance at the bottom of this method — CalibrationCar stays stale,
+    so the NEXT boot re-detects this same "swap" (car_swapped_for_oplong is still stored != cur) and
+    retries both the calibration wipe (idempotent/harmless if already wiped) and the op-long reset,
+    converging once the write actually succeeds. Without this, a raised write would still let
+    CalibrationCar advance normally, permanently hiding the swap from car_swapped_for_oplong() and
+    leaving the swapped car driving op-long ON forever with no retry path (fail-UNSAFE). A failure in
+    the SEPARATE OnroadCycleRequested write does NOT set the flag — AlphaLongitudinalEnabled is
+    already durably False by then, so the next boot is safe regardless and a retry would just be an
+    unneeded extra recalibration.
 
     Fully defensive throughout — a param hiccup must never break card startup; the op-long branch
     logs (Fix 2, Fable LOW) instead of silently swallowing, since unlike the calibration cleanup
@@ -303,25 +317,60 @@ class Car:
           pass
 
     # oplongpersist2pnw (req 3b, Fix 1): separate, broader swap test — see the docstring above.
+    # Fix B (Gemini F2, SHOULD-FIX, review pass 3): oplong_reset_ok tracks whether a NEEDED reset
+    # actually landed. Default True: either no reset was needed at all (no swap detected, the new
+    # car is native, or op-long was already off for it), or the reset was attempted and its
+    # load-bearing write succeeded. Only the DETERMINE-AND-WRITE-AlphaLongitudinalEnabled step
+    # (constructing PnwVehicle, reading the capability, and the param write itself) sets it False on
+    # failure — a failure in the SEPARATE OnroadCycleRequested write does NOT, because
+    # AlphaLongitudinalEnabled is already durably False by that point, so the next boot fingerprints
+    # with op-long OFF regardless (safe) and does not need a retry. See the CalibrationCar gate below
+    # for why this flag exists: without it, a raised AlphaLongitudinalEnabled write would still let
+    # CalibrationCar advance (its own gate is unrelated), so stored_car would flip to cur_car and
+    # car_swapped_for_oplong() would never see this swap again — the reset would be silently skipped
+    # FOREVER, leaving the swapped car driving op-long ON permanently (fail-UNSAFE, not fail-safe).
+    oplong_reset_ok = True
     if car_swapped_for_oplong(stored_car, cur_car, brand):
       try:
-        if not PnwVehicle(self.CP).op_long_native and self.CP.openpilotLongitudinalControl:
+        # INFO (Gemini, review pass 3, no code change): a future radar-equipped Ford would get
+        # openpilotLongitudinalControl=True unconditionally while op_long_native stays tesla-only
+        # (pnw_vehicle.py) -- that car would then cycle-loop under a persistent fp_fixed swap. Not in
+        # today's fleet; if the fleet grows, op_long_native should mean "op-long not alpha-param-
+        # gated" rather than brand == "tesla".
+        needs_reset = not PnwVehicle(self.CP).op_long_native and self.CP.openpilotLongitudinalControl
+        if needs_reset:
           cloudlog.warning("card: car changed with op-long ON — resetting to stock ACC + requesting onroad cycle")
           self.params.put_bool("AlphaLongitudinalEnabled", False)
-          self.params.put_bool("OnroadCycleRequested", True)
       except Exception:
         # Fix 2 (Fable LOW): logged, not silently swallowed — this guards the whole safety behavior,
-        # unlike the sibling calibration-cleanup excepts above (best-effort cleanup only). Partial-
-        # failure mode: if AlphaLongitudinalEnabled=False lands but the OnroadCycleRequested write
-        # then raises, op-long stays ON for THIS session (self.CP was already baked at fingerprint
-        # time) and self-heals next boot when get_car() re-reads the now-False param — acceptable,
-        # and now at least logged instead of silent.
-        cloudlog.exception("card: failed to reset AlphaLongitudinalEnabled/OnroadCycleRequested on car change")
+        # unlike the sibling calibration-cleanup excepts above (best-effort cleanup only).
+        oplong_reset_ok = False
+        cloudlog.exception("card: failed to reset AlphaLongitudinalEnabled on car change — will retry next boot")
+      else:
+        if needs_reset:
+          try:
+            self.params.put_bool("OnroadCycleRequested", True)
+          except Exception:
+            # AlphaLongitudinalEnabled already landed False above -- next boot is safe regardless
+            # (Fix B note above), so this does NOT flip oplong_reset_ok / block CalibrationCar.
+            # Partial-failure mode: op-long stays ON for THIS session only (self.CP was already
+            # baked at fingerprint time) and self-heals next boot when get_car() re-reads the now-
+            # False param — acceptable, and now at least logged instead of silent.
+            cloudlog.exception("card: failed to request OnroadCycleRequested on car change")
 
-    # tag the car this calibration now belongs to — but only on a real, reliable fingerprint, and
-    # only when it changed (avoids churning the param every boot). First boot: stored empty -> no
-    # reset above, just record the current car so the NEXT swap is detected.
-    if brand != "mock" and cur_car and not fp_fixed and stored_car != cur_car:
+    # oplongpersist2pnw / calswap2pnw: tag the car this calibration now belongs to — but only on a
+    # real, reliable fingerprint, only when it changed (avoids churning the param every boot), AND
+    # only when a needed op-long reset actually landed (Fix B — see oplong_reset_ok above). First
+    # boot: stored empty -> no reset above, just record the current car so the NEXT swap is detected.
+    #
+    # ACCEPT (Fable Finding 2 / Gemini Finding 3, review pass 3, deliberately NOT fixed): under
+    # recurring sleepy-bus fp_fixed boots, CalibrationCar never advances either (its own `not
+    # fp_fixed` gate, independent of oplong_reset_ok), so op-long re-resets on every such boot if the
+    # driver had re-enabled it. This is FAIL-SAFE and bounded (a real reset each time, not a runaway
+    # loop), consistent with this design's stated trade-off (op-long reset intentionally trusts the
+    # unreliable VIN fallback less than "leave it alone" would) — left as-is on purpose. If a future
+    # report says "op-long keeps turning itself off", this accepted trade-off is why.
+    if brand != "mock" and cur_car and not fp_fixed and stored_car != cur_car and oplong_reset_ok:
       try:
         self.params.put_nonblocking("CalibrationCar", cur_car)
       except Exception:

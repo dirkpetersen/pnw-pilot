@@ -178,3 +178,66 @@ class TestOpLongResetUnderFixedSourceFingerprint:
       _run_card(_make_cp("ford", LIGHTNING, op_long=False, source="fixed"))
       assert params.get_bool("OnroadCycleRequested") is False  # not re-armed
       assert params.get_bool("AlphaLongitudinalEnabled") is False
+
+
+class TestOpLongResetFailureRetry:
+  """Fix B (Gemini F2, SHOULD-FIX, review pass 3): a failed AlphaLongitudinalEnabled write must not
+  permanently skip the reset. card.py's Params (common.params_pyx.Params) is a Cython extension type
+  and cannot be monkeypatched at the method level (confirmed: pytest's monkeypatch.setattr(Params,
+  'put_bool', ...) raises "cannot set attribute of immutable type"), so these tests instead make
+  PnwVehicle(self.CP) raise -- the EXACT SAME try/except block in
+  _maybe_reset_calibration_on_car_change wraps both the PnwVehicle construction/capability read AND
+  the AlphaLongitudinalEnabled write, so a raise from either exercises the identical
+  oplong_reset_ok=False path and the identical CalibrationCar-gating consequence under test."""
+
+  def test_reset_failure_blocks_calibration_car_advance_and_arms_retry(self, monkeypatch):
+    with OpenpilotPrefix():
+      params = Params()
+      params.put("CalibrationCar", TESLA)
+      params.put_bool("AlphaLongitudinalEnabled", True)
+
+      def _boom(*_a, **_kw):
+        raise RuntimeError("boom")
+
+      monkeypatch.setattr("openpilot.selfdrive.car.card.PnwVehicle", _boom)
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True))
+      # the reset attempt failed -- AlphaLongitudinalEnabled is UNCHANGED (still True: the write
+      # never landed), and CalibrationCar must NOT advance so the swap is retried next boot.
+      assert params.get_bool("AlphaLongitudinalEnabled") is True
+      assert params.get_bool("OnroadCycleRequested") is False
+      assert params.get("CalibrationCar") == TESLA  # stale on purpose -- retry armed
+
+  def test_retry_after_failure_converges_once_the_write_succeeds(self, monkeypatch):
+    with OpenpilotPrefix():
+      params = Params()
+      params.put("CalibrationCar", TESLA)
+      params.put_bool("AlphaLongitudinalEnabled", True)
+
+      def _boom(*_a, **_kw):
+        raise RuntimeError("boom")
+
+      monkeypatch.setattr("openpilot.selfdrive.car.card.PnwVehicle", _boom)
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True))
+      assert params.get("CalibrationCar") == TESLA  # still stale after the failed attempt
+      monkeypatch.undo()  # restore the real PnwVehicle for the retry pass below
+
+      # NEXT boot: same swap is still detected (CalibrationCar never advanced) and this time the
+      # reset attempt succeeds -- converges: param resets, cycle requested, CalibrationCar advances.
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True))
+      assert params.get_bool("AlphaLongitudinalEnabled") is False
+      assert params.get_bool("OnroadCycleRequested") is True
+      _wait_for_calibration_car(params, LIGHTNING)
+      assert params.get("CalibrationCar") == LIGHTNING
+
+  def test_reset_success_advances_calibration_car(self):
+    # Contrast case, explicit per review request: when the reset attempt succeeds (the normal path,
+    # already covered implicitly by TestOpLongResetOnCarChange), CalibrationCar DOES advance on the
+    # same boot that performed the reset -- no PnwVehicle patch here.
+    with OpenpilotPrefix():
+      params = Params()
+      params.put("CalibrationCar", TESLA)
+      params.put_bool("AlphaLongitudinalEnabled", True)
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True))
+      assert params.get_bool("AlphaLongitudinalEnabled") is False
+      _wait_for_calibration_car(params, LIGHTNING)
+      assert params.get("CalibrationCar") == LIGHTNING

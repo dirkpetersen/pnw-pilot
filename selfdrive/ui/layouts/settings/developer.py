@@ -1,7 +1,9 @@
 from typing import NamedTuple
 
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+from openpilot.selfdrive.ui.onroad.exp_button import ConfirmOutcome, decide_confirm_outcome
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
@@ -48,6 +50,27 @@ class AlphaLongToggleState(NamedTuple):
   visible: bool
   checked: bool | None
   enabled: bool
+
+
+def alpha_long_confirm_should_enable(v_ego: float, engaged: bool) -> bool:
+  """oplongpersist2pnw (Fix A, Fable+Gemini review pass 3, MUST-FIX): whether the op-long ENABLE
+  ConfirmDialog's confirming tap may actually enable op-long RIGHT NOW.
+
+  The toggle's grey-out (compute_alpha_long_toggle_state) only gates OPENING the dialog -- it is a
+  live, per-frame check (ui_state.engaged), so it's safe at tap time. But the dialog itself has no
+  re-check: once open, it can sit there while the driver engages via the stalk and drives off (nothing
+  auto-dismisses it), and the ORIGINAL confirm_callback wrote AlphaLongitudinalEnabled=True +
+  OnroadCycleRequested=True unconditionally on CONFIRM -- restarting the entire onroad process set
+  (hardwared.py) at whatever speed the truck happens to be moving. req 2 widened the hole: the dialog
+  now opens any time the car is merely disengaged, where the old CES-master gate previously kept it
+  unreachable in practice.
+
+  Reuses exp_button.py's decide_confirm_outcome/_STANDSTILL_MS (the SAME two-gesture enable path's
+  final gate) rather than duplicating the threshold: `engaged` alone is insufficient because a
+  DISENGAGED-but-MOVING car is still moving and the reload would still happen at speed -- the real
+  requirement is STANDSTILL (v_ego < _STANDSTILL_MS), with `engaged` checked second (stopped but still
+  under active control, e.g. held at a light, still can't safely reload without disengaging first)."""
+  return decide_confirm_outcome(v_ego, engaged) is ConfirmOutcome.ENABLE
 
 
 def compute_alpha_long_toggle_state(*, op_long_native: bool, alpha_long_available: bool,
@@ -280,9 +303,22 @@ class DeveloperLayout(Widget):
     if state:
       def confirm_callback(result: DialogResult):
         if result == DialogResult.CONFIRM:
-          self._params.put_bool("AlphaLongitudinalEnabled", True)
-          self._params.put_bool("OnroadCycleRequested", True)
-          self._update_toggles()
+          # Fix A (Fable+Gemini review pass 3, MUST-FIX): re-check LIVE vehicle state at CONFIRM
+          # time, not just at the tap that opened this dialog -- the dialog can sit open while the
+          # driver engages via the stalk and drives off (nothing here auto-dismisses it), so a stale
+          # "was safe when opened" check is not enough. See alpha_long_confirm_should_enable's
+          # docstring for the standstill-vs-engaged rationale.
+          if alpha_long_confirm_should_enable(ui_state.sm["carState"].vEgo, ui_state.engaged):
+            self._params.put_bool("AlphaLongitudinalEnabled", True)
+            self._params.put_bool("OnroadCycleRequested", True)
+            self._update_toggles()
+          else:
+            # Not safe right now (moving, or stopped but still engaged) -- abort: no param write, no
+            # cycle request. Revert the toggle visual (AlphaLongitudinalEnabled is still False) and
+            # log for traceability; kept deliberately simple -- no new toast/hint UI here, the
+            # reverted toggle is the driver-visible signal that the confirm didn't take.
+            cloudlog.warning("developer: op-long enable confirm aborted -- not at a safe standstill")
+            self._alpha_long_toggle.action_item.set_state(False)
         else:
           self._alpha_long_toggle.action_item.set_state(False)
 

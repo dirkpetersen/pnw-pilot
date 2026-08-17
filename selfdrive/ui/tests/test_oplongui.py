@@ -52,7 +52,9 @@ F3 (LOW): the standstill compare uses `abs(v_ego)` so a rolling-backward negativ
 past it. `is_disable_reach` (which nxt values are a disable) and `decide_disable_outcome` (the
 standstill+engaged gate) are the pure helpers -- see TestIsDisableReach / TestDecideDisableOutcome.
 """
-from openpilot.selfdrive.ui.layouts.settings.developer import AlphaLongToggleState, compute_alpha_long_toggle_state
+from openpilot.selfdrive.ui.layouts.settings.developer import (
+  AlphaLongToggleState, alpha_long_confirm_should_enable, compute_alpha_long_toggle_state,
+)
 from openpilot.selfdrive.ui.onroad.exp_button import (
   _BTN_CES, _BTN_CHILL, _BTN_EXP, _CES_CYCLE, _CES_CYCLE_NO_LONG, _CES_CYCLE_OFF_ALPHA, _STANDSTILL_MS,
   ConfirmOutcome, DisableOutcome, decide_confirm_outcome, decide_disable_outcome, is_disable_reach,
@@ -149,6 +151,38 @@ class TestComputeAlphaLongToggleState:
         op_long_native=native, alpha_long_available=alpha_avail, openpilot_long_control=op_long,
         is_release=True, engaged=False)
       assert state.visible is False
+
+
+class TestAlphaLongConfirmShouldEnable:
+  """Fix A (Fable+Gemini review pass 3, MUST-FIX): the op-long ENABLE ConfirmDialog's confirm_callback
+  must re-check LIVE vehicle state at CONFIRM time (the dialog can sit open while the driver engages
+  and drives off) -- alpha_long_confirm_should_enable is the extracted pure decision, a thin wrapper
+  around exp_button.py's decide_confirm_outcome/ConfirmOutcome.ENABLE (reused, not duplicated)."""
+
+  def test_stopped_and_not_engaged_may_enable(self):
+    assert alpha_long_confirm_should_enable(v_ego=0.0, engaged=False) is True
+
+  def test_just_under_standstill_threshold_may_enable(self):
+    assert alpha_long_confirm_should_enable(v_ego=_STANDSTILL_MS - 0.01, engaged=False) is True
+
+  def test_moving_but_disengaged_blocks_enable(self):
+    # THE concrete hole this fix closes: the toggle's live `not engaged` gate permits opening the
+    # dialog while disengaged, then the driver engages/drives off before tapping Confirm -- a bare
+    # `not engaged` re-check at confirm time would STILL wrongly allow this (engaged can be False
+    # while moving). Standstill is the real requirement.
+    assert alpha_long_confirm_should_enable(v_ego=15.0, engaged=False) is False
+
+  def test_at_standstill_threshold_blocks_enable(self):
+    # Boundary: v_ego == _STANDSTILL_MS counts as still moving (>=), matching decide_confirm_outcome.
+    assert alpha_long_confirm_should_enable(v_ego=_STANDSTILL_MS, engaged=True) is False
+
+  def test_stopped_but_engaged_blocks_enable(self):
+    # Stopped under active openpilot control (e.g. held at a light) -- still can't safely reload
+    # without disengaging first.
+    assert alpha_long_confirm_should_enable(v_ego=0.0, engaged=True) is False
+
+  def test_moving_and_engaged_blocks_enable(self):
+    assert alpha_long_confirm_should_enable(v_ego=20.0, engaged=True) is False
 
 
 class TestSelectCesCycle:
