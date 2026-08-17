@@ -83,6 +83,23 @@ def car_changed_for_recal(stored_car: str, cur_car: str, brand: str, fp_fixed: b
   return bool(stored_car) and stored_car != cur_car
 
 
+def car_swapped_for_oplong(stored_car: str, cur_car: str, brand: str) -> bool:
+  """oplongpersist2pnw (req 3b, Fix 1): True iff this is a real, different-car swap for the PURPOSE
+  of resetting op-long — deliberately BROADER than car_changed_for_recal(): this test does NOT
+  exclude a fixed-source (fleet-VIN fallback) fingerprint (no fp_fixed parameter at all). The
+  calibration wipe above must stay fp_fixed-EXCLUDED (a flaky fingerprint must never destructively
+  wipe a good calibration — the poisoned-cache incident); the op-long reset is the FAIL-SAFE
+  direction instead (worst case the driver has to re-enable it), so it must still fire even when only
+  an unreliable VIN read distinguishes the swap (e.g. a sleepy-bus power-up right after a
+  Tesla->Lightning swap, where only the VIN fallback resolves and fp_fixed=True) — skipping it there
+  would leave the newly-swapped car driving op-long ON on the OLD car's stale calibration, defeating
+  the whole feature. Still excludes mock / empty-current / same-car, same as car_changed_for_recal.
+  Pure — unit-tested."""
+  if brand == "mock" or not cur_car:
+    return False
+  return bool(stored_car) and stored_car != cur_car
+
+
 class Car:
   CI: CarInterfaceBase
   RI: RadarInterfaceBase
@@ -226,6 +243,23 @@ class Car:
     reset trigger, and it must land here (the one place that already reliably detects a swap) rather
     than at every boot.
 
+    Fix 1 (Fable, MEDIUM): the op-long reset runs under car_swapped_for_oplong(), DECOUPLED from the
+    calibration wipe's car_changed_for_recal() gate — the op-long test is deliberately BROADER, it
+    does NOT exclude a fixed-source (fleet-VIN) fingerprint. The calibration wipe stays fp_fixed-
+    excluded (destructive; a flaky fingerprint must never wipe a good calibration — poisoned-cache
+    incident), but op-long reset is the FAIL-SAFE direction (worst case the driver re-enables it), so
+    it must still fire on a swap detected only via the unreliable VIN fallback — otherwise a sleepy-
+    bus power-up right after a Tesla->Lightning swap (only a VIN read resolves -> fp_fixed=True ->
+    car_changed_for_recal() is False) would leave the Lightning driving op-long ON on the Tesla's
+    stale calibration, defeating this feature. See car_swapped_for_oplong()'s docstring for the full
+    rationale. Convergence still holds even though CalibrationCar is NOT updated under fp_fixed (that
+    stays not-fp_fixed-gated below): after the OnroadCycleRequested cycle re-fingerprints, the new
+    session's self.CP.openpilotLongitudinalControl reads False (get_car() now sees the just-written
+    AlphaLongitudinalEnabled=False) regardless of whether that re-fingerprint again resolves fixed —
+    the `and self.CP.openpilotLongitudinalControl` gate below is then False on the second pass, so no
+    second cycle fires even if car_swapped_for_oplong() itself would still evaluate True (stored tag
+    unchanged under fp_fixed).
+
     Ordering trap this must solve: self.CP was already fixed at fingerprint time — get_car() in
     __init__ (called BEFORE this method) reads the PERSISTED AlphaLongitudinalEnabled and bakes it
     into self.CP.openpilotLongitudinalControl for this whole process lifetime. So if a Lightning was
@@ -238,36 +272,56 @@ class Car:
     ONROAD_CYCLE_TIME, which drops should_start and cycles deviceState.started, so manager_thread's
     ensure_running() restarts the ONROAD process set (including this card process) and it re-runs
     get_car() against the now-False param — all within the SAME power-up, no reboot needed. No
-    re-trigger loop: CalibrationCar is updated to cur_car below in this same call, so the post-cycle
-    re-init of card.py sees stored_car == cur_car and car_changed_for_recal() returns False the second
-    time around. Only cycle when op-long was ACTUALLY on for the new car
-    (self.CP.openpilotLongitudinalControl) — a swap onto an already-stock-ACC car needs no reload."""
+    re-trigger loop: see the Fix 1 convergence note above (holds whether or not CalibrationCar itself
+    got updated on this pass). Only cycle when op-long was ACTUALLY on for the new car
+    (self.CP.openpilotLongitudinalControl) — a swap onto an already-stock-ACC car needs no reload.
+
+    Finding 4 (INFO/future, no code change): if the fleet ever gains a SECOND native-op-long car
+    (op_long_native True on both old and new), `not PnwVehicle(self.CP).op_long_native` still
+    correctly skips the reset for it — but if a future native car's swap partner is non-native, the
+    non-native side's swap-in still cycles it (wasteful, not wrong: it's a real reset, not a loop).
+
+    Fully defensive throughout — a param hiccup must never break card startup; the op-long branch
+    logs (Fix 2, Fable LOW) instead of silently swallowing, since unlike the calibration cleanup
+    (best-effort, no safety property), a lost op-long reset silently keeps op-long ON on a
+    freshly-swapped car — see the except block below for the partial-failure mode this covers."""
     cur_car = str(getattr(self.CP, 'carFingerprint', '') or '')
     fp_fixed = self.CP.fingerprintSource == structs.CarParams.FingerprintSource.fixed
+    brand = str(self.CP.brand or '')
     try:
       stored = self.params.get("CalibrationCar")
       stored_car = stored.decode() if isinstance(stored, bytes) else (stored or "")
     except Exception:
       stored_car = ""
-    if car_changed_for_recal(stored_car, cur_car, str(self.CP.brand or ''), fp_fixed):
+
+    if car_changed_for_recal(stored_car, cur_car, brand, fp_fixed):
       cloudlog.warning(f"card: car changed {stored_car!r} -> {cur_car!r} — forcing recalibration")
       for k in _CALIBRATION_PARAMS:
         try:
           self.params.remove(k)
         except Exception:
           pass
-      # oplongpersist2pnw (req 3b): see the docstring above for the full ordering rationale.
+
+    # oplongpersist2pnw (req 3b, Fix 1): separate, broader swap test — see the docstring above.
+    if car_swapped_for_oplong(stored_car, cur_car, brand):
       try:
         if not PnwVehicle(self.CP).op_long_native and self.CP.openpilotLongitudinalControl:
           cloudlog.warning("card: car changed with op-long ON — resetting to stock ACC + requesting onroad cycle")
           self.params.put_bool("AlphaLongitudinalEnabled", False)
           self.params.put_bool("OnroadCycleRequested", True)
       except Exception:
-        pass
+        # Fix 2 (Fable LOW): logged, not silently swallowed — this guards the whole safety behavior,
+        # unlike the sibling calibration-cleanup excepts above (best-effort cleanup only). Partial-
+        # failure mode: if AlphaLongitudinalEnabled=False lands but the OnroadCycleRequested write
+        # then raises, op-long stays ON for THIS session (self.CP was already baked at fingerprint
+        # time) and self-heals next boot when get_car() re-reads the now-False param — acceptable,
+        # and now at least logged instead of silent.
+        cloudlog.exception("card: failed to reset AlphaLongitudinalEnabled/OnroadCycleRequested on car change")
+
     # tag the car this calibration now belongs to — but only on a real, reliable fingerprint, and
     # only when it changed (avoids churning the param every boot). First boot: stored empty -> no
     # reset above, just record the current car so the NEXT swap is detected.
-    if self.CP.brand != "mock" and cur_car and not fp_fixed and stored_car != cur_car:
+    if brand != "mock" and cur_car and not fp_fixed and stored_car != cur_car:
       try:
         self.params.put_nonblocking("CalibrationCar", cur_car)
       except Exception:

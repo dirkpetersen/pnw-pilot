@@ -100,15 +100,18 @@ def manager_init() -> None:
 
   # oplongpersist2pnw (supersedes oplongfix2pnw, docs/pnw/op-long-features.md §6): op-long now
   # PERSISTS across a same-car reboot -- this used to force AlphaLongitudinalEnabled=False on every
-  # manager startup (every genuine cold boot); that line is REMOVED. The driver's op-long choice is
-  # a durable per-car preference now, not a per-session opt-in that had to be re-made every drive.
-  # Reset happens on exactly one event instead: a real CAR CHANGE (the physical device moved to a
-  # different, non-native-op-long car), handled by card.py's
-  # _maybe_reset_calibration_on_car_change() (the calswap2pnw hook) -- it clears
-  # AlphaLongitudinalEnabled (and requests an OnroadCycleRequested reload so the freshly-swapped car
-  # comes up on stock ACC the SAME session, not just next boot) the moment
-  # car_changed_for_recal() detects the swap. This is unconditional / capability-clean (no
-  # car/fingerprint branch here in manager.py): the Tesla is unaffected either way, because its
+  # manager startup (every genuine cold boot); that line is REMOVED. The driver's op-long choice
+  # survives a same-car reboot now, instead of being a per-session opt-in re-made every drive. Fix 5
+  # (Fable INFO, review pass 2): this is ONE global param, not a per-car preference -- it is reset on
+  # ANY real car swap (see below), so e.g. Lightning-ON -> a Tesla stint -> back to the Lightning
+  # still wipes the ON (the swap back to the Lightning is itself a detected change). Reset happens on
+  # exactly one event instead: a real CAR CHANGE (the physical device moved to a different,
+  # non-native-op-long car), handled by card.py's _maybe_reset_calibration_on_car_change() (the
+  # calswap2pnw hook) -- it clears AlphaLongitudinalEnabled (and requests an OnroadCycleRequested
+  # reload so the freshly-swapped car comes up on stock ACC the SAME session, not just next boot) the
+  # moment car_swapped_for_oplong() detects the swap (a broader test than the calibration wipe's
+  # car_changed_for_recal() -- see card.py's Fix 1 comments). This is unconditional / capability-clean
+  # (no car/fingerprint branch here in manager.py): the Tesla is unaffected either way, because its
   # op-long is native (openpilotLongitudinalControl=True regardless of this param; see
   # opendbc_repo/opendbc/car/tesla/interface.py::_get_params_sx, and pnw_vehicle.py's op_long_native
   # capability) -- card.py's car-change hook explicitly skips native cars, and this param never

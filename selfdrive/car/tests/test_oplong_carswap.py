@@ -1,9 +1,16 @@
 # oplongpersist2pnw (req 3b): op-long now persists across a SAME-car reboot (system/manager/manager.py
 # no longer force-resets AlphaLongitudinalEnabled every boot — req 3a). The only remaining reset
 # trigger is a genuine CAR CHANGE, handled in the SAME card.py hook that already resets calibration
-# on a swap (_maybe_reset_calibration_on_car_change / car_changed_for_recal). The Tesla is exempt
-# (its op-long is native — pnw_vehicle.PnwVehicle.op_long_native — never a per-session opt-in, so the
-# param is never touched and no onroad cycle is ever requested for it).
+# on a swap (_maybe_reset_calibration_on_car_change). The Tesla is exempt (its op-long is native —
+# pnw_vehicle.PnwVehicle.op_long_native — never a per-session opt-in, so the param is never touched
+# and no onroad cycle is ever requested for it).
+#
+# Fix 1 (Fable MEDIUM, review pass 2): the op-long reset runs under its OWN, broader swap test
+# (car_swapped_for_oplong), decoupled from the calibration wipe's car_changed_for_recal — it does NOT
+# exclude a fixed-source (fleet-VIN fallback) fingerprint, because the op-long reset is the FAIL-SAFE
+# direction (worst case the driver re-enables it) while the calibration wipe is destructive and must
+# stay excluded there (poisoned-cache incident). See TestOpLongResetUnderFixedSourceFingerprint.
+import time
 from types import SimpleNamespace
 
 from openpilot.common.params import Params
@@ -30,6 +37,19 @@ def _run_card(cp):
   Car(CI=CI, RI=SimpleNamespace())
 
 
+def _wait_for_calibration_car(params, expected, timeout=1.0):
+  """Fix 3 (Fable, test robustness): CalibrationCar is written via params.put_nonblocking (an async
+  detached thread) in card.py. A slow flush right after Car.__init__ returns can leave a reader --
+  either this test's own assertion, or a SECOND _run_card() simulating the post-cycle re-init -- seeing
+  the STALE tag, which for the re-init test would spuriously re-detect a "swap" and could flake the
+  very no-loop property under test. Poll briefly instead of asserting/reading immediately."""
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if params.get("CalibrationCar") == expected:
+      return
+    time.sleep(0.01)
+
+
 class TestOpLongResetOnCarChange:
   def test_tesla_to_lightning_swap_with_op_long_on_resets_and_cycles(self):
     # The concrete scenario req 3b targets: a Lightning left with op-long ON, then the device is
@@ -46,6 +66,7 @@ class TestOpLongResetOnCarChange:
       assert params.get_bool("AlphaLongitudinalEnabled") is False
       assert params.get_bool("OnroadCycleRequested") is True
       # calibration reset still happens (this hook's original job) and the car tag is updated
+      _wait_for_calibration_car(params, LIGHTNING)
       assert params.get("CalibrationCar") == LIGHTNING
 
   def test_lightning_to_tesla_swap_never_touches_param_or_cycles(self):
@@ -59,6 +80,7 @@ class TestOpLongResetOnCarChange:
       _run_card(_make_cp("tesla", TESLA, op_long=True))
       assert params.get_bool("AlphaLongitudinalEnabled") is True  # untouched
       assert params.get_bool("OnroadCycleRequested") is False  # never requested
+      _wait_for_calibration_car(params, TESLA)
       assert params.get("CalibrationCar") == TESLA
 
   def test_swap_to_lightning_already_stock_acc_does_not_needlessly_cycle(self):
@@ -92,6 +114,7 @@ class TestOpLongResetOnCarChange:
       _run_card(_make_cp("ford", LIGHTNING, op_long=True))
       assert params.get_bool("AlphaLongitudinalEnabled") is True
       assert params.get_bool("OnroadCycleRequested") is False
+      _wait_for_calibration_car(params, LIGHTNING)
       assert params.get("CalibrationCar") == LIGHTNING
 
   def test_no_cycle_loop_on_reinit_after_swap(self):
@@ -106,8 +129,52 @@ class TestOpLongResetOnCarChange:
       assert params.get_bool("OnroadCycleRequested") is True
       # simulate hardwared.py consuming the request (system/hardware/hardwared.py does this)
       params.put_bool("OnroadCycleRequested", False)
+      # Fix 3: make sure the async CalibrationCar write from the first _run_card has actually landed
+      # before the "re-init" second _run_card reads it, or this would flake on exactly the race the
+      # real bug would exploit.
+      _wait_for_calibration_car(params, LIGHTNING)
       # the re-fingerprint after the cycle: same car, and AlphaLongitudinalEnabled is now False so
       # the new session's CP correctly reports op_long=False this time.
       _run_card(_make_cp("ford", LIGHTNING, op_long=False))
+      assert params.get_bool("OnroadCycleRequested") is False  # not re-armed
+      assert params.get_bool("AlphaLongitudinalEnabled") is False
+
+
+class TestOpLongResetUnderFixedSourceFingerprint:
+  """Fix 1 (Fable MEDIUM): a sleepy-bus power-up right after a real car swap can resolve only via the
+  unreliable fleet-VIN fallback (fingerprintSource=fixed). The calibration wipe correctly stays
+  fp_fixed-excluded (must never wipe a good calibration on a flaky read -- poisoned-cache incident),
+  but the op-long reset is the FAIL-SAFE direction and must still fire, or the newly-swapped car would
+  drive op-long ON on the OLD car's stale calibration -- exactly the failure this feature prevents."""
+
+  def test_fixed_source_swap_with_op_long_on_resets_oplong_but_not_calibration(self):
+    with OpenpilotPrefix():
+      params = Params()
+      params.put("CalibrationCar", TESLA)
+      params.put_bool("AlphaLongitudinalEnabled", True)
+      params.put("CalibrationParams", b"stale-tesla-calibration")
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True, source="fixed"))
+      # op-long IS reset (fail-safe direction) even though the fingerprint is unreliable
+      assert params.get_bool("AlphaLongitudinalEnabled") is False
+      assert params.get_bool("OnroadCycleRequested") is True
+      # the destructive calibration wipe stays gated on a RELIABLE fingerprint -- untouched here
+      assert params.get("CalibrationParams") == b"stale-tesla-calibration"
+      # the CalibrationCar tag likewise does not advance on an unreliable fingerprint
+      assert params.get("CalibrationCar") == TESLA
+
+  def test_fixed_source_swap_no_second_cycle_after_reset(self):
+    # No re-trigger loop even under fp_fixed: after the cycle re-fingerprints (which may still
+    # resolve fixed-source, e.g. the bus is still sleepy), the new session's CP already reports
+    # op-long=False (get_car() read the just-written param) -- the op-long gate is then False, so no
+    # second cycle fires even though car_swapped_for_oplong() would still evaluate True (the stored
+    # tag never advanced under fp_fixed, so it's still a "different car" by that test).
+    with OpenpilotPrefix():
+      params = Params()
+      params.put("CalibrationCar", TESLA)
+      params.put_bool("AlphaLongitudinalEnabled", True)
+      _run_card(_make_cp("ford", LIGHTNING, op_long=True, source="fixed"))
+      assert params.get_bool("OnroadCycleRequested") is True
+      params.put_bool("OnroadCycleRequested", False)  # simulate hardwared.py consuming it
+      _run_card(_make_cp("ford", LIGHTNING, op_long=False, source="fixed"))
       assert params.get_bool("OnroadCycleRequested") is False  # not re-armed
       assert params.get_bool("AlphaLongitudinalEnabled") is False
