@@ -19,6 +19,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
 REPLAY = "REPLAY" in os.environ
 
@@ -215,7 +216,32 @@ class Car:
     """calswap2pnw: if this real fingerprint differs from the car the current calibration belongs to,
     clear the learned car-specific params so openpilot recalibrates cleanly on the new car. Also
     records the current car tag (seeds it on first boot without resetting). Fully defensive — a
-    param hiccup here must never break card startup."""
+    param hiccup here must never break card startup.
+
+    oplongpersist2pnw (req 3b): the SAME car-change event also resets op-long (AlphaLongitudinalEnabled)
+    to stock ACC for the newly-swapped car, UNLESS that car's op-long is NATIVE (the Tesla — never
+    touched, never cycled; op-long isn't a per-session opt-in there in the first place). This pairs
+    with req 3a (system/manager/manager.py no longer force-resets AlphaLongitudinalEnabled on every
+    boot): op-long now persists across a SAME-car reboot, so a real car swap is the only remaining
+    reset trigger, and it must land here (the one place that already reliably detects a swap) rather
+    than at every boot.
+
+    Ordering trap this must solve: self.CP was already fixed at fingerprint time — get_car() in
+    __init__ (called BEFORE this method) reads the PERSISTED AlphaLongitudinalEnabled and bakes it
+    into self.CP.openpilotLongitudinalControl for this whole process lifetime. So if a Lightning was
+    left with op-long ON and the device is then swapped onto it, self.CP.openpilotLongitudinalControl
+    is ALREADY True for THIS session's card process — merely writing the param False here would only
+    take effect NEXT boot, leaving op-long ON on the freshly-swapped (and freshly-uncalibrated) car
+    for the whole current drive. Fix: mirror developer.py::_on_alpha_long_enabled's own mechanism —
+    set OnroadCycleRequested=True alongside the param write. hardwared.py
+    (system/hardware/hardwared.py) consumes it: OnroadCycleRequested forces not_onroad_cycle=False for
+    ONROAD_CYCLE_TIME, which drops should_start and cycles deviceState.started, so manager_thread's
+    ensure_running() restarts the ONROAD process set (including this card process) and it re-runs
+    get_car() against the now-False param — all within the SAME power-up, no reboot needed. No
+    re-trigger loop: CalibrationCar is updated to cur_car below in this same call, so the post-cycle
+    re-init of card.py sees stored_car == cur_car and car_changed_for_recal() returns False the second
+    time around. Only cycle when op-long was ACTUALLY on for the new car
+    (self.CP.openpilotLongitudinalControl) — a swap onto an already-stock-ACC car needs no reload."""
     cur_car = str(getattr(self.CP, 'carFingerprint', '') or '')
     fp_fixed = self.CP.fingerprintSource == structs.CarParams.FingerprintSource.fixed
     try:
@@ -230,6 +256,14 @@ class Car:
           self.params.remove(k)
         except Exception:
           pass
+      # oplongpersist2pnw (req 3b): see the docstring above for the full ordering rationale.
+      try:
+        if not PnwVehicle(self.CP).op_long_native and self.CP.openpilotLongitudinalControl:
+          cloudlog.warning("card: car changed with op-long ON — resetting to stock ACC + requesting onroad cycle")
+          self.params.put_bool("AlphaLongitudinalEnabled", False)
+          self.params.put_bool("OnroadCycleRequested", True)
+      except Exception:
+        pass
     # tag the car this calibration now belongs to — but only on a real, reliable fingerprint, and
     # only when it changed (avoids churning the param every boot). First boot: stored empty -> no
     # reset above, just record the current car so the NEXT swap is detected.
