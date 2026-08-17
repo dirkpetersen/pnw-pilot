@@ -1,7 +1,6 @@
 from typing import NamedTuple
 
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, read_ces_mode
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -52,28 +51,29 @@ class AlphaLongToggleState(NamedTuple):
 
 
 def compute_alpha_long_toggle_state(*, op_long_native: bool, alpha_long_available: bool,
-                                     openpilot_long_control: bool, is_release: bool, engaged: bool,
-                                     ces_master_on: bool) -> AlphaLongToggleState:
+                                     openpilot_long_control: bool, is_release: bool,
+                                     engaged: bool) -> AlphaLongToggleState:
   """Capability-view-only decision logic (2026-07-11 directive: never branch on carFingerprint/brand).
 
-  oplongfix2pnw (supersedes oplongui2pnw / the discarded oplongboot2pnw): three cases, distinguished
-  by capability-view fields -- op_long_native is itself the capability (pnw_vehicle.PnwVehicle),
-  never a carFingerprint/brand string here.
+  oplongpersist2pnw (req 2, supersedes oplongfix2pnw / oplongui2pnw / the discarded oplongboot2pnw):
+  three cases, distinguished by capability-view fields -- op_long_native is itself the capability
+  (pnw_vehicle.PnwVehicle), never a carFingerprint/brand string here.
     1. native op-long (e.g. Tesla): op_long_native
        -> visible, forced checked=True, disabled (greyed) -- never a real per-car choice, and NEVER
-       gated on ces_master_on (there's nothing to re-enable). Checked FIRST, before
-       alpha_long_available: the Tesla ALSO has alpha_long_available=True (opendbc's tesla
-       _get_params_sx sets both openpilotLongitudinalControl and alphaLongitudinalAvailable
-       unconditionally), so the old test `openpilot_long_control and not alpha_long_available` never
-       matched the Tesla and it fell through to the alpha branch -- that was the bug this supersedes.
+       gated on engaged (there's nothing to re-enable). Checked FIRST, before alpha_long_available:
+       the Tesla ALSO has alpha_long_available=True (opendbc's tesla _get_params_sx sets both
+       openpilotLongitudinalControl and alphaLongitudinalAvailable unconditionally), so the old test
+       `openpilot_long_control and not alpha_long_available` never matched the Tesla and it fell
+       through to the alpha branch -- that was the bug this supersedes.
     2. alpha op-long (e.g. Lightning): alpha_long_available (and not native)
-       -> visible, checked mirrors the real param, enabled = (not ces_master_on) and not engaged.
-       The driver's enable path is: turn CES mode OFF first (Settings), which un-greys this toggle,
-       then enable op-long. Gated on the CES **master** (Settings-level "is CES on at all", i.e.
-       `ces_enabled(read_ces_mode(params))` -- CESMode != Off / the legacy ConditionalExperimentalSwitching
-       bool it's kept in sync with), NOT the live CESButtonState: gating on the live button deadlocks,
-       since forced-Experimental is unreachable without op-long in the first place (the discarded
-       oplongboot2pnw's mistake).
+       -> visible, checked mirrors the real param, enabled = not engaged. req 2 DROPS the prior
+       CES-master gate (`(not ces_master_on) and not engaged`, driver-directed 2026-08-17): CES is
+       normally on, so gating the toggle on it left it greyed almost all the time on the Lightning --
+       the driver wants a live on/off switch, not one gated behind turning CES off first. The
+       `not engaged` gate is KEPT -- it is a hard SAFETY requirement, not a UX gate: the toggle's
+       callback (_on_alpha_long_enabled) writes the param via an OnroadCycleRequested reload, which
+       restarts the entire onroad process set, and that must never be triggerable while
+       engaged/driving.
     3. unavailable: neither -> hidden.
   is_release hides the toggle in all three cases (unchanged from prior behavior).
 
@@ -87,7 +87,7 @@ def compute_alpha_long_toggle_state(*, op_long_native: bool, alpha_long_availabl
   if op_long_native:
     return AlphaLongToggleState(visible=True, checked=True, enabled=False)
   if alpha_long_available:
-    return AlphaLongToggleState(visible=True, checked=None, enabled=(not ces_master_on) and not engaged)
+    return AlphaLongToggleState(visible=True, checked=None, enabled=not engaged)
   return AlphaLongToggleState(visible=False, checked=None, enabled=False)
 
 
@@ -181,37 +181,31 @@ class DeveloperLayout(Widget):
     # CP gating
     alpha_state: AlphaLongToggleState | None = None
     if ui_state.CP is not None:
-      # oplongfix2pnw (docs/pnw/op-long-features.md §6): capability-view only, never
+      # oplongpersist2pnw (req 2, docs/pnw/op-long-features.md §6): capability-view only, never
       # carFingerprint/brand directly here -- op_long_native comes from pnw_vehicle.py's
       # PnwVehicle (a per-platform constant, not session state, so no live_op_long is needed).
-      # ces_master_on is the Settings-level "is CES on at all" signal -- the SAME reader
-      # exp_button.py/ces_status.py use (ces_enabled(read_ces_mode(params)), back-compat with the
-      # legacy ConditionalExperimentalSwitching bool) -- NOT the live CESButtonState (see
-      # compute_alpha_long_toggle_state's docstring for why that gate deadlocks).
-      ces_master_on = ces_enabled(read_ces_mode(self._params))
+      # The prior CES-master gate (ces_enabled(read_ces_mode(params))) is REMOVED (req 2): CES is
+      # normally on, so gating the toggle on it left it greyed almost all the time on the Lightning.
+      # Only `not engaged` gates the alpha branch now -- see compute_alpha_long_toggle_state's
+      # docstring for why that gate stays (it's a hard safety requirement, not a UX one).
       alpha_state = compute_alpha_long_toggle_state(
         op_long_native=PnwVehicle(ui_state.CP).op_long_native,
         alpha_long_available=ui_state.CP.alphaLongitudinalAvailable,
         openpilot_long_control=ui_state.CP.openpilotLongitudinalControl,
         is_release=self._is_release,
         engaged=ui_state.engaged,
-        ces_master_on=ces_master_on,
       )
       self._alpha_long_native = alpha_state.checked is True
       self._alpha_long_toggle.set_visible(alpha_state.visible)
       if self._alpha_long_native:
-        # Forced-ON + greyed unconditionally (never depends on engaged/CES) -> a static disabled
-        # beats a live lambda here, since there's nothing to re-enable.
+        # Forced-ON + greyed unconditionally (never depends on engaged) -> a static disabled beats a
+        # live lambda here, since there's nothing to re-enable.
         self._alpha_long_toggle.action_item.set_enabled(False)
       else:
         # Alpha op-long (and hidden/unavailable, harmlessly): keep engaged live-tracked (matches the
-        # pre-oplongfix2pnw behavior) while the CES-master gate uses the snapshot read above
-        # (default-arg binds it at lambda-creation time, avoiding a late-binding closure bug --
-        # _update_toggles only runs on show/offroad-transition, not per-frame, so this is a
-        # snapshot: the driver has to leave and reopen this screen, or the offroad transition must
-        # fire, for a CESMode change to be reflected here).
-        ces_gate = ces_master_on
-        self._alpha_long_toggle.action_item.set_enabled(lambda ces_gate=ces_gate: not ces_gate and not ui_state.engaged)
+        # pre-oplongfix2pnw behavior). No CES-master snapshot any more (req 2 dropped that gate
+        # entirely) -- a plain lambda suffices, no closure-binding trick needed.
+        self._alpha_long_toggle.action_item.set_enabled(lambda: not ui_state.engaged)
 
       if not alpha_state.visible and not self._alpha_long_native:
         # fpcache2pnw: only a REAL fingerprint that lacks alpha-long support may clear the driver's

@@ -13,12 +13,14 @@ opendbc_repo/opendbc/car/ford/interface.py):
   Lightning OFF:  op_long_native=False, alpha_long_available=True,  openpilot_long_control=False
   Lightning ON:   op_long_native=False, alpha_long_available=True,  openpilot_long_control=True
 
-The Lightning (alpha, non-native) toggle's enabled state also gates on ces_master_on -- the
-Settings-level "is CES on at all" signal (ces_enabled(read_ces_mode(params)), the same reader
-exp_button.py/ces_status.py use). The driver's enable path is: turn CES mode off -> toggle un-greys
--> enable op-long. This deliberately does NOT gate on the live CESButtonState (Experimental is
-unreachable without op-long in the first place, so gating on "currently in Experimental" deadlocks --
-that was the discarded oplongboot2pnw's mistake).
+req 2 (oplongpersist2pnw, driver-directed 2026-08-17): the Lightning (alpha, non-native) toggle's
+enabled state PREVIOUSLY also gated on ces_master_on -- the Settings-level "is CES on at all" signal
+(ces_enabled(read_ces_mode(params))). Since CES is normally on, that left the toggle greyed almost
+all the time -- the "greyed all the time on the Lightning" bug. That gate is REMOVED: the alpha
+branch's enabled state is now `not engaged` alone, matched regardless of CES on/off. The `not engaged`
+gate is KEPT and is NOT a UX gate -- it's a hard safety requirement, since the toggle's callback
+(_on_alpha_long_enabled) applies the change via an OnroadCycleRequested reload, which restarts the
+entire onroad process set and must never be triggerable while engaged/driving.
 
 oplongexp2pnw adds a SECOND, onroad enable path: flipping the top-right button to Experimental while
 op-long is OFF on an alpha-capable car now starts the enable flow directly (no Settings trip). Per a
@@ -62,17 +64,17 @@ class TestComputeAlphaLongToggleState:
   def test_native_op_long_forced_on_and_disabled(self):
     # Tesla Raven, the REAL flag combo: op_long_native=True is what correctly picks this out even
     # though alpha_long_available is ALSO True (see module docstring) -- no real per-car choice, so
-    # the toggle is visible, forced checked=True, and greyed out.
+    # the toggle is visible, forced checked=True, and greyed out. (c)
     state = compute_alpha_long_toggle_state(
       op_long_native=True, alpha_long_available=True, openpilot_long_control=True,
-      is_release=False, engaged=False, ces_master_on=False)
+      is_release=False, engaged=False)
     assert state == AlphaLongToggleState(visible=True, checked=True, enabled=False)
 
-  def test_native_op_long_disabled_regardless_of_engaged_or_ces(self):
-    # the forced-ON state never depends on engaged OR ces_master_on -- there's nothing to re-enable.
+  def test_native_op_long_disabled_regardless_of_engaged(self):
+    # the forced-ON state never depends on engaged -- there's nothing to re-enable. (c)
     state = compute_alpha_long_toggle_state(
       op_long_native=True, alpha_long_available=True, openpilot_long_control=True,
-      is_release=False, engaged=True, ces_master_on=True)
+      is_release=False, engaged=True)
     assert state.enabled is False
     assert state.checked is True
 
@@ -81,44 +83,39 @@ class TestComputeAlphaLongToggleState:
     # Tesla combo) must land on the native branch, not the alpha branch. op_long_native must be
     # checked BEFORE alpha_long_available in compute_alpha_long_toggle_state -- if that ordering
     # ever regresses to testing alpha_long_available first, the Tesla's toggle silently starts
-    # mirroring AlphaLongitudinalEnabled instead of being forced True (the oplongui2pnw bug).
+    # mirroring AlphaLongitudinalEnabled instead of being forced True (the oplongui2pnw bug). (c)
     state = compute_alpha_long_toggle_state(
       op_long_native=True, alpha_long_available=True, openpilot_long_control=True,
-      is_release=False, engaged=False, ces_master_on=False)
+      is_release=False, engaged=False)
     assert state.checked is True
     assert state.enabled is False
 
-  def test_alpha_op_long_greyed_while_ces_on(self):
-    # Lightning, CES mode ON: the toggle is visible (real A/B choice) but greyed -- the driver must
-    # turn CES off first. Not engaged, but ces_master_on alone is enough to disable it.
+  def test_alpha_op_long_enabled_regardless_of_ces_state(self):
+    # (a) THE key req 2 regression test: Lightning, not engaged -> enabled=True REGARDLESS of CES
+    # on/off -- there is no ces_master_on parameter any more, so there is nothing left to gate this
+    # on besides `not engaged`. Previously CES-on alone greyed this out; that gate is gone.
     state = compute_alpha_long_toggle_state(
       op_long_native=False, alpha_long_available=True, openpilot_long_control=False,
-      is_release=False, engaged=False, ces_master_on=True)
-    assert state.visible is True
-    assert state.checked is None
-    assert state.enabled is False
-
-  def test_alpha_op_long_tappable_with_ces_off(self):
-    # Lightning, CES mode OFF, offroad: the enable path -- toggle is tappable.
-    state = compute_alpha_long_toggle_state(
-      op_long_native=False, alpha_long_available=True, openpilot_long_control=False,
-      is_release=False, engaged=False, ces_master_on=False)
+      is_release=False, engaged=False)
     assert state.visible is True
     assert state.checked is None  # mirrors the real AlphaLongitudinalEnabled param, not forced
     assert state.enabled is True
 
-  def test_alpha_op_long_disabled_while_engaged_even_with_ces_off(self):
+  def test_alpha_op_long_disabled_while_engaged(self):
+    # (b) the ONE remaining gate on the alpha branch: engaged=True -> enabled=False. This is a
+    # SAFETY gate, not a UX one (see module docstring / compute_alpha_long_toggle_state docstring) --
+    # it must survive req 2's CES-gate removal untouched.
     state = compute_alpha_long_toggle_state(
       op_long_native=False, alpha_long_available=True, openpilot_long_control=False,
-      is_release=False, engaged=True, ces_master_on=False)
+      is_release=False, engaged=True)
     assert state.enabled is False
     assert state.checked is None
 
   def test_unavailable_car_hidden(self):
-    # neither native nor alpha op-long capable at all.
+    # (d) neither native nor alpha op-long capable at all -- unchanged by req 2.
     state = compute_alpha_long_toggle_state(
       op_long_native=False, alpha_long_available=False, openpilot_long_control=False,
-      is_release=False, engaged=False, ces_master_on=False)
+      is_release=False, engaged=False)
     assert state == AlphaLongToggleState(visible=False, checked=None, enabled=False)
 
   def test_alpha_op_long_on_stays_the_alpha_branch_not_forced(self):
@@ -127,31 +124,30 @@ class TestComputeAlphaLongToggleState:
     # Tesla is native) -- must stay on the ALPHA branch (checked=None, mirrors the real param), NOT
     # forced True, so the driver can always turn it back OFF (docs/pnw/op-long-features.md §6
     # "always able to turn OFF" requirement). openpilot_long_control alone must never force the
-    # native branch -- only op_long_native may. CES off + not engaged -> tappable.
+    # native branch -- only op_long_native may. Not engaged -> tappable (regardless of CES, req 2).
     state = compute_alpha_long_toggle_state(
       op_long_native=False, alpha_long_available=True, openpilot_long_control=True,
-      is_release=False, engaged=False, ces_master_on=False)
+      is_release=False, engaged=False)
     assert state.visible is True
     assert state.checked is None
     assert state.enabled is True
 
     state_engaged = compute_alpha_long_toggle_state(
       op_long_native=False, alpha_long_available=True, openpilot_long_control=True,
-      is_release=False, engaged=True, ces_master_on=False)
+      is_release=False, engaged=True)
     assert state_engaged.enabled is False
     assert state_engaged.checked is None
 
   def test_release_build_hides_every_case(self):
-    for native, alpha_avail, op_long, ces_on in (
-      (True, True, True, False),     # Tesla
-      (False, True, False, False),   # Lightning, op-long off, CES off
-      (False, True, False, True),    # Lightning, op-long off, CES on
-      (False, True, True, False),    # Lightning, op-long on
-      (False, False, False, False),  # unavailable
+    for native, alpha_avail, op_long in (
+      (True, True, True),     # Tesla
+      (False, True, False),   # Lightning, op-long off
+      (False, True, True),    # Lightning, op-long on
+      (False, False, False),  # unavailable
     ):
       state = compute_alpha_long_toggle_state(
         op_long_native=native, alpha_long_available=alpha_avail, openpilot_long_control=op_long,
-        is_release=True, engaged=False, ces_master_on=ces_on)
+        is_release=True, engaged=False)
       assert state.visible is False
 
 
