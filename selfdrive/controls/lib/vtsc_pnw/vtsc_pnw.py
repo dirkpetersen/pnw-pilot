@@ -161,7 +161,8 @@ def required_decel(v_ego: float, v_target: float, dist: float) -> float:
 def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: float,
                            a_decel: float = C.A_DECEL, finish_s: float = C.APEX_FINISH_S,
                            sharp_v: float = C.SHARP_CURVE_V, speed_scale: float = 1.0,
-                           v_cruise_cap: float = float('inf')):
+                           v_cruise_cap: float = float('inf'),
+                           min_slowdown: float = C.MAP_MIN_SLOWDOWN):
   """sharpcurve2pnw: scan pfeiferj map path points {latitude,longitude,velocity} within horizon_m and
   return (v_target, dist, is_sharp) of the curve whose decel-limited brake cap is the LOWEST right now
   — i.e. the one to start slowing for first. This is the distance-based lookahead: a far sharp curve
@@ -169,13 +170,18 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   envelope (not nearest / not min-speed) chooses the right one over the FULL ~500 m mapd horizon.
   The MTSC target scale (speed_scale) and clamp (v_cruise_cap) are applied to each point BEFORE the
   envelope so the SELECTED curve matches the value actually used downstream (no selection/use mismatch).
-  v_target is the effective (scaled+clamped) target. (0.0, inf, False) if no point / no data. Pure."""
+  Returns (v_target, dist, is_sharp, v_raw, floored): v_target is the effective (scaled+clamped, and
+  possibly floored -- see below) target, v_raw is the UNSCALED mapd target for that same curve, and
+  floored says the curvefloor2pnw minimum-slowdown floor was applied to at least one candidate.
+  (0.0, inf, False, 0.0, False) if no point / no data. Pure."""
   if not points or cur_lat is None or cur_lon is None:
-    return 0.0, float('inf'), False
+    return 0.0, float('inf'), False, 0.0, False
   best_cap = float('inf')
   best_v = 0.0
   best_d = float('inf')
   best_sharp = False
+  best_raw = 0.0
+  floored_any = False
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
@@ -190,6 +196,22 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     # on the production call (speed_scale == MAP_SPEED_SCALE); explicit/test callers keep flat scaling.
     scale = C.tiered_map_scale(tv) if math.isclose(speed_scale, C.MAP_SPEED_SCALE) else speed_scale
     tv_eff = min(tv * scale, v_cruise_cap)   # MTSC scale + clamp applied before selection
+    # curvefloor2pnw (2026-08-18, I-5 Woodland takeover): the MTSC scale must never ERASE a curve mapd
+    # actually flagged. Measured: raw 27.0 m/s (60 mph) * tiered scale 1.742 = 47 m/s (105 mph),
+    # clamped to the 40.2 m/s set speed, then discarded downstream as "not a meaningful slowdown" ->
+    # VTSC commanded nothing and the car entered a 409 m curve at 90 mph.
+    # This MUST happen per-point HERE, before the envelope, not after selection: the envelope ranks on
+    # tv_eff, so once several points clamp to v_cruise_cap they tie and the NEAREST wins. mapd emits a
+    # target for every node with finite curvature, so an ordinary gentle node in front of the real
+    # curve would be selected instead and its (high) raw would suppress a post-selection floor
+    # entirely -- the fix would silently not fire on exactly the road that motivated it.
+    # Keeping it here also preserves this function's documented invariant: scale+clamp applied INSIDE
+    # the selection so the SELECTED curve matches the value used downstream.
+    if math.isfinite(v_cruise_cap):
+      floor_v = v_cruise_cap - min_slowdown
+      if tv < floor_v <= tv_eff:             # raw says slow down, scaled says don't -> smallest trim
+        tv_eff = floor_v
+        floored_any = True
     if tv_eff <= 0.0:
       continue
     cap = brake_cap_for_apex(tv_eff, d, v_ego, a_decel, finish_s)
@@ -198,7 +220,8 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
       # 1.12x scale inflate a genuinely sharp 28 m/s curve to 31.4 and DROP its sharp flag -> the
       # last-resort firmer brake would be denied while we target the inflated entrance speed (overshoot).
       best_cap, best_v, best_d, best_sharp = cap, tv_eff, d, (tv < sharp_v)
-  return best_v, best_d, best_sharp
+      best_raw = tv                            # UNSCALED mapd target for the chosen curve
+  return best_v, best_d, best_sharp, best_raw, floored_any
 
 
 def twisty_section_cap(points, cur_lat, cur_lon, v_cruise: float, v_ego: float, horizon_m: float,

@@ -167,6 +167,8 @@ def test_min_dist_zero_keeps_old_behavior():
 
 # ---- controller apex state machine (drive #4: confidence cut, finish-before-apex, accelerate out) ----
 import time
+
+import pytest
 import types
 
 
@@ -296,32 +298,32 @@ def test_required_decel():
 
 def test_most_binding_picks_lowest_envelope_not_nearest():
   # a NEAR sharp curve (13 m/s @ 60 m) must out-bind a FAR gentle one (25 m/s @ 300 m)
-  v, d, sharp = most_binding_map_curve([_pt(300, 25.0), _pt(60, 13.0)], LAT0, LON0, 28.0, 500.0)
+  v, d, sharp, _raw, _fl = most_binding_map_curve([_pt(300, 25.0), _pt(60, 13.0)], LAT0, LON0, 28.0, 500.0)
   assert abs(v - 13.0) < 0.5 and 40 < d < 90 and sharp is True
 
 
 def test_most_binding_respects_horizon():
   # the binding curve sits beyond a short horizon -> not considered
-  v, d, _ = most_binding_map_curve([_pt(300, 13.0)], LAT0, LON0, 28.0, 100.0)
+  v, d, _, _raw, _fl = most_binding_map_curve([_pt(300, 13.0)], LAT0, LON0, 28.0, 100.0)
   assert v == 0.0 and d == float('inf')
 
 
 def test_most_binding_far_curve_seen_over_full_500m():
   # the whole point of the change: a sharp curve at 450 m IS now found (old ~370 m horizon missed it)
-  v, d, sharp = most_binding_map_curve([_pt(450, 18.0)], LAT0, LON0, 31.0, 500.0)
+  v, d, sharp, _raw, _fl = most_binding_map_curve([_pt(450, 18.0)], LAT0, LON0, 31.0, 500.0)
   assert abs(v - 18.0) < 0.5 and 400 < d < 500 and sharp is True
 
 
 def test_most_binding_empty_or_no_gps():
-  assert most_binding_map_curve([], LAT0, LON0, 28.0, 500.0) == (0.0, float('inf'), False)
-  assert most_binding_map_curve([_pt(60, 13.0)], None, None, 28.0, 500.0) == (0.0, float('inf'), False)
+  assert most_binding_map_curve([], LAT0, LON0, 28.0, 500.0) == (0.0, float('inf'), False, 0.0, False)
+  assert most_binding_map_curve([_pt(60, 13.0)], None, None, 28.0, 500.0) == (0.0, float('inf'), False, 0.0, False)
 
 
 def test_most_binding_applies_scale_and_clamp():
   # the MTSC scale + clamp are applied INSIDE selection so the returned target matches what's used
-  v, _, _ = most_binding_map_curve([_pt(80, 20.0)], LAT0, LON0, 28.0, 500.0, speed_scale=1.12)
+  v, _, _, _raw, _fl = most_binding_map_curve([_pt(80, 20.0)], LAT0, LON0, 28.0, 500.0, speed_scale=1.12)
   assert abs(v - 20.0 * 1.12) < 0.5                       # scaled up
-  v2, _, _ = most_binding_map_curve([_pt(80, 25.0)], LAT0, LON0, 28.0, 500.0,
+  v2, _, _, _raw2, _fl2 = most_binding_map_curve([_pt(80, 25.0)], LAT0, LON0, 28.0, 500.0,
                                     speed_scale=1.12, v_cruise_cap=26.0)
   assert v2 <= 26.0 + 1e-6                                # clamped to the set cruise
 
@@ -329,7 +331,7 @@ def test_most_binding_applies_scale_and_clamp():
 def test_sharp_classification_on_raw_target_not_scaled():
   # raw 28 m/s is physically sharp (<30); the 1.12x scale -> 31.4 must NOT lose the sharp flag,
   # else the last-resort firmer brake would be denied while targeting the inflated entrance speed
-  _, _, sharp = most_binding_map_curve([_pt(120, 28.0)], LAT0, LON0, 31.0, 500.0,
+  _, _, sharp, _raw, _fl = most_binding_map_curve([_pt(120, 28.0)], LAT0, LON0, 31.0, 500.0,
                                        speed_scale=1.12, v_cruise_cap=40.0)
   assert sharp is True
 
@@ -356,3 +358,154 @@ def test_twisty_only_reduces():
   pts = [_pt(80, 20.0), _pt(160, 21.0), _pt(240, 22.0)]
   vc = 31.3
   assert twisty_section_cap(pts, LAT0, LON0, vc, 28.0, 500.0, pitch=-0.05) <= vc
+
+
+# --- curvefloor2pnw: the MTSC scale must never erase a curve mapd DID flag ------------------------
+# 2026-08-18, I-5 Woodland: raw map target 27.0 m/s (60 mph) -> tiered scale 1.742 -> 47 m/s (105 mph)
+# -> clamped to the 40.2 m/s set speed -> failed the MAP_MIN_SLOWDOWN gate -> "no map curve" -> VTSC
+# commanded NOTHING and the car entered a 409 m-radius curve at 90 mph until the driver took over.
+
+def test_scale_can_inflate_a_real_target_past_the_set_speed():
+    """The mechanism itself, pinned so it can't silently change."""
+    scale = C.tiered_map_scale(27.0)
+    assert 1.7 < scale < 1.8
+    assert 27.0 * scale > 40.2, "the scaled target exceeded the driver's set speed"
+
+
+def test_selector_returns_the_raw_target_alongside_the_scaled_one():
+    v, d, _sharp, raw, _fl = most_binding_map_curve([_pt(300, 27.0)], LAT0, LON0, 40.0, 500.0,
+                                               speed_scale=C.MAP_SPEED_SCALE, v_cruise_cap=40.2)
+    assert raw == 27.0, "the caller must be able to see what mapd actually said"
+    assert v > raw, "and that the scale inflated it"
+
+
+def _fold(ctrl, raw_target, v_cruise_set, dist_m=300.0):
+    ctrl._map_targets = [_pt(dist_m, raw_target)]
+    ctrl._cur_lat, ctrl._cur_lon = LAT0, LON0
+    return ctrl._fold_map_curve(0.0, -1.0, float('inf'), v_cruise_set, v_cruise_set, 500.0)
+
+
+def test_inflated_target_now_yields_the_minimum_slowdown_instead_of_nothing():
+    c = _make_ctrl()
+    c._map_curves = True
+    _k, d, v, _sharp = _fold(c, 27.0, 40.2)
+    assert v != float('inf'), "the curve must not be discarded"
+    assert v == pytest.approx(40.2 - C.MAP_MIN_SLOWDOWN, abs=1e-6)
+    assert d > 0.0
+    assert c._tele_map_floored is True
+
+
+def test_the_floor_is_small_and_never_over_brakes():
+    c = _make_ctrl()
+    c._map_curves = True
+    _k, _d, v, _sharp = _fold(c, 27.0, 40.2)
+    # ~10 mph off a 90 mph set speed -- a trim, not a stab
+    assert (40.2 - v) * 2.237 == pytest.approx(10.0, abs=0.5)
+
+
+def test_an_already_binding_map_curve_is_untouched():
+    """A curve whose SCALED target is already meaningfully below cruise must keep its own value --
+    the tuned sweeper behaviour must not change."""
+    c = _make_ctrl()
+    c._map_curves = True
+    _k, _d, v, _sharp = _fold(c, 13.0, 40.2)          # tight curve: scale 1.35 -> ~17.6 m/s
+    assert v == pytest.approx(13.0 * C.tiered_map_scale(13.0), rel=1e-6)
+    assert c._tele_map_floored is False
+
+
+def test_no_map_curve_still_means_no_cap():
+    c = _make_ctrl()
+    c._map_curves = True
+    c._map_targets = []
+    c._cur_lat, c._cur_lon = LAT0, LON0
+    _k, _d, v, _sharp = c._fold_map_curve(0.0, -1.0, float('inf'), 40.2, 40.2, 500.0)
+    assert v == float('inf'), "no map data must never synthesise a slowdown"
+    assert c._tele_map_floored is False
+
+
+def test_a_trivial_target_above_cruise_is_still_ignored():
+    c = _make_ctrl()
+    c._map_curves = True
+    _k, _d, v, _sharp = _fold(c, 45.0, 40.2)          # mapd says faster than we're going
+    assert v == float('inf')
+    assert c._tele_map_floored is False
+
+
+# --- curvefloor2pnw: the floor must survive SHADOWING by ordinary multi-point map data -------------
+# A review caught that applying the floor AFTER selection was provably suppressed: the envelope ranks
+# on the scaled+clamped target, so once several points clamp to the set speed they tie and the NEAREST
+# wins. mapd emits a target for EVERY node with finite curvature, so an ordinary gentle node in front
+# of the real curve was selected instead and its high raw blocked the floor -- the fix would not have
+# fired on the very road that motivated it. Every test below uses MULTIPLE points for that reason;
+# the original single-point tests could not see this class of bug at all.
+
+_SET = 40.2
+
+
+def _sharp_plus_shadows(sharp_d, sharp_v=27.0, shadow_v=39.2, shadows=(50, 120, 220)):
+    return [_pt(sharp_d, sharp_v)] + [_pt(x, shadow_v) for x in shadows if x < sharp_d]
+
+
+def _select(points, v_ego=_SET):
+    return most_binding_map_curve(points, LAT0, LON0, v_ego, 500.0, C.A_DECEL, C.APEX_FINISH_S,
+                                  C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, _SET, C.MAP_MIN_SLOWDOWN)
+
+
+def test_floor_survives_a_nearer_gentle_node_shadowing_the_curve():
+    v, d, _s, _raw, floored = _select(_sharp_plus_shadows(200))
+    assert floored is True
+    assert v == pytest.approx(_SET - C.MAP_MIN_SLOWDOWN, abs=1e-6)
+    assert d == pytest.approx(200, abs=5), "the SHARP curve must be the selected one, not the shadow"
+
+
+def test_floor_binds_with_useful_warning_distance():
+    """It must fire far enough out to be a trim rather than a stab."""
+    bound_at = None
+    for dist in (500, 400, 300, 250, 200, 150, 100):
+        v, d, _s, _raw, _f = _select(_sharp_plus_shadows(dist))
+        if 0.0 < v < _SET - C.MAP_MIN_SLOWDOWN + 1e-6 and bound_at is None:
+            bound_at = dist
+    assert bound_at is not None, "never binds during the whole approach"
+    assert bound_at >= 150, f"only {bound_at} m of warning — too late to be a gentle trim"
+    # and the decel that trim implies is mild
+    req = (_SET ** 2 - (_SET - C.MAP_MIN_SLOWDOWN) ** 2) / (2 * bound_at)
+    assert req < 1.5, f"required decel {req:.2f} m/s^2 is not a gentle trim"
+
+
+def test_dense_shadowing_still_selects_the_real_curve_in_time():
+    """Worst realistic case: mapd always emits a node a few metres ahead, so there is ALWAYS a near
+    shadow. The floored curve legitimately loses the envelope until it is close enough to actually
+    need braking -- what matters is that it wins EARLY ENOUGH for the trim to stay gentle."""
+    bound_at = None
+    for dist in (400, 300, 250, 200, 170, 150, 120, 100):
+        pts = [_pt(dist, 27.0)] + [_pt(x, 39.2) for x in (24, 60, 100, 150, 250) if x < dist]
+        v, d, _s, _raw, _f = _select(pts)
+        if 0.0 < v < _SET - C.MAP_MIN_SLOWDOWN + 1e-6:
+            bound_at = dist
+            assert d == pytest.approx(dist, abs=5), "must select the SHARP curve, not a shadow"
+            break
+    assert bound_at is not None, "dense shadowing suppressed the curve for the whole approach"
+    req = (_SET ** 2 - (_SET - C.MAP_MIN_SLOWDOWN) ** 2) / (2 * bound_at)
+    assert req < 1.5, f"binds at {bound_at} m -> {req:.2f} m/s^2, no longer a gentle trim"
+
+
+def test_gentle_nodes_alone_never_synthesise_a_slowdown():
+    v, _d, _s, _raw, floored = _select([_pt(x, 39.2) for x in (24, 100, 300)])
+    assert floored is False
+    assert v >= _SET - C.MAP_MIN_SLOWDOWN, "no real curve -> no cap"
+
+
+def test_an_already_binding_curve_is_not_raised_by_the_floor():
+    # a genuinely tight curve keeps its own (deeper) target even with shadows present
+    pts = [_pt(200, 13.0)] + [_pt(x, 39.2) for x in (50, 120)]
+    v, _d, _s, _raw, floored = _select(pts)
+    assert v == pytest.approx(13.0 * C.tiered_map_scale(13.0), rel=1e-6)
+    assert floored is False, "a curve that already binds must not be floored upward"
+
+
+def test_floor_never_targets_below_the_raw_advisory():
+    """The floored target is always ABOVE what mapd asked for -- it can never over-brake."""
+    for raw in (20.0, 27.0, 30.0, 34.0):
+        v, _d, _s, _r, floored = _select(_sharp_plus_shadows(200, sharp_v=raw))
+        if floored:
+            assert v > raw, f"floored target {v} undercut mapd's own advisory {raw}"

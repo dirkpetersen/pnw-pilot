@@ -58,6 +58,11 @@ class VTSCController:
     self._enabled = False
     # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
     self._map_curves = False
+    # curvefloor2pnw telemetry — initialised here (not just in cap()) so the fold is inspectable and
+    # safe to call standalone; _finish() reads them on every tick including the disabled early-return.
+    self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
+    self._tele_map_floored = False
+    self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._map_targets: list = []
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
@@ -160,14 +165,21 @@ class VTSCController:
     cruise — otherwise a lowered base would dismiss a real sharp curve as 'trivial' (it must still brake).
     The MTSC scale (driver: mapd targets ran ~10 mph slow) + clamp are applied INSIDE the selection so the
     chosen curve matches the value used here."""
+    self._tele_map_floored = False               # per-fold, so the flag never survives a stale tick
     try:
-      mv, md, sharp = most_binding_map_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego,
-                                             horizon_m, self.tune['A_DECEL'], C.APEX_FINISH_S,
-                                             C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set)
+      mv, md, sharp, mv_raw, floored = most_binding_map_curve(
+        self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
+        C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN)
     except Exception:
       return k_apex, d_apex, v_curve, False
+    self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
+    self._tele_map_floored = bool(floored)
+    # curvefloor2pnw: the minimum-slowdown floor is applied PER-POINT inside most_binding_map_curve,
+    # before the decel envelope -- doing it here, after selection, was provably suppressed by ordinary
+    # multi-point map data (a gentle near node clamps to the set speed, ties on envelope, wins on
+    # proximity, and its high raw target then blocks the floor). See that function for the full note.
     # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
-    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN) or md <= 0.0:
+    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
@@ -182,6 +194,11 @@ class VTSCController:
     self._read_enabled(now)
     dt = min(max((now - self._last_t) if self._last_t is not None else DT_MDL, 1e-3), 0.5)
     self._last_t = now
+    # curvefloor2pnw: reset BEFORE the early returns below -- otherwise a disabled tick (or a modelV2
+    # exception) republishes the previous enabled tick's map/vision values next to enabled=False.
+    self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
+    self._tele_map_floored = False
+    self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
 
     if not self._enabled:
       self._reset()
@@ -211,6 +228,10 @@ class VTSCController:
     self._tele_dir = ""
 
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
+    # vision's own verdict, BEFORE any map fold -- the "independent safety net" claim is only
+    # checkable if what vision actually saw is recorded.
+    self._tele_vis_k, self._tele_vis_d = float(k_apex), float(d_apex)
+    self._tele_vis_v = 0.0 if v_curve == float('inf') else float(v_curve)
     sharp_map = False
     if self._map_curves:                        # ces-i90-2pnw (MTSC) + sharpcurve2pnw
       horizon_m = C.MAP_SOURCE_HORIZON_M        # scan the FULL ~500 m mapd publishes (envelope gates binding)
@@ -368,7 +389,14 @@ class VTSCController:
     active = capped < v_cruise - 0.5
     vcs = 0.0 if v_curve == float('inf') else float(v_curve)
     tta = (d_apex / v_ego) if (d_apex >= 0.0 and v_ego > 0.1) else -1.0
-    self.msg = dict(enabled=bool(self._enabled), active=bool(active), state=self._state,
+    self.msg = dict(mapRaw=float(getattr(self, '_tele_map_raw', 0.0)),
+                    mapEff=float(getattr(self, '_tele_map_eff', 0.0)),
+                    mapD=float(getattr(self, '_tele_map_d', 0.0)),
+                    mapFloored=bool(getattr(self, '_tele_map_floored', False)),
+                    visK=float(getattr(self, '_tele_vis_k', 0.0)),
+                    visD=float(getattr(self, '_tele_vis_d', 0.0)),
+                    visV=float(getattr(self, '_tele_vis_v', 0.0)),
+                    enabled=bool(self._enabled), active=bool(active), state=self._state,
                     vCruise=float(v_cruise), vTarget=float(capped), vEgo=float(v_ego),
                     apexDist=float(d_apex), apexCurvature=float(k_apex), vCurveSafe=vcs,
                     timeToApex=float(tta))
@@ -388,6 +416,16 @@ class VTSCController:
         "pen": round(float(self._tele_pen), 2),
         "pitch": round(float(self._tele_pitch), 4) if self._tele_pitch is not None else None,
         "dir": self._tele_dir,
+        # curvefloor2pnw: WHY each path did or didn't bind. Without these on THIS channel the fields
+        # never left the process (the cereal publisher copies a fixed whitelist and VtscState has no
+        # such members), so the fix's own effectiveness would have been unobservable in any log.
+        "mapRaw": round(float(self._tele_map_raw), 1),
+        "mapEff": round(float(self._tele_map_eff), 1),
+        "mapD": round(float(self._tele_map_d), 0),
+        "mapFlr": bool(self._tele_map_floored),
+        "visK": round(float(self._tele_vis_k), 5),
+        "visD": round(float(self._tele_vis_d), 0),
+        "visV": round(float(self._tele_vis_v), 1),
       })
     except Exception:
       pass
