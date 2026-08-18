@@ -11,7 +11,7 @@ import pytest
 # params_pyx -- so this module only imports in a properly built tree (device / CI / a fork venv with
 # scons run). Skip rather than error in a partially-built dev worktree; it still runs where it counts.
 try:
-  from openpilot.selfdrive.ui.onroad.speed_limit import (  # noqa: E402
+  from openpilot.selfdrive.ui.onroad.speed_limit import (
     SpeedLimitRenderer, DROP_CONFIRM_S, STALE_AFTER_S, MIN_VALID_KPH)
 except Exception as _e:                                    # pragma: no cover - environment guard
   pytest.skip(f"raylib/params UI deps unavailable in this tree: {_e}", allow_module_level=True)

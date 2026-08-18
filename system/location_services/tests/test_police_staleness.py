@@ -21,9 +21,12 @@ def _ts_min_ago(minutes):
   return (_now_epoch() - minutes * 60.0) * 1000.0      # Waze timestamps are epoch MILLISECONDS
 
 
-def _alert(uuid, lat, lon=-122.0, age_min=5):
+def _alert(uuid, lat, lon=-122.0, age_min=5, thumbs=0):
+  # thumbs=0 (an EXPLICIT zero, as upstream sends) so these age-focused cases grade by age alone.
+  # thumbs=None would mean "field not carried" and deliberately grades confirmed -- see
+  # TestUnknownInputsFailTowardWarning in test_police_tier.py.
   return {"lat": lat, "lon": lon, "magvar": None, "uuid": uuid, "street": "", "town": "T",
-          "ts": None if age_min is None else _ts_min_ago(age_min)}
+          "thumbs": thumbs, "ts": None if age_min is None else _ts_min_ago(age_min)}
 
 
 def _line(alerts, lat=47.0, lon=-122.0, brg=0.0):
@@ -81,18 +84,25 @@ class TestNoStalenessDrop:
   def test_unknown_age_is_kept(self):
     assert _line([_alert("nots", _lat_mi_north(3.0), age_min=None)])["state"] == "alert"
 
-  def test_old_near_report_still_outranks_a_fresh_distant_one(self):
-    # consequence of the driver's rule as stated: proximity decides, not age. Recorded deliberately —
-    # this is the case a confidence TIER is meant to re-colour rather than re-order.
+  def test_proximity_decides_the_display_line_regardless_of_age(self):
+    # The DISPLAY line is proximity-first across all tiers -- that is the driver's "focus on the
+    # closest one" rule and the anti-flapping property. Liveness is not ignored: it moves to the
+    # separate `cap` control channel (see TestDisplayControlSplit in test_police_tier.py), so the
+    # live report still gets the slowdown without destabilising what is on screen.
     out = _line([_alert("old_near", _lat_mi_north(0.5), age_min=60),
                  _alert("new_far", _lat_mi_north(6.0), age_min=2)])
     assert out["uuid"] == "old_near"
+    assert out["cap"]["uuid"] == "new_far"
 
 
 class TestSpeedGateReason:
-  def test_unknown_speed_is_not_reported_as_too_slow(self):
-    for cur_speed, expect_slow in ((None, False), (0.0, True), (5.0, True)):
-      reason = f"speed <{lsd.POLICE_GATE_MPH}mph" if cur_speed is not None else "no GPS speed"
-      assert (reason == f"speed <{lsd.POLICE_GATE_MPH}mph") is expect_slow
-      if not expect_slow:
-        assert "mph" not in reason
+  """Was a tautology (it rebuilt the string in the test and asserted its own ternary, so it passed
+  under any regression of the production line). Now calls the real _gate_reason()."""
+
+  def test_unknown_speed_says_so_instead_of_claiming_too_slow(self):
+    assert lsd._gate_reason(None) == "no GPS speed"
+    assert "mph" not in lsd._gate_reason(None)
+
+  @pytest.mark.parametrize("speed", [0.0, 5.0, 19.9])
+  def test_a_known_slow_speed_reports_the_threshold(self, speed):
+    assert lsd._gate_reason(speed) == f"speed <{lsd.POLICE_GATE_MPH}mph"

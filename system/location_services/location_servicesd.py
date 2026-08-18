@@ -23,7 +23,9 @@ the proxy (comma-connect/WAZE-API.md). The legacy per-device direct RapidAPI mod
 unchanged); {"source": "proxy"} forces proxy. A failed poll shows "—", never a false "Clear".
 """
 import json
+import math
 import os
+import stat
 import time
 import threading
 import urllib.request
@@ -143,6 +145,29 @@ POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this 
 # candidate set and the closest of it wins, by plain straight-line distance (which is stable at
 # short range, unlike the path projection). A far report cannot interrupt a near one.
 POLICE_NEAR_MI = 1.0
+# policetier2pnw (2026-08-18): grade each report "confirmed" vs "unconfirmed" instead of dropping old
+# ones (driver: "I still do want to see it" when nothing fresher is in range). Waze does not publish a
+# report lifetime -- their Help says only "reports appear on the map for a certain amount of time and
+# this time changes according to the number of Wazers who react", and a Waze Team Admin stated
+# "duration for any report depends on number of upvotes and 'Not there's -- the more upvoted the
+# report is, the more time it lasts on the map". So we MODEL that rule with the same input the app
+# uses (num_thumbs_up, carried through the proxy as `thumbs`):
+#     effective_life_min = BASE + BONUS * thumbs
+# BASE 10 min comes from the police baseline Waze users consistently report (the standing Suggestion
+# Box request is literally "lengthen the duration of the police reports from 10 min"). A report inside
+# its effective life is one the driver's own Waze app is likely still showing -> full alert. Past it,
+# it is API-only -> still displayed (never dropped), but visually distinct and NOT allowed to command
+# a slowdown (driver directive: "slow down only for the ones that show up on Waze").
+POLICE_TIER_PATH = "/data/pnw/police_tiers.json"
+POLICE_TIER_BASE_MIN = 10.0
+POLICE_TIER_BONUS_MIN = 10.0
+_POLICE_TIER_CLAMP = (0.0, 720.0)      # a typo in the on-road file must not make everything confirmed
+_POLICE_TIER_MIN_BASE_MIN = 1.0        # ...nor everything UNCONFIRMED: base_min 0 would strip the
+                                       # slowdown from every report, so the floor is the suppressive
+                                       # direction's guard. bonus_min 0 is legitimate (age-only mode).
+_POLICE_TIER_MAX_THUMBS = 20           # bound a garbage/huge upvote count before it scales BONUS
+_POLICE_TIER_RELOAD_S = 10.0
+_POLICE_TIER_MAX_B = 64 * 1024
 POLICE_NEAR_CONE_DEG = 90.0   # ...still only forward-hemisphere: near-locking must not resurrect a
                               # report we are driving AWAY from before recede-tracking retires it.
 
@@ -457,7 +482,7 @@ class PoliceUpdater(threading.Thread):
         out.append({"lat": float(a["latitude"]), "lon": float(a["longitude"]),
                     "magvar": None, "ts": _iso_to_epoch_ms(a.get("publish_datetime_utc")),
                     "uuid": a.get("alert_id"), "street": a.get("street") or "",
-                    "town": a.get("city") or ""})
+                    "town": a.get("city") or "", "thumbs": a.get("num_thumbs_up")})
       except (KeyError, TypeError, ValueError):
         continue
     return out
@@ -501,10 +526,15 @@ class PoliceUpdater(threading.Thread):
       if not isinstance(a, dict):
         continue
       try:
+        # `thumbs` MUST be carried here: this rebuild is the PRODUCTION path (the keyless proxy is the
+        # default source; the direct-key path is legacy), so dropping it silently ran the whole tier
+        # model at thumbs=0 -- a flat 10 min lifetime that demoted heavily-upvoted, genuinely live
+        # reports to display-only. Absent key -> None -> "unknown", which _police_tier grades
+        # CONFIRMED (see there); an explicit 0 from upstream means a real zero upvotes.
         out.append({"lat": float(a["lat"]), "lon": float(a["lon"]),
                     "magvar": a.get("magvar"), "ts": a.get("ts"),
                     "uuid": a.get("uuid"), "street": a.get("street") or "",
-                    "town": a.get("town") or ""})
+                    "town": a.get("town") or "", "thumbs": a.get("thumbs")})
       except (KeyError, TypeError, ValueError):
         continue
     return out
@@ -541,7 +571,7 @@ class PoliceUpdater(threading.Thread):
           # _cur_speed() returns None for BOTH "no GPS fix yet" and "stale fix"; reporting either as
           # "speed <45mph" told the driver they were too slow while they were doing 70 (observed after
           # a mid-drive reboot, 2026-08-18). Name the real cause -- they diagnose from this string.
-          reason = f"speed <{POLICE_GATE_MPH}mph" if cur_speed is not None else "no GPS speed"
+          reason = _gate_reason(cur_speed)
           with self._lock:
             self._alerts, self._state, self._err = [], "nodata", reason
           self._stop.wait(POLICE_POLL_S)
@@ -659,6 +689,83 @@ def _police_dir(alert, cur_bearing):
   if d > 135.0:
     return "opp"
   return "none"
+
+
+_police_tier_cache = {"t": -1e9, "base": POLICE_TIER_BASE_MIN, "bonus": POLICE_TIER_BONUS_MIN, "id": None}
+
+
+def _gate_reason(cur_speed):
+  """Why the police poll is gated off. _cur_speed() returns None for BOTH "no GPS fix yet" and "stale
+  fix"; reporting either as "speed <45mph" told a driver doing 70 that they were too slow (observed
+  after a mid-drive reboot, 2026-08-18). Kept as a function so it is testable against production code
+  rather than a string rebuilt in a test."""
+  return f"speed <{POLICE_GATE_MPH}mph" if cur_speed is not None else "no GPS speed"
+
+
+def _police_tier_knobs():
+  """(base_min, bonus_min) from POLICE_TIER_PATH, hot-reloadable on the road. Mirrors the
+  lataccel/lanecenter tuning convention: lives OUTSIDE the git tree so an auto-update's `git clean`
+  cannot delete it, re-stat'd at most every _POLICE_TIER_RELOAD_S, single os.stat gate so only a
+  regular file within the size cap is ever opened, and NEVER raises -- any problem falls back to the
+  in-source defaults."""
+  now = time.monotonic()
+  if now - _police_tier_cache["t"] < _POLICE_TIER_RELOAD_S:
+    return _police_tier_cache["base"], _police_tier_cache["bonus"]
+  _police_tier_cache["t"] = now
+  base, bonus = POLICE_TIER_BASE_MIN, POLICE_TIER_BONUS_MIN
+  try:
+    st = os.stat(POLICE_TIER_PATH)
+    if stat.S_ISREG(st.st_mode) and st.st_size <= _POLICE_TIER_MAX_B:
+      ident = (st.st_mtime_ns, st.st_size)
+      if ident == _police_tier_cache["id"]:
+        return _police_tier_cache["base"], _police_tier_cache["bonus"]   # unchanged -> keep parsed
+      with open(POLICE_TIER_PATH) as f:
+        d = json.load(f)
+      if isinstance(d, dict):
+        _, hi = _POLICE_TIER_CLAMP
+        for key, lo in (("base_min", _POLICE_TIER_MIN_BASE_MIN), ("bonus_min", 0.0)):
+          v = d.get(key)
+          # `bool` is an int subclass: without this, {"base_min": true} would set a 1-minute lifetime
+          # and mark almost everything unconfirmed -- the suppressive direction, from one typo.
+          if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+          if math.isfinite(v) and lo <= float(v) <= hi:
+            if key == "base_min":
+              base = float(v)
+            else:
+              bonus = float(v)
+        _police_tier_cache["id"] = ident
+  except Exception:
+    base, bonus = POLICE_TIER_BASE_MIN, POLICE_TIER_BONUS_MIN      # unreadable/malformed -> defaults
+    _police_tier_cache["id"] = None
+  _police_tier_cache["base"], _police_tier_cache["bonus"] = base, bonus
+  return base, bonus
+
+
+def _police_tier(age_min, thumbs, base_min=None, bonus_min=None):
+  """"confirmed" while the report is inside the lifetime the Waze app itself would give it, else
+  "unconfirmed".
+
+  UNKNOWN inputs grade CONFIRMED, in BOTH directions -- absence of a timestamp is not evidence of
+  staleness, and absence of an upvote count is not evidence of no upvotes. A warning system must fail
+  toward warning, never toward silently downgrading a real report. This matters concretely: `thumbs`
+  is None whenever the proxy body predates the field (an older Lambda, or a cached response up to
+  POLICE_PROXY_MAX_AGE_S old), and treating that as "0 upvotes" would collapse every report to a flat
+  BASE-minute lifetime and strip the slowdown from live sightings. Upstream sends an explicit 0 for a
+  genuine zero, so None is unambiguously "not carried"."""
+  if age_min is None or thumbs is None:
+    return "confirmed"
+  if base_min is None or bonus_min is None:
+    base_min, bonus_min = _police_tier_knobs()
+  try:
+    n = int(thumbs)
+  except (TypeError, ValueError):
+    n = 0
+  n = max(0, min(n, _POLICE_TIER_MAX_THUMBS))
+  try:
+    return "confirmed" if float(age_min) <= base_min + bonus_min * n else "unconfirmed"
+  except (TypeError, ValueError):
+    return "confirmed"
 
 
 def _age_min(ts, now):
@@ -803,6 +910,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   # we can't tell they're across and dropping them would silently miss most reports (Waze often omits magvar).
   # Track closest-approach on EVERY surviving report so one is marked PASSED even while a nearer one shows,
   # then drop reports we've already driven past so they can't linger / reappear (2026-07-06).
+  base, bonus = _police_tier_knobs()     # once per tick, not once per report
   fresh = []
   dbg = []          # police2pnw forensics (2026-07-09 "0.5 mi off vs the Waze app"): per-report verdicts
   for al in alerts:
@@ -819,6 +927,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
     try:
       dbg.append({"lat": round(float(al.get("lat", 0)), 5), "lon": round(float(al.get("lon", 0)), 5),
                   "mi": recede.live_mi(al, lat, lon), "age_min": age, "v": verdict,
+                  "thumbs": al.get("thumbs"), "tier": _police_tier(age, al.get("thumbs"), base, bonus),
                   "magvar": al.get("magvar"), "uuid": (al.get("uuid") or "")[:8]})
     except (TypeError, ValueError):
       pass
@@ -828,32 +937,77 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   # such report wins on straight-line distance. Deliberately bypasses the along-track projection: at
   # this range it is the projection that is unstable, and it is the only thing that let a 6 mi report
   # take the line away from a sighting the driver was actively approaching.
-  near = []
-  for al in fresh:
-    d = recede.live_mi(al, lat, lon)
-    if d is None or d > POLICE_NEAR_MI:
-      continue
-    if brg is not None:
-      try:
-        rel = abs(geo.normalize180(geo.bearing_deg(lat, lon, float(al["lat"]), float(al["lon"])) - brg))
-      except (KeyError, TypeError, ValueError):
+  def _select(cands):
+    near = []
+    for al in cands:
+      d = recede.live_mi(al, lat, lon)
+      if d is None or d > POLICE_NEAR_MI:
         continue
-      if rel > POLICE_NEAR_CONE_DEG:
-        continue                                  # behind us — leave it to recede-tracking to retire
-    near.append((d, al))
-  if near:
-    poi, _a = min(near, key=lambda t: t[0])[1], None
-  else:
-    poi, _a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
+      if brg is not None:
+        try:
+          rel = abs(geo.normalize180(geo.bearing_deg(lat, lon, float(al["lat"]), float(al["lon"])) - brg))
+        except (KeyError, TypeError, ValueError):
+          continue
+        if rel > POLICE_NEAR_CONE_DEG:
+          continue                                # behind us — leave it to recede-tracking to retire
+      near.append((d, al))
+    if near:
+      return min(near, key=lambda t: t[0])[1], None
+    return geo.nearest_ahead(path, lat, lon, brg, cands, max_fallback_m=DISPLAY_MAX_DIST_M)
+
+  # policetier2pnw -- DISPLAY and CONTROL are separate channels (two Gemini review rounds).
+  #
+  #   Round 1 found: only ONE report was published and the controller acted on ITS tier, so a nearer
+  #   UNCONFIRMED report masked a CONFIRMED one behind it, killing the banner AND the slowdown for a
+  #   live sighting (amber at 0.4 mi hiding a 2-minute-old 5-upvote report at 0.8 mi).
+  #   Round 2 found: fixing that by preferring the confirmed subset for the DISPLAY pick reintroduced
+  #   the original flapping -- a confirmed report beyond POLICE_NEAR_MI goes through nearest_ahead's
+  #   path projection, which is exactly the unstable thing the near-lock was built to avoid; when it
+  #   intermittently fails to project, the line falls back to a near unconfirmed report and the two
+  #   alternate tick to tick.
+  #
+  # So: the DISPLAY pick stays purely proximity-first over the whole set (stable near-lock, the
+  # driver's "focus on the closest one" rule, and old reports still shown in amber), while the
+  # CONTROL pick is published SEPARATELY as `cap` -- the nearest CONFIRMED report, which is the only
+  # thing allowed to command a slowdown or raise the banner. Neither channel can suppress the other.
+  poi, _a = _select(fresh)
+  confirmed = [al for al in fresh if _police_tier(_age_min(al.get("ts"), now), al.get("thumbs"),
+                                                  base, bonus) == "confirmed"]
+  cap_poi, _ca = _select(confirmed)
   _police_debug_log(dbg, poi, lat, lon, brg)
   if poi is None:
     return {"state": "clear"}                     # nothing ahead
   live = recede.live_mi(poi, lat, lon)
   # _a is None on the near-lock path (no along-track solve was needed); live_mi is guaranteed there.
   fallback_mi = round(_a["along_m"] / geo.M_PER_MILE, 1) if _a is not None else 0.0
-  return {"state": "alert", "dist_mi": live if live is not None else fallback_mi,
-          "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now),
-          "uuid": poi.get("uuid"), "town": poi.get("town", "")}
+  poi_age = _age_min(poi.get("ts"), now)
+  out = {"state": "alert", "dist_mi": live if live is not None else fallback_mi,
+         "dir": _police_dir(poi, brg), "age_min": poi_age,
+         # policetier2pnw: "confirmed" = still inside the lifetime the Waze app would give it, so the
+         # driver's own app is likely showing it too. "unconfirmed" = API-only -> shown in amber
+         # (never dropped), but display-only. This tier describes the DISPLAYED report; what may act
+         # on the car is the separate `cap` channel below.
+         "tier": _police_tier(poi_age, poi.get("thumbs"), base, bonus),
+         "thumbs": poi.get("thumbs"),
+         "uuid": poi.get("uuid"), "town": poi.get("town", "")}
+  # CONTROL channel: the nearest CONFIRMED report, or absent when there is none. Its presence is what
+  # licenses a slowdown/banner -- consumers must NOT act on the display fields above. Keyed off the
+  # `tier` key so a pre-tier payload (no `tier`, no `cap`) keeps the old whole-line behaviour.
+  if cap_poi is not None:
+    cap_live = recede.live_mi(cap_poi, lat, lon)
+    cap_mi = cap_live if cap_live is not None else (round(_ca["along_m"] / geo.M_PER_MILE, 1)
+                                                    if _ca is not None else None)
+    if cap_mi is not None:
+      try:
+        cap_key = cap_poi.get("uuid") or f"{float(cap_poi['lat']):.4f},{float(cap_poi['lon']):.4f}"
+      except (KeyError, TypeError, ValueError):
+        cap_key = None
+      # dir/town belong to the CONFIRMED report: the banner renders from these, and reading them off
+      # the (proximity-picked, possibly different) display line spliced two reports into one message.
+      out["cap"] = {"dist_mi": cap_mi, "uuid": cap_poi.get("uuid"), "key": cap_key,
+                    "age_min": _age_min(cap_poi.get("ts"), now),
+                    "dir": _police_dir(cap_poi, brg), "town": cap_poi.get("town", "")}
+  return out
 
 
 class _Hold:

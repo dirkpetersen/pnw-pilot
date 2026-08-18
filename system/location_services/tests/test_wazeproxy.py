@@ -90,12 +90,13 @@ class TestParseProxyBody:
     alerts = [{"type": "POLICE", "lat": 47.6011, "lon": -122.3128, "magvar": 270,
                "ts": 1751303880000, "uuid": "a1b2", "street": "I-5 N", "town": "Seattle"}]
     out = PoliceUpdater._parse_proxy_body(self._body(alerts))
-    assert out == [{"lat": 47.6011, "lon": -122.3128, "magvar": 270,
+    # `thumbs` (policetier2pnw) is carried through this parse -- the tier model keys on it
+    assert out == [{"thumbs": None, "lat": 47.6011, "lon": -122.3128, "magvar": 270,
                     "ts": 1751303880000, "uuid": "a1b2", "street": "I-5 N", "town": "Seattle"}]
 
   def test_optional_fields_default(self):
     out = PoliceUpdater._parse_proxy_body(self._body([{"lat": 1.0, "lon": 2.0}]))
-    assert out == [{"lat": 1.0, "lon": 2.0, "magvar": None, "ts": None,
+    assert out == [{"thumbs": None, "lat": 1.0, "lon": 2.0, "magvar": None, "ts": None,
                     "uuid": None, "street": "", "town": ""}]
 
   def test_malformed_alert_skipped_not_fatal(self):

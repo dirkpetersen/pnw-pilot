@@ -12,7 +12,8 @@ import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
-  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S)
+  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S,
+  _police_key)
 
 MPH = MPH_TO_MS
 V75 = 75 * MPH
@@ -1118,11 +1119,12 @@ def test_transient_drop_never_takes_effect():
 def test_a_different_lower_value_restarts_the_window():
   c = _sl_reader(V60, V45)
   c._read_speed_limit()
-  first_t = c._sl_pending_t
+  c._sl_pending_t -= 10.0                       # age the window well past confirmation
+  aged_t = c._sl_pending_t
   c.mem_params.value = 30 * MPH                 # reading moved to another low value
-  assert c._read_speed_limit() == V60
+  assert c._read_speed_limit() == V60, "a NEW pending value must not inherit the old window"
   assert c._sl_pending == 30 * MPH
-  assert c._sl_pending_t >= first_t, "the confirmation window restarts on a new pending value"
+  assert c._sl_pending_t > aged_t, "the confirmation window restarts on a new pending value"
 
 
 def test_rising_limit_is_accepted_immediately():
@@ -1144,3 +1146,136 @@ def test_unknown_read_breaks_the_confirmation_chain():
 def test_dropout_hold_still_works():
   c = _sl_reader(V60, None)
   assert c._read_speed_limit() == V60, "brief dropout must still hold the last valid limit"
+
+
+# --- policetier2pnw: only a CONFIRMED police report may command a slowdown ------------------------
+# Driver directive 2026-08-18: "slow down only for the ones that show up on Waze". An UNCONFIRMED
+# report (past the lifetime the Waze app would give it) still displays -- in amber -- but must never
+# cap the car. A missing/unknown tier keeps the previous behaviour (treated as confirmed).
+
+def _police(dist_mi, tier=None, state="alert", cap_mi="same"):
+  """Display line as location_servicesd publishes it. `tier` present => post-split payload, and the
+  CONTROL channel is the separate `cap` dict (nearest CONFIRMED report). cap_mi="same" mirrors the
+  display distance; None means nothing confirmed ahead."""
+  p = {"state": state, "dist_mi": dist_mi}
+  if tier is not None:
+    p["tier"] = tier
+    if cap_mi == "same":
+      cap_mi = dist_mi if tier == "confirmed" else None
+    if cap_mi is not None:
+      p["cap"] = {"dist_mi": cap_mi, "uuid": "c", "age_min": 1}
+  return p
+
+
+def test_confirmed_police_report_still_caps():
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+
+
+def test_unconfirmed_police_report_never_caps():
+  c = _ctrl(sl=V45, police=_police(0.3, "unconfirmed"))
+  assert c._police_cap(V75, V75) is None
+
+
+def test_missing_tier_is_treated_as_confirmed():
+  # pre-tier location_servicesd payload / cached body -> must not silently disable police braking
+  c = _ctrl(sl=V45, police=_police(0.3))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+
+
+def test_report_aging_out_of_confirmed_mid_approach_releases_the_latch():
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  assert c._police_latched is True
+  c._police = _police(0.3, "unconfirmed")          # crossed its effective lifetime while approaching
+  assert c._police_cap(V75, V75) is None
+  assert c._police_latched is False, "an unconfirmed report must not keep holding the cap"
+
+
+def test_unconfirmed_report_does_not_latch_for_a_later_confirmed_one():
+  c = _ctrl(sl=V45, police=_police(0.3, "unconfirmed"))
+  c._police_cap(V75, V75)
+  assert c._police_latched is False
+  c._police = _police(0.3, "confirmed")
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+
+
+# --- display/control split: the controller must read `cap`, never the displayed report -----------
+
+def test_amber_display_line_still_caps_for_a_confirmed_report_behind_it():
+  """The masking bug: an amber report at 0.2 mi is what is DISPLAYED, but a confirmed one at 0.5 mi
+  is what the car must react to. Reading the display fields here suppressed the slowdown entirely.
+  0.5 mi at 75 mph is ~24 s of driving, inside POLICE_ENGAGE_S; 0.8 mi would be ~38 s and would
+  legitimately not latch yet, which is a property of the engage window, not of the split."""
+  p = _police(0.2, "unconfirmed", cap_mi=0.5)
+  c = _ctrl(sl=V45, police=p)
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  assert c._police_latched is True
+
+
+def test_control_channel_distance_is_used_not_the_display_distance():
+  # display 0.05 mi (would latch instantly), confirmed report 6 mi out (must NOT latch at 75 mph)
+  c = _ctrl(sl=V45, police=_police(0.05, "unconfirmed", cap_mi=6.0))
+  assert c._police_cap(V75, V75) is None
+  assert c._police_latched is False
+
+
+def test_no_confirmed_report_means_no_cap_however_close_the_amber_one_is():
+  c = _ctrl(sl=V45, police=_police(0.05, "unconfirmed", cap_mi=None))
+  assert c._police_cap(V75, V75) is None
+
+
+def test_legacy_payload_without_tier_uses_the_display_line():
+  # pre-split location_servicesd: no `tier`, no `cap` -> previous behaviour, braking still works
+  c = _ctrl(sl=V45, police={"state": "alert", "dist_mi": 0.3})
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+
+
+# --- Fable finding 3: the key-based dismissal had no regression net at all --------------------------
+
+def test_dismissal_holds_while_the_same_report_is_the_cap():
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  c._police_cap(V75, V75)
+  c._police_suppressed = True
+  c._police_suppressed_uuid = _police_key(c._police["cap"])
+  assert c._police_cap(V75, V75) is None, "a dismissed report must stay dismissed"
+
+
+def test_dismissal_clears_when_a_different_report_becomes_the_cap():
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  c._police_cap(V75, V75)
+  c._police_suppressed = True
+  c._police_suppressed_uuid = "some-other-report"
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN, "a NEW report must not inherit a dismissal"
+
+
+def test_a_missing_key_never_carries_a_dismissal_onto_another_report():
+  # two reports both lacking an alert_id would both key None; None == None must NOT suppress
+  p = {"state": "alert", "dist_mi": 0.3, "tier": "unconfirmed",
+       "cap": {"dist_mi": 0.3, "uuid": None, "key": None}}
+  c = _ctrl(sl=V45, police=p)
+  c._police_suppressed = True
+  c._police_suppressed_uuid = None
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+
+
+def test_switching_reports_also_drops_the_stale_latch():
+  # Fable finding 1: carrying the latch across a report switch skipped the 30 s engage gate, capping
+  # immediately for a report still miles away.
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  assert c._police_latched is True
+  c._police_suppressed = True
+  c._police_suppressed_uuid = "old-report"
+  c._police = _police(6.0, "confirmed", cap_mi=6.0)   # different report, 6 mi out
+  assert c._police_cap(V75, V75) is None, "must re-earn the latch via the approach window"
+  assert c._police_latched is False
+
+
+def test_cap_absent_clears_both_latch_and_dismissal():
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed"))
+  c._police_cap(V75, V75)
+  c._police_suppressed = True
+  c._police = _police(0.3, "unconfirmed", cap_mi=None)
+  assert c._police_cap(V75, V75) is None
+  assert c._police_latched is False and c._police_suppressed is False

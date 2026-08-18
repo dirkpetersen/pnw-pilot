@@ -48,7 +48,11 @@ _POLICE_BANNER_MAX_S = 15.0   # blink the "POLICE AHEAD" banner for at most this
 class _C:
   WHITE = rl.Color(255, 255, 255, 235)
   GREY = rl.Color(175, 180, 177, 235)
-  ORANGE = rl.Color(255, 149, 0, 240)
+  ORANGE = rl.Color(255, 149, 0, 240)    # police: CONFIRMED (inside the lifetime the Waze app gives it)
+  AMBER = rl.Color(245, 205, 80, 235)    # police: UNCONFIRMED -- API-only, past that lifetime. Shown,
+                                         # but visually distinct and never allowed to slow the car
+                                         # (driver directive: "slow down only for the ones that show
+                                         # up on Waze"). Lighter/yellower than ORANGE on purpose.
   GREEN = rl.Color(90, 205, 115, 240)
   RED = rl.Color(235, 70, 60, 240)       # poll error surfaced on the police line (e.g. quota (429), HTTP 403)
   DIM = rl.Color(140, 145, 142, 220)
@@ -116,7 +120,10 @@ class LocationServicesStatusRenderer(Widget):
         txt += " - your way"
       elif d == "opp":
         txt += " - other side"
-      return txt + self._town(p.get("town")), _C.ORANGE
+      # policetier2pnw: colour carries the confidence. Unknown/missing tier renders as CONFIRMED so an
+      # older locationd payload can never silently downgrade a live report to the quiet colour.
+      color = _C.AMBER if p.get("tier") == "unconfirmed" else _C.ORANGE
+      return txt + self._town(p.get("town")), color
     if s == "clear":
       return "Police   Clear", _C.GREEN
     err = p.get("err")
@@ -256,15 +263,23 @@ class LocationServicesStatusRenderer(Widget):
     # Blink for at most _POLICE_BANNER_MAX_S (15 s) per report, then stop (driver req); a NEW report
     # (different uuid) or a fresh appearance restarts the window.
     p = self._st.get("police", {})
-    pd = p.get("dist_mi")
-    if p.get("state") == "alert" and pd is not None and pd <= _POLICE_NEAR_MI:
-      uuid = p.get("uuid")
+    # policetier2pnw: the big flashing banner is the most intrusive channel we have, so it follows the
+    # CONTROL channel (`cap` = nearest CONFIRMED report), not the displayed line -- which is
+    # proximity-first and may be an amber, display-only report. A payload with no `tier` key predates
+    # the split and keeps the old whole-line behaviour.
+    cap = p.get("cap") if "tier" in p else p
+    bd = cap.get("dist_mi") if isinstance(cap, dict) else None
+    if p.get("state") == "alert" and bd is not None and bd <= _POLICE_NEAR_MI:
+      uuid = cap.get("uuid")
       if not self._banner_active or uuid != self._banner_uuid:
         self._banner_start = time.monotonic()
         self._banner_uuid = uuid
       self._banner_active = True
       if time.monotonic() - self._banner_start < _POLICE_BANNER_MAX_S:
-        self._draw_police_banner(rect, p)
+        # Render the CONFIRMED report end to end. Taking only its distance and inheriting dir/town
+        # from the proximity-picked display line spliced two different reports into one banner.
+        self._draw_police_banner(rect, {**p, **{k: v for k, v in cap.items() if k != "key"}}
+                                 if cap is not p else p)
     else:
       self._banner_active = False
 

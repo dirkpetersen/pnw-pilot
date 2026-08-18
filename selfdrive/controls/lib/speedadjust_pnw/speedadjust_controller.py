@@ -199,6 +199,15 @@ SET_CHANGE_EPS = 0.15                     # m/s
 SA_ACTUATION_GRACE_S = 2.0                # s; stock-ACC only
 
 
+def _police_key(rep):
+  """Stable identity for one police report: its uuid, else the quantized position the daemon falls
+  back to. Returns None only for a non-dict/empty report, and a None key never matches another None
+  (see _police_cap) so a missing identity can never carry a dismissal onto a different report."""
+  if not isinstance(rep, dict):
+    return None
+  return rep.get("key") or rep.get("uuid") or None
+
+
 class SpeedAdjustController:
   def __init__(self, CP, params=None):
     import platform
@@ -229,6 +238,7 @@ class SpeedAdjustController:
     # clears (state != "alert"), at which point it clears alongside _police_latched and the feature
     # re-arms for the NEXT alert. See _is_own_actuation()/cap() for why this exists.
     self._police_suppressed = False
+    self._police_suppressed_uuid = None   # which report the driver dismissed (see _police_cap)
     # speedadjustreset2pnw: last observed driver v_cruise_set (m/s), used to detect a manual cruise
     # nudge (see cap()). None = not yet tracked — also forced back to None whenever
     # v_cruise_initialized is False OR ACC is not engaged (FIX A) so the uninitialized->initialized
@@ -332,10 +342,40 @@ class SpeedAdjustController:
       self._police_latched = False           # cleared/passed report → release
       self._police_suppressed = False        # speedadjustreset2pnw: report gone → re-arm for the next one
       return None
+    # policetier2pnw (driver directive 2026-08-18: "slow down only for the ones that show up on Waze").
+    # Act on the CONTROL channel, never the displayed report: location_servicesd publishes `cap` = the
+    # nearest CONFIRMED report, separately from the line on screen (which is proximity-first and may be
+    # an amber, display-only one). Reading the display fields here is what let a nearer stale report
+    # suppress a live one, and what would have let the two channels flap each other.
+    # A payload with NO `tier` key predates this split: fall back to the whole line, i.e. the previous
+    # behaviour, so an older location_servicesd can never silently disable police braking.
+    src = p
+    if "tier" in p:
+      src = p.get("cap")
+      if not isinstance(src, dict):
+        self._police_latched = False           # nothing confirmed ahead → release, don't hold a cap
+        self._police_suppressed = False        # ...and nothing left to be dismissing → re-arm
+        self._police_suppressed_uuid = None
+        return None
+      # A dismissal applies to the report the driver dismissed, not to the police line as a whole.
+      # The line now stays "alert" for as long as ANY report (including a display-only amber) is in
+      # range, so clearing suppression only on state != "alert" could carry a dismissal of report A
+      # across an entire corridor and silently swallow the slowdown for a later, different report C.
+      # Key on `key` (uuid, else quantized position -- the same fallback _PoliceRecede._key uses).
+      # Keying on uuid alone meant two reports that both lack an alert_id keyed None == None, and the
+      # second silently inherited the first's dismissal and lost its slowdown.
+      _k, _sk = _police_key(src), self._police_suppressed_uuid
+      if self._police_suppressed and (_k is None or _sk is None or _k != _sk):
+        self._police_suppressed = False
+        self._police_suppressed_uuid = None
+        # ...and drop the latch with it: it was latched for the report just dismissed. Carrying it on
+        # to a DIFFERENT report skips the POLICE_ENGAGE_S approach gate and caps immediately for a
+        # report that may still be miles away.
+        self._police_latched = False
     if self._police_suppressed:              # speedadjustreset2pnw: driver dismissed THIS alert via a
       return None                            # manual set change — stay off until it clears (see cap())
     try:
-      dist_m = float(p.get("dist_mi", 0.0)) * MILE_M
+      dist_m = float(src.get("dist_mi", 0.0)) * MILE_M
     except (TypeError, ValueError):
       return None
     if not math.isfinite(dist_m) or dist_m <= 0.0:   # NaN/inf/garbage distance → don't act, don't latch
@@ -643,6 +683,8 @@ class SpeedAdjustController:
         # re-anchor + _cap_out=None are OUTSIDE this gate).
         if self._police_latched:
           self._police_suppressed = True
+          _capsrc = self._police.get("cap") if isinstance(self._police, dict) else None
+          self._police_suppressed_uuid = _police_key(_capsrc or self._police)
         # speed limit: re-anchor the baseline to the new set (speedanchor2pnw's own F2 formula) so
         # the current trim releases; a FURTHER drop below this new baseline will still re-cap.
         self._sl_ref = self._sl
