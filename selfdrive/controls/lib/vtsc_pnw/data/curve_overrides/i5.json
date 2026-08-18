@@ -1,0 +1,38 @@
+[
+  {
+    "name": "Woodland left curve (SB)",
+    "road": "I 5", "state": "WA", "dir": "S",
+    "lat": 45.96455, "lon": -122.80992,
+    "bearing": 147,
+    "v_max_mph": 72,
+    "note": "2026-08-18 takeover. R=409 m. mapd advised 60 mph with 400 m lead; MTSC scale erased it. Lateral demand 3.91 vs a 2.33 cap, slCurvLim fired, lane margin 0.113 m. v_max from v_safe at A_LAT_TARGET=2.5.",
+    "evidence": "drives/2026-08-18/i5-southbound-curve-takeover/"
+  },
+  {
+    "name": "Left turn after curve (SB, 50 mph zone)",
+    "road": "I 5", "state": "WA", "dir": "S",
+    "lat": 45.6436, "lon": -122.6619,
+    "bearing": 181,
+    "v_max_mph": 55,
+    "note": "2026-08-18 takeover. Steering RATE saturation (slAngSat, commanded 20.5 deg vs 16.6 achieved, 3.90 deg error), lane margin 0.16 m; lateral accel was WITHIN cap. mapd advised 51 mph, posted 50. Rate scales with speed, so the target is set below the 63 mph that saturated rather than at the advisory.",
+    "evidence": "drives/2026-08-18/i5-left-turn-takeover/"
+  },
+  {
+    "name": "Terwilliger S-curve, upper (SB)",
+    "road": "I 5", "state": "OR", "dir": "S",
+    "lat": 45.51288, "lon": -122.66804,
+    "bearing": 200,
+    "v_max_mph": 55,
+    "note": "2026-06-16 disengagement at 48.7 mph while VTSC capped only to 60.3 (cruise 75). The curve VTSC was originally calibrated against; construction zone also present that day.",
+    "evidence": "drives/2026-06-16/INCIDENT_TERWILLIGER.md"
+  },
+  {
+    "name": "Terwilliger S-curve, lower left (SB)",
+    "road": "I 5", "state": "OR", "dir": "S",
+    "lat": 45.47023, "lon": -122.68422,
+    "bearing": 205,
+    "v_max_mph": 60,
+    "note": "2026-06-16 disengagement at 56.1 mph while VTSC capped only to 83.8 (cruise 85). Report attributes the intervention to ACC accelerating into the wall rather than to VTSC, so this entry is a speed ceiling for the sequence, not a claim about curvature.",
+    "evidence": "drives/2026-06-16/INCIDENT_TERWILLIGER.md"
+  }
+]

@@ -1906,7 +1906,7 @@ class CESController:
       # this cherry-picking read was the ONLY consumer, so the fields published by 62a51a4772 were
       # being computed and thrown away. That made the drive-replay they exist for impossible.
       for k in ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
-                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead"):
+                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead", "ovName"):
         self._vtsc_tele[k] = vt.get(k)
     except Exception:
       self._vtsc_cap = self._vtsc_state = None

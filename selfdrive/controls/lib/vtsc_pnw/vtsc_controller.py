@@ -30,6 +30,7 @@ import time
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
+from openpilot.selfdrive.controls.lib.vtsc_pnw.curve_overrides import CurveOverrides
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   polyline_curvature,
   model_curve_state, brake_cap_for_apex, apply_limits,
@@ -70,8 +71,10 @@ class VTSCController:
     self._tele_mapk_v = 0.0
     self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
     self._tele_mapk_ahead = True    # measured point in front of us (mapd also publishes nodes behind)
+    self._tele_ov = ""              # name of the curated override that bound this tick, if any
     self._map_targets: list = []
     self._cur_bearing = None
+    self._overrides = CurveOverrides()   # curveoverride2pnw
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._cur_lat = self._cur_lon = None
@@ -216,6 +219,7 @@ class VTSCController:
     self._tele_mapk_v = 0.0
     self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
     self._tele_mapk_ahead = True    # measured point in front of us (mapd also publishes nodes behind)
+    self._tele_ov = ""              # name of the curated override that bound this tick, if any
 
     if not self._enabled:
       self._reset()
@@ -267,6 +271,21 @@ class VTSCController:
     self._tele_vis_k, self._tele_vis_d = float(k_apex), float(d_apex)
     self._tele_vis_v = 0.0 if v_curve == float('inf') else float(v_curve)
     sharp_map = False
+    # curveoverride2pnw: a curated ceiling for a known-problematic location competes in the SAME
+    # decel-envelope selection as vision and map -- deliberately NOT a separate control path, so it
+    # inherits the gentle A_DECEL envelope, apex timing, the V_MIN and posted-limit floors,
+    # reduce-only, and the state machine's debounce. It can only ever LOWER the target.
+    ov = self._overrides.resolve(now, self._cur_lat, self._cur_lon, self._cur_bearing)
+    self._tele_ov = ""
+    if ov is not None:
+      ov_v, ov_d, ov_name = ov
+      rsn_cur = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) \
+          if d_apex >= 0.0 else float('inf')
+      rsn_ov = brake_cap_for_apex(ov_v, ov_d, v_ego, self.tune['A_DECEL'])
+      if rsn_ov < rsn_cur:                       # only when the override is the MORE binding source
+        k_apex = (self.tune['A_LAT_TARGET'] / (ov_v * ov_v)) if ov_v > 0.0 else k_apex
+        d_apex, v_curve = ov_d, ov_v
+        self._tele_ov = ov_name[:24]
     if self._map_curves:                        # ces-i90-2pnw (MTSC) + sharpcurve2pnw
       horizon_m = C.MAP_SOURCE_HORIZON_M        # scan the FULL ~500 m mapd publishes (envelope gates binding)
       # most-binding upcoming map curve over the FULL horizon (earlier detection of blind sharp curves).
@@ -463,6 +482,7 @@ class VTSCController:
         "mapKV": round(float(self._tele_mapk_v), 1),
         "mapKN": int(self._tele_mapk_n),
         "mapKAhead": bool(self._tele_mapk_ahead),
+        "ovName": str(self._tele_ov),
         "visK": round(float(self._tele_vis_k), 5),
         "visD": round(float(self._tele_vis_d), 0),
         "visV": round(float(self._tele_vis_v), 1),
