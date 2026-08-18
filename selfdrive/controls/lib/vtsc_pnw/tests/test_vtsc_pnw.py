@@ -509,3 +509,96 @@ def test_floor_never_targets_below_the_raw_advisory():
         v, _d, _s, _r, floored = _select(_sharp_plus_shadows(200, sharp_v=raw))
         if floored:
             assert v > raw, f"floored target {v} undercut mapd's own advisory {raw}"
+
+
+# --- MAP_FLOOR_DEPTH: the knob must default to the cheapest possible safety net -------------------
+# Corridor directive 2026-08-18: "very very gradual slowdowns... the system is working very well...
+# I want to go as smooth and fast as possible." The map path cannot tell a real curve from a mapd
+# artifact, so its default must cost as little speed as possible.
+
+def test_default_depth_is_the_flat_notch():
+    assert C.MAP_FLOOR_DEPTH == 0.0, "the shipped default must not deepen the trim"
+    v, _d, _s, _raw, floored = _select(_sharp_plus_shadows(200))
+    assert floored is True
+    assert v == pytest.approx(_SET - C.MAP_MIN_SLOWDOWN, abs=1e-6)
+
+
+def _select_depth(points, depth, limit):
+    return most_binding_map_curve(points, LAT0, LON0, _SET, 500.0, C.A_DECEL, C.APEX_FINISH_S,
+                                  C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, _SET, C.MAP_MIN_SLOWDOWN,
+                                  limit, depth)
+
+
+def test_depth_interpolates_between_notch_and_posted_limit():
+    LIMIT = 31.3                                   # 70 mph posted
+    notch = _SET - C.MAP_MIN_SLOWDOWN
+    pts = _sharp_plus_shadows(200, sharp_v=27.0)
+    v0 = _select_depth(pts, 0.0, LIMIT)[0]
+    v5 = _select_depth(pts, 0.5, LIMIT)[0]
+    v1 = _select_depth(pts, 1.0, LIMIT)[0]
+    assert v0 == pytest.approx(notch, abs=1e-6)
+    assert v1 == pytest.approx(LIMIT, abs=1e-6)
+    assert v5 == pytest.approx((notch + LIMIT) / 2.0, abs=1e-6)
+
+
+def test_floor_never_goes_below_the_posted_limit_at_any_depth():
+    """The controller already refuses to trim below the posted limit; the knob must not out-run it.
+    Only applies to FLOORED curves -- a curve whose scaled target already binds keeps its own (deeper)
+    value here and is floored by the controller's own SPEED-LIMIT FLOOR downstream, not by this."""
+    LIMIT = 31.3
+    for depth in (0.0, 0.25, 0.5, 0.75, 1.0):
+        v, _d, _s, _r, floored = _select_depth(_sharp_plus_shadows(200, sharp_v=23.0), depth, LIMIT)
+        assert floored is True, "test must exercise the floor path"
+        assert v >= LIMIT - 1e-6, f"depth {depth} trimmed below the posted limit"
+
+
+def test_depth_is_clamped_against_a_bad_value():
+    LIMIT = 31.3
+    notch = _SET - C.MAP_MIN_SLOWDOWN
+    pts = _sharp_plus_shadows(200, sharp_v=27.0)
+    assert _select_depth(pts, -5.0, LIMIT)[0] == pytest.approx(notch, abs=1e-6)
+    assert _select_depth(pts, 99.0, LIMIT)[0] == pytest.approx(LIMIT, abs=1e-6)
+
+
+def test_a_floored_curve_never_earns_the_friction_brake():
+    """is_sharp unlocks SHARP_A_DECEL_MAX (2.8 m/s^2). A synthetic trim must be regen-only -- this is
+    what keeps the slowdown gradual rather than a stab."""
+    # raws whose SCALED value saturates at/above the notch (so the floor actually fires) AND which
+    # are below SHARP_CURVE_V, i.e. would normally be flagged sharp. raw 20 scales to only 30.8,
+    # already below the notch, so it binds normally and never reaches the floor.
+    for raw in (23.0, 25.0, 27.0):
+        _v, _d, sharp, _r, floored = _select(_sharp_plus_shadows(200, sharp_v=raw))
+        assert floored is True
+        assert sharp is False, f"floored curve at raw {raw} would have unlocked friction braking"
+
+
+def test_a_genuinely_sharp_unfloored_curve_keeps_its_sharp_flag():
+    # the guard must not disarm firm braking for curves that legitimately need it
+    pts = [_pt(200, 13.0)] + [_pt(x, 39.2) for x in (50, 120)]
+    _v, _d, sharp, _r, floored = _select(pts)
+    assert floored is False and sharp is True
+
+
+def test_a_DEEPENED_floored_curve_keeps_its_firm_braking():
+    """Review CRITICAL: suppressing is_sharp for ANY floored curve meant that raising MAP_FLOOR_DEPTH
+    handed the car a deep target while denying it SHARP_A_DECEL_MAX to reach it -- worse than not
+    deepening at all. A raw target of 25-29 m/s is both 'sharp' (< SHARP_CURVE_V) and floorable."""
+    LIMIT = 22.35                                  # 50 mph posted
+    pts = _sharp_plus_shadows(200, sharp_v=25.0)   # raw 25 -> scaled 42.1 -> saturates -> floorable
+    v0, _d, sharp0, _r, fl0 = _select_depth(pts, 0.0, LIMIT)
+    v1, _d, sharp1, _r, fl1 = _select_depth(pts, 1.0, LIMIT)
+    assert fl0 is True and fl1 is True
+    assert v0 == pytest.approx(_SET - C.MAP_MIN_SLOWDOWN, abs=1e-6)
+    assert sharp0 is False, "the shallow synthetic notch must stay regen-only (gradual)"
+    assert v1 < v0 - 1.0, "depth 1.0 must actually deepen the target"
+    assert sharp1 is True, "a DEEPENED target must keep the authority to reach it"
+
+
+def test_floored_flag_describes_the_SELECTED_curve_not_any_candidate():
+    """Review finding: floored was a global accumulator, so telemetry could report a floor that did
+    not apply to the curve actually chosen."""
+    # a floorable point far away, and a genuinely-binding tight curve that wins selection
+    pts = [_pt(450, 27.0)] + [_pt(150, 13.0)] + [_pt(x, 39.2) for x in (50, 100)]
+    v, _d, _s, _raw, floored = _select(pts)
+    assert v == pytest.approx(13.0 * C.tiered_map_scale(13.0), rel=1e-6), "tight curve should win"
+    assert floored is False, "the SELECTED curve was not floored, so the flag must be False"

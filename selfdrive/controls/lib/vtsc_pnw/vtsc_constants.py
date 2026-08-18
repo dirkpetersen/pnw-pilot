@@ -84,6 +84,24 @@ CURVE_MIN_POINTS = 3    # debounce: require the curve sustained over >= this man
 # defaulting it ON safe. Set VtscMapCurves=0 to fall back to vision-only.
 MAP_LOOKAHEAD_S   = 12.0  # s; trust map curve targets within v_ego * this (longer reach than vision's 8 s)
 MAP_MIN_SLOWDOWN  = 4.5   # m/s; only fold a map curve whose (scaled) target is this far below cruise (~10 mph)
+# curvefloor2pnw (2026-08-18): how DEEP the minimum-slowdown floor is allowed to go when the MTSC
+# scale has erased a curve mapd flagged. 0.0 = the flat minimum notch (set - MAP_MIN_SLOWDOWN, ~10 mph
+# off the SET speed). 1.0 = bound by mapd's own raw advisory, itself clamped to the posted speed limit
+# (never deeper than the limit -- which the SPEED-LIMIT FLOOR in the controller already enforces, so
+# this grants no new authority). Values between interpolate.
+#
+# DEFAULT 0.0, deliberately. Measured on the Seattle->Corvallis corridor 2026-08-18: the I-84-style
+# sweeper the driver comfortably took at 85 mph is INDISTINGUISHABLE in map data from the Woodland
+# curve that forced a takeover (both raw ~24-27 m/s, set 40.2, limit 31.3). No depth setting fixes the
+# takeovers without also slowing curves that were already fine -- so the map path gets only the cheap
+# safety net, and the real discrimination has to come from VISION (which can measure the curve rather
+# than guess at it). Raise this only with drive evidence.
+#
+#   depth   Woodland(need ~72)   left turn(need <63)   I-84 sweeper(must NOT slow)
+#   0.0          80 mph                60 mph                80 mph
+#   0.5          75 mph                56 mph                75 mph
+#   1.0          70 mph                51 mph                70 mph
+MAP_FLOOR_DEPTH   = 0.0
 
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
 # Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a

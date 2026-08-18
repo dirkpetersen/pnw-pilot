@@ -162,7 +162,8 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
                            a_decel: float = C.A_DECEL, finish_s: float = C.APEX_FINISH_S,
                            sharp_v: float = C.SHARP_CURVE_V, speed_scale: float = 1.0,
                            v_cruise_cap: float = float('inf'),
-                           min_slowdown: float = C.MAP_MIN_SLOWDOWN):
+                           min_slowdown: float = C.MAP_MIN_SLOWDOWN,
+                           floor_limit: float = 0.0, floor_depth: float = C.MAP_FLOOR_DEPTH):
   """sharpcurve2pnw: scan pfeiferj map path points {latitude,longitude,velocity} within horizon_m and
   return (v_target, dist, is_sharp) of the curve whose decel-limited brake cap is the LOWEST right now
   — i.e. the one to start slowing for first. This is the distance-based lookahead: a far sharp curve
@@ -181,7 +182,7 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   best_d = float('inf')
   best_sharp = False
   best_raw = 0.0
-  floored_any = False
+  best_floored = False
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
@@ -207,11 +208,33 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     # entirely -- the fix would silently not fire on exactly the road that motivated it.
     # Keeping it here also preserves this function's documented invariant: scale+clamp applied INSIDE
     # the selection so the SELECTED curve matches the value used downstream.
+    floored_pt = False
+    shallow_floor = False
     if math.isfinite(v_cruise_cap):
-      floor_v = v_cruise_cap - min_slowdown
-      if tv < floor_v <= tv_eff:             # raw says slow down, scaled says don't -> smallest trim
-        tv_eff = floor_v
-        floored_any = True
+      notch = v_cruise_cap - min_slowdown
+      if tv < notch <= tv_eff:               # raw says slow down, scaled says don't
+        # Target mapd's OWN raw advisory, but bounded on BOTH sides:
+        #   never SHALLOWER than the minimum notch (else it wouldn't clear the gate downstream), and
+        #   never DEEPER than floor_limit -- the posted speed limit on a freeway. That deeper bound is
+        #   not new authority: the controller ALREADY refuses to trim below the posted limit
+        #   (see the SPEED-LIMIT FLOOR in vtsc_controller.cap()), so this can never ask for more
+        #   slowdown than the system already permits. With no limit known, floor_limit is 0.0 and the
+        #   behaviour degrades to the flat minimum notch.
+        # 2026-08-18 second event: a flat notch measured from the SET speed is far too weak whenever
+        # the driver is already below set -- at 63 mph with a 70 set it bought 3.1 mph, against a
+        # steering-rate saturation that scales with speed. mapd said 51 and the limit was 50.
+        if floor_limit > 0.0 and floor_depth > 0.0:
+          deep = min(max(tv, floor_limit), notch)          # mapd's advisory, never below the limit
+          tv_eff = notch + (deep - notch) * min(max(floor_depth, 0.0), 1.0)
+        else:
+          tv_eff = notch                                    # flat minimum notch (MAP_FLOOR_DEPTH=0)
+        floored_pt = True
+        # Only the SHALLOW target (still at the minimum notch) is a synthetic trim that must stay
+        # regen-only. Once MAP_FLOOR_DEPTH deepens it toward mapd's advisory it is a real slowdown
+        # and MUST keep its firm-braking flag -- otherwise raising the knob hands the car a deep
+        # target while denying it the authority to reach it, which is worse than not deepening at
+        # all. (A raw target of 25-29 m/s is both "sharp" and floorable, so this is reachable.)
+        shallow_floor = tv_eff >= notch - 1e-6
     if tv_eff <= 0.0:
       continue
     cap = brake_cap_for_apex(tv_eff, d, v_ego, a_decel, finish_s)
@@ -219,9 +242,16 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
       # is_sharp = the RAW (unscaled) target is physically sharp. Classifying on tv_eff would let the
       # 1.12x scale inflate a genuinely sharp 28 m/s curve to 31.4 and DROP its sharp flag -> the
       # last-resort firmer brake would be denied while we target the inflated entrance speed (overshoot).
-      best_cap, best_v, best_d, best_sharp = cap, tv_eff, d, (tv < sharp_v)
+      # is_sharp unlocks SHARP_A_DECEL_MAX (2.8 m/s^2 friction braking) downstream. A SHALLOW floored
+      # target is a synthetic ~10 mph trim and must be reached with regen alone -- driver directive
+      # 2026-08-18: "we only want very very gradual slowdowns". A DEEPER floored target keeps the
+      # flag (see shallow_floor above).
+      best_cap, best_v, best_d, best_sharp = cap, tv_eff, d, (tv < sharp_v and not shallow_floor)
+      # F4: report whether the SELECTED curve was floored, not whether any candidate was -- a global
+      # accumulator would mislabel the telemetry whenever a non-selected point happened to be floored.
+      best_floored = floored_pt
       best_raw = tv                            # UNSCALED mapd target for the chosen curve
-  return best_v, best_d, best_sharp, best_raw, floored_any
+  return best_v, best_d, best_sharp, best_raw, best_floored
 
 
 def twisty_section_cap(points, cur_lat, cur_lon, v_cruise: float, v_ego: float, horizon_m: float,

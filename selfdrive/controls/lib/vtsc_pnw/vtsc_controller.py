@@ -169,7 +169,8 @@ class VTSCController:
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
         self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
-        C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN)
+        C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
+        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0)
     except Exception:
       return k_apex, d_apex, v_curve, False
     self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
