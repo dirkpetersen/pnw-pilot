@@ -23,6 +23,7 @@ drives are analyzable) AND a `VTSCStatus` JSON to /dev/shm/params for the live o
 Runs inside plannerd (20 Hz / DT_MDL). Uses a MEASURED loop dt for the rate-limiter (don't assume a
 fixed rate — that was the CES 5x bug). Pure curve/curvature math lives in vtsc_pnw.py.
 """
+import math
 import json
 import time
 
@@ -30,6 +31,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
+  polyline_curvature,
   model_curve_state, brake_cap_for_apex, apply_limits,
   most_binding_map_curve, twisty_section_cap, required_decel,   # sharpcurve2pnw
   apex_turn_direction)                                          # descentcurve2pnw
@@ -63,7 +65,13 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
+    # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
+    self._tele_mapk = self._tele_mapk_d = 0.0
+    self._tele_mapk_v = 0.0
+    self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
+    self._tele_mapk_ahead = True    # measured point in front of us (mapd also publishes nodes behind)
     self._map_targets: list = []
+    self._cur_bearing = None
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._cur_lat = self._cur_lon = None
@@ -150,8 +158,11 @@ class VTSCController:
         pos = json.loads(pos)
       self._cur_lat = float(pos["latitude"])
       self._cur_lon = float(pos["longitude"])
+      brg = pos.get("bearing")
+      self._cur_bearing = float(brg) if brg is not None else None
     except Exception:
       self._cur_lat = self._cur_lon = None
+      self._cur_bearing = None
 
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
@@ -200,6 +211,11 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
+    # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
+    self._tele_mapk = self._tele_mapk_d = 0.0
+    self._tele_mapk_v = 0.0
+    self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
+    self._tele_mapk_ahead = True    # measured point in front of us (mapd also publishes nodes behind)
 
     if not self._enabled:
       self._reset()
@@ -227,6 +243,23 @@ class VTSCController:
     self._tele_pen = 0.0
     self._tele_pitch = pitch
     self._tele_dir = ""
+
+    # mapcurv2pnw (TELEMETRY ONLY, 2026-08-18): measure curvature from the map POLYLINE and record
+    # what it WOULD advise, so a drive can be replayed against the three reference cases before any
+    # of this is allowed to touch control. mapd's velocity field cannot tell a real 409 m curve from
+    # a sweeper the driver takes at 85 mph (both land in the same 24-27 m/s band); the coordinates in
+    # the same message can.
+    # CORRECTED IN REVIEW -- this is NOT ungated: _read_enabled() clears _map_targets whenever
+    # VtscMapCurves is off or VTSC is disabled, and cap() early-returns before here when CES is off.
+    # So the measurement exists only with CESMode>0 AND op-long AND VtscMapCurves=1. That holds in the
+    # deployed Tesla config so data flows on I-5, but coverage is narrower than "every tick".
+    if self._map_targets:
+      self._tele_mapk, self._tele_mapk_d, mapk_v, self._tele_mapk_n, self._tele_mapk_ahead = \
+        polyline_curvature(self._map_targets, self._cur_lat, self._cur_lon, C.MAP_SOURCE_HORIZON_M,
+                           self.tune['A_LAT_TARGET'], self._cur_bearing)
+      # isfinite, not `== inf`: NaN != inf, so a NaN would have sailed into the JSON-serialised
+      # /dev/shm dict and Python's json emits a bare NaN, which strict consumers reject.
+      self._tele_mapk_v = float(mapk_v) if math.isfinite(mapk_v) else 0.0
 
     k_apex, d_apex, v_curve = model_curve_state(model, v_cruise, self.tune['A_LAT_TARGET'])
     # vision's own verdict, BEFORE any map fold -- the "independent safety net" claim is only
@@ -424,6 +457,12 @@ class VTSCController:
         "mapEff": round(float(self._tele_map_eff), 1),
         "mapD": round(float(self._tele_map_d), 0),
         "mapFlr": bool(self._tele_map_floored),
+        # mapcurv2pnw: measured map curvature + what it would advise (m/s). Telemetry only.
+        "mapK": round(float(self._tele_mapk), 5),
+        "mapKD": round(float(self._tele_mapk_d), 0),
+        "mapKV": round(float(self._tele_mapk_v), 1),
+        "mapKN": int(self._tele_mapk_n),
+        "mapKAhead": bool(self._tele_mapk_ahead),
         "visK": round(float(self._tele_vis_k), 5),
         "visD": round(float(self._tele_vis_d), 0),
         "visV": round(float(self._tele_vis_v), 1),

@@ -150,12 +150,133 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
   return 2 * r * math.asin(min(1.0, a ** 0.5))
 
 
+def _rel_bearing_deg(lat1, lon1, lat2, lon2, ref_deg) -> float:
+  """|relative bearing| in degrees from a heading of `ref_deg` to the point (lat2, lon2). Local copy
+  for the same reason as _haversine_m: this module stays self-contained and unit-testable."""
+  dl = math.radians(lon2 - lon1)
+  p1, p2 = math.radians(lat1), math.radians(lat2)
+  y = math.sin(dl) * math.cos(p2)
+  x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+  brg = math.degrees(math.atan2(y, x)) % 360.0
+  return abs((brg - ref_deg + 540.0) % 360.0 - 180.0)
+
+
 def required_decel(v_ego: float, v_target: float, dist: float) -> float:
   """Constant decel (m/s^2) needed to reach v_target by `dist` ahead. 0 if no slowing needed / dist<=0.
   Used to decide when REGEN alone won't make a sharp curve (-> allow last-resort firmer braking). Pure."""
   if dist <= 0.0 or v_target >= v_ego:
     return 0.0
   return (v_ego * v_ego - v_target * v_target) / (2.0 * dist)
+
+
+# --- mapcurv2pnw: curvature measured from the map POLYLINE (telemetry only, 2026-08-18) ----------
+# mapd's `velocity` field is a lossy round-trip of the very thing we need: it emits
+# sqrt(a_lat/k) with an unpublished, INCONSISTENT a_lat, which is why a genuine 409 m curve and a
+# sweeper the driver takes at 85 mph land in the same 24-27 m/s band and cannot be told apart. The
+# lat/lon points in the SAME message carry the real geometry. Applying the already-tuned
+# A_LAT_TARGET to a measured radius reproduces all three 2026-08-18 reference cases:
+#     Woodland  R=409 m -> 72 mph (measured need ~72)
+#     left turn R=208 m -> 51 mph (measured need <63)
+#     I-84 sweeper R>=577 m -> 85 mph (must NOT slow)
+# Vision cannot substitute: a gradual 90->72 needs ~347 m of runway and LOOKAHEAD_MAX_S=8.0 s gives
+# ~322 m at 40 m/s, so vision can only ever produce a firm save.
+#
+# SPACING IS THE CATCH (measured live on-device: node gaps ran 57 m to 4072 m on one 21-point
+# polyline). Menger curvature over raw consecutive triplets is meaningless across a 4 km gap, so
+# triplets are ACCEPTED ONLY when every leg falls inside [_K_MIN_LEG_M, _K_MAX_LEG_M]. Sparse or
+# bunched stretches simply yield no measurement rather than a fabricated one.
+#
+# TELEMETRY ONLY for now. Nothing here feeds control until a drive has been replayed against the
+# three reference cases above.
+_K_MIN_LEG_M = 25.0      # below this, GPS/OSM node jitter dominates the angle
+_K_MAX_LEG_M = 300.0     # above this, a triplet no longer describes a local curve
+_K_MAX_POINTS = 256      # bound the scan; the polyline is untrusted input
+
+
+def polyline_curvature(points, cur_lat, cur_lon, horizon_m, a_lat=C.A_LAT_TARGET, cur_bearing=None):
+  """Largest reliably-measurable curvature on the map polyline ahead, as (k, dist_m, v_safe).
+
+  Returns (k, dist_m, v_safe, n_ok, ahead). k is 1/m (0.0 = nothing measurable), dist_m the distance
+  to that point, v_safe = sqrt(a_lat/k) in m/s (inf when k is 0), n_ok the number of triplets that
+  passed the spacing gate, and ahead whether the measured point is in front of the car.
+
+  n_ok exists because k == 0.0 is ambiguous: it means EITHER "the road is straight" OR "the geometry
+  was unmeasurable" (a real R=1500 m curve with ~366 m node gaps -- well inside the live-measured
+  57-4072 m range -- returns 0.0 exactly like a straight). Replay cannot judge whether this lever is
+  trustworthy without knowing which. n_ok == 0 means no measurement was possible.
+
+  `ahead` exists because mapd publishes the whole current way, including nodes BEHIND the car, and
+  the distance is unsigned -- so a curve just exited would otherwise keep 'advising' a slowdown while
+  receding and contaminate exactly the apex-timing comparisons the replay needs. With no bearing the
+  flag is True (unknown) rather than silently dropping data.
+
+  Pure; never raises; always returns finite k/dist.
+
+  PATH ORDER IS TAKEN FROM THE INPUT, never re-derived. mapd emits the polyline in path order (the
+  sibling most_binding_map_curve relies on the same thing). An earlier version sorted by straight-line
+  distance from the car "to be safe"; that is actively wrong on any road that bends back -- a 267 deg
+  switchback reorders to [0,1,2,3,10,4,9,5,8,6,7], and the resulting zig-zag triplets get thrown out
+  by the spacing gate, silently UNDER-reporting the sharpest curves on exactly the roads that need
+  them most. Filtering by horizon preserves relative order, so the sequence stays intact."""
+  best_k, best_d, vs, n_ok, best_ahead = 0.0, 0.0, float('inf'), 0, True
+  try:
+    if not points or cur_lat is None or cur_lon is None:
+      return 0.0, 0.0, float('inf'), 0, True
+    pts = []
+    for p in points[:_K_MAX_POINTS]:
+      try:
+        la, lo = float(p["latitude"]), float(p["longitude"])
+      except (KeyError, TypeError, ValueError):
+        continue
+      if not (math.isfinite(la) and math.isfinite(lo)):
+        continue
+      d = _haversine_m(cur_lat, cur_lon, la, lo)
+      if 0.0 <= d <= horizon_m:
+        pts.append((d, la, lo))                        # order preserved -- deliberately NOT sorted
+    if len(pts) < 3:
+      return 0.0, 0.0, float('inf'), 0, True
+    # Consecutive leg lengths, computed ONCE each: leg[i] spans pts[i] -> pts[i+1]. Recomputing them
+    # per triplet did ~3x the haversine work inside a 20 Hz control-loop caller.
+    legs = [_haversine_m(pts[i][1], pts[i][2], pts[i+1][1], pts[i+1][2]) for i in range(len(pts)-1)]
+    for i in range(1, len(pts) - 1):
+      ab, bc = legs[i-1], legs[i]
+      if not (_K_MIN_LEG_M <= ab <= _K_MAX_LEG_M and _K_MIN_LEG_M <= bc <= _K_MAX_LEG_M):
+        continue                                       # unusable spacing -> no measurement
+      (_, la0, lo0), (db, la1, lo1), (_, la2, lo2) = pts[i-1], pts[i], pts[i+1]
+      # n_ok counts triplets that passed the SPACING gate -- it must increment here, before the
+      # collinearity check below. A perfectly straight road has zero area and would otherwise
+      # `continue` past the counter, reporting n_ok == 0 and making "straight" indistinguishable
+      # from "unmeasurable" -- precisely the ambiguity this field exists to resolve.
+      n_ok += 1
+      ca = _haversine_m(la0, lo0, la2, lo2)
+      if ab * bc * ca <= 0.0:
+        continue
+      # Menger curvature: k = 4*area / (|ab| |bc| |ca|); area from the cross product about b.
+      cosb = math.cos(math.radians(la1))
+      ax, ay = (lo0 - lo1) * 111320.0 * cosb, (la0 - la1) * 111320.0
+      cx, cy = (lo2 - lo1) * 111320.0 * cosb, (la2 - la1) * 111320.0
+      area2 = abs(ax * cy - ay * cx)                   # 2 * triangle area
+      if area2 <= 0.0:
+        continue
+      k = 2.0 * area2 / (ab * bc * ca)
+      if k > best_k:
+        best_k, best_d = k, db
+        best_ahead = True
+        if cur_bearing is not None:
+          try:
+            best_ahead = _rel_bearing_deg(cur_lat, cur_lon, la1, lo1, float(cur_bearing)) <= 90.0
+          except (TypeError, ValueError):
+            best_ahead = True
+    # INSIDE the try: a_lat comes from the tune dict, so a bad value must not escape as an exception
+    # into plannerd. (Left outside previously -- a negative or non-numeric a_lat would have raised
+    # straight through the guard and taken lateral control down with it.)
+    if best_k > 1e-9 and math.isfinite(a_lat) and a_lat > 0.0:
+      vs = math.sqrt(a_lat / best_k)
+  except Exception:
+    return 0.0, 0.0, float('inf'), 0, True             # telemetry must never break the control loop
+  if not (math.isfinite(best_k) and math.isfinite(best_d)):
+    return 0.0, 0.0, float('inf'), 0, True
+  return best_k, best_d, vs, n_ok, best_ahead
 
 
 def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: float,

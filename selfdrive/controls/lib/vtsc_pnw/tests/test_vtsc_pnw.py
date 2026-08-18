@@ -7,6 +7,7 @@ and START braking ~100 m before the apex, not at it.
 import math
 
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
+  polyline_curvature,
   v_safe, curve_speed_target, apply_limits, sharpest_ahead, brake_cap_for_apex,
   required_decel, most_binding_map_curve, twisty_section_cap)
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
@@ -602,3 +603,197 @@ def test_floored_flag_describes_the_SELECTED_curve_not_any_candidate():
     v, _d, _s, _raw, floored = _select(pts)
     assert v == pytest.approx(13.0 * C.tiered_map_scale(13.0), rel=1e-6), "tight curve should win"
     assert floored is False, "the SELECTED curve was not floored, so the flag must be False"
+
+
+# --- mapcurv2pnw: curvature measured from the map polyline (TELEMETRY ONLY) -----------------------
+# mapd's velocity field cannot tell a real 409 m curve from a sweeper the driver takes at 85 mph
+# (both land in the same 24-27 m/s band). The lat/lon points in the SAME message can. These tests
+# pin the three 2026-08-18 reference cases and the live-measured spacing hazard.
+
+def _arc(radius_m, n=9, step_m=40.0, lat0=LAT0, lon0=LON0):
+    """n points along a circular arc of the given radius, `step_m` apart, starting at (lat0, lon0)."""
+    pts, ang = [], 0.0
+    for _ in range(n):
+        x, y = radius_m * math.sin(ang), radius_m * (1.0 - math.cos(ang))
+        pts.append({"latitude": lat0 + y / 111320.0,
+                    "longitude": lon0 + x / (111320.0 * math.cos(math.radians(lat0))),
+                    "velocity": 30.0})
+        ang += step_m / radius_m
+    return pts
+
+
+def _straight(n=9, step_m=100.0, lat0=LAT0, lon0=LON0):
+    return [{"latitude": lat0 + (i * step_m) / 111320.0, "longitude": lon0, "velocity": 30.0}
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("radius,expect_mph,tol", [
+    (409.0, 72.0, 6.0),      # Woodland curve  -> measured need ~72 mph
+    (208.0, 51.0, 5.0),      # left turn       -> measured need <63 mph
+    (577.0, 85.0, 8.0),      # I-84 sweeper    -> must NOT slow (driver took it at 85)
+])
+def test_reference_curves_reproduce_their_measured_targets(radius, expect_mph, tol):
+    k, d, v, _n, _ah = polyline_curvature(_arc(radius), LAT0, LON0, 500.0, a_lat=2.5)
+    assert k > 0.0, "a real arc must yield a measurement"
+    assert 1.0 / k == pytest.approx(radius, rel=0.25), "recovered radius should track the true one"
+    assert v * 2.237 == pytest.approx(expect_mph, abs=tol)
+    assert d > 0.0
+
+
+def test_the_sweeper_and_the_takeover_curve_are_now_distinguishable():
+    """The whole point: mapd's velocity band cannot separate these two, geometry can."""
+    _k1, _d1, v_takeover, _n, _ah = polyline_curvature(_arc(409.0), LAT0, LON0, 500.0, a_lat=2.5)
+    _k2, _d2, v_sweeper, _n, _ah = polyline_curvature(_arc(577.0), LAT0, LON0, 500.0, a_lat=2.5)
+    assert v_sweeper - v_takeover > 4.0, "must separate a takeover curve from a fine sweeper"
+
+
+def test_a_straight_road_yields_no_meaningful_curvature():
+    k, _d, v, _n, _ah = polyline_curvature(_straight(), LAT0, LON0, 500.0, a_lat=2.5)
+    assert k < 1e-4, "a straight must not manufacture a curve"
+    assert v * 2.237 > 200.0, "no curve -> no advisory"
+
+
+def test_sparse_polyline_yields_no_measurement_rather_than_garbage():
+    """Measured live on-device: node gaps ran 57 m to 4072 m. A triplet spanning a 4 km gap must be
+    REJECTED, not turned into a fabricated curvature."""
+    far = [{"latitude": LAT0 + (i * 4000.0) / 111320.0, "longitude": LON0 + (0.0005 * i),
+            "velocity": 30.0} for i in range(5)]
+    k, _d, v, _n, _ah = polyline_curvature(far, LAT0, LON0, 100000.0, a_lat=2.5)
+    assert k == 0.0, "over-long legs must produce no measurement"
+    assert v == float('inf')
+
+
+def test_bunched_points_are_rejected_as_jitter():
+    tight = [{"latitude": LAT0 + (i * 3.0) / 111320.0, "longitude": LON0 + 0.00002 * (i % 2),
+              "velocity": 30.0} for i in range(9)]
+    k, _d, _v, _n, _ah = polyline_curvature(tight, LAT0, LON0, 500.0, a_lat=2.5)
+    assert k == 0.0, "sub-25 m legs are GPS/OSM jitter, not curvature"
+
+
+def _hairpin():
+    """Straight 300 m, then a tight 120 m-radius hairpin that loops back toward the car. Unlike a
+    constant-radius arc (where ANY three points give the same curvature, so ordering cannot show a
+    difference), curvature VARIES here, so triplet adjacency actually matters."""
+    def pt(x, y):
+        return {"latitude": LAT0 + y / 111320.0,
+                "longitude": LON0 + x / (111320.0 * math.cos(math.radians(LAT0))),
+                "velocity": 30.0}
+    pts = [pt(0.0, i * 60.0) for i in range(6)]
+    R, ang, by = 120.0, 0.0, 300.0
+    for _ in range(9):
+        ang += 60.0 / R
+        pts.append(pt(R * (1.0 - math.cos(ang)), by + R * math.sin(ang)))
+    return pts
+
+
+def _chord(p):
+    return math.hypot((p["latitude"] - LAT0) * 111320.0,
+                      (p["longitude"] - LON0) * 111320.0 * math.cos(math.radians(LAT0)))
+
+
+def test_path_order_is_taken_from_the_input_not_re_derived():
+    """Review CRITICAL: an earlier version sorted points by straight-line distance from the car. On
+    any road that bends back that destroys path topology and FABRICATES geometry. Measured here:
+    path order recovers the true R=120 m (39 mph); distance-ordered invents R=78 m (31 mph).
+    The previous ordering test could not catch this -- it used a constant-radius arc, where every
+    triplet yields the same curvature no matter how the points are permuted."""
+    pts = _hairpin()
+    d = [_chord(p) for p in pts]
+    assert d != sorted(d), "geometry must actually bend back, or this proves nothing"
+
+    k_path, _dd, v_path, _n, _ah = polyline_curvature(pts, LAT0, LON0, 5000.0, a_lat=2.5)
+    assert k_path > 0.0
+    assert 1.0 / k_path == pytest.approx(120.0, rel=0.15), "path order must recover the TRUE radius"
+
+    k_sorted, _d2, _v2, _n, _ah = polyline_curvature(sorted(pts, key=_chord), LAT0, LON0, 5000.0, a_lat=2.5)
+    assert abs(k_sorted - k_path) / k_path > 1e-3, \
+        "distance-ordered input must measurably differ -- otherwise the fix is untested"
+    assert v_path * 2.237 == pytest.approx(39.0, abs=3.0)
+
+
+def test_reversing_the_path_does_not_change_the_measurement():
+    """Traversal direction must not matter -- curvature is a property of the geometry."""
+    pts = _hairpin()
+    k_fwd, _d, _v, _n, _ah = polyline_curvature(pts, LAT0, LON0, 5000.0, a_lat=2.5)
+    k_rev, _d2, _v2, _n, _ah = polyline_curvature(list(reversed(pts)), LAT0, LON0, 5000.0, a_lat=2.5)
+    assert k_rev == pytest.approx(k_fwd, rel=0.05)
+
+
+@pytest.mark.parametrize("bad", [None, [], [{}], [{"latitude": "x", "longitude": None}],
+                                 [{"latitude": float('nan'), "longitude": 0.0}] * 5,
+                                 [{"latitude": float('inf'), "longitude": 0.0}] * 5])
+def test_garbage_input_never_raises(bad):
+    k, d, v, _n, _ah = polyline_curvature(bad, LAT0, LON0, 500.0, a_lat=2.5)
+    assert k == 0.0 and d == 0.0 and v == float('inf')
+
+
+def test_missing_gps_yields_nothing():
+    assert polyline_curvature(_arc(400.0), None, None, 500.0)[0] == 0.0
+
+
+def test_beyond_horizon_points_are_ignored():
+    k, _d, _v, _n, _ah = polyline_curvature(_arc(300.0), LAT0, LON0, 10.0, a_lat=2.5)
+    assert k == 0.0, "horizon must actually bound the scan"
+
+
+@pytest.mark.parametrize("a_lat", [0.0, -1.0, float('nan'), float('inf')])
+def test_a_bad_a_lat_cannot_raise_into_the_control_loop(a_lat):
+    """Review HIGH: the sqrt was outside the try, so a negative/NaN a_lat from the tune dict would
+    have raised straight through the guard and taken plannerd (and lateral control) down."""
+    k, d, v, _n, _ah = polyline_curvature(_arc(400.0), LAT0, LON0, 500.0, a_lat=a_lat)
+    assert math.isfinite(k) and math.isfinite(d)
+    assert v == float('inf'), "an unusable a_lat must yield no advisory, not a crash"
+
+
+def test_returned_values_are_always_json_safe():
+    """mapK/mapKD are JSON-serialised into /dev/shm; a NaN there breaks strict consumers."""
+    for pts in (_arc(300.0), _straight(), [], _arc(300.0)[:2]):
+        k, d, _v, _n, _ah = polyline_curvature(pts, LAT0, LON0, 500.0, a_lat=2.5)
+        assert math.isfinite(k) and math.isfinite(d)
+
+
+# --- review findings: validity count and ahead/behind -------------------------------------------
+
+def test_zero_curvature_is_distinguishable_from_unmeasurable():
+    """k == 0.0 alone is ambiguous: 'straight' vs 'geometry unmeasurable'. A real R=1500 m curve with
+    ~366 m node gaps (inside the live-measured 57-4072 m range) returns 0.0 exactly like a straight,
+    so replay cannot judge whether this lever is trustworthy without a validity count."""
+    k_str, _d, _v, n_str, _a = polyline_curvature(_straight(), LAT0, LON0, 5000.0, a_lat=2.5)
+    assert k_str < 1e-4 and n_str > 0, "a straight IS measurable -- just not curved"
+
+    sparse = _arc(1500.0, n=6, step_m=366.0)          # legs beyond _K_MAX_LEG_M
+    k_sp, _d2, _v2, n_sp, _a2 = polyline_curvature(sparse, LAT0, LON0, 5000.0, a_lat=2.5)
+    assert k_sp == 0.0 and n_sp == 0, "unmeasurable must report zero accepted triplets"
+
+
+def test_a_curve_behind_the_car_is_flagged_not_reported_as_upcoming():
+    """mapd publishes the whole current way including nodes BEHIND the car, and the distance is
+    unsigned -- so a curve just exited would keep 'advising' a slowdown while receding."""
+    ahead_pts = _arc(400.0)
+    behind = [{"latitude": 2 * LAT0 - p["latitude"], "longitude": p["longitude"], "velocity": 30.0}
+              for p in ahead_pts]                     # mirrored to the south
+    _k, _d, _v, n, is_ahead = polyline_curvature(behind, LAT0, LON0, 5000.0, a_lat=2.5,
+                                                 cur_bearing=0.0)   # heading north
+    assert n > 0, "the geometry is still measurable"
+    assert is_ahead is False, "a curve behind us must be flagged"
+
+    _k2, _d2, _v2, _n2, is_ahead2 = polyline_curvature(ahead_pts, LAT0, LON0, 5000.0, a_lat=2.5,
+                                                       cur_bearing=0.0)
+    assert is_ahead2 is True
+
+
+def test_unknown_bearing_does_not_silently_drop_data():
+    _k, _d, _v, n, is_ahead = polyline_curvature(_arc(400.0), LAT0, LON0, 5000.0, a_lat=2.5,
+                                                 cur_bearing=None)
+    assert n > 0 and is_ahead is True, "no bearing -> keep the measurement, flagged as unknown/ahead"
+
+
+def test_mixed_spacing_recovers_a_dense_curve_after_a_huge_gap():
+    """The live polyline had a 4072 m gap next to 57 m ones. Per-triplet gating must let the dense
+    part through rather than discarding the whole polyline."""
+    far = [{"latitude": LAT0 + (i * 4000.0) / 111320.0, "longitude": LON0, "velocity": 30.0}
+           for i in range(2)]
+    dense = _arc(200.0, n=8, step_m=40.0, lat0=LAT0 + 8000.0 / 111320.0)
+    k, _d, _v, n, _a = polyline_curvature(far + dense, LAT0, LON0, 100000.0, a_lat=2.5)
+    assert n > 0, "the dense section must still be measured"
+    assert 1.0 / k == pytest.approx(200.0, rel=0.25)

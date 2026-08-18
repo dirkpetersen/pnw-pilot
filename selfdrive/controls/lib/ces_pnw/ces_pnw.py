@@ -1692,6 +1692,7 @@ class CESController:
     # vtsctele2pnw: VTSC penalty components actually applied (from VTSCStatus) — logging only
     self._vtsc_pen = self._vtsc_pitch = None
     self._vtsc_dir = ""
+    self._vtsc_tele: dict = {}   # curve-source forensics from VTSCStatus
     # lanecenter2pnw telemetry: lane-centering trim status (from LaneCenterStatus, published by
     # controlsd — see selfdrive/controls/lib/lane_centering.py) — logging only, never gates control
     # here. Defaulted so a missing/never-published param (feature disabled, or before the first
@@ -1900,10 +1901,18 @@ class CESController:
       self._vtsc_pen = round(float(pen), 2) if pen is not None else None
       self._vtsc_pitch = round(float(pitch), 4) if pitch is not None else None
       self._vtsc_dir = str(vt.get("dir") or "")
+      # curvefloor2pnw / mapcurv2pnw: WHY each curve source did or didn't bind. Without ingesting
+      # these here they never leave /dev/shm -- VTSCStatus is volatile and overwritten at 5 Hz, and
+      # this cherry-picking read was the ONLY consumer, so the fields published by 62a51a4772 were
+      # being computed and thrown away. That made the drive-replay they exist for impossible.
+      for k in ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
+                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead"):
+        self._vtsc_tele[k] = vt.get(k)
     except Exception:
       self._vtsc_cap = self._vtsc_state = None
       self._vtsc_pen = self._vtsc_pitch = None
       self._vtsc_dir = ""
+      self._vtsc_tele = {}
     # lanecenter2pnw telemetry: lane-centering trim status — logging only (see _event_record).
     # Same cross-process read as VTSCStatus just above: controlsd (100 Hz) publishes to
     # /dev/shm/params at ~5 Hz, this reads it at ~1 Hz. Fully defensive — any missing key, wrong
@@ -2250,7 +2259,7 @@ class CESController:
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
         "spdLim": round(self._speed_limit, 1) if self._speed_limit else 0.0,
         # VTSC applied cap + state (from VTSCStatus) — same fields as the enabled-path tick record.
-        "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
+        "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),
         # lanecenter2pnw fields (from LaneCenterStatus) — same subset the enabled-path tick logs.
         "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
         # steerlimit-log2pnw / steertele2pnw / fordkappalog2pnw fields (from SteerLimitStatus).
@@ -2735,7 +2744,7 @@ class CESController:
       "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
-      "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state,
+      "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),
       # vtsctele2pnw: the penalty components VTSC actually applied (Lightning penalty m/s, the road
       # pitch it used, apex turn direction L/R) — 2026-07-12 westbound over-slow forensics needed
       # these and had to infer them.
