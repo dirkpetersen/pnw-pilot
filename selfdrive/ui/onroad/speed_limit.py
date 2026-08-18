@@ -35,6 +35,13 @@ STALE_AFTER_S = 10.0       # s: if the limit was UNKNOWN longer than this (mapd 
                            #   loss, stalled stream), the remembered limit is stale — re-acquiring
                            #   a limit is a fresh fix, NOT a "drop", so no warning. Short flickers
                            #   at a genuine road transition (< this) still warn normally.
+DROP_CONFIRM_S = 2.0       # s a lower limit must PERSIST before the banner fires. mapd re-matches
+                           #   position after a restart / GPS re-acquire and can briefly land on a
+                           #   parallel surface street: that put a 25 mph banner on I-5 at 70 mph
+                           #   (2026-08-18, after a mid-drive reboot). STALE_AFTER_S cannot catch it —
+                           #   both the 60 and the 25 were FRESH reads, so the drop looked genuine.
+                           #   A real drop still warns, DROP_CONFIRM_S later; Case 2 (nextSpeedLimit
+                           #   within AHEAD_ACTIVE_DIST) is untouched and still gives advance notice.
 
 
 class _Colors:
@@ -62,6 +69,8 @@ class SpeedLimitRenderer(Widget):
     self._shown_limit_t = 0.0       # monotonic stamp of the last VALID limit (staleness gate)
     self._warn_value = 0.0          # the lower value to show in the warning banner
     self._warn_until = 0.0          # monotonic deadline for the warning banner
+    self._pending_drop = 0.0        # a lower limit seen but not yet confirmed (DROP_CONFIRM_S)
+    self._pending_drop_t = 0.0      # monotonic stamp of when that value was first seen
 
     self.font_bold = gui_app.font(FontWeight.BOLD)
     self.font_demi = gui_app.font(FontWeight.SEMI_BOLD)
@@ -114,13 +123,16 @@ class SpeedLimitRenderer(Widget):
     baseline_fresh = (self._shown_limit > MIN_VALID_KPH
                       and (now - self._shown_limit_t) <= STALE_AFTER_S)
 
-    # Case 1: the current limit itself just dropped below what we were showing.
+    # Case 1: the current limit itself just dropped below what we were showing. ARM the drop rather
+    # than firing on it — a single mapd sample is not enough to warrant a red banner (see
+    # DROP_CONFIRM_S). The confirmation/discard runs below, on this and every following update.
     if (self.speed_limit_valid and new_limit > MIN_VALID_KPH
         and baseline_fresh
         and round(new_limit) < round(self._shown_limit)
         and self._overspeeding(new_limit)):
-      self._warn_value = new_limit
-      self._warn_until = now + WARNING_DURATION
+      if round(self._pending_drop) != round(new_limit):
+        self._pending_drop = new_limit
+        self._pending_drop_t = now
 
     # Case 2: a lower "ahead" limit is imminent (within range). Both limits here are
     # CURRENT mapd data (not a remembered baseline), so no staleness gate is needed.
@@ -133,6 +145,18 @@ class SpeedLimitRenderer(Widget):
       if round(self._warn_value) != round(self.speed_limit_ahead) or now > self._warn_until:
         self._warn_value = self.speed_limit_ahead
         self._warn_until = now + WARNING_DURATION
+
+    # Confirm or discard an armed drop. The value must still be the CURRENT limit and the driver must
+    # still be overspeeding for it; anything else means the reading was a transient (or they slowed),
+    # so it is dropped without ever reaching the screen.
+    if self._pending_drop > MIN_VALID_KPH:
+      if not (self.speed_limit_valid and round(new_limit) == round(self._pending_drop)
+              and self._overspeeding(new_limit)):
+        self._pending_drop = 0.0
+      elif now - self._pending_drop_t >= DROP_CONFIRM_S:
+        self._warn_value = self._pending_drop
+        self._warn_until = now + WARNING_DURATION
+        self._pending_drop = 0.0
 
     if self.speed_limit_valid and new_limit > MIN_VALID_KPH:
       self._shown_limit = new_limit

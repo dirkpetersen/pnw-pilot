@@ -154,6 +154,14 @@ READ_S = 1.0                             # param read cadence
 # valid<->unknown at ~1 Hz, so the cap target STEPPED between two values every second and the truck
 # surged/braked chasing it. Three guards make the cap a smooth ceiling instead of a square wave:
 SL_HOLD_S = 5.0                          # hold the last valid posted limit through brief map dropouts
+SL_DROP_CONFIRM_S = 2.0                  # speedlimitconfirm2pnw: a LOWER posted limit must persist this
+                                         # long before it is acted on. mapd re-matches position after a
+                                         # restart / GPS re-acquire and can briefly land on a parallel
+                                         # surface street; with AutoSpeedReduce=2 that bogus limit feeds
+                                         # _limit_drop_cap() directly, which caps at max(sl, sl*ratio) --
+                                         # a transient 25 mph read on I-5 would command ~29 mph at 70.
+                                         # Increases are still accepted immediately (release direction).
+SL_DROP_EPS = 0.1                        # m/s tolerance when matching the pending value across reads
 CAP_SLEW = 1.0                           # m/s per s — emitted cap RAMPS toward its target, never steps
 RELEASE_S = 2.0                          # cap sources must stay clear this long before the cap releases
 # speedadjust-exec2pnw: the stock-ACC button-management publish (mem-param only; never touches the
@@ -209,6 +217,8 @@ class SpeedAdjustController:
     self._mode = 0
     self._sl = 0.0                # current posted limit (m/s); 0 = unknown
     self._sl_valid_t = -1e9       # monotonic time of the last VALID limit read (for the dropout hold)
+    self._sl_pending = 0.0        # a LOWER limit awaiting SL_DROP_CONFIRM_S confirmation (0 = none)
+    self._sl_pending_t = 0.0      # monotonic stamp of when that pending value was first seen
     self._sl_ref = 0.0            # baseline limit (the limit we were last uncapped at)
     self._ratio = 0.0            # ANCHORED over-limit ratio (v_set/limit) captured at the baseline —
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
@@ -268,7 +278,21 @@ class SpeedAdjustController:
     now = time.monotonic()
     if sl > 0.0:
       self._sl_valid_t = now
+      # speedlimitconfirm2pnw: hold the previous limit until a DECREASE has persisted for
+      # SL_DROP_CONFIRM_S. Only the falling direction is gated -- a rising limit releases the cap and
+      # is accepted at once. A pending value that stops matching (the reading moved on) is discarded
+      # without ever having been acted on, which is exactly the mapd re-match transient we're after.
+      if 0.0 < sl < self._sl:
+        if abs(sl - self._sl_pending) > SL_DROP_EPS:
+          self._sl_pending = sl
+          self._sl_pending_t = now
+        if now - self._sl_pending_t < SL_DROP_CONFIRM_S:
+          return self._sl                      # unconfirmed drop → keep the previous limit
+      self._sl_pending = 0.0
       return sl
+    # Unknown read: break any confirmation chain (a drop that flickers valid/unknown has not
+    # "persisted"), then fall through to the existing brief-dropout hold.
+    self._sl_pending = 0.0
     if now - self._sl_valid_t < SL_HOLD_S and self._sl > 0.0:
       return self._sl                        # brief dropout → hold the last valid limit
     return 0.0

@@ -134,6 +134,17 @@ POLICE_GATE_MPH = 45                                       # arm the police poll
 POLICE_MIN_SPEED_MS = POLICE_GATE_MPH * 0.44704           # arm threshold (m/s)
 POLICE_RESUME_SPEED_MS = (POLICE_GATE_MPH - 2) * 0.44704  # disarm 2 mph below (hysteresis, avoids flapping)
 POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this (GPS dropout -> fail-closed)
+# policenear2pnw (2026-08-18, driver report): with a real sighting <1 mi ahead AND another ~6 mi out,
+# the overlay ALTERNATED between them. Cause: selection ranks by geo.nearest_ahead's along-track
+# distance (projected onto the mapd path) while the driver sees live_mi (straight-line). Near an
+# interchange the close report can project onto a far arm of the polyline, or fall outside the 60°
+# cone for one tick, handing the pick to the distant report -- then flip back the next tick. The
+# fix is the driver's own rule: once anything is inside POLICE_NEAR_MI, that set is the ONLY
+# candidate set and the closest of it wins, by plain straight-line distance (which is stable at
+# short range, unlike the path projection). A far report cannot interrupt a near one.
+POLICE_NEAR_MI = 1.0
+POLICE_NEAR_CONE_DEG = 90.0   # ...still only forward-hemisphere: near-locking must not resurrect a
+                              # report we are driving AWAY from before recede-tracking retires it.
 
 
 def _now_epoch() -> float:
@@ -524,10 +535,15 @@ class PoliceUpdater(threading.Thread):
         # while actually driving >=45 mph, with hysteresis down to <43 mph before disarming. Speed is
         # read from the LastGPSPosition mem param (never carState msgq -- HARD RULE above); an unknown
         # speed fails CLOSED (no poll). Supersedes the earlier parked-gate approach.
-        self._speed_ok = self._speed_gate(self._cur_speed(), self._speed_ok)
+        cur_speed = self._cur_speed()
+        self._speed_ok = self._speed_gate(cur_speed, self._speed_ok)
         if not self._speed_ok:
+          # _cur_speed() returns None for BOTH "no GPS fix yet" and "stale fix"; reporting either as
+          # "speed <45mph" told the driver they were too slow while they were doing 70 (observed after
+          # a mid-drive reboot, 2026-08-18). Name the real cause -- they diagnose from this string.
+          reason = f"speed <{POLICE_GATE_MPH}mph" if cur_speed is not None else "no GPS speed"
           with self._lock:
-            self._alerts, self._state, self._err = [], "nodata", f"speed <{POLICE_GATE_MPH}mph"
+            self._alerts, self._state, self._err = [], "nodata", reason
           self._stop.wait(POLICE_POLL_S)
           continue
         gps = self._cur_gps()
@@ -759,6 +775,10 @@ def _police_debug_log(dbg, poi, lat, lon, brg):
       return
     _police_dbg_last["sig"] = sig
     import os
+    # /data/pnw/location/ is device-local and is NOT recreated by an openpilot reinstall/reflash, which
+    # wiped it (2026-08-18) -- the append below then raised FileNotFoundError into the blanket except
+    # and the forensics log was silently dead exactly when a mismatch needed diagnosing.
+    os.makedirs(os.path.dirname(_POLICE_DEBUG_PATH), exist_ok=True)
     if os.path.exists(_POLICE_DEBUG_PATH) and os.path.getsize(_POLICE_DEBUG_PATH) > _POLICE_DEBUG_MAX_B:
       os.replace(_POLICE_DEBUG_PATH, _POLICE_DEBUG_PATH + ".1")   # keep one generation
     with open(_POLICE_DEBUG_PATH, "a") as f:
@@ -773,8 +793,11 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
   recede.prune(alerts)                           # bound tracking state to the current Waze pull
-  # Waze-app parity (2026-07-09): NO staleness drop — a report displays for as long as the Waze feed
-  # still returns it (server-side expiry), with its age surfaced to the UI instead. Drop
+  # NO staleness drop (2026-07-09, reaffirmed by the driver 2026-08-18): an old report is still worth
+  # showing when nothing fresher is in range — age is surfaced to the UI (and will drive a confidence
+  # TIER) rather than used as a filter. Our upstream (OpenWebNinja's resale of the Waze feed) does keep
+  # reports past the point the Waze app displays them, which is a presentation problem, not a reason to
+  # discard data the driver asked to see. Drop
   # OPPOSITE-direction reports ("other side" of the highway) so we don't alert for police on the other
   # carriageway (driver req 2026-07-01); unknown-direction reports (no magvar -> 'none') are KEPT, since
   # we can't tell they're across and dropping them would silently miss most reports (Waze often omits magvar).
@@ -801,12 +824,34 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
       pass
     if verdict == "kept":
       fresh.append(al)
-  poi, _a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
+  # policenear2pnw: a report inside POLICE_NEAR_MI outranks EVERYTHING further out, and the closest
+  # such report wins on straight-line distance. Deliberately bypasses the along-track projection: at
+  # this range it is the projection that is unstable, and it is the only thing that let a 6 mi report
+  # take the line away from a sighting the driver was actively approaching.
+  near = []
+  for al in fresh:
+    d = recede.live_mi(al, lat, lon)
+    if d is None or d > POLICE_NEAR_MI:
+      continue
+    if brg is not None:
+      try:
+        rel = abs(geo.normalize180(geo.bearing_deg(lat, lon, float(al["lat"]), float(al["lon"])) - brg))
+      except (KeyError, TypeError, ValueError):
+        continue
+      if rel > POLICE_NEAR_CONE_DEG:
+        continue                                  # behind us — leave it to recede-tracking to retire
+    near.append((d, al))
+  if near:
+    poi, _a = min(near, key=lambda t: t[0])[1], None
+  else:
+    poi, _a = geo.nearest_ahead(path, lat, lon, brg, fresh, max_fallback_m=DISPLAY_MAX_DIST_M)
   _police_debug_log(dbg, poi, lat, lon, brg)
   if poi is None:
     return {"state": "clear"}                     # nothing ahead
   live = recede.live_mi(poi, lat, lon)
-  return {"state": "alert", "dist_mi": live if live is not None else round(_a["along_m"] / geo.M_PER_MILE, 1),
+  # _a is None on the near-lock path (no along-track solve was needed); live_mi is guaranteed there.
+  fallback_mi = round(_a["along_m"] / geo.M_PER_MILE, 1) if _a is not None else 0.0
+  return {"state": "alert", "dist_mi": live if live is not None else fallback_mi,
           "dir": _police_dir(poi, brg), "age_min": _age_min(poi.get("ts"), now),
           "uuid": poi.get("uuid"), "town": poi.get("town", "")}
 

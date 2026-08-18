@@ -12,7 +12,7 @@ import time
 
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
-  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S)
+  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S)
 
 MPH = MPH_TO_MS
 V75 = 75 * MPH
@@ -1068,3 +1068,79 @@ def test_fix2_late_tap_after_driver_intervening_clears_restore_does_not_self_can
   late_tap_set = c._last_v_set + 1.0 * MPH
   c.cap(None, late_tap_set, late_tap_set, V60, True)
   assert c._police_suppressed is False                    # NOT mistaken for a driver override
+
+
+# --- speedlimitconfirm2pnw: a LOWER posted limit must persist before it is acted on ---------------
+# 2026-08-18 live drive: a mid-drive reboot made mapd re-match position and briefly land on a parallel
+# surface street, so MapSpeedLimit read 25 mph on I-5 at 70. With AutoSpeedReduce=2 that feeds
+# _limit_drop_cap() directly (which caps at max(sl, sl*ratio)) -- a transient ~29 mph command at 70 mph.
+
+class _MemParams:
+  """Stands in for the /dev/shm Params store; `value` is the raw MapSpeedLimit string mapd_configd writes."""
+  def __init__(self, value):
+    self.value = value
+
+  def get(self, key, return_default=False):
+    if key != "MapSpeedLimit":
+      return None
+    return None if self.value is None else str(self.value)
+
+
+def _sl_reader(initial_sl, first_read):
+  c = SpeedAdjustController(_CP(True), params=_Params())
+  c.mem_params = _MemParams(first_read)
+  c._sl = initial_sl
+  c._sl_valid_t = time.monotonic()
+  return c
+
+
+def test_limit_drop_is_held_until_confirmed():
+  c = _sl_reader(V60, V45 / MPH * MPH)          # 60 -> 45 mph drop appears
+  assert c._read_speed_limit() == V60, "an unconfirmed drop must keep the previous limit"
+
+
+def test_limit_drop_is_accepted_after_confirmation_window():
+  c = _sl_reader(V60, V45)
+  assert c._read_speed_limit() == V60
+  c._sl_pending_t -= (SL_DROP_CONFIRM_S + 0.1)  # simulate the value persisting past the window
+  assert c._read_speed_limit() == V45
+
+
+def test_transient_drop_never_takes_effect():
+  # the exact reboot artifact: 60 -> 25 for one read -> back to 60. The 25 must never be returned.
+  c = _sl_reader(V60, 25 * MPH)
+  assert c._read_speed_limit() == V60
+  c.mem_params.value = V60
+  assert c._read_speed_limit() == V60
+  assert c._sl_pending == 0.0, "pending drop must be discarded once the reading moves off it"
+
+
+def test_a_different_lower_value_restarts_the_window():
+  c = _sl_reader(V60, V45)
+  c._read_speed_limit()
+  first_t = c._sl_pending_t
+  c.mem_params.value = 30 * MPH                 # reading moved to another low value
+  assert c._read_speed_limit() == V60
+  assert c._sl_pending == 30 * MPH
+  assert c._sl_pending_t >= first_t, "the confirmation window restarts on a new pending value"
+
+
+def test_rising_limit_is_accepted_immediately():
+  # the release direction is never gated -- a higher limit lifts the cap and must not be delayed
+  c = _sl_reader(V45, V60)
+  assert c._read_speed_limit() == V60
+  assert c._sl_pending == 0.0
+
+
+def test_unknown_read_breaks_the_confirmation_chain():
+  c = _sl_reader(V60, V45)
+  c._read_speed_limit()
+  assert c._sl_pending == V45
+  c.mem_params.value = None                     # map dropout
+  c._read_speed_limit()
+  assert c._sl_pending == 0.0, "a drop that flickers valid/unknown has not persisted"
+
+
+def test_dropout_hold_still_works():
+  c = _sl_reader(V60, None)
+  assert c._read_speed_limit() == V60, "brief dropout must still hold the last valid limit"
