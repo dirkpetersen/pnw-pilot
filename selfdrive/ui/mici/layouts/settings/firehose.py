@@ -53,6 +53,13 @@ class FirehoseLayoutBase(Widget):
     self._scroll_panel = GuiScrollPanel2(horizontal=False)
     self._content_height = 0
 
+    # uploadgate2pnw2: _get_status() is called twice per rendered frame (draw + measure). It reads
+    # three params, so evaluating it per frame would be ~180 param file reads/s on a device with thin
+    # CPU headroom. Cache the verdict and refresh at ~1 Hz — the gate inputs are change-only params
+    # that move on the order of minutes, so 1 Hz is far faster than they can actually change.
+    self._status_cache: tuple[str, rl.Color] | None = None
+    self._status_cache_t = 0.0
+
     self._running = True
     self._update_thread = threading.Thread(target=self._update_loop, daemon=True)
     self._update_thread.start()
@@ -190,13 +197,44 @@ class FirehoseLayoutBase(Widget):
     return y
 
   def _get_status(self) -> tuple[str, rl.Color]:
+    now = time.monotonic()
+    if self._status_cache is not None and (now - self._status_cache_t) < 1.0:
+      return self._status_cache
+    status = self._compute_status()
+    self._status_cache = status
+    self._status_cache_t = now
+    return status
+
+  def _compute_status(self) -> tuple[str, rl.Color]:
+    # uploadgate2pnw2: report the gate that ACTUALLY runs (uploader.pass2_allowed), not comma's stock
+    # metered-and-connected check. Those disagree on this fork: stock painted a green "ACTIVE" on any
+    # unmetered connection, including a phone hotspot that is not a priority network — where pass 2 is
+    # in fact blocked, so the panel claimed uploads were happening while the rlog queue sat still
+    # (observed 2026-08-20). Reason strings name the specific blocking condition so the panel is
+    # diagnostic rather than merely red.
     network_type = ui_state.sm["deviceState"].networkType
     network_metered = ui_state.sm["deviceState"].networkMetered
 
-    if not network_metered and network_type != 0:  # Not metered and connected
-      return tr("ACTIVE"), self.GREEN
-    else:
-      return tr("INACTIVE: connect to an unmetered network"), self.RED
+    if network_type == 0:
+      return tr("INACTIVE: not connected"), self.RED
+    if network_metered:
+      return tr("INACTIVE: connection is metered"), self.RED
+
+    try:
+      from openpilot.system.loggerd.uploader import pass2_allowed
+      at_home = self._params.get_bool("OnPriorityNetwork")
+      parked = self._params.get_bool("GearPark")
+      defer_hd = self._params.get_bool("DeferHDVideoUpload")
+      onroad = ui_state.sm["deviceState"].started
+      if not at_home:
+        return tr("INACTIVE: not on a priority network"), self.RED
+      if not pass2_allowed(network_type.raw, network_metered, at_home, onroad, parked, defer_hd):
+        return tr("INACTIVE: paused while driving"), self.RED
+    except Exception:
+      # never let the settings panel raise; fall back to the stock (looser) reading
+      cloudlog.exception("firehose status check failed")
+
+    return tr("ACTIVE"), self.GREEN
 
   def _fetch_firehose_stats(self):
     try:

@@ -36,7 +36,13 @@ def _coerce_entry(d: dict) -> dict | None:
       return float(v)
     except (TypeError, ValueError):
       return None
-  return {"label": label, "ssid": ssid, "lat": _f(d.get("lat")), "lon": _f(d.get("lon")), "portal": portal}
+  # uploadgate2pnw2: "mobile" marks a network that TRAVELS with the car (a phone hotspot). Such an
+  # entry has no meaningful geofence: auto-learn would rewrite the param every time the car moved
+  # more than LEARN_MIN_MOVE_M while connected — at highway speed that is a param write every tick,
+  # exactly the flash wear the learn guard exists to prevent. `mobile` suppresses both the learn and
+  # the geo-gate contribution; SSID matching (and therefore OnPriorityNetwork) is unaffected.
+  return {"label": label, "ssid": ssid, "lat": _f(d.get("lat")), "lon": _f(d.get("lon")), "portal": portal,
+          "mobile": bool(d.get("mobile", False))}
 
 
 def parse(raw: str | bytes | None,
@@ -91,8 +97,14 @@ def ssids(nets: list[dict]) -> list[str]:
 
 
 def locations(nets: list[dict]) -> list[tuple[float, float]]:
-  """All learned (lat, lon) centers (entries without a fix are skipped)."""
-  return [(e["lat"], e["lon"]) for e in nets if e.get("lat") is not None and e.get("lon") is not None]
+  """All learned (lat, lon) centers (entries without a fix, and mobile entries, are skipped).
+
+  uploadgate2pnw2: a mobile (hotspot) entry must never contribute a geofence center — wherever it was
+  last seen is not where it will be next, so feeding it to near_any_home() would gate WiFi scanning on
+  a stale, meaningless location.
+  """
+  return [(e["lat"], e["lon"]) for e in nets
+          if e.get("lat") is not None and e.get("lon") is not None and not e.get("mobile")]
 
 
 def select_available(nets: list[dict], scan_ssids: list[str], saved_connections: list[str],

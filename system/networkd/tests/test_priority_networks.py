@@ -97,6 +97,36 @@ class TestSelection:
     nets = pn.parse(json.dumps([{"ssid": "A", "lat": 1.0, "lon": 2.0}, {"ssid": "B"}]))
     assert pn.locations(nets) == [(1.0, 2.0)]
 
+  def test_locations_skips_mobile_even_when_it_has_a_fix(self):
+    # uploadgate2pnw2: a hotspot travels, so a stale fix on it must not become a geofence center.
+    nets = pn.parse(json.dumps([{"ssid": "Home", "lat": 1.0, "lon": 2.0},
+                                {"ssid": "Phone", "lat": 47.6, "lon": -122.3, "mobile": True}]))
+    assert pn.locations(nets) == [(1.0, 2.0)]
+
+
+class TestMobileFlag:
+  def test_defaults_false_and_is_preserved(self):
+    nets = pn.parse(json.dumps([{"ssid": "Home"}, {"ssid": "Phone", "mobile": True}]))
+    assert nets[0]["mobile"] is False
+    assert nets[1]["mobile"] is True
+
+  def test_survives_a_dumps_parse_round_trip(self):
+    # the UI rewrites the whole list through dumps() on every edit — the flag must not be dropped
+    nets = pn.parse(json.dumps([{"ssid": "Phone", "mobile": True}]))
+    assert pn.parse(pn.dumps(nets))[0]["mobile"] is True
+
+  def test_non_bool_truthy_values_are_coerced(self):
+    nets = pn.parse(json.dumps([{"ssid": "A", "mobile": 1}, {"ssid": "B", "mobile": 0},
+                                {"ssid": "C", "mobile": None}]))
+    assert [n["mobile"] for n in nets] == [True, False, False]
+
+  def test_mobile_entry_still_matches_by_ssid(self):
+    # the whole point: it is still a priority network for OnPriorityNetwork / selection purposes
+    nets = pn.parse(json.dumps([{"ssid": "Phone", "mobile": True}]))
+    assert pn.ssids(nets) == ["Phone"]
+    assert pn.select_available(nets, ["Phone"], [priority_connection_id("Phone")],
+                               priority_connection_id) is not None
+
 
 class TestNearAnyHome:
   def test_within_one(self):

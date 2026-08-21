@@ -150,7 +150,8 @@ def pass1_allowed(metered: bool) -> bool:
 LOCATOR_PING_S = 300.0
 
 
-def pass2_allowed(network_type: int, metered: bool, at_home: bool, onroad: bool, parked: bool) -> bool:
+def pass2_allowed(network_type: int, metered: bool, at_home: bool, onroad: bool, parked: bool,
+                  defer_hd: bool = False) -> bool:
   # uploadgate2pnw (driver spec 2026-07-13, replacing the firehose2pnw gate that caused the commIssue
   # cascade): the FIRST check is the priority (GPS-gated home) WiFi. Pass 2 (rlog + HD video, 75 MB
   # bursts) runs ONLY when connected to one of the driver's priority networks — NEVER anywhere else,
@@ -161,11 +162,19 @@ def pass2_allowed(network_type: int, metered: bool, at_home: bool, onroad: bool,
   #              in this process (lesson 2026-07-13: uploader carState subs caused the cascade).
   # The onroad block stays for the driving case; Park (or offroad) opens it so an EV charging at home
   # (ignition line on -> onroad True) still uploads. Metered blocks everything, everywhere.
+  #
+  # uploadgate2pnw2 (2026-08-21): the onroad block is RELAXED when defer_hd is set. The gate's stated
+  # rationale is the 75 MB video burst; with DeferHDVideoUpload the pass-2 queue is rlog-only (~10-13 MB),
+  # which is a different animal. Measured on the 3X during a live drive: 8-10 rlog uploads/min sustained
+  # produced ZERO selfdrivedLagging events over 23 min, while a lag spike in the same session traced to
+  # an unrelated CPU hog and coincided with the LOWEST upload rate (1-3/min). Video is still never
+  # uploaded while driving — defer_hd is exactly the condition that holds it back (see HD_VIDEO_FILES in
+  # list_upload_files), so this cannot re-open the case the gate was written for.
   if network_type not in PASS2_NETWORK_TYPES or metered:
     return False
   if not at_home:
     return False
-  if onroad and not parked:
+  if onroad and not parked and not defer_hd:
     return False
   return True
 
@@ -579,7 +588,8 @@ def _firehose_network_guard(uploader: Uploader, exit_event: threading.Event) -> 
       # thread deliberately subscribes to nothing beyond the 2 Hz deviceState.
       at_home = uploader.params.get_bool("OnPriorityNetwork")
       parked = uploader.params.get_bool("GearPark")
-      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, at_home, onroad, parked) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
+      defer_hd = uploader.params.get_bool(DEFER_HD_PARAM)   # uploadgate2pnw2: relaxes the onroad block
+      if not pass2_allowed(ds.networkType.raw, ds.networkMetered, at_home, onroad, parked, defer_hd) and uploader.params.get_bool(FIREHOSE_ACTIVE_PARAM):
         uploader._set_firehose_active(False)
         uploader._set_firehose_speed(0)   # connect2pnw: drop the stale Mbps too, so it can't show on resume
     except Exception:
@@ -660,8 +670,9 @@ def main(exit_event: threading.Event | None = None) -> None:
     # starved behind a long backlog of small files. Small files keep priority.
     at_home = params.get_bool("OnPriorityNetwork")
     parked = params.get_bool("GearPark")
+    defer_hd = params.get_bool(DEFER_HD_PARAM)   # uploadgate2pnw2: relaxes the onroad block (rlog-only)
     p2 = None
-    if pass2_allowed(network_type_raw, metered, at_home, onroad, parked) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, at_home, onroad, parked, defer_hd) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
       p2 = uploader.step(network_type_raw, metered, pass2=True)
       pass1_run = 0
 

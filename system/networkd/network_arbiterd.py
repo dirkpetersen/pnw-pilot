@@ -395,6 +395,10 @@ def main() -> NoReturn:
       # Otherwise this would params.put() a new JSON blob every 20 s forever, wearing the flash.
       if gps is not None and current_active:
         for e in nets:
+          # uploadgate2pnw2: never learn a location for a mobile (hotspot) entry — it travels with the
+          # car, so every LEARN_MIN_MOVE_M of driving would trigger a param write.
+          if e.get("mobile"):
+            continue
           if current_active == priority_connection_id(e["ssid"]):
             old = (e.get("lat"), e.get("lon"))
             moved = old[0] is None or old[1] is None or \
