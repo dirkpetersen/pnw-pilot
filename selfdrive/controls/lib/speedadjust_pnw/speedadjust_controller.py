@@ -233,6 +233,13 @@ class SpeedAdjustController:
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
     self._police = None          # last LocationServices["police"] dict
     self._police_latched = False # once within the approach window, hold until the report clears
+    # policelatch2pnw: WHICH report the latch belongs to. The latch means "I am approaching THIS
+    # report"; it must not survive onto a different one. Without this the cap carried across reports:
+    # pass report A, _PoliceRecede drops it, `cap` switches to report B miles ahead, and because
+    # _police_latched was still True the POLICE_ENGAGE_S approach gate was skipped and the car stayed
+    # capped at limit+5 indefinitely — on a corridor where some confirmed report is almost always in
+    # range, the speed never resumed (observed 2026-08-21, cap report 8.3 mi out while capped).
+    self._police_latched_key = None
     # speedadjustreset2pnw: True after a detected manual set-change dismisses the CURRENT police
     # alert — suppresses _police_cap() (so it can't simply re-latch next tick) until the report
     # clears (state != "alert"), at which point it clears alongside _police_latched and the feature
@@ -340,6 +347,7 @@ class SpeedAdjustController:
     p = self._police
     if not isinstance(p, dict) or p.get("state") != "alert":
       self._police_latched = False           # cleared/passed report → release
+      self._police_latched_key = None
       self._police_suppressed = False        # speedadjustreset2pnw: report gone → re-arm for the next one
       return None
     # policetier2pnw (driver directive 2026-08-18: "slow down only for the ones that show up on Waze").
@@ -354,6 +362,7 @@ class SpeedAdjustController:
       src = p.get("cap")
       if not isinstance(src, dict):
         self._police_latched = False           # nothing confirmed ahead → release, don't hold a cap
+        self._police_latched_key = None
         self._police_suppressed = False        # ...and nothing left to be dismissing → re-arm
         self._police_suppressed_uuid = None
         return None
@@ -372,6 +381,18 @@ class SpeedAdjustController:
         # to a DIFFERENT report skips the POLICE_ENGAGE_S approach gate and caps immediately for a
         # report that may still be miles away.
         self._police_latched = False
+    # policelatch2pnw: the latch belongs to ONE report. If the CONTROL report is no longer the one we
+    # latched onto — we passed it and `cap` moved to the next confirmed report — drop the latch so the
+    # new report has to earn its own cap through the POLICE_ENGAGE_S approach gate. This is the same
+    # reasoning the dismissal branch above applies, which previously only ran when the driver had
+    # manually dismissed something; without it the cap never released. An unresolvable key (None)
+    # deliberately drops the latch too: fail toward resuming the driver's speed, never toward holding
+    # a cap we can no longer attribute to a specific report.
+    _lk = _police_key(src)
+    if self._police_latched and (_lk is None or self._police_latched_key is None
+                                 or _lk != self._police_latched_key):
+      self._police_latched = False
+      self._police_latched_key = None
     if self._police_suppressed:              # speedadjustreset2pnw: driver dismissed THIS alert via a
       return None                            # manual set change — stay off until it clears (see cap())
     try:
@@ -383,6 +404,7 @@ class SpeedAdjustController:
     ttr = dist_m / max(v_ego, 1.0)           # time-to-report at current speed
     if ttr <= POLICE_ENGAGE_S and not self._police_latched:
       self._police_latched = True            # entered the approach window → latch on
+      self._police_latched_key = _lk         # policelatch2pnw: ...for THIS report only
     if not self._police_latched:
       return None                            # not close enough yet — hold current speed
     if self._sl > 0.0:

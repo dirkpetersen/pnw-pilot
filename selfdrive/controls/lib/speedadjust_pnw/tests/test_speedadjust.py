@@ -175,6 +175,55 @@ def test_police_clear_releases():
   assert c._police_latched is False
 
 
+def test_police_latch_releases_when_cap_report_changes():
+  # policelatch2pnw REGRESSION (observed on-car 2026-08-21, cap report 8.3 mi out while still capped):
+  # the latch belongs to ONE report. After passing report A the CONTROL channel switches to the next
+  # confirmed report B, which may be miles away. _police_latched survived that switch, so the
+  # POLICE_ENGAGE_S approach gate was skipped and the car stayed capped indefinitely -- on a corridor
+  # where some confirmed report is nearly always in range, the speed never resumed.
+  #
+  # NOTE this is NOT covered by test_switching_reports_also_drops_the_stale_latch: that one sets
+  # _police_suppressed first, so it only exercises the DISMISSAL branch. This is the plain switch.
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed", cap_uuid="A"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  assert c._police_latched is True and c._police_latched_key == "A"
+  c._police = _police(8.3, "confirmed", cap_mi=8.3, cap_uuid="B")   # passed A; B is 8.3 mi out
+  assert c._police_cap(V75, V75) is None, "must resume, not inherit A's latch"
+  assert c._police_latched is False
+
+
+def test_police_latch_survives_same_report_across_ticks():
+  # the flip side: the identity check must not break latch-holds-when-slowed (the oscillation fix)
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed", cap_uuid="A"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  c._police = _police(0.05, "confirmed", cap_mi=0.05, cap_uuid="A")   # same report, now crawling
+  assert c._police_cap(V75, 1.0) == V45 + POLICE_MARGIN               # ttr balloons -> still held
+  assert c._police_latched is True
+
+
+def test_police_new_report_must_earn_its_own_latch():
+  # after the switch, B caps only once IT is inside the approach window -- never inherited from A
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed", cap_uuid="A"))
+  c._police_cap(V75, V75)
+  c._police = _police(8.3, "confirmed", cap_mi=8.3, cap_uuid="B")
+  assert c._police_cap(V75, V75) is None
+  c._police = _police(0.3, "confirmed", cap_mi=0.3, cap_uuid="B")     # now B is close
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  assert c._police_latched is True and c._police_latched_key == "B"
+
+
+def test_police_unresolvable_key_cannot_inherit_the_latch():
+  # fail toward resuming: a cap report we cannot attribute must not carry a latch earned by another.
+  # (A keyless report that is genuinely close still caps -- it re-earns the latch via the approach
+  # gate on the same tick -- which is correct; what must not happen is inheriting one from far away.)
+  c = _ctrl(sl=V45, police=_police(0.3, "confirmed", cap_uuid="A"))
+  assert c._police_cap(V75, V75) == V45 + POLICE_MARGIN
+  c._police = {"state": "alert", "dist_mi": 8.3, "tier": "confirmed",
+               "cap": {"dist_mi": 8.3, "age_min": 1}}                  # no uuid, no key
+  assert c._police_cap(V75, V75) is None
+  assert c._police_latched is False
+
+
 def test_reduce_only_never_raises():
   c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.3})
   v_set = 40 * MPH                                   # target 65 > set 40 -> unchanged (reduce-only)
@@ -1153,17 +1202,19 @@ def test_dropout_hold_still_works():
 # report (past the lifetime the Waze app would give it) still displays -- in amber -- but must never
 # cap the car. A missing/unknown tier keeps the previous behaviour (treated as confirmed).
 
-def _police(dist_mi, tier=None, state="alert", cap_mi="same"):
+def _police(dist_mi, tier=None, state="alert", cap_mi="same", cap_uuid="c"):
   """Display line as location_servicesd publishes it. `tier` present => post-split payload, and the
   CONTROL channel is the separate `cap` dict (nearest CONFIRMED report). cap_mi="same" mirrors the
-  display distance; None means nothing confirmed ahead."""
+  display distance; None means nothing confirmed ahead. cap_uuid defaults to a single shared identity
+  so pre-policelatch2pnw tests keep their exact behaviour; pass it explicitly to model the CONTROL
+  channel switching to a DIFFERENT report (which is what happens once you drive past one)."""
   p = {"state": state, "dist_mi": dist_mi}
   if tier is not None:
     p["tier"] = tier
     if cap_mi == "same":
       cap_mi = dist_mi if tier == "confirmed" else None
     if cap_mi is not None:
-      p["cap"] = {"dist_mi": cap_mi, "uuid": "c", "age_min": 1}
+      p["cap"] = {"dist_mi": cap_mi, "uuid": cap_uuid, "age_min": 1}
   return p
 
 
