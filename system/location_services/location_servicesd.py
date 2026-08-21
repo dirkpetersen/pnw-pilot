@@ -890,7 +890,9 @@ def _police_debug_log(dbg, poi, lat, lon, brg):
       os.replace(_POLICE_DEBUG_PATH, _POLICE_DEBUG_PATH + ".1")   # keep one generation
     with open(_POLICE_DEBUG_PATH, "a") as f:
       f.write(json.dumps({"t": _now_epoch(), "gps": [round(lat, 5), round(lon, 5)], "brg": round(brg or 0, 1),
-                          "chosen": (poi or {}).get("uuid", "")[:8] if poi else None, "reports": dbg}) + "\n")
+                          # policedbguuid2pnw: full uuid here too, so "which one did we choose" can
+                          # actually be matched against the entries in `reports` (see the note there).
+                          "chosen": (poi or {}).get("uuid", "") if poi else None, "reports": dbg}) + "\n")
   except Exception:
     pass
 
@@ -928,7 +930,14 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
       dbg.append({"lat": round(float(al.get("lat", 0)), 5), "lon": round(float(al.get("lon", 0)), 5),
                   "mi": recede.live_mi(al, lat, lon), "age_min": age, "v": verdict,
                   "thumbs": al.get("thumbs"), "tier": _police_tier(age, al.get("thumbs"), base, bonus),
-                  "magvar": al.get("magvar"), "uuid": (al.get("uuid") or "")[:8]})
+                  # policedbguuid2pnw: log the FULL uuid. Waze ids look like
+                  # "alert-34594548/83073a43-e136-4dc7-...", so the old [:8] slice collapsed every
+                  # report to "alert-34"/"alert-35" — distinct sightings became indistinguishable,
+                  # which defeats the entire purpose of this forensics log (and, because the
+                  # change-detection `sig` below keys on this same field, also suppressed log lines
+                  # for genuine report changes that happened to share a prefix). ~40 extra bytes per
+                  # report per changed tick against a 2 MB rotating cap.
+                  "magvar": al.get("magvar"), "uuid": al.get("uuid") or ""})
     except (TypeError, ValueError):
       pass
     if verdict == "kept":
