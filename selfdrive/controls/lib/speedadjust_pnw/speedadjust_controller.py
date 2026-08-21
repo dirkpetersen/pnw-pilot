@@ -246,6 +246,8 @@ class SpeedAdjustController:
     # re-arms for the NEXT alert. See _is_own_actuation()/cap() for why this exists.
     self._police_suppressed = False
     self._police_suppressed_uuid = None   # which report the driver dismissed (see _police_cap)
+    self._ovr = "init"                    # satele2pnw: last manual-override verdict (see cap())
+    self._sa_pub_t = -1e9                 # satele2pnw: SpeedAdjustStatus publish throttle
     # speedadjustreset2pnw: last observed driver v_cruise_set (m/s), used to detect a manual cruise
     # nudge (see cap()). None = not yet tracked — also forced back to None whenever
     # v_cruise_initialized is False OR ACC is not engaged (FIX A) so the uninitialized->initialized
@@ -446,6 +448,40 @@ class SpeedAdjustController:
       return None
     return max(sl, sl * self._ratio)         # proportional trim, but NEVER below the posted limit
 
+  # ---- satele2pnw: diagnostic status publish (mem-param; ces_pnw forwards it into ces_events) -----
+  SA_PUB_THROTTLE_S = 0.2                  # 5 Hz — ces_pnw samples at ~1 Hz, this just bounds the cost
+
+  def _publish_status(self, v_cruise_set, v_cruise, out) -> None:
+    """Publish the internal state needed to explain any speedadjust behaviour after the fact.
+
+    NOT gated on _long_ok (unlike _publish_target, which is a stock-ACC actuator channel) — this must
+    report on every car. Every field here exists because its absence blocked a real diagnosis:
+      sl/slRef/ratio  -> reproduce the limit-drop cap arithmetic (cap = sl * ratio, floored at sl)
+      ovr             -> WHY a manual set-change did or didn't release the cap (the 2026-08-21 gap)
+      lastSet/vSet    -> whether the driver's change was even visible to the controller
+      eng             -> the _cruise_engaged() gate that discards the baseline when it flickers
+    Writing to /dev/shm alone is NOT enough to be logged — ces_pnw must also cherry-pick these keys
+    into its tick record, or they evaporate (lesson: VTSCStatus fields, 2026-08-18)."""
+    if self.mem_params is None:
+      return
+    now = time.monotonic()
+    if now - self._sa_pub_t < self.SA_PUB_THROTTLE_S:
+      return
+    self._sa_pub_t = now
+    def _r(v, n=2):
+      return round(float(v), n) if isinstance(v, (int, float)) and math.isfinite(float(v)) else None
+    self.mem_params.put_nonblocking("SpeedAdjustStatus", {
+      "mode": self._mode,
+      "sl": _r(self._sl), "slRef": _r(self._sl_ref), "ratio": _r(self._ratio, 3),
+      "cap": _r(self._cap_out), "out": _r(out), "vSet": _r(v_cruise_set), "vCruise": _r(v_cruise),
+      "lastSet": _r(self._last_v_set),
+      "ovr": self._ovr,
+      "eng": bool(self._engaged),
+      "polLatch": bool(self._police_latched),
+      "polSupp": bool(self._police_suppressed),
+      "polKey": self._police_latched_key,
+    })
+
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
   def _publish_target(self, target, ceiling=None, direction="dec") -> None:
     """Publish (or clear) the SpeedAdjustTarget mem-param for the shared stock-ACC button executor.
@@ -631,6 +667,27 @@ class SpeedAdjustController:
 
   # ---- the cap the planner folds (reduce-only) ------------------------------
   def cap(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float, v_cruise_initialized: bool) -> float:
+    """satele2pnw: thin wrapper over _cap_impl() that ALWAYS publishes SpeedAdjustStatus.
+
+    Deliberately a wrapper rather than publish-calls inside _cap_impl(): that method has six separate
+    return points, and a telemetry channel that misses paths is worse than none — you cannot tell "the
+    feature was inactive" from "the logger missed it". The `finally` also captures the state when
+    _cap_impl() raises. Driver directive 2026-08-21, after a stuck-at-47-mph episode was undiagnosable
+    because this module published nothing: _ratio/_sl_ref/_last_v_set and the engaged gate were
+    invisible live AND unrecoverable afterwards.
+    """
+    out = v_cruise
+    try:
+      out = self._cap_impl(sm, v_cruise_set, v_cruise, v_ego, v_cruise_initialized)
+      return out
+    finally:
+      try:
+        self._publish_status(v_cruise_set, v_cruise, out)
+      except Exception:
+        pass                                 # telemetry must never affect the control path
+
+  def _cap_impl(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float,
+                v_cruise_initialized: bool) -> float:
     """
     v_cruise_set: the driver's raw, PRE-VTSC (pre-any-other-cap) cruise set (m/s) — used ONLY to anchor
       the limit-drop ratio/baseline and to seed the cap slew (speedanchor2pnw F2). Using this instead of
@@ -682,17 +739,33 @@ class SpeedAdjustController:
     # _last_v_set back to None on every not-engaged tick means the FIRST engaged tick after any
     # not-engaged stretch (including a fresh enable) only establishes a new baseline -- it can never
     # itself be read as a change, exactly mirroring the uninit-sentinel treatment above.
+    # satele2pnw: record WHY a manual-override was or wasn't honoured this tick. This is the field the
+    # 2026-08-21 stuck-at-47-mph episode needed and did not have: "the driver turned the dial and the
+    # cap did not release" has five distinct causes and no way to tell them apart after the fact.
     engaged = self._cruise_engaged(sm)
     if not engaged:
       self._last_v_set = None
-    elif self._last_v_set is not None and abs(v_cruise_set - self._last_v_set) > SET_CHANGE_EPS:
+      self._ovr = "notEngaged"               # gate closed -> baseline discarded, a change here is lost
+    elif self._last_v_set is None:
+      self._ovr = "baseline"                 # first engaged tick: establishes a baseline, never a change
+    elif abs(v_cruise_set - self._last_v_set) <= SET_CHANGE_EPS:
+      self._ovr = "noChange"
+    if engaged and self._last_v_set is not None and abs(v_cruise_set - self._last_v_set) > SET_CHANGE_EPS:
       # FIX B: a stock-ACC tap of OUR OWN can still be in flight (0.3-2 s actuation->CAN->carState
       # latency) for a short window after _cap_out/_restore_ceiling already nulled at a phase
       # boundary -- suppress detection entirely for that grace window rather than let a late-landing
       # own-tap fall through _is_own_actuation() (which needs the field to still be non-None).
       in_grace = (not self._long_ok
                   and now - self._last_actuation_transition_t < SA_ACTUATION_GRACE_S)
-      if not in_grace and not self._is_own_actuation(self._last_v_set, v_cruise_set):
+      # satele2pnw: same short-circuit as the original `not in_grace and not _is_own_actuation(...)`
+      # (_is_own_actuation is still not called while in_grace), just with the outcome recorded.
+      if in_grace:
+        self._ovr = "grace"
+      elif self._is_own_actuation(self._last_v_set, v_cruise_set):
+        self._ovr = "ownTap"
+      else:
+        self._ovr = "applied"
+      if self._ovr == "applied":
         # FIX D: only dismiss an alert the driver could actually perceive acting on -- a routine set
         # nudge with a report still minutes away (not latched, no active cap) must not silently kill
         # the eventual slowdown.

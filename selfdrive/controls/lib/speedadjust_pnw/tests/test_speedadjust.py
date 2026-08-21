@@ -392,8 +392,16 @@ class _FakeMemParams:
     self.calls.append((key, payload))
 
   @property
+  def target_calls(self):
+    # satele2pnw: the ACTUATOR channel only. speedadjust now also publishes a read-only diagnostic
+    # channel ("SpeedAdjustStatus") on EVERY car including op-long; tests that assert "this car must
+    # never be actuated" mean SpeedAdjustTarget specifically, not "no mem-param write of any kind".
+    return [c for c in self.calls if c[0] == "SpeedAdjustTarget"]
+
+  @property
   def last(self):
-    return self.calls[-1][1] if self.calls else None
+    tc = self.target_calls
+    return tc[-1][1] if tc else None
 
 
 def _stock_ctrl(**kw):
@@ -426,7 +434,7 @@ def _settle_pub(c, v_cruise=V75, v_ego=V60, iters=250):
 def test_no_publish_when_idle_from_start():
   c = _stock_ctrl(mode=0)
   _cap(c, V75, V60)
-  assert c.mem_params.calls == []
+  assert c.mem_params.target_calls == []
 
 
 def test_no_publish_on_oplong_car():
@@ -435,7 +443,7 @@ def test_no_publish_on_oplong_car():
   c = _ctrl(op_long=True, mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
   c.mem_params = _FakeMemParams()   # inject AFTER construction so we can observe (a lack of) calls
   _settle(c, V75, V60)
-  assert c.mem_params.calls == []
+  assert c.mem_params.target_calls == []
 
 
 def test_publish_dec_while_capping():
@@ -729,13 +737,13 @@ def test_restore_pauses_in_curve():
   c._release_t -= (RELEASE_S + 0.1)
   _tick(c)                                                # restore begins
   assert c._restore_ceiling is not None
-  n_before = len(c.mem_params.calls)
+  n_before = len(c.mem_params.target_calls)
   c._last_t -= 0.5
   c._pub_last -= 1.0
   out = c.cap(_sm(speed=V60, lat_accel=2.5, v_ego=30.0), V75, V75, V60, True)
   assert out == V75                                        # neutral op-long return, unaffected
   assert c._restore_ceiling is not None                     # episode still alive -- PAUSED, not aborted
-  assert len(c.mem_params.calls) == n_before                # no fresh publish while paused
+  assert len(c.mem_params.target_calls) == n_before         # no fresh publish while paused
 
 
 def test_restore_resumes_after_curve_clears():
