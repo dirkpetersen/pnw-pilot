@@ -36,6 +36,19 @@ TESTING_CLOSET = "TESTING_CLOSET" in os.environ
 # absence at least this long closes it and re-arms the next rising edge for a new record.
 STEER_SATURATED_HOLDOFF_S = 1.0
 
+# locdebounce2pnw: consecutive livePose frames (20 Hz -> 3 = 150 ms) that must report inputsOK False
+# before locationdTemporaryError is raised. Measured 2026-08-20 over 522 segment-minutes: all 8
+# occurrences were exactly ONE frame long, and each one painted a red "TAKE CONTROL IMMEDIATELY" +
+# softDisabling on an engaged system that recovered on the very next frame. Root cause is upstream
+# (locationd.py): the gyro/cameraOdometry yaw-rate cross-check gate is 30 * camodo rotStd[2], which
+# floors at ~0.029 rad/s when vision is confident, while this device's residual reaches p99 = 0.031 —
+# so a confident camera makes the gate a hair-trigger. Violations are exclusively low-speed (<15 m/s:
+# 0.169%, highway: 0.000%). This debounce does NOT relax locationd's math or its detection
+# sensitivity; a genuine locationd fault persists for seconds and still alerts within 150 ms. A total
+# livePose failure is unaffected — it is caught by the commIssue alive/valid checks above (livePose is
+# not in the SubMaster `ignore` list), which do not route through this counter.
+LOCATIOND_INVALID_FRAMES = 3
+
 LONGITUDINAL_PERSONALITY_MAP = {v: k for k, v in log.LongitudinalPersonality.schema.enumerants.items()}
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -139,6 +152,7 @@ class SelfdriveD:
     self.last_functional_fan_frame = 0
     self.events_prev = []
     self.logged_comm_issue = None
+    self.locationd_invalid_frames = 0  # locdebounce2pnw: consecutive livePose frames with inputsOK False
     self.not_running_prev = None
     self.experimental_mode = False
     self.manual_experimental_mode = False     # ces2xnor: the ExperimentalMode-param baseline
@@ -411,7 +425,16 @@ class SelfdriveD:
     if not self.CP.notCar:
       if not self.sm['livePose'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['livePose'].inputsOK:
+      # locdebounce2pnw: count on livePose UPDATES, not selfdrived frames — selfdrived runs at 100 Hz
+      # and livePose at 20 Hz, so counting frames here would trip on 30 ms and defeat the debounce.
+      if self.sm.updated['livePose']:
+        if self.sm['livePose'].inputsOK:
+          self.locationd_invalid_frames = 0
+        else:
+          self.locationd_invalid_frames += 1
+      # raised every frame while the condition holds (self.events is rebuilt each frame), not just on
+      # the livePose tick that crosses the threshold.
+      if self.locationd_invalid_frames >= LOCATIOND_INVALID_FRAMES:
         self.events.add(EventName.locationdTemporaryError)
       if not self.sm['liveParameters'].valid and cal_status == log.LiveCalibrationData.Status.calibrated and not TESTING_CLOSET and (not SIMULATION or REPLAY):
         self.events.add(EventName.paramsdTemporaryError)
