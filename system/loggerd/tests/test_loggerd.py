@@ -97,7 +97,10 @@ class TestLoggerd:
 
     return sent_msgs
 
-  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5):
+  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5, gear=None):
+    """parkedvideo2pnw: `gear` optionally publishes carState with that gearShifter alongside the
+    frames, so loggerd's live park gate can be exercised. Defaults to None -- no carState is sent and
+    every pre-existing caller behaves exactly as before."""
     # Use small frame sizes for testing (width, height, size, stride, uv_offset)
     # NV12 format: size = stride * height * 1.5, uv_offset = stride * height
     w, h = 320, 240
@@ -109,7 +112,7 @@ class TestLoggerd:
     ]
 
     sm = messaging.SubMaster(["roadEncodeData"])
-    pm = messaging.PubMaster([s for _, _, s in streams] + ["rawAudioData"])
+    pm = messaging.PubMaster([s for _, _, s in streams] + ["rawAudioData"] + (["carState"] if gear is not None else []))
     vipc_server = VisionIpcServer("camerad")
     for stream_type, frame_spec, _ in streams:
       vipc_server.create_buffers_with_sizes(stream_type, 40, *(frame_spec))
@@ -132,6 +135,13 @@ class TestLoggerd:
         frame = getattr(camera_state, state)
         frame.frameId = n
         pm.send(state, camera_state)
+
+      # parkedvideo2pnw: loggerd samples gearShifter off this stream (every 20th message), so send it
+      # every frame to guarantee the gate has seen a value before the first segment boundary.
+      if gear is not None:
+        cs = messaging.new_message('carState')
+        cs.carState.gearShifter = gear
+        pm.send('carState', cs)
 
       # send audio
       msg = messaging.new_message('rawAudioData')
@@ -315,6 +325,69 @@ class TestLoggerd:
 
     dcamera_hevc_exists = os.path.exists(os.path.join(self._get_latest_log_dir(), 'dcamera.hevc'))
     assert dcamera_hevc_exists == record_front
+
+  # --- parkedvideo2pnw ------------------------------------------------------------------------------
+  # The Lightning holds its ignition line live while parked+charging, so IsOnroad stays 1 and loggerd
+  # wrote ~145 MB/min of a stationary truck, pinning /data at the deleter threshold and evicting real
+  # drive footage. SkipVideoWhenParked suppresses ONLY the big .hevc writers while gearShifter == park.
+  #
+  # A first attempt shipped with a canValid condition and was provably INERT on the car (canValid is
+  # false on 996/996 messages while parked+charging). These tests exist so that class of "shipped but
+  # does nothing" is caught here instead of on a drive.
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  @pytest.mark.parametrize("skip_enabled,gear,expect_video", [
+    (False, "park", True),    # feature OFF -> unchanged, video written even in Park
+    (True, "drive", True),    # feature ON but moving -> video written
+    (True, "park", False),    # feature ON and parked -> the ONLY case that suppresses
+  ])
+  def test_skip_video_when_parked(self, skip_enabled, gear, expect_video):
+    Params().put_bool("SkipVideoWhenParked", skip_enabled)
+
+    self._publish_camera_and_audio_messages(gear=gear)
+
+    d = self._get_latest_log_dir()
+    for name in ("fcamera.hevc", "ecamera.hevc"):
+      assert os.path.exists(os.path.join(d, name)) == expect_video, \
+        f"{name}: skip={skip_enabled} gear={gear} expected exists={expect_video}"
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  def test_skip_video_when_parked_keeps_everything_else(self):
+    """The suppression must cost ONLY the big video. qcamera in particular inherits record=True from
+    the EncoderInfo struct default and never opts out, so an earlier version of the gate killed the
+    preview stream too -- and because qcamera is the only encoder with include_audio, that also
+    deadlocked audio init and dropped its encodeIdx packets. Pin all of it."""
+    Params().put_bool("SkipVideoWhenParked", True)
+
+    self._publish_camera_and_audio_messages(gear="park")
+
+    d = self._get_latest_log_dir()
+    assert not os.path.exists(os.path.join(d, "fcamera.hevc"))
+    assert not os.path.exists(os.path.join(d, "ecamera.hevc"))
+    # the cheap preview and the logs must survive
+    assert os.path.exists(os.path.join(d, "qcamera.ts")), "qcamera must NOT be suppressed"
+    assert os.path.getsize(os.path.join(d, "qcamera.ts")) > 0
+    assert os.path.exists(os.path.join(d, "rlog.zst"))
+
+    # the idx packets must still reach the log even with no video file, or rotation bookkeeping and
+    # offline frame lookup break. roadEncodeIdx is the fcamera stream -- the one we suppressed.
+    whichs = {m.which() for m in LogReader(os.path.join(d, "rlog.zst"))}
+    assert "roadEncodeIdx" in whichs, "suppressing the writer must not drop encodeIdx from the log"
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  def test_skip_video_when_parked_still_rotates(self):
+    """Regression for the hazard that made this gate delicate: handle_encoder_msg drives
+    ready_to_rotate/max_waiting, so gating anything more than the writer stalls rotation and yields
+    one enormous segment. Suppressed segments must still rotate on schedule."""
+    Params().put_bool("SkipVideoWhenParked", True)
+
+    self._publish_camera_and_audio_messages(num_segs=3, segment_length=2, gear="park")
+
+    route = self._get_latest_log_dir().rsplit("--", 1)[0]
+    segs = [p for p in Path(route).parent.iterdir() if p.name.startswith(Path(route).name)]
+    assert len(segs) >= 2, f"expected multiple segments, rotation may have stalled: {len(segs)}"
+    for s in segs:
+      assert not os.path.exists(os.path.join(s, "fcamera.hevc"))
 
   @pytest.mark.xdist_group("camera_encoder_tests")  # setting xdist group ensures tests are run in same worker, prevents encoderd from crashing
   @pytest.mark.parametrize("record_audio", [True, False])
