@@ -16,6 +16,13 @@ ExitHandler do_exit;
 struct LoggerdState {
   LoggerState logger;
   std::atomic<double> last_camera_seen_tms{0.0};
+  // parkedvideo2pnw: live "car is in Park" truth, parsed from the carState messages already flowing
+  // through this loop (loggerd is a should_log subscriber to carState -- no new subscription). This is
+  // deliberately NOT the GearPark param: card publishes that change-only against its own internal
+  // state, so an externally hand-set GearPark is never corrected and would silently discard driving
+  // video for the rest of a drive. Param = enable, CAN = truth.
+  bool car_parked = false;
+  uint64_t carstate_decim = 0;   // unsigned: wraps defined, no signed-overflow UB at 100 Hz
   std::atomic<int> ready_to_rotate{0};  // count of encoders ready to rotate
   int max_waiting = 0;
   double last_rotate_tms = 0.;      // last rotate time in ms
@@ -63,12 +70,25 @@ struct RemoteEncoder {
   bool marked_ready_to_rotate = false;
   bool seen_first_packet = false;
   bool audio_initialized = false;
+  bool park_skipped = false;   // parkedvideo2pnw: writer suppressed for this segment (parked)
 };
 
 size_t write_encode_data(LoggerdState *s, cereal::Event::Reader event, RemoteEncoder &re, const EncoderInfo &encoder_info) {
   auto edata = (event.*(encoder_info.get_encode_data_func))();
   auto idx = edata.getIdx();
   auto flags = idx.getFlags();
+
+  // parkedvideo2pnw: re-check the gate HERE, not only at the segment boundary. Every drive begins
+  // with the car in Park, so a boundary-only check would discard the first segment of EVERY drive
+  // (backing out, first street) -- up to 60 s, on every trip, not just charging sessions. Leaving
+  // Park now starts the video immediately; the file simply begins partway into the segment.
+  if (re.park_skipped && !s->car_parked && encoder_info.record && encoder_info.filename != NULL) {
+    re.writer.reset(new VideoWriter(s->logger.segmentPath().c_str(),
+                                    encoder_info.filename, idx.getType() != cereal::EncodeIndex::Type::FULL_H_E_V_C,
+                                    edata.getWidth(), edata.getHeight(), encoder_info.fps, idx.getType()));
+    re.recording = false;      // force the header to be written at the next keyframe below
+    re.park_skipped = false;
+  }
 
   // if we aren't recording yet, try to start, since we are in the correct segment
   if (!re.recording) {
@@ -79,7 +99,10 @@ size_t write_encode_data(LoggerdState *s, cereal::Event::Reader event, RemoteEnc
         LOGW("%s: dropped %d non iframe packets before init", encoder_info.publish_name, re.dropped_frames);
         re.dropped_frames = 0;
       }
-      if (encoder_info.record) {
+      // parkedvideo2pnw: `re.writer` used to be non-null whenever encoder_info.record was true, so
+      // this deref was safe. The park gate below can now suppress the writer for a segment while
+      // record stays true, so the writer must be checked explicitly or this null-derefs loggerd.
+      if (encoder_info.record && re.writer) {
         // write the header
         auto header = edata.getHeader();
         re.writer->write((uint8_t *)header.begin(), header.size(), idx.getTimestampEof() / 1000, true, false);
@@ -134,14 +157,60 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
 
     // if this is a new segment, we close any possible old segments, move to the new, and process any queued packets
     if (re.current_segment != s->logger.segment()) {
-      // if we aren't actually recording, don't create the writer
-      if (encoder_info.record) {
+      // parkedvideo2pnw: skip the VIDEO FILE for a segment recorded while the car sits in Park.
+      // The Lightning holds its ignition line live while parked/charging, so IsOnroad stays 1 and
+      // loggerd kept writing ~145 MB/min of a stationary truck -- which pinned /data at the
+      // deleter's 10% threshold and evicted real drive footage to make room (2026-08-21).
+      //
+      // Deliberately gates ONLY the writer, not handle_encoder_msg: everything else -- the idx
+      // packet into the log stream, re.recording, and above all the ready_to_rotate / max_waiting
+      // bookkeeping -- must still run, or segment rotation stalls and produces one enormous
+      // segment. write_encode_data() already has a "writer is null" path (it was the
+      // encoder_info.record == false case), so this reuses a seam that already exists.
+      //
+      // Evaluated once per SEGMENT (~1 min), not per frame: one param read per minute is free, and
+      // a segment is the smallest unit that can be whole-or-absent anyway. Fails toward RECORDING:
+      // any read error leaves skip_video false.
+      // ONLY the big .hevc cameras. Two reasons, both load-bearing (Gemini review 2026-08-21):
+      //   1. qcamera.ts inherits `record = true` from the struct default -- it never opts out -- so a
+      //      naive `encoder_info.record` gate would kill the small preview stream too. qcamera is
+      //      ~2 MB/min against ~145 MB/min for fcamera+ecamera; it is not the problem and it is what
+      //      makes a parked segment still viewable.
+      //   2. qcamera is the ONLY encoder with include_audio (= RecordAudio). re.audio_initialized is
+      //      set exclusively inside `if (encoder && encoder->writer)`, so a null writer would leave it
+      //      false forever, and handle_encoder_msg's `(re.audio_initialized || !include_audio)` branch
+      //      would then queue every frame to the MAIN_FPS*10 cap, drop the rest WITHOUT writing their
+      //      idx packets to qlog, and finally flush ~10 s of stale parked frames into the NEXT
+      //      (driving) segment's video. Excluding qcamera makes that entire failure class unreachable:
+      //      fcamera/ecamera/dcamera all have include_audio == false, so they always take the
+      //      immediate-write branch and never queue.
+      const std::string enc_file = encoder_info.filename != NULL ? encoder_info.filename : "";
+      const bool big_video = (enc_file == "fcamera.hevc" || enc_file == "ecamera.hevc" ||
+                              enc_file == "dcamera.hevc");
+      bool skip_video = false;
+      if (encoder_info.record && big_video && s->car_parked) {
+        try {
+          skip_video = Params().getBool("SkipVideoWhenParked");
+        } catch (...) {
+          skip_video = false;   // never lose driving footage to a params hiccup
+        }
+      }
+      if (encoder_info.record && !skip_video) {
         assert(encoder_info.filename != NULL);
         re.writer.reset(new VideoWriter(s->logger.segmentPath().c_str(),
                                         encoder_info.filename, idx.getType() != cereal::EncodeIndex::Type::FULL_H_E_V_C,
                                         edata.getWidth(), edata.getHeight(), encoder_info.fps, idx.getType()));
         re.recording = false;
         re.audio_initialized = false;
+        re.park_skipped = false;
+      } else if (encoder_info.record && big_video) {
+        // Park: drop the PREVIOUS segment's writer. Without this reset the unique_ptr still points at
+        // the old segment's VideoWriter and this segment's frames would be appended to the previous
+        // segment's file -- a corrupt, oversized .hevc rather than an absent one.
+        re.writer.reset();
+        re.recording = false;
+        re.audio_initialized = false;
+        re.park_skipped = true;    // ...and allow a mid-segment start if we leave Park
       }
       re.current_segment = s->logger.segment();
       re.marked_ready_to_rotate = false;
@@ -301,6 +370,26 @@ void loggerd_thread() {
               encoder->writer->write_audio((uint8_t*)audio_data.begin(), audio_data.size(), event.getLogMonoTime() / 1000, sample_rate);
               encoder->audio_initialized = true;
             }
+          }
+        }
+
+        // parkedvideo2pnw: sample the live gear from the carState stream this loop already drains.
+        // Decimated to ~5 Hz (carState is 100 Hz) -- park/drive transitions are human-scale, and this
+        // avoids a capnp parse per message. No new subscription, no new socket.
+        if (service.name == "carState" && (s.carstate_decim++ % 20) == 0) {
+          try {
+            capnp::FlatArrayMessageReader creader(kj::ArrayPtr<capnp::word>((capnp::word *)msg->getData(), msg->getSize() / sizeof(capnp::word)));
+            auto cs = creader.getRoot<cereal::Event>().getCarState();
+            // Fable review N1: require canValid AND park, rather than latching the last value through
+            // an invalid tick. Latching meant that if CAN died after we were already parked, video
+            // stayed suppressed for the rest of that loggerd lifetime -- e.g. parked with good CAN,
+            // CAN dies, then the car is driven as a pure dashcam: no video for the whole drive. The
+            // cost of this direction is that a CAN glitch while charging records a little parked
+            // video, which is harmless. Fail toward RECORDING.
+            s.car_parked = cs.getCanValid() &&
+                           (cs.getGearShifter() == cereal::CarState::GearShifter::PARK);
+          } catch (...) {
+            // malformed carState -> keep the last known gear rather than guessing "parked"
           }
         }
 
