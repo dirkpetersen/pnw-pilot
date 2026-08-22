@@ -64,7 +64,6 @@ class VTSCController:
     # safe to call standalone; _finish() reads them on every tick including the disabled early-return.
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
-    self._tele_map_vetoed = False   # mapveto2pnw: geometry contradicted the map advisory this fold
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
@@ -165,36 +164,6 @@ class VTSCController:
       self._cur_lat = self._cur_lon = None
       self._cur_bearing = None
 
-  def _map_geometry_contradicts(self, mv: float) -> bool:
-    """mapveto2pnw: True when the map polyline says this "curve" is effectively straight.
-
-    ALL of these must hold, or we do not veto (fail toward keeping the slowdown):
-      - the veto is enabled
-      - >= MAPVETO_MIN_N usable curvature triplets were solved this tick (geometry is confident;
-        it is unmeasurable on ~44% of highway samples, so absence must never imply "straight")
-      - the measured curvature is AHEAD of us, not behind
-      - the implied radius exceeds MAPVETO_MIN_RADIUS (a genuine curve is tighter than this)
-      - geometry's own safe speed exceeds mapd's advisory by >= MAPVETO_MIN_RATIO
-
-    Reads only the telemetry polyline_curvature() already computed this tick -- no extra solve.
-    Never raises: any missing/non-finite input degrades to False (no veto).
-    """
-    if not C.MAPVETO_ENABLED:
-      return False
-    try:
-      n = int(self._tele_mapk_n or 0)
-      k = float(self._tele_mapk or 0.0)
-      kv = float(self._tele_mapk_v or 0.0)
-      if n < C.MAPVETO_MIN_N or not self._tele_mapk_ahead:
-        return False
-      if not (math.isfinite(k) and math.isfinite(kv)) or k <= 0.0 or kv <= 0.0 or mv <= 0.0:
-        return False
-      if (1.0 / k) <= C.MAPVETO_MIN_RADIUS:
-        return False                            # geometry agrees there IS a curve -> keep the slowdown
-      return kv >= mv * C.MAPVETO_MIN_RATIO
-    except (TypeError, ValueError, ZeroDivisionError):
-      return False
-
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
     whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
@@ -208,7 +177,6 @@ class VTSCController:
     The MTSC scale (driver: mapd targets ran ~10 mph slow) + clamp are applied INSIDE the selection so the
     chosen curve matches the value used here."""
     self._tele_map_floored = False               # per-fold, so the flag never survives a stale tick
-    self._tele_map_vetoed = False                # mapveto2pnw: same per-fold reset
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
         self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
@@ -224,14 +192,6 @@ class VTSCController:
     # proximity, and its high raw target then blocks the floor). See that function for the full note.
     # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
     if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
-      return k_apex, d_apex, v_curve, False
-    # mapveto2pnw: drop a map advisory that the road GEOMETRY contradicts. mapd's advisory VELOCITY
-    # cannot distinguish a real curve from an artifact, but the lat/lon polyline in the same message
-    # can -- measured 179 corroborated vs 12 contradicted on the I-5 corridor (see vtsc_constants).
-    # REMOVE-ONLY and vision-independent: dropping the map candidate here just leaves vision's own
-    # verdict (k_apex/d_apex/v_curve, computed before any map fold) to stand on its own.
-    if self._map_geometry_contradicts(mv):
-      self._tele_map_vetoed = True
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
@@ -497,8 +457,6 @@ class VTSCController:
         "mapEff": round(float(self._tele_map_eff), 1),
         "mapD": round(float(self._tele_map_d), 0),
         "mapFlr": bool(self._tele_map_floored),
-        # mapveto2pnw: True when the polyline geometry vetoed a map advisory this fold.
-        "mapVeto": bool(self._tele_map_vetoed),
         # mapcurv2pnw: measured map curvature + what it would advise (m/s). Telemetry only.
         "mapK": round(float(self._tele_mapk), 5),
         "mapKD": round(float(self._tele_mapk_d), 0),

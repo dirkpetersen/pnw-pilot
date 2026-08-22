@@ -118,26 +118,6 @@ MAP_FLOOR_DEPTH   = 0.0
 #   3) allow firm friction braking (SHARP_A_DECEL_MAX) ONLY as a last resort when regen alone can't reach
 #      curve-safe speed before a blind SHARP curve's entrance (anti-take-control); still bounded — no slam.
 MAP_SOURCE_HORIZON_M = 500.0  # m; mapd's hard MIN_WAY_DIST cap — no path data exists beyond this (don't scan past)
-
-# --- mapveto2pnw: reject a map advisory the road GEOMETRY contradicts -----------------------------
-# Measured on the I-5 corridor 2026-08-21 (13,859 mapK-bearing ticks). Filtered to highway driving
-# (vEgo > 22 m/s, motorway/trunk/primary) with CONFIDENT geometry (mapKN >= 3), for mapd advisories
-# below 70 mph: 179 were corroborated by the polyline geometry, 12 were contradicted. The 12 are the
-# artifacts worth killing -- e.g. a 61.1 mph advisory on an 877 m-radius road (geometry supports
-# 104.9 mph), and 54.8 mph at a 2083 m radius (dead straight).
-#
-# WHY THIS IS ONLY A VETO, never a source: geometry was UNMEASURABLE (mapKN == 0) on 44% of highway
-# samples and confident on only 38%. Anything that DEPENDS on mapK being present would be inoperative
-# more than half the time. So this can only ever REMOVE a map candidate, never create or deepen one.
-#
-# SAFETY: the vision path is completely untouched. If the road genuinely curves, model_curve_state()
-# still sees it (~107 m ahead in the same telemetry) and still brakes -- this only drops the MAP
-# candidate before brake_cap_for_apex() weighs it. Deliberately conservative: all four conditions
-# must hold, and the radius/ratio gates are set well outside the measured corroborated population.
-MAPVETO_ENABLED    = True    # kill switch; set False to restore pre-mapveto2pnw behaviour exactly
-MAPVETO_MIN_N      = 3       # require >= this many usable curvature triplets (the "confident" bar)
-MAPVETO_MIN_RADIUS = 600.0   # m; below this the geometry is a real curve -- never veto
-MAPVETO_MIN_RATIO  = 1.5     # geometry-safe speed must exceed the map advisory by this factor
 MAP_BRAKE_MARGIN_M   = 40.0   # m; cushion added to the computed brake distance when sizing the scan horizon
 REGEN_A_DECEL        = 2.0    # m/s^2 (~0.2 g) EV regen authority — NORMAL commanded-decel ceiling (no friction brake)
 SHARP_CURVE_V        = 30.0   # m/s (~67 mph); a map curve target below this is "sharp" (in sync with CES CURVE_SHARP_MAP_V)
