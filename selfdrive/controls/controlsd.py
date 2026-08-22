@@ -162,6 +162,10 @@ class Controls:
     # through -> angErr>8 deg) both spuriously fire this "openpilot couldn't steer" event.
     self._flight_last_steer_pressed_t = -1e9   # monotonic stamp of the last observed CS.steeringPressed
     self._flight_had_override = False          # latched True if steeringPressed anywhere in this episode
+    # steertrig2pnw: which condition armed the current episode + the undershoot inputs at that edge.
+    self._flight_trig_why: list[str] = []
+    self._flight_trig_ratio = None
+    self._flight_trig_deslat = None
     # I4 review fix: 100 Hz accumulator (updated every control tick, OUTSIDE the ~5 Hz sample gate
     # below) so the emitted peakAngErr/satAny reflect the true peak within the ~190 ms gaps between
     # throttled samples, not just the aliased value at the sample instant. Folded into the 5 Hz sample
@@ -673,6 +677,23 @@ class Controls:
                                             or undershoot_turn)
           trig_core = bool(steer_limit_status["sat"] or steer_limit_status["angSat"] or trig_departure)
           trig = bool(trig_core and not recent_steer_pressed)
+          # steertrig2pnw: WHICH condition armed this episode. On a country road 2026-08-21 the
+          # recorder fired 33 times in 19 min with peakAngErr only 2.6-4.1 deg -- and the trigger could
+          # not be identified offline, because sat/angSat/undershoot are evaluated HERE at 100 Hz while
+          # ces_events ticks are sampled at ~1 Hz. The one thing the emitted record could establish was
+          # a negative (peakAngErr is a 100 Hz running max and never reached the 8 deg threshold, so
+          # the angErr branch did not fire); everything else was unobservable. Capture the reason and
+          # the two ratio inputs at the arming edge so the threshold can be retuned from evidence
+          # instead of guessed. Pure observation -- `trig` itself is unchanged.
+          trig_why = []
+          if steer_limit_status["sat"]:
+            trig_why.append("sat")
+          if steer_limit_status["angSat"]:
+            trig_why.append("angSat")
+          if lat_active and abs(steer_limit_status["angErr"]) > FLIGHT_ANG_ERR_TRIG_DEG:
+            trig_why.append("angErr")
+          if lat_active and undershoot_turn:
+            trig_why.append("undershoot")
 
           # --- Edge-triggered state machine: idle -> armed (rising edge) -> cooldown (after emit,
           # until a clean clear) -> idle. Debounced: a sustained episode (even with brief flicker,
@@ -701,6 +722,10 @@ class Controls:
               # pre-edge ring can still hold a genuine pre-override departure, so this only tags,
               # never suppresses retroactively).
               self._flight_had_override = bool(CS.steeringPressed) or recent_steer_pressed
+              # steertrig2pnw: same latch-at-onset lifecycle as the peak fields above.
+              self._flight_trig_why = list(trig_why)
+              self._flight_trig_ratio = round(abs(desired_lat_accel) / (1e-3 + abs(actual_lat_accel)), 3)
+              self._flight_trig_deslat = round(abs(desired_lat_accel), 3)
           elif self._flight_state == "armed":
             if trig:
               self._flight_last_trig_t = now_mono
@@ -786,6 +811,12 @@ class Controls:
                 "minLaneConf": (round(self._flight_min_conf, 3)
                                 if self._flight_min_conf is not None else None),
                 "laneLowConf": bool(low_conf),   # never silently trust a low-confidence excursion
+                # steertrig2pnw: which condition(s) armed this episode, plus the undershoot ratio and
+                # desired lateral accel AT the arming edge -- the inputs to `undershoot_turn`, so a
+                # spurious-trigger cluster can be diagnosed without 100 Hz rlog forensics.
+                "trigWhy": ",".join(getattr(self, "_flight_trig_why", []) or []),
+                "trigRatio": getattr(self, "_flight_trig_ratio", None),
+                "trigDesLat": getattr(self, "_flight_trig_deslat", None),
                 # Proposal 3: rlog pointer -- frameId + the modelV2 logMonoTime anchor, the same
                 # anchor the 2026-08-11 drive report recovered manually from the `clocks` message.
                 # Route/segment id is NOT included: it is owned by loggerd, not exposed to controlsd

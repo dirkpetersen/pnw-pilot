@@ -2404,6 +2404,15 @@ class CESController:
         # window -- lets offline analysis separate genuine "openpilot couldn't steer" departures from
         # override-adjacent ones without silently dropping the latter.
         "driverOverride": bool(ev.get("driverOverride", False)),
+        # steertrig2pnw: WHICH condition armed this episode ("sat"/"angSat"/"angErr"/"undershoot",
+        # comma-joined) plus the two undershoot_turn inputs at the arming edge. Without these the
+        # 33-events-in-19-min cluster of 2026-08-21 could not be attributed to any trigger: sat /
+        # angSat / undershoot are evaluated at 100 Hz in controlsd while these records are ~1 Hz, so
+        # offline reconstruction could only establish a negative (peakAngErr never reached the 8 deg
+        # threshold, so it wasn't that branch). Pass-through, no re-derivation here.
+        "trigWhy": ev.get("trigWhy"),
+        "trigRatio": ev.get("trigRatio"),
+        "trigDesLat": ev.get("trigDesLat"),
         # N5 review fix: True only when controlsd's 5 s defensive ceiling force-emitted this event
         # (still armed, no clean clear) -- durationS is then a known-truncated lower bound.
         "capped": bool(ev.get("capped", False)),
