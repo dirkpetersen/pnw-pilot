@@ -1922,9 +1922,13 @@ class CESController:
       st = self.mem_params.get("SpeedAdjustStatus", return_default=True)
       if isinstance(st, (bytes, str)):
         st = json.loads(st)
+      # Fable review 2026-08-21: this list MUST cover every key _publish_status() emits, or the
+      # missing ones evaporate in /dev/shm -- the exact trap satele2pnw's own commit message named,
+      # and it had already caught vCruise + polKey (published, never picked up, while
+      # params_keys.h advertised polKey as reaching ces_events).
       self._sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in
-                       ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "lastSet",
-                        "ovr", "eng", "polLatch", "polSupp")}
+                       ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
+                        "ovr", "eng", "polLatch", "polSupp", "polKey")}
     except Exception:
       self._sa_tele = {}
     # lanecenter2pnw telemetry: lane-centering trim status — logging only (see _event_record).
