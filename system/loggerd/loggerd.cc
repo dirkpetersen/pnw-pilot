@@ -380,14 +380,18 @@ void loggerd_thread() {
           try {
             capnp::FlatArrayMessageReader creader(kj::ArrayPtr<capnp::word>((capnp::word *)msg->getData(), msg->getSize() / sizeof(capnp::word)));
             auto cs = creader.getRoot<cereal::Event>().getCarState();
-            // Fable review N1: require canValid AND park, rather than latching the last value through
-            // an invalid tick. Latching meant that if CAN died after we were already parked, video
-            // stayed suppressed for the rest of that loggerd lifetime -- e.g. parked with good CAN,
-            // CAN dies, then the car is driven as a pure dashcam: no video for the whole drive. The
-            // cost of this direction is that a CAN glitch while charging records a little parked
-            // video, which is harmless. Fail toward RECORDING.
-            s.car_parked = cs.getCanValid() &&
-                           (cs.getGearShifter() == cereal::CarState::GearShifter::PARK);
+            // NO canValid GATE -- measured on-car 2026-08-22 and it is decisive: with the Lightning
+            // parked and charging, carState reported canValid == FALSE on 996 of 996 messages while
+            // gearShifter read 'park' on all 996. The truck holds its ignition line live but its CAN
+            // bus is quiet, so ANY canValid-conditioned gate (either `canValid && park`, or the
+            // latch-on-valid variant) is dead in precisely the situation this feature exists for.
+            //
+            // Gearing on the shifter alone is still safe in the failure direction: the value only
+            // ever comes from a real parse, and ANY non-park reading -- including the capnp default
+            // 'unknown' when nothing has been decoded -- records. A CAN dropout mid-drive leaves the
+            // last decoded gear (drive/reverse/...), which also records. The only way to suppress
+            // video is an affirmative 'park'.
+            s.car_parked = (cs.getGearShifter() == cereal::CarState::GearShifter::PARK);
           } catch (...) {
             // malformed carState -> keep the last known gear rather than guessing "parked"
           }
