@@ -87,6 +87,50 @@ def _run(args: list[str]) -> subprocess.CompletedProcess | None:
     return None
 
 
+def _wifi_autoconnect_repair(nets: list[dict]) -> None:
+  """wifirepair2pnw: restore `autoconnect` on saved client wifi, and make selection deterministic.
+
+  THE BUG THIS FIXES. The hotspot and a client connection cannot share the single radio, so
+  wifi_manager._set_others_autoconnect(False) turns autoconnect OFF on every saved wifi network when
+  tethering starts, and only turns it back ON in set_tethering_active(False). That restore is reachable
+  ONLY through the UI toggle, runs on a daemon thread that dies with the UI process, and the
+  `autoconnect=no` it leaves behind is PERSISTED in NM config across reboots. Meanwhile decide() here
+  can independently return "down_hotspot" and tear the hotspot down without any of that running.
+
+  Net effect (driver report 2026-08-22, "sometimes it does not auto connect to a saved network, but
+  not always", and once "could not see ANY wifi networks until I toggled tethering"): the device is
+  left with autoconnect disabled on every saved network and silently never rejoins anything. Toggling
+  tethering on and off by hand is what repairs it today, which is exactly the reported workaround.
+
+  So: whenever tethering is NOT active, assert the invariant every tick. Idempotent -- it only issues
+  an nmcli write when a connection is actually in the wrong state, so the steady-state cost is one
+  read. Deliberately does nothing while tethering IS active: there the UI's suppression is correct and
+  fighting it would let a client steal the radio back from the AP.
+
+  Also sets connection.autoconnect-priority from the driver's OWN priority-list order (first entry
+  wins). Without it every saved network sits at priority 0 and NM picks among in-range candidates
+  arbitrarily -- the second half of "sometimes it does not auto connect to [the right] network".
+  """
+  out = _nmcli(["-t", "-f", "NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY", "con", "show"])
+  if out is None:
+    return
+  # highest priority to the first list entry; anything not in the list keeps a neutral 0
+  want_prio = {priority_connection_id(e["ssid"]): len(nets) - i for i, e in enumerate(nets)}
+  for line in out.splitlines():
+    parts = line.rsplit(":", 3)
+    if len(parts) != 4:
+      continue
+    name, ctype, autoconn, prio = parts
+    if "wireless" not in ctype or name == HOTSPOT_CONNECTION_ID:
+      continue
+    if autoconn.lower() != "yes":
+      cloudlog.warning(f"network_arbiterd: repairing autoconnect on '{name}' (was {autoconn!r}) -- left disabled by a hotspot session that never restored it")
+      _nmcli(["con", "modify", name, "connection.autoconnect", "yes"])
+    target = want_prio.get(name)
+    if target is not None and prio.strip() != str(target):
+      _nmcli(["con", "modify", name, "connection.autoconnect-priority", str(target)])
+
+
 def _scan_ssids() -> list[str]:
   """SSIDs currently visible to NM. `nmcli -t -f SSID dev wifi list` (works even in AP mode)."""
   out = _nmcli(["-t", "-f", "SSID", "dev", "wifi", "list"])
@@ -446,6 +490,10 @@ def main() -> NoReturn:
       # pick the first configured network that is both in range and has a saved NM connection.
       chosen = pn.select_available(nets, scan, _saved_connections(), priority_connection_id)
       chosen_ssid = chosen["ssid"] if chosen else ""
+
+      # wifirepair2pnw: assert the autoconnect invariant while tethering is off (see the helper).
+      if not tethering_enabled and current_active != HOTSPOT_CONNECTION_ID:
+        _wifi_autoconnect_repair(nets)
 
       action = decide(
         tethering_enabled=tethering_enabled,
