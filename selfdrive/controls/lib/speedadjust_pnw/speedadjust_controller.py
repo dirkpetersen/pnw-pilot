@@ -248,6 +248,7 @@ class SpeedAdjustController:
     self._police_suppressed_uuid = None   # which report the driver dismissed (see _police_cap)
     self._ovr = "init"                    # satele2pnw: last manual-override verdict (see cap())
     self._sa_pub_t = -1e9                 # satele2pnw: SpeedAdjustStatus publish throttle
+    self._sa_pub_warned = False           # satele2pnw: one-shot publish-failure log latch
     # speedadjustreset2pnw: last observed driver v_cruise_set (m/s), used to detect a manual cruise
     # nudge (see cap()). None = not yet tracked — also forced back to None whenever
     # v_cruise_initialized is False OR ACC is not engaged (FIX A) so the uninitialized->initialized
@@ -684,7 +685,13 @@ class SpeedAdjustController:
       try:
         self._publish_status(v_cruise_set, v_cruise, out)
       except Exception:
-        pass                                 # telemetry must never affect the control path
+        # telemetry must never affect the control path -- but it must not fail SILENTLY either.
+        # satele2pnw shipped without its params_keys.h entry, so every publish raised
+        # UnknownKeyName and this handler swallowed it: the channel was dead for a whole drive and
+        # looked exactly like "the feature never ran". Log once so the next such bug is one grep away.
+        if not self._sa_pub_warned:
+          self._sa_pub_warned = True
+          cloudlog.exception("satele2pnw: SpeedAdjustStatus publish failed (telemetry only, control unaffected)")
 
   def _cap_impl(self, sm, v_cruise_set: float, v_cruise: float, v_ego: float,
                 v_cruise_initialized: bool) -> float:
