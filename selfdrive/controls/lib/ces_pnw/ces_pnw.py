@@ -47,8 +47,14 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
 # One JSON line per CES mode transition, with GPS so we can map where each adoption happened.
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
-CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB; one .1 generation kept -> ~40 MB cap
-                                             # (was unbounded — 43 MB and growing on a 90%-full disk)
+CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
+# cesretain2pnw: keep N rotated generations (.1 .. .N), not one. A single .1 gave a ~1-day window:
+# the 2026-08-26 Olympic Peninsula trip (261 mi, two cars) had ALREADY rotated past by the time it
+# was analysed — .1 started AFTER the driving ended, and the whole trip had to be reconstructed from
+# S3 qlogs instead. Heavy driving writes ~21 MB/day (measured on that trip), so a full week needs
+# >=147 MB of ROTATED history: 8 generations x 20 MB = 160 MB clears it, 7 would NOT (140 MB).
+# Worst case 180 MB including the live file — 0.2% of the 89 GB /data.
+CES_EVENT_LOG_GENERATIONS = 8
 # stophold2pnw (D): the comma 3X RTC battery is dead (RTC reads 1970) — every cold boot writes
 # event records with a garbage wall clock until NTP/GPS sync (a 2025-11-25-stamped record polluted
 # the 2026-07-12 gap analysis). Records written before the clock is plausibly valid are MARKED
@@ -62,6 +68,18 @@ def clock_bad(t_wall: float) -> bool:
     return float(t_wall) < CLOCK_VALID_EPOCH
   except (TypeError, ValueError):
     return True
+
+
+def rotate_event_log(path: str, generations: int) -> None:
+  """cesretain2pnw: shift path.1..path.(N-1) down one and move path -> path.1, keeping `generations`
+  rotated files. Oldest (path.N) is dropped. Each step is an atomic os.replace, so a crash mid-rotate
+  loses at most one generation and never the live file. Caller has already checked the size."""
+  for i in range(max(int(generations), 1) - 1, 0, -1):
+    try:
+      os.replace(f"{path}.{i}", f"{path}.{i + 1}")
+    except OSError:
+      pass          # that generation doesn't exist yet -> nothing to shift
+  os.replace(path, f"{path}.1")
 
 
 # steerpower2pnw: LOGGING ONLY -- measure the truck's true hands-off steering capability by direction.
@@ -2853,7 +2871,7 @@ class CESController:
     try:
       try:
         if os.path.getsize(CES_EVENT_LOG) > CES_EVENT_LOG_MAX_BYTES:
-          os.replace(CES_EVENT_LOG, CES_EVENT_LOG + ".1")   # atomic rotate; overwrites the previous .1
+          rotate_event_log(CES_EVENT_LOG, CES_EVENT_LOG_GENERATIONS)
       except OSError:
         pass                                                # no file yet / stat race -> just append
       with open(CES_EVENT_LOG, "a") as f:

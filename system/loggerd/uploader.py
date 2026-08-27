@@ -36,6 +36,44 @@ FIREHOSE_FILES = {"rlog", "rlog.zst", "fcamera.hevc", "ecamera.hevc"}
 HD_VIDEO_FILES = {"fcamera.hevc", "ecamera.hevc", "dcamera.hevc"}
 DEFER_HD_PARAM = "DeferHDVideoUpload"
 
+# uploadprio2pnw: pass-2 files that jump the queue ACROSS ALL segments. rlog is ~10% of the pass-2
+# bytes (7.4 GB of a 72.7 GB backlog on 2026-08-27) but carries all the analysis value, yet raw
+# os.listdir order puts it LAST inside every segment (['fcamera.hevc', 'ecamera.hevc', ..., 'rlog.zst'])
+# because every pass-2 name shares the same default sort priority. On a 6 Mbit/s home uplink that put
+# the cheapest, most valuable data behind ~27 h of video, fully exposed to the deleter.
+PASS2_PRIORITY_FILES = {"rlog", "rlog.zst"}
+
+# uploadprio2pnw: the wide (ecamera) road camera is half the video bytes. Skipping it halves the
+# pass-2 backlog. Skipped-not-marked (never xattr-marked), so the files become uploadable again the
+# moment the toggle goes back off -- but this is a PERMANENT skip, not a hold like DeferHDVideoUpload:
+# the deleter stops protecting those segments while it is on, so under disk pressure some will
+# already have been reclaimed by then. See the params_keys.h entry. Default OFF.
+WIDE_CAMERA_FILES = {"ecamera.hevc"}
+SKIP_WIDE_PARAM = "SkipWideCameraUpload"
+
+
+def uploadable_firehose_files(params=None) -> set[str]:
+  """uploadprio2pnw: the pass-2 files the uploader is EVER going to send, given the permanent-skip
+  toggles. The DELETER uses this for its keep-un-uploaded-last ordering: a file that will never be
+  sent must not count as "still un-uploaded", or every segment stays pinned as un-uploaded forever
+  and the ordering silently degenerates to plain oldest-first.
+
+  DELIBERATELY does NOT consider DeferHDVideoUpload. Defer is a TEMPORARY hold ("skipped-but-KEPT",
+  see HD_VIDEO_FILES above): the whole point is to upload that video later at home, so its segments
+  MUST keep sorting last and must keep triggering the loud "deleting UN-UPLOADED segment" error if
+  space ever forces their destruction. Subtracting it here would quietly turn "hold the video" into
+  "discard the video under disk pressure" — on a device that sits at the deleter threshold today.
+  When defer pins every segment, oldest-first-plus-a-loud-error IS the correct last resort.
+
+  Best-effort — any param failure falls back to the full set (the pre-existing behaviour)."""
+  try:
+    p = params if params is not None else Params()
+    if p.get_bool(SKIP_WIDE_PARAM):
+      return FIREHOSE_FILES - WIDE_CAMERA_FILES
+  except Exception:
+    pass
+  return FIREHOSE_FILES
+
 # connect2xnor: only real external WiFi clients qualify for pass-2. The comma's
 # own hotspot is never-default, so NM's PrimaryConnection stays LTE while
 # hotspotting -> networkType reports `cell`, never `wifi`. So wifi cleanly means
@@ -237,6 +275,7 @@ class Uploader:
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
     self._defer_hd = False   # DeferHDVideoUpload snapshot, refreshed per pass-2 selection
+    self._skip_wide = False  # uploadprio2pnw: SkipWideCameraUpload snapshot, refreshed per listing
     self._retry_after: dict[str, float] = {}   # uploadretry2pnw: fn -> monotonic time it may retry
     self._upload_err_desc: str | None = None   # uploadretry2pnw: last LastUploadError we wrote (change-only)
     # upload412ui2pnw: MONOTONIC instant the current run of 412s with no success in between started;
@@ -330,6 +369,10 @@ class Uploader:
       self._defer_hd = self.params.get_bool(DEFER_HD_PARAM)   # refresh once per listing
     except Exception:
       self._defer_hd = False
+    try:
+      self._skip_wide = self.params.get_bool(SKIP_WIDE_PARAM)  # uploadprio2pnw, same cadence
+    except Exception:
+      self._skip_wide = False
 
     # uploadretry2pnw: drop lapsed retry-cooldowns (those files become eligible again) — keeps the map
     # bounded to files that failed within the last RETRY_COOLDOWN_S.
@@ -375,6 +418,11 @@ class Uploader:
         if self._defer_hd and name in HD_VIDEO_FILES:
           continue
 
+        # uploadprio2pnw: SkipWideCameraUpload drops the wide road camera (half the video bytes).
+        # Skipped-not-marked, same contract as defer above -- flip the toggle off and it uploads.
+        if self._skip_wide and name in WIDE_CAMERA_FILES:
+          continue
+
         if pass2:
           if name not in FIREHOSE_FILES:
             continue
@@ -410,9 +458,18 @@ class Uploader:
     # connect2xnor: oldest un-uploaded large file (listdir_by_creation already
     # sorts oldest-first), so video/logs leave the device before the deleter
     # reaches them.
+    # uploadprio2pnw: but drain ALL rlogs first, across every segment -- not just first within each
+    # segment. rlog is ~10% of the pass-2 bytes and carries the analysis value, so on a slow uplink
+    # this secures it in hours instead of behind a day of video. The oldest-first walk is preserved
+    # within each class, and the first non-priority file found is the fallback for when no rlog is
+    # left, so behaviour with an rlog-free backlog is byte-identical to before.
+    fallback: tuple[str, str, str] | None = None
     for name, key, fn in self.list_upload_files(metered, pass2=True):
-      return name, key, fn
-    return None
+      if name in PASS2_PRIORITY_FILES:
+        return name, key, fn
+      if fallback is None:
+        fallback = (name, key, fn)
+    return fallback
 
   def do_upload(self, key: str, fn: str):
     # connect2pnw device-locator: local_ip rides along as a query param (api_get forwards **kwargs

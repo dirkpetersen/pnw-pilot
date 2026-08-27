@@ -33,9 +33,16 @@ CLUSTER_GAP_S = 3.0             # ticks within this gap belong to the same overr
 
 def _load_folder_records(folder: str) -> list[dict]:
   """All records from every ces_events*.jsonl in one drive folder, deduped by timestamp (the
-  evening/final files overlap — same drive, re-pulled later) and time-sorted."""
+  evening/final files overlap — same drive, re-pulled later) and time-sorted.
+
+  cesretain2pnw: also picks up ROTATED generations. On-device rotation names them
+  `ces_events.jsonl.1` .. `.N`, which the `*.jsonl` glob alone does not match — so a multi-day trip
+  pulled off the device generation-by-generation was silently ignored here. Dedup by timestamp makes
+  the overlap between a copied live file and its own rotated copy harmless."""
   by_t: dict[float, dict] = {}
-  for path in sorted(glob.glob(os.path.join(folder, "ces_events*.jsonl"))):
+  paths = set(glob.glob(os.path.join(folder, "ces_events*.jsonl")))
+  paths |= set(glob.glob(os.path.join(folder, "ces_events*.jsonl.[0-9]*")))
+  for path in sorted(paths):
     with open(path) as f:
       for line in f:
         try:

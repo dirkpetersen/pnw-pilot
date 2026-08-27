@@ -7,7 +7,9 @@ from pathlib import Path
 from openpilot.system.hardware.hw import Paths
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.loggerd.uploader import main, pass1_allowed, pass2_allowed, PASS2_NETWORK_TYPES, UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE
+from openpilot.system.loggerd.uploader import (main, pass1_allowed, pass2_allowed, PASS2_NETWORK_TYPES,
+                                               UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE, Uploader,
+                                               uploadable_firehose_files, FIREHOSE_FILES)
 from cereal import log
 
 from openpilot.system.loggerd.tests.loggerd_tests_common import UploaderTestCase
@@ -223,3 +225,151 @@ class TestUploader(UploaderTestCase):
     for f_path in f_paths:
       lock_path = f_path.with_suffix(f_path.suffix + ".lock")
       assert not lock_path.is_file(), "File lock not cleared on startup"
+
+
+class TestPass2Priority:
+  """uploadprio2pnw: rlog is ~10% of the pass-2 bytes but carries the analysis value, and raw
+  os.listdir order put it LAST inside every segment. These pin the selection contract."""
+
+  class _FakeUploader:
+    """Minimal stand-in exercising the real next_pass2_file_to_upload against a scripted listing."""
+    def __init__(self, files):
+      self._files = files
+
+    def list_upload_files(self, metered, pass2=False):
+      yield from self._files
+
+    next_pass2_file_to_upload = Uploader.next_pass2_file_to_upload
+
+  def test_rlog_wins_over_video_in_the_same_segment(self):
+    u = self._FakeUploader([
+      ("fcamera.hevc", "seg0/fcamera.hevc", "/d/seg0/fcamera.hevc"),
+      ("ecamera.hevc", "seg0/ecamera.hevc", "/d/seg0/ecamera.hevc"),
+      ("rlog.zst", "seg0/rlog.zst", "/d/seg0/rlog.zst"),
+    ])
+    assert u.next_pass2_file_to_upload(metered=False)[0] == "rlog.zst"
+
+  def test_rlog_wins_across_segments_not_just_within_one(self):
+    # the whole point: an rlog in a LATER segment still beats video in the oldest one
+    u = self._FakeUploader([
+      ("fcamera.hevc", "seg0/fcamera.hevc", "/d/seg0/fcamera.hevc"),
+      ("ecamera.hevc", "seg0/ecamera.hevc", "/d/seg0/ecamera.hevc"),
+      ("fcamera.hevc", "seg1/fcamera.hevc", "/d/seg1/fcamera.hevc"),
+      ("rlog.zst", "seg9/rlog.zst", "/d/seg9/rlog.zst"),
+    ])
+    assert u.next_pass2_file_to_upload(metered=False)[2] == "/d/seg9/rlog.zst"
+
+  def test_oldest_rlog_first_among_rlogs(self):
+    u = self._FakeUploader([
+      ("rlog.zst", "seg3/rlog.zst", "/d/seg3/rlog.zst"),
+      ("rlog.zst", "seg7/rlog.zst", "/d/seg7/rlog.zst"),
+    ])
+    assert u.next_pass2_file_to_upload(metered=False)[2] == "/d/seg3/rlog.zst"
+
+  def test_falls_back_to_oldest_video_when_no_rlog_left(self):
+    # byte-identical to the old behaviour once the rlog backlog is drained
+    u = self._FakeUploader([
+      ("fcamera.hevc", "seg0/fcamera.hevc", "/d/seg0/fcamera.hevc"),
+      ("ecamera.hevc", "seg0/ecamera.hevc", "/d/seg0/ecamera.hevc"),
+      ("fcamera.hevc", "seg1/fcamera.hevc", "/d/seg1/fcamera.hevc"),
+    ])
+    assert u.next_pass2_file_to_upload(metered=False)[2] == "/d/seg0/fcamera.hevc"
+
+  def test_empty_listing_returns_none(self):
+    assert self._FakeUploader([]).next_pass2_file_to_upload(metered=False) is None
+
+  def test_uncompressed_rlog_also_prioritised(self):
+    u = self._FakeUploader([
+      ("fcamera.hevc", "seg0/fcamera.hevc", "/d/seg0/fcamera.hevc"),
+      ("rlog", "seg0/rlog", "/d/seg0/rlog"),
+    ])
+    assert u.next_pass2_file_to_upload(metered=False)[0] == "rlog"
+
+
+class TestUploadableFirehoseFiles:
+  """uploadprio2pnw: the deleter must not count a deliberately-skipped file as 'un-uploaded' --
+  otherwise every segment is pinned and the keep-un-uploaded-last ordering flattens to oldest-first."""
+
+  class _P:
+    def __init__(self, **vals):
+      self._vals = vals
+
+    def get_bool(self, k):
+      return self._vals.get(k, False)
+
+  def test_default_is_the_full_set(self):
+    assert uploadable_firehose_files(self._P()) == FIREHOSE_FILES
+
+  def test_skip_wide_drops_only_ecamera(self):
+    got = uploadable_firehose_files(self._P(SkipWideCameraUpload=True))
+    assert "ecamera.hevc" not in got
+    assert {"rlog", "rlog.zst", "fcamera.hevc"} <= got
+
+  def test_defer_hd_is_deliberately_IGNORED(self):
+    # Defer is a TEMPORARY hold ("skipped-but-KEPT"): its segments must keep sorting last and must
+    # keep raising the loud "deleting UN-UPLOADED segment" error. Subtracting it here would turn
+    # "hold the video until I'm home" into "silently discard the video under disk pressure".
+    assert uploadable_firehose_files(self._P(DeferHDVideoUpload=True)) == FIREHOSE_FILES
+
+  def test_defer_does_not_widen_the_skip_wide_reduction(self):
+    got = uploadable_firehose_files(self._P(SkipWideCameraUpload=True, DeferHDVideoUpload=True))
+    assert got == FIREHOSE_FILES - {"ecamera.hevc"}
+    assert "fcamera.hevc" in got          # defer must NOT strip fcamera from the deleter's view
+
+  def test_param_failure_falls_back_to_full_set(self):
+    class Boom:
+      def get_bool(self, k):
+        raise RuntimeError("params down")
+    assert uploadable_firehose_files(Boom()) == FIREHOSE_FILES
+
+
+class TestSkipWideListing:
+  """uploadprio2pnw: the _skip_wide branch inside list_upload_files is the ONE place that changes
+  what really gets uploaded, so exercise it directly against a real on-disk segment."""
+
+  def _uploader(self, root, skip_wide):
+    u = Uploader.__new__(Uploader)
+    u.root = str(root)
+    u.params = self._Params(skip_wide)
+    u.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    u.immediate_folders = []
+    u._retry_after = {}
+    u._defer_hd = False
+    u._skip_wide = False
+    return u
+
+  class _Params:
+    def __init__(self, skip_wide):
+      self._skip_wide = skip_wide
+
+    def get(self, k):
+      return None
+
+    def get_bool(self, k):
+      return self._skip_wide if k == "SkipWideCameraUpload" else False
+
+  def _segment(self, tmp_path):
+    seg = tmp_path / "00000001--abcdef0123--0"
+    seg.mkdir(parents=True)
+    for n in ("fcamera.hevc", "ecamera.hevc", "rlog.zst", "qlog.zst", "qcamera.ts"):
+      (seg / n).write_bytes(b"x")
+    return seg
+
+  def test_ecamera_offered_when_toggle_off(self, tmp_path):
+    self._segment(tmp_path)
+    u = self._uploader(tmp_path, skip_wide=False)
+    names = {n for n, _, _ in u.list_upload_files(metered=False, pass2=True)}
+    assert names == {"fcamera.hevc", "ecamera.hevc", "rlog.zst"}
+
+  def test_ecamera_withheld_when_toggle_on(self, tmp_path):
+    self._segment(tmp_path)
+    u = self._uploader(tmp_path, skip_wide=True)
+    names = {n for n, _, _ in u.list_upload_files(metered=False, pass2=True)}
+    assert "ecamera.hevc" not in names
+    assert names == {"fcamera.hevc", "rlog.zst"}     # nothing else collaterally dropped
+
+  # NOTE: there is deliberately no "skipped file is never xattr-marked" test here. setxattr runs only
+  # on a 2xx inside upload(); a test that merely lists and then asserts the xattr is absent can never
+  # fail, and a test that cannot fail is worse than no test. The real contract -- a skipped file is
+  # never even a CANDIDATE, because the skip is a `continue` before the yield -- is what
+  # test_ecamera_withheld_when_toggle_on above actually pins.
