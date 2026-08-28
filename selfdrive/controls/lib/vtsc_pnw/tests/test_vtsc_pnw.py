@@ -19,6 +19,37 @@ def mph(v):
 TERW_KAPPA = 1.0 / 415   # Terwilliger apex curvature (radius ~415 m)
 V70 = 70 * MPH
 
+# testbaseline2pnw: a curve that is GENUINELY BINDING at whatever the current aggressiveness tune is.
+# Derived from A_LAT_TARGET rather than hardcoded, because a hardcoded one already went stale once:
+# the state-machine test below used TERW_KAPPA, which at the old A_LAT_TARGET=1.9 was safe at 62.8 mph
+# (well under the 70 mph set -> real braking) but at the 2.5 retune is safe at 72.1 mph -- ABOVE the
+# set speed. Nothing bound any more, the only reduction left was the CONFIDENCE_CUT nibble, and the
+# "brakes further as the apex nears" step could never pass. Deriving the fixture means the next
+# retune moves it too, instead of silently turning a control test into a no-op.
+# _step drives the controller at a FIXED v_ego (V_EGO_TEST) -- the fixture never actually slows the
+# car -- so the binding curve has to satisfy BOTH ends of the state machine at that one speed:
+#   binds   : v_curve < v_cruise            -> there is something real to brake for
+#   at_safe : v_ego <= v_curve * (1 + RELEASE_SPEED_MARGIN)  -> HOLD can ever reach RELEASE
+# Take the midpoint of that band so neither edge is grazed. Both bounds come from the constants, so a
+# retune slides the fixture with them.
+V_EGO_TEST = 28.0
+_BIND_LO = V_EGO_TEST / (1.0 + C.RELEASE_SPEED_MARGIN)   # below this, HOLD can never release
+_BIND_HI = V70 - 1.0                                     # above this, nothing binds
+BINDING_V = 0.5 * (_BIND_LO + _BIND_HI)                  # ~27.9 m/s at the current tune
+BINDING_KAPPA = C.A_LAT_TARGET / (BINDING_V ** 2)        # ~R=311 m at A_LAT_TARGET=2.5
+
+# The apex distance at which the controller is still BRAKING rather than HOLDING. The state machine
+# switches to HOLD once tta <= HOLD_TTA_S, so any "keep braking as the apex nears" step must stay
+# outside that window. This is the OTHER half of the staleness: sharpcurve2pnw (39997887f9) raised
+# HOLD_TTA_S 1.2 -> 2.5 s, which put the old hardcoded apex_d=60 (tta=2.14 s at v_ego=28) INSIDE the
+# hold window -- so step 2 froze at the confidence cut and could never reduce, independent of A_LAT.
+BRAKE_D = V_EGO_TEST * (C.HOLD_TTA_S + 0.4)              # ~81 m: comfortably still in BRAKE
+# The other two zones, also derived: HOLD is APEX_TTA_S < tta <= HOLD_TTA_S (take the midpoint), and
+# RELEASE is tta <= APEX_TTA_S. Hardcoded distances (25 m / 8 m) silently moved between zones as the
+# TTA constants were retuned, which is the same failure mode as the curvature above.
+HOLD_D = V_EGO_TEST * 0.5 * (C.APEX_TTA_S + C.HOLD_TTA_S)   # ~52 m: inside HOLD, outside the apex
+APEX_D = V_EGO_TEST * C.APEX_TTA_S * 0.5                    # ~17 m: at the apex -> RELEASE
+
 
 # ---- v_safe ----------------------------------------------------------------
 def test_v_safe_terwilliger_apex():
@@ -190,36 +221,59 @@ def _make_ctrl():
   return c
 
 
-def _step(c, apex_d, apex_k=TERW_KAPPA, v_cruise=V70, v_ego=28.0):
+def _step(c, apex_d, apex_k=BINDING_KAPPA, v_cruise=V70, v_ego=V_EGO_TEST):
   c._last_t = time.monotonic() - 0.05   # force dt ~ 50 ms (deterministic rate-limit step)
   c.cap({'modelV2': _fake_model(apex_k, apex_d, v_ego)}, v_cruise, v_ego)
   return c.msg["vTarget"]
+
+
+def test_state_machine_fixture_actually_binds():
+  """Guard for the staleness that broke the test below: if a retune ever makes BINDING_KAPPA safe at
+  or above the set speed, fail HERE with a clear reason instead of down inside the state machine.
+
+  Honest scope: this is a CONSTANTS-RELATIONSHIP check, not extra validation of the controller, and
+  it is mostly true-by-construction (BINDING_V is the band midpoint, and the distances are built from
+  the TTA constants). Its real teeth are the two degeneracies that would silently neuter the test
+  below: band INVERSION (_BIND_LO >= _BIND_HI -- a retune where no speed both binds and can still
+  release at the fixed v_ego, so the midpoint violates both endpoints), and APEX_TTA_S >= HOLD_TTA_S
+  (which would collapse the HOLD zone to nothing). Those are exactly the two modes that bit here."""
+  vc = v_safe(BINDING_KAPPA, C.A_LAT_TARGET)
+  assert vc < V70 - 1.0, (
+    f"fixture no longer BINDS at A_LAT_TARGET={C.A_LAT_TARGET}: v_safe={vc:.2f} vs set {V70:.2f} m/s")
+  assert BRAKE_D / V_EGO_TEST > C.HOLD_TTA_S, (
+    f"BRAKE_D={BRAKE_D:.1f} m inside HOLD window (tta={BRAKE_D / V_EGO_TEST:.2f} <= {C.HOLD_TTA_S})")
+  assert C.APEX_TTA_S < HOLD_D / V_EGO_TEST <= C.HOLD_TTA_S, (
+    f"HOLD_D={HOLD_D:.1f} m not in HOLD zone (tta={HOLD_D / V_EGO_TEST:.2f})")
+  assert APEX_D / V_EGO_TEST <= C.APEX_TTA_S, (
+    f"APEX_D={APEX_D:.1f} m not at the apex (tta={APEX_D / V_EGO_TEST:.2f} > {C.APEX_TTA_S})")
+  assert V_EGO_TEST <= vc * (1.0 + C.RELEASE_SPEED_MARGIN), (
+    f"at_safe unreachable at v_ego={V_EGO_TEST}: v_safe={vc:.2f} -- HOLD would never release")
 
 
 def test_state_machine_confidence_cut_then_brake_hold_release():
   c = _make_ctrl()
   # 1) approach (apex far) -> after debounce, BRAKE with an immediate >=1mph cut
   for _ in range(5):
-    _step(c, apex_d=200.0)
+    _step(c, apex_d=200.0, apex_k=BINDING_KAPPA)
   assert c._state == "brake"
   cut = c.msg["vTarget"]
   assert cut <= V70 - C.CONFIDENCE_CUT + 1e-3            # instant confidence cut (>=~1 mph)
 
   # 2) keep braking with the apex closer -> slows further (below the mere cut)
   for _ in range(40):
-    _step(c, apex_d=60.0)
+    _step(c, apex_d=BRAKE_D, apex_k=BINDING_KAPPA)
   braked = c.msg["vTarget"]
   assert braked < cut - 0.2                              # actually reduced speed for the curve
 
   # 3) HOLD zone (close/uncertain) -> must NOT reduce further
   hold_start = braked
   for _ in range(20):
-    v = _step(c, apex_d=25.0)
+    v = _step(c, apex_d=HOLD_D, apex_k=BINDING_KAPPA)
     assert v >= hold_start - 1e-3                         # never reduces in hold
   assert c._state == "hold"
 
   # 4) at the apex -> RELEASE: accelerate back toward cruise, never reduce
-  rel = [_step(c, apex_d=8.0) for _ in range(20)]
+  rel = [_step(c, apex_d=APEX_D, apex_k=BINDING_KAPPA) for _ in range(20)]
   assert c._state == "release"
   assert rel[-1] > rel[0] + 0.1                           # accelerating out
   for a, b in zip(rel, rel[1:], strict=False):

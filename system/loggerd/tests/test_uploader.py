@@ -161,8 +161,19 @@ class TestUploader(UploaderTestCase):
     assert len(log_handler.upload_order) == 0, "Some files were not ignored"
     assert not len(log_handler.upload_ignored) < len(exp_order), "Some files failed to ignore"
     assert not len(log_handler.upload_ignored) > len(exp_order), "Some files were ignored twice"
+
+    # testbaseline2pnw: this assertion is INVERTED from stock openpilot, deliberately. Upstream marks a
+    # 412'd file uploaded (user.upload=1) and moves on. This fork does NOT -- uploadretry2pnw made "only
+    # a real 2xx marks a file uploaded" after the API_HOST incident, where the host fell back to comma's
+    # backend, every proactive upload 412'd, and files were stamped uploaded WITHOUT ever reaching S3:
+    # silent data loss, with an idle uploader and a clean-looking device. So the contract here is that a
+    # 412'd file keeps NO xattr and stays eligible for retry. The stock assertion (expecting the xattr to
+    # be SET) had been failing on this branch ever since, which is exactly backwards -- it would now pass
+    # only if the data-loss bug came back.
     for f_path in exp_order:
-      assert os.getxattr((Path(Paths.log_root()) / f_path).with_suffix(""), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, "All files not ignored"
+      fn = (Path(Paths.log_root()) / f_path).with_suffix("")
+      assert UPLOAD_ATTR_NAME not in os.listxattr(fn), \
+        f"412'd file was marked uploaded without reaching S3 (silent data loss): {fn}"
 
     assert log_handler.upload_ignored == exp_order, "Files ignored in wrong order"
 
@@ -373,3 +384,87 @@ class TestSkipWideListing:
   # fail, and a test that cannot fail is worse than no test. The real contract -- a skipped file is
   # never even a CANDIDATE, because the skip is a `continue` before the yield -- is what
   # test_ecamera_withheld_when_toggle_on above actually pins.
+
+
+class TestSkipWideFullLoop(UploaderTestCase):
+  """uploadprio2pnw: end-to-end guard for the skip contract, through the REAL main() loop.
+
+  TestSkipWideListing (above) only proves the generator withholds ecamera. This proves the whole
+  loop -- selection, upload, xattr marking -- never stamps a withheld file as uploaded. That is the
+  API_HOST-412 family of bug: in that incident files were marked uploaded WITHOUT reaching S3, and
+  the device looked clean while data was quietly lost. A future "mark skipped files so they stop
+  being re-listed" optimisation would reintroduce exactly that, and this test is what catches it.
+  """
+
+  def setup_method(self):
+    super().setup_method()
+    log_handler.reset()
+    # pass-2 gate (uploadgate2pnw): unmetered wifi (force_wifi) + priority network + parked/offroad
+    self.params.put_bool("OnPriorityNetwork", True)
+    self.params.put_bool("GearPark", True)
+    self.params.put_bool("DeferHDVideoUpload", False)
+
+  def teardown_method(self):
+    self.params.put_bool("SkipWideCameraUpload", False)
+
+  def _run(self):
+    end_event = threading.Event()
+    t = threading.Thread(target=main, args=[end_event])
+    t.daemon = True
+    t.start()
+    time.sleep(1.5)         # long enough for several pass-2 picks
+    end_event.set()
+    t.join()
+
+  def _pass2_files(self):
+    seg = Path(Paths.log_root()) / self.seg_dir
+    return {n: seg / n for n in ("rlog", "fcamera.hevc", "ecamera.hevc")}
+
+  def _marked(self, p: Path) -> bool:
+    return UPLOAD_ATTR_NAME in os.listxattr(p)
+
+  def test_skipped_ecamera_is_never_marked_uploaded(self):
+    self.params.put_bool("SkipWideCameraUpload", True)
+    for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
+      self.make_file_with_data(self.seg_dir, n, 1)
+
+    self._run()
+    f = self._pass2_files()
+
+    # the withheld file must be untouched: no xattr, and never even attempted
+    assert not self._marked(f["ecamera.hevc"]), \
+      "ecamera was marked uploaded while SkipWideCameraUpload was on -- silent data loss"
+    assert not any(k.endswith("ecamera.hevc") for k in log_handler.upload_order), \
+      "ecamera was uploaded despite the skip toggle"
+    # (No "file still exists on disk" assertion: nothing in the uploader path ever deletes a segment
+    # -- that is the deleter thread, which does not run here -- so such an assert could never fail.
+    # The xattr and upload_order checks above are what actually carry the mutation coverage.)
+
+    # the NON-skipped pass-2 files must still go, or the toggle is dropping too much
+    assert self._marked(f["rlog"]), "rlog did not upload with the skip toggle on"
+    assert self._marked(f["fcamera.hevc"]), "fcamera did not upload with the skip toggle on"
+
+  def test_ecamera_uploads_normally_when_toggle_is_off(self):
+    # the control case: same fixture, toggle off -> ecamera goes. Without this, the test above would
+    # also pass if pass 2 were broken entirely.
+    self.params.put_bool("SkipWideCameraUpload", False)
+    for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
+      self.make_file_with_data(self.seg_dir, n, 1)
+
+    self._run()
+    f = self._pass2_files()
+    assert self._marked(f["ecamera.hevc"]), "ecamera did not upload with the skip toggle OFF"
+
+  def test_rlog_is_picked_before_video(self):
+    # uploadprio2pnw ordering, end-to-end: rlog must be the first pass-2 key to succeed even though
+    # os.listdir hands back fcamera/ecamera first.
+    self.params.put_bool("SkipWideCameraUpload", False)
+    for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
+      self.make_file_with_data(self.seg_dir, n, 1)
+
+    self._run()
+    pass2 = [k for k in log_handler.upload_order
+             if k.endswith(("rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc"))]
+    assert pass2, "no pass-2 uploads happened at all"
+    assert pass2[0].endswith(("rlog.zst", "rlog")), \
+      f"pass 2 did not start with rlog (got {pass2[0]}) -- priority ordering regressed"

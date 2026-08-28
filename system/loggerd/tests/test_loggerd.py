@@ -381,10 +381,18 @@ class TestLoggerd:
     one enormous segment. Suppressed segments must still rotate on schedule."""
     Params().put_bool("SkipVideoWhenParked", True)
 
-    self._publish_camera_and_audio_messages(num_segs=3, segment_length=2, gear="park")
+    # segment_length must clear the encoder's 40-frame lookahead (>=3 s at 20 fps) or segments never
+    # complete and only ONE dir is ever produced -- see the same note on test_rotation. The original
+    # 2 s here made this look like a rotation stall; a control run with the gate OFF produced one
+    # segment too, so the gate was never implicated.
+    self._publish_camera_and_audio_messages(num_segs=3, segment_length=4, gear="park")
 
-    route = self._get_latest_log_dir().rsplit("--", 1)[0]
-    segs = [p for p in Path(route).parent.iterdir() if p.name.startswith(Path(route).name)]
+    # _get_latest_log_dir() returns a Path, not a str -- see the str() at the top of
+    # test_rotation_on_gear_change. This test had never actually been executed until 2026-08-27
+    # (test_loggerd.py needs a built loggerd + visionipc), so the AttributeError went unnoticed.
+    latest = Path(self._get_latest_log_dir())
+    route_name = latest.name.rsplit("--", 1)[0]
+    segs = [p for p in latest.parent.iterdir() if p.name.startswith(route_name)]
     assert len(segs) >= 2, f"expected multiple segments, rotation may have stalled: {len(segs)}"
     for s in segs:
       assert not os.path.exists(os.path.join(s, "fcamera.hevc"))
