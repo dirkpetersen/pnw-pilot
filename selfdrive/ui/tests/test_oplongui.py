@@ -53,12 +53,13 @@ past it. `is_disable_reach` (which nxt values are a disable) and `decide_disable
 standstill+engaged gate) are the pure helpers -- see TestIsDisableReach / TestDecideDisableOutcome.
 """
 from openpilot.selfdrive.ui.layouts.settings.developer import (
-  AlphaLongToggleState, alpha_long_confirm_should_enable, compute_alpha_long_toggle_state,
+  AlphaLongToggleState, alpha_long_confirm_should_enable, alpha_long_toggle_should_disable,
+  compute_alpha_long_toggle_state,
 )
 from openpilot.selfdrive.ui.onroad.exp_button import (
   _BTN_CES, _BTN_CHILL, _BTN_EXP, _CES_CYCLE, _CES_CYCLE_NO_LONG, _CES_CYCLE_OFF_ALPHA, _STANDSTILL_MS,
   ConfirmOutcome, DisableOutcome, decide_confirm_outcome, decide_disable_outcome, is_disable_reach,
-  is_exp_slot_reach, select_ces_cycle,
+  is_exp_slot_reach, select_ces_cycle, confirm_tap_too_soon, _MIN_INTER_TAP_S, _CONFIRM_WINDOW_S,
 )
 
 
@@ -382,3 +383,212 @@ class TestOpLongOnLightningFullCycleDisable:
     nxt = cycle[(idx + 1) % len(cycle)]
     assert nxt == _BTN_CES
     assert is_disable_reach(nxt, has_long, alpha_avail, op_native) is True
+
+
+class TestCarStateAliveGate:
+  """expbtnguard2pnw (Fable LOW hardening, 2026-08-31): both onroad-reload gates must fail CLOSED
+  when carState isn't alive.
+
+  The hazard is specific and easy to miss: a capnp reader for a service that has died or has never
+  been received yields ZEROS, so `sm["carState"].vEgo` is 0.0 -- indistinguishable from a genuine
+  standstill. Both decide_* helpers gate an OnroadCycleRequested reload (which restarts modeld /
+  controlsd / card), so a carState dropout at 70 mph previously read as "stopped" and would have let
+  a tap tear down the onroad stack at speed. `carstate_alive` is therefore checked FIRST, ahead of
+  both the speed and engaged conditions."""
+
+  def test_dead_carstate_blocks_enable_even_though_vego_reads_stopped(self):
+    # the exact shape of the bug: vEgo == 0.0 because nothing is publishing, not because we stopped
+    assert decide_confirm_outcome(v_ego=0.0, engaged=False, carstate_alive=False) \
+      is ConfirmOutcome.HOLD_NO_DATA
+
+  def test_dead_carstate_blocks_disable_even_though_vego_reads_stopped(self):
+    assert decide_disable_outcome(v_ego=0.0, engaged=False, carstate_alive=False) \
+      is DisableOutcome.HOLD_NO_DATA
+
+  def test_alive_gate_outranks_every_other_condition(self):
+    """No combination of speed/engaged may produce anything but HOLD_NO_DATA when data is dead."""
+    for v_ego in (-20.0, 0.0, 0.05, 15.0):
+      for engaged in (False, True):
+        assert decide_confirm_outcome(v_ego, engaged, False) is ConfirmOutcome.HOLD_NO_DATA
+        assert decide_disable_outcome(v_ego, engaged, False) is DisableOutcome.HOLD_NO_DATA
+
+  def test_alive_defaults_true_so_existing_callers_are_unchanged(self):
+    assert decide_confirm_outcome(v_ego=0.0, engaged=False) is ConfirmOutcome.ENABLE
+    assert decide_disable_outcome(v_ego=0.0, engaged=False) is DisableOutcome.DISABLE
+
+  def test_live_carstate_still_permits_the_normal_paths(self):
+    assert decide_confirm_outcome(0.0, False, True) is ConfirmOutcome.ENABLE
+    assert decide_confirm_outcome(20.0, False, True) is ConfirmOutcome.HOLD_MOVING
+    assert decide_disable_outcome(0.0, True, True) is DisableOutcome.HOLD_ENGAGED
+
+
+class TestRollingBackwardSymmetry:
+  """expbtnguard2pnw: the ENABLE direction compared a bare `v_ego >= _STANDSTILL_MS`, so a car
+  rolling BACKWARD (negative vEgo -- drifting back on a hill before the driver catches it) read as
+  standstill and could reload the onroad stack while moving. Fable F3 had already fixed exactly this
+  on the disable side with abs(); the two directions gate the identical hazard and must agree."""
+
+  def test_rolling_backward_blocks_enable(self):
+    assert decide_confirm_outcome(v_ego=-2.0, engaged=False) is ConfirmOutcome.HOLD_MOVING
+
+  def test_rolling_backward_blocks_disable(self):
+    assert decide_disable_outcome(v_ego=-2.0, engaged=False) is DisableOutcome.HOLD_MOVING
+
+  def test_both_directions_agree_on_what_stopped_means(self):
+    for v_ego in (-20.0, -1.0, -_STANDSTILL_MS, -0.01, 0.0, 0.01, _STANDSTILL_MS, 1.0, 20.0):
+      enable_moving = decide_confirm_outcome(v_ego, False) is ConfirmOutcome.HOLD_MOVING
+      disable_moving = decide_disable_outcome(v_ego, False) is DisableOutcome.HOLD_MOVING
+      assert enable_moving == disable_moving, f"directions disagree at v_ego={v_ego}"
+
+
+class TestConfirmInterTapFloor:
+  """expbtnguard2pnw: the confirm tap must be a SEPARATE gesture from the arming tap.
+
+  Fable HIGH-3 made enabling op-long a deliberate two-tap confirm precisely because enabling drops
+  AEB coverage. But nothing enforced that the two taps were distinct events -- a single physical
+  double-tap, or a touchscreen contact bounce, delivered two releases milliseconds apart and sailed
+  through both the arm and the confirm, disabling AEB with one gesture. The floor restores the
+  'deliberate' part of 'deliberate second gesture'."""
+
+  def test_bounce_is_rejected(self):
+    assert confirm_tap_too_soon(now=100.0, armed_at=100.0) is True
+    assert confirm_tap_too_soon(now=100.02, armed_at=100.0) is True
+
+  def test_double_tap_is_rejected(self):
+    assert confirm_tap_too_soon(now=100.0 + _MIN_INTER_TAP_S / 2, armed_at=100.0) is True
+
+  def test_deliberate_second_tap_is_accepted(self):
+    # Deliberately NOT testing exactly now-armed_at == _MIN_INTER_TAP_S: binary floats make that
+    # boundary unrepresentable (100.0 + 0.35 - 100.0 == 0.3499999999999943), so which side it lands
+    # on is an artifact of the arithmetic, not a designed behaviour. A gesture a hair either side of
+    # the floor is the same gesture; only the clearly-separate case is a real requirement.
+    assert confirm_tap_too_soon(now=100.0 + _MIN_INTER_TAP_S + 0.01, armed_at=100.0) is False
+    assert confirm_tap_too_soon(now=101.5, armed_at=100.0) is False
+
+  def test_floor_sits_inside_the_confirm_window(self):
+    """A floor at/above the 3 s arm window would make confirming impossible -- the arm would expire
+    before any tap became acceptable. This is the property that keeps the feature usable at all."""
+    assert 0.0 < _MIN_INTER_TAP_S < _CONFIRM_WINDOW_S
+
+  def test_backwards_clock_is_treated_as_too_soon(self):
+    """time.monotonic() shouldn't go backwards, but if elapsed ever comes out negative the safe
+    answer is 'tap again', not 'enable'."""
+    assert confirm_tap_too_soon(now=99.0, armed_at=100.0) is True
+
+
+class TestSettingsConfirmAliveGate:
+  """expbtnguard2pnw: the Settings-dialog confirm is the SECOND door onto the same reload hazard as
+  the onroad Experimental button, and had the same dead-carState hole. Both must be shut."""
+
+  def test_dead_carstate_blocks_the_settings_confirm(self):
+    assert alpha_long_confirm_should_enable(0.0, False, False) is False
+
+  def test_live_carstate_still_enables_when_stopped(self):
+    assert alpha_long_confirm_should_enable(0.0, False, True) is True
+
+  def test_defaults_unchanged(self):
+    assert alpha_long_confirm_should_enable(0.0, False) is True
+    assert alpha_long_confirm_should_enable(20.0, False) is False
+
+  def test_rolling_backward_blocks_the_settings_confirm(self):
+    assert alpha_long_confirm_should_enable(-2.0, False) is False
+
+
+class TestNaNSpeedFailsClosed:
+  """Gemini review (MEDIUM): every comparison against NaN is False, so a bare
+  `abs(v_ego) >= _STANDSTILL_MS` answers "not moving" for a garbage speed. A NaN vEgo from a CAN
+  parse failure would therefore have waved an onroad-stack reload through at any real speed --
+  the exact hazard the standstill gate exists to prevent, reached through the gate itself."""
+
+  def test_nan_blocks_enable(self):
+    assert decide_confirm_outcome(float('nan'), False) is ConfirmOutcome.HOLD_NO_DATA
+
+  def test_nan_blocks_disable(self):
+    assert decide_disable_outcome(float('nan'), False) is DisableOutcome.HOLD_NO_DATA
+
+  def test_nan_blocks_the_settings_confirm(self):
+    assert alpha_long_confirm_should_enable(float('nan'), False) is False
+
+  def test_nan_blocks_regardless_of_engaged(self):
+    for engaged in (False, True):
+      assert decide_confirm_outcome(float('nan'), engaged) is ConfirmOutcome.HOLD_NO_DATA
+      assert decide_disable_outcome(float('nan'), engaged) is DisableOutcome.HOLD_NO_DATA
+
+  def test_infinity_is_still_treated_as_moving(self):
+    """inf compares normally, so it lands in HOLD_MOVING -- also a refusal, just a different one."""
+    assert decide_confirm_outcome(float('inf'), False) is ConfirmOutcome.HOLD_MOVING
+
+
+class TestSettingsToggleUsableOffroad:
+  """Gemini review (HIGH): a regression I introduced. `card` is only_onroad, so offroad carState is
+  legitimately dead and sm.alive["carState"] is legitimately False -- and offroad (parked, in the
+  driveway) is exactly when a driver opens Settings to flip alpha-long. Gating on liveness alone
+  silently bricked the toggle at the moment it is most likely to be used: the confirm dialog would
+  appear and the Confirm button would do nothing at all.
+
+  Offroad there is also no hazard to guard against -- the onroad stack is not running, so
+  OnroadCycleRequested has nothing to tear down."""
+
+  def test_offroad_confirm_works_with_dead_carstate(self):
+    assert alpha_long_confirm_should_enable(0.0, False, carstate_alive=False, onroad=False) is True
+
+  def test_offroad_confirm_works_regardless_of_stale_speed(self):
+    # offroad vEgo is whatever the last onroad frame left behind (or capnp zeros) -- irrelevant
+    for v_ego in (0.0, 20.0, float('nan')):
+      assert alpha_long_confirm_should_enable(v_ego, False, carstate_alive=False, onroad=False) is True
+
+  def test_onroad_still_enforces_every_gate(self):
+    assert alpha_long_confirm_should_enable(0.0, False, carstate_alive=False, onroad=True) is False
+    assert alpha_long_confirm_should_enable(20.0, False, carstate_alive=True, onroad=True) is False
+    assert alpha_long_confirm_should_enable(0.0, True, carstate_alive=True, onroad=True) is False
+    assert alpha_long_confirm_should_enable(0.0, False, carstate_alive=True, onroad=True) is True
+
+
+class TestSettingsDisableIsGated:
+  """Fable review (MEDIUM): the THIRD door, and it predates this commit. The Settings toggle's
+  DISABLE branch wrote AlphaLongitudinalEnabled=False + OnroadCycleRequested=True with no gates at
+  all, while the toggle is live onroad whenever merely disengaged. A passenger flipping it off at 70
+  mph disengaged reloaded modeld/controlsd/card AT SPEED -- the same hazard the enable direction and
+  exp_button's own disable direction both refuse."""
+
+  def test_moving_blocks_the_settings_disable(self):
+    assert alpha_long_toggle_should_disable(31.0, False, True, True) is False   # ~70 mph, disengaged
+
+  def test_engaged_blocks_the_settings_disable(self):
+    assert alpha_long_toggle_should_disable(0.0, True, True, True) is False
+
+  def test_dead_carstate_blocks_the_settings_disable_onroad(self):
+    assert alpha_long_toggle_should_disable(0.0, False, False, True) is False
+
+  def test_nan_blocks_the_settings_disable(self):
+    assert alpha_long_toggle_should_disable(float('nan'), False, True, True) is False
+
+  def test_stopped_and_disengaged_onroad_still_permits_it(self):
+    assert alpha_long_toggle_should_disable(0.0, False, True, True) is True
+
+  def test_offroad_permits_it(self):
+    assert alpha_long_toggle_should_disable(0.0, False, False, False) is True
+
+  def test_agrees_with_exp_buttons_own_disable_direction(self):
+    """The two disable paths must not disagree about when a reload is safe."""
+    for v_ego in (0.0, 0.05, 0.5, 31.0, -2.0):
+      for engaged in (False, True):
+        settings_ok = alpha_long_toggle_should_disable(v_ego, engaged, True, True)
+        button_ok = decide_disable_outcome(v_ego, engaged, True) is DisableOutcome.DISABLE
+        assert settings_ok == button_ok, f"paths disagree at v_ego={v_ego} engaged={engaged}"
+
+
+class TestOffroadBypassNeedsBothSignals:
+  """Fable review (LOW): the bypass must require BOTH 'not onroad' AND 'carState dead'. This
+  hardware's quick-release harness has known wandering power latches, so a momentary ignition-false
+  could otherwise present as offroad for ~a second while the stack is running and the car is
+  moving -- and the confirm dialog can sit open across exactly that window."""
+
+  def test_flickered_onroad_signal_does_not_open_the_gate_while_data_is_live(self):
+    # onroad=False (flicker) but carState is still ALIVE and reporting 70 mph -> must still refuse
+    assert alpha_long_confirm_should_enable(31.0, False, carstate_alive=True, onroad=False) is False
+    assert alpha_long_toggle_should_disable(31.0, False, carstate_alive=True, onroad=False) is False
+
+  def test_genuine_offroad_still_bypasses(self):
+    assert alpha_long_confirm_should_enable(0.0, False, carstate_alive=False, onroad=False) is True
+    assert alpha_long_toggle_should_disable(0.0, False, carstate_alive=False, onroad=False) is True
