@@ -128,6 +128,13 @@ POLICE_RECEDE_MI = 0.3                     # once we've receded this far past cl
                                            # increasing = moving away -> give it a clear"). Matches POI_RECEDE_MI.
 POLICE_TIMEOUT_S = 20
 POLICE_MAX_BACKOFF_S = 15 * 60
+# policebackoff2pnw (2026-08-31): a cellular device on the move drops the odd poll for reasons that
+# have nothing to do with the service being down -- a tunnel, a handover, a moment of no signal. The
+# old rule doubled the interval on EVERY such blip, so three unlucky minutes of LTE could push the
+# police feed from 1/min out to 8 min while the driver was on exactly the highway the feature exists
+# for. Transient failures now have to happen CONSECUTIVELY before the interval grows; any success
+# resets the streak. Policy denials (402/429) are NOT transient and still jump to max on the first.
+POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF = 3   # retry at the normal cadence for this many in a row first
 # wazespeedgate2pnw: cost control — the Waze proxy poll is a PAID upstream call, so only run it while
 # actually driving the highway. Hysteresis (arm at POLICE_GATE_MPH, disarm 2 mph below) avoids flapping
 # right around a single threshold speed. Supersedes the earlier parked-gate approach (policeparkgate2pnw).
@@ -541,6 +548,7 @@ class PoliceUpdater(threading.Thread):
 
   def run(self):
     backoff = POLICE_POLL_S
+    consec_fails = 0        # policebackoff2pnw: CONSECUTIVE transient failures (any success resets)
     while not self._stop.is_set():
       try:
         cfg = self._load_cfg()                             # re-read EVERY cycle (tiny file, 1/min) so a key
@@ -607,6 +615,7 @@ class PoliceUpdater(threading.Thread):
           cloudlog.info("location_services: police poll ok (%d alerts, %s)", len(alerts),
                         src_used)   # heartbeat for diagnosis
           backoff = POLICE_POLL_S                            # success -> reset backoff
+          consec_fails = 0                                   # ...and the transient-failure streak
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
                 _ProxyUpstreamErr) as e:
           # Surface the real cause on-screen. HTTPError carries the status code; HTTPError subclasses
@@ -631,14 +640,16 @@ class PoliceUpdater(threading.Thread):
             emsg = "bad resp"
           else:                                              # URLError / OSError -> connectivity
             emsg = "net err"
-          cloudlog.warning("location_services: police poll failed (%s: %s); backing off %ds",
-                           type(e).__name__, emsg, int(backoff))
           with self._lock:
             self._state, self._err = "nodata", emsg         # NEVER a false 'clear' on failure (decision #4)
-          if isinstance(e, urllib.error.HTTPError) and e.code in (402, 429):
-            backoff = POLICE_MAX_BACKOFF_S                  # budget/daily-limit hit -> stop hammering, max backoff now
-          else:
-            backoff = min(backoff * 2, POLICE_MAX_BACKOFF_S)
+          denial = isinstance(e, urllib.error.HTTPError) and e.code in (402, 429)
+          backoff, consec_fails = next_police_backoff(backoff, consec_fails, denial)
+          # Logged AFTER the decision so the interval printed is the one actually about to be waited,
+          # and the streak explains WHY (a "consecutive 1/3" at 60s is a blip being tolerated, a
+          # "consecutive 5/3" at 480s is a real outage).
+          cloudlog.warning("location_services: police poll failed (%s: %s); next poll in %ds (consecutive %d/%d)",
+                           type(e).__name__, emsg, int(backoff), consec_fails,
+                           POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF)
       except Exception:
         cloudlog.exception("location_services: police thread loop error (continuing)")  # HARD RULE: never die silently
       self._stop.wait(backoff)
@@ -673,6 +684,28 @@ def _read_mem(mem):
   except Exception:
     wayref = ""
   return lat, lon, brg, path, ctx, wayref
+
+
+def next_police_backoff(cur_backoff: float, consec_fails: int, policy_denial: bool) -> tuple[float, int]:
+  """policebackoff2pnw: pure escalation rule -> (next_backoff_s, next_consecutive_failure_count).
+
+  Pure/static so it can be unit-tested without a daemon, matching _speed_gate's pattern.
+
+  `policy_denial` is a proxy 402 (monthly budget) / 429 (per-device daily cap). Those are NOT
+  transient -- the cap is already spent and polling sooner cannot help -- so they go straight to the
+  max interval and park the streak at the threshold, leaving a later success as the only way back to
+  the fast cadence.
+
+  Everything else is treated as possibly-transient: the first
+  POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF - 1 failures in a row keep the NORMAL poll interval, and
+  only a streak at/over the threshold starts doubling. `max(cur_backoff, POLICE_POLL_S)` keeps the
+  doubling anchored even if the caller was sitting at a sub-normal interval."""
+  if policy_denial:
+    return float(POLICE_MAX_BACKOFF_S), POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF
+  consec = consec_fails + 1
+  if consec < POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF:
+    return float(POLICE_POLL_S), consec
+  return float(min(max(cur_backoff, POLICE_POLL_S) * 2, POLICE_MAX_BACKOFF_S)), consec
 
 
 def _police_dir(alert, cur_bearing):
