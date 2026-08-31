@@ -1,3 +1,4 @@
+import math
 import time
 from enum import Enum, auto
 import pyray as rl
@@ -69,9 +70,10 @@ class ConfirmOutcome(Enum):
   ENABLE = auto()        # stopped and not engaged -> safe to enable op-long now
   HOLD_MOVING = auto()   # still moving -> reloading the onroad stack now would be dangerous
   HOLD_ENGAGED = auto()  # stopped but still engaged -> reload would disengage the drive
+  HOLD_NO_DATA = auto()  # carState not alive -> vEgo is unknowable, refuse rather than assume stopped
 
 
-def decide_confirm_outcome(v_ego: float, engaged: bool) -> ConfirmOutcome:
+def decide_confirm_outcome(v_ego: float, engaged: bool, carstate_alive: bool = True) -> ConfirmOutcome:
   """Pure decision (Fable review, HIGH-2 fix): whether the confirming tap may actually enable op-long.
 
   The original gate was `not engaged` alone, which is wrong: `engaged` only means openpilot currently
@@ -81,12 +83,46 @@ def decide_confirm_outcome(v_ego: float, engaged: bool) -> ConfirmOutcome:
   below _STANDSTILL_MS. `engaged` is still checked (stopped-but-engaged, e.g. held at a light under
   openpilot control, still can't reload without disengaging) but only as a second condition once
   standstill is confirmed -- the two failure modes get distinct hints (STOP vs DISENGAGE, Fable F7).
+
+  expbtnguard2pnw (Fable LOW hardening, 2026-08-31): `carstate_alive` is checked FIRST and fails
+  closed. A capnp reader for a dead/never-received service yields ZEROS, so a stalled or not-yet-
+  alive carState presents as vEgo == 0.0 -- indistinguishable from a genuine standstill. Without this
+  check, a carState dropout at speed reads as "stopped" and lets a tap reload the whole onroad stack
+  while the car is moving, which is precisely the hazard the standstill gate exists to prevent.
+  Defaults True so existing callers/tests keep their meaning; the live caller passes sm.alive.
+
+  A NaN v_ego is handled in the SAME breath, for the same reason and because it is the same class of
+  bug: EVERY comparison against NaN is False, so a bare `abs(v_ego) >= _STANDSTILL_MS` would answer
+  "not moving" for a garbage speed and wave the reload through at any real speed. NaN means the speed
+  is unknown, not zero, so it maps to HOLD_NO_DATA rather than HOLD_MOVING -- the hint then names the
+  actual problem instead of telling a driver at 70 mph to "stop".
+
+  Also compares `abs(v_ego)`, matching decide_disable_outcome's Fable F3 fix -- a car rolling
+  BACKWARD (negative vEgo on a hill before the driver catches it) is moving, and a bare
+  `>= _STANDSTILL_MS` let it through as standstill. The two directions must not disagree about what
+  "stopped" means when they gate the identical hazard.
   """
-  if v_ego >= _STANDSTILL_MS:
+  if not carstate_alive or math.isnan(v_ego):
+    return ConfirmOutcome.HOLD_NO_DATA
+  if abs(v_ego) >= _STANDSTILL_MS:
     return ConfirmOutcome.HOLD_MOVING
   if engaged:
     return ConfirmOutcome.HOLD_ENGAGED
   return ConfirmOutcome.ENABLE
+
+
+def confirm_tap_too_soon(now: float, armed_at: float) -> bool:
+  """expbtnguard2pnw: pure decision -- did this confirming tap land too soon after the ARMING tap to
+  count as a separate, deliberate gesture?
+
+  Without a floor, one physical double-tap (or a touchscreen bounce) both arms and confirms, which
+  collapses the two-tap gate Fable HIGH-3 introduced into a single tap that silently disables AEB.
+  The caller keeps the arm alive on True, so a too-fast tap costs the driver nothing but a retry.
+
+  Defensive about the clock: a non-positive elapsed time (equal timestamps, or a clock that went
+  backwards) is treated as TOO SOON rather than allowed through -- the safe direction here is to ask
+  for another tap."""
+  return not (now - armed_at >= _MIN_INTER_TAP_S)
 
 
 def is_disable_reach(nxt: int, has_longitudinal_control: bool, alpha_long_available: bool,
@@ -128,9 +164,10 @@ class DisableOutcome(Enum):
   DISABLE = auto()       # stopped AND not engaged -> safe to hand control back to stock ACC now
   HOLD_MOVING = auto()   # still moving -> reloading the onroad stack now would be dangerous
   HOLD_ENGAGED = auto()  # stopped but still engaged -> reload would release the brake hold (creep)
+  HOLD_NO_DATA = auto()  # carState not alive -> vEgo is unknowable, refuse rather than assume stopped
 
 
-def decide_disable_outcome(v_ego: float, engaged: bool) -> DisableOutcome:
+def decide_disable_outcome(v_ego: float, engaged: bool, carstate_alive: bool = True) -> DisableOutcome:
   """Pure decision: whether a disable-reach tap (is_disable_reach == True) may actually disable
   op-long right now. Reuses _STANDSTILL_MS, the same threshold decide_confirm_outcome uses for the
   enable direction, because the hazard is identical either way -- OnroadCycleRequested restarts the
@@ -143,7 +180,14 @@ def decide_disable_outcome(v_ego: float, engaged: bool) -> DisableOutcome:
 
   Fable F3 (LOW hardening): compares `abs(v_ego)` -- a rolling-backward negative vEgo (e.g. gently
   rolling back on a hill before the driver catches it) must not slip past a bare `< _STANDSTILL_MS`
-  check just because it's negative."""
+  check just because it's negative.
+
+  expbtnguard2pnw: `carstate_alive` fails closed ahead of everything else, same reasoning as
+  decide_confirm_outcome -- a dead carState reads vEgo == 0.0 (capnp zeros), which would look like a
+  standstill and permit an onroad-stack reload at speed. A NaN v_ego is caught in the same check:
+  every comparison against NaN is False, so it would otherwise read as "not moving"."""
+  if not carstate_alive or math.isnan(v_ego):
+    return DisableOutcome.HOLD_NO_DATA
   if abs(v_ego) >= _STANDSTILL_MS:
     return DisableOutcome.HOLD_MOVING
   if engaged:
@@ -153,6 +197,12 @@ def decide_disable_outcome(v_ego: float, engaged: bool) -> DisableOutcome:
 
 _STANDSTILL_MS = 0.1     # m/s -- "stopped enough" to safely reload the whole onroad stack
 _CONFIRM_WINDOW_S = 3.0  # oplongexp2pnw (Fable HIGH-3): deliberate two-tap confirm window
+# expbtnguard2pnw (Fable LOW hardening): the confirm tap must be a SEPARATE, deliberate gesture, so
+# it is ignored until this long after the arming tap. Without a floor, one physical double-tap (or a
+# touchscreen bounce) both arms and confirms, collapsing the two-tap safety gate Fable HIGH-3 added
+# into a single tap that silently disables AEB. Comfortably above a bounce, well under a considered
+# second tap; the arm is KEPT (not cancelled) so a too-fast tap costs the driver nothing but a retry.
+_MIN_INTER_TAP_S = 0.35
 # oplongexp2pnw (Fable HIGH-4/F4): once an enable has been requested, swallow taps until
 # has_longitudinal_control has had a chance to catch up (ui_state.update_params polls at ~5 s
 # cadence -- see update() in ui_state.py) so a stray tap mid-reload can't re-arm/re-cycle against a
@@ -172,6 +222,9 @@ _CONFIRM_HINT_TEXT = tr_noop(
 _ENABLE_HINT_TEXT = tr_noop("Enabling openpilot Longitudinal Control...")
 _STOP_HINT_TEXT = tr_noop("Stop to enable openpilot Longitudinal Control")
 _DISENGAGE_HINT_TEXT = tr_noop("Disengage to enable openpilot Longitudinal Control")
+# expbtnguard2pnw: carState not alive -- we cannot know whether the car is stopped, so we refuse.
+# Names the real reason rather than telling a stationary driver to "stop".
+_NO_DATA_HINT_TEXT = tr_noop("Car data unavailable - try again in a moment")
 # oplongdisable: same rendering, the disable direction's own three messages (Fable F2: now symmetric
 # with the enable direction's ARM/ENABLE/HOLD_MOVING/HOLD_ENGAGED set) -- no AEB wording since this
 # direction restores AEB rather than disabling it.
@@ -214,7 +267,8 @@ class ExpButton(Widget):
     self._txt_wheel: rl.Texture = gui_app.texture('icons/chffr_wheel.png', icon_size, icon_size)
     self._txt_exp: rl.Texture = gui_app.texture('icons/experimental.png', icon_size, icon_size)        # baked ORANGE
     self._txt_exp_white: rl.Texture = gui_app.texture('icons/experimental_white.png', icon_size, icon_size)  # ces2xnor
-    self._txt_exp_yellow: rl.Texture = gui_app.texture('icons/experimental_yellow.png', icon_size, icon_size)  # icbm2pnw: CES-auto-Experimental (driver req 2026-07-11 — orange is forced-Exp ONLY)
+    # icbm2pnw: CES-auto-Experimental (driver req 2026-07-11 — orange is forced-Exp ONLY)
+    self._txt_exp_yellow: rl.Texture = gui_app.texture('icons/experimental_yellow.png', icon_size, icon_size)
     self._rect = rl.Rectangle(0, 0, button_size, button_size)
 
     # oplongexp2pnw: transient hint (repurposed from oplongui2pnw's informational-only box) -- text
@@ -224,6 +278,7 @@ class ExpButton(Widget):
     # oplongexp2pnw (Fable HIGH-3/F4): the two-tap confirm gesture + post-enable tap guard. Both are
     # monotonic deadlines, 0.0 (default, always in the past) means "not armed/pending".
     self._confirm_armed_until: float = 0.0   # set when a tap reaches the Exp slot (arms the confirm)
+    self._confirm_armed_at: float = 0.0      # expbtnguard2pnw: when that arming tap landed (inter-tap floor)
     self._enable_pending_until: float = 0.0  # set right after ENABLE fires (swallow taps until then)
     # oplongdisable: mirrors _enable_pending_until for the opposite direction -- set right after a
     # DISABLE fires, swallowing taps until ui_state's ~5 s param poll has had a chance to observe
@@ -285,8 +340,16 @@ class ExpButton(Widget):
         # oplongexp2pnw (Fable HIGH-3): the CONFIRM tap -- a second, deliberate tap while the "tap
         # again to enable" hint (armed by is_exp_slot_reach below) is still showing. CESButtonState
         # is left untouched here -- it's already sitting wherever the arming tap left it (CES).
+        if confirm_tap_too_soon(now, self._confirm_armed_at):
+          # expbtnguard2pnw: too fast to be a separate, deliberate gesture (a double-tap or a
+          # touchscreen bounce). Swallow it and KEEP the arm, so the driver just taps again --
+          # collapsing the two-tap gate into one tap would disable AEB without a real confirmation.
+          self._hint_text = _CONFIRM_HINT_TEXT
+          self._hint_until = now + _HINT_S
+          return
         self._confirm_armed_until = 0.0
-        outcome = decide_confirm_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged)
+        outcome = decide_confirm_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged,
+                                         ui_state.sm.alive["carState"])
         if outcome is ConfirmOutcome.ENABLE:
           # Same param pair developer.py::_on_alpha_long_enabled writes on confirm (minus the dialog
           # and AEB warning text -- this two-tap gesture IS the driver's confirmation).
@@ -296,6 +359,8 @@ class ExpButton(Widget):
           self._hint_text = _ENABLE_HINT_TEXT
         elif outcome is ConfirmOutcome.HOLD_MOVING:
           self._hint_text = _STOP_HINT_TEXT
+        elif outcome is ConfirmOutcome.HOLD_NO_DATA:
+          self._hint_text = _NO_DATA_HINT_TEXT
         else:  # HOLD_ENGAGED: stopped, but openpilot still has control -- disengage first, not "stop"
           self._hint_text = _DISENGAGE_HINT_TEXT
         self._hint_until = now + _HINT_S
@@ -317,6 +382,7 @@ class ExpButton(Widget):
         if is_exp_slot_reach(nxt, has_long, alpha_long_available, op_long_native):
           nxt = _BTN_CES
           self._confirm_armed_until = now + _CONFIRM_WINDOW_S
+          self._confirm_armed_at = now
           self._hint_text = _CONFIRM_HINT_TEXT
           self._hint_until = now + _HINT_S
         elif is_disable_reach(nxt, has_long, alpha_long_available, op_long_native):
@@ -329,7 +395,8 @@ class ExpButton(Widget):
           # carry over BOTH the standstill AND the engaged gate (Fable F2/MEDIUM): OnroadCycleRequested
           # restarts the whole onroad stack regardless of direction, and doing that while stopped-but-
           # engaged would release op-long's brake hold out from under a driver at a light -> EV creep.
-          outcome = decide_disable_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged)
+          outcome = decide_disable_outcome(ui_state.sm["carState"].vEgo, ui_state.engaged,
+                                           ui_state.sm.alive["carState"])
           if outcome is DisableOutcome.DISABLE:
             # Mirror of developer.py::_on_alpha_long_enabled's else-branch (the Settings-toggle
             # disable path) -- same param pair, this tap IS the driver's action.
@@ -337,6 +404,9 @@ class ExpButton(Widget):
             self._params.put_bool("OnroadCycleRequested", True)
             self._disable_pending_until = now + _ENABLE_GUARD_S
             self._hint_text = _DISABLE_HINT_TEXT
+          elif outcome is DisableOutcome.HOLD_NO_DATA:
+            nxt = cur                      # same refusal shape as HOLD_MOVING: don't advance either
+            self._hint_text = _NO_DATA_HINT_TEXT
           elif outcome is DisableOutcome.HOLD_MOVING:
             # Refuse to disable at speed -- don't advance the button either, it's already sitting
             # wherever it was (mirrors the enable confirm's "left untouched").

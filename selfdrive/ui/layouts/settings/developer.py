@@ -3,7 +3,8 @@ from typing import NamedTuple
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
-from openpilot.selfdrive.ui.onroad.exp_button import ConfirmOutcome, decide_confirm_outcome
+from openpilot.selfdrive.ui.onroad.exp_button import (ConfirmOutcome, DisableOutcome,
+                                                      decide_confirm_outcome, decide_disable_outcome)
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
@@ -52,7 +53,8 @@ class AlphaLongToggleState(NamedTuple):
   enabled: bool
 
 
-def alpha_long_confirm_should_enable(v_ego: float, engaged: bool) -> bool:
+def alpha_long_confirm_should_enable(v_ego: float, engaged: bool, carstate_alive: bool = True,
+                                     onroad: bool = True) -> bool:
   """oplongpersist2pnw (Fix A, Fable+Gemini review pass 3, MUST-FIX): whether the op-long ENABLE
   ConfirmDialog's confirming tap may actually enable op-long RIGHT NOW.
 
@@ -69,8 +71,52 @@ def alpha_long_confirm_should_enable(v_ego: float, engaged: bool) -> bool:
   final gate) rather than duplicating the threshold: `engaged` alone is insufficient because a
   DISENGAGED-but-MOVING car is still moving and the reload would still happen at speed -- the real
   requirement is STANDSTILL (v_ego < _STANDSTILL_MS), with `engaged` checked second (stopped but still
-  under active control, e.g. held at a light, still can't safely reload without disengaging first)."""
-  return decide_confirm_outcome(v_ego, engaged) is ConfirmOutcome.ENABLE
+  under active control, e.g. held at a light, still can't safely reload without disengaging first).
+
+  expbtnguard2pnw (2026-08-31): also threads `carstate_alive` through. This is the SECOND door onto
+  the same hazard as the onroad Experimental button -- a dead/not-yet-alive carState reads
+  vEgo == 0.0 (capnp zeros for an unreceived service), which looked like a standstill and would have
+  let the Settings confirm reload the onroad stack at speed. Fixing only the onroad button would
+  have left this path open. Defaults True so the signature stays compatible.
+
+  ...but OFFROAD is the one place that liveness check must NOT apply (Gemini review, HIGH). `card` is
+  an only_onroad process, so offroad carState is legitimately dead and sm.alive is legitimately
+  False -- and offroad is exactly when a parked driver opens Settings to flip this. Gating on
+  liveness alone would have silently bricked the toggle whenever it is most likely to be used, with
+  the dialog appearing and Confirm doing nothing. Offroad there is also no hazard to guard: the
+  onroad stack is not running, so there is nothing for OnroadCycleRequested to tear down, and the car
+  is not being driven by openpilot. So `onroad=False` short-circuits to True; the speed/engaged/alive
+  gates apply only while onroad, where they mean something.
+
+  Fable review (LOW): the bypass requires BOTH "not onroad" AND "carState is dead". `onroad` is
+  sourced from deviceState.started (the manager's own view of whether an onroad stack exists), not
+  from ui_state.is_onroad(), which ANDs in the UI's pandaStates ignition read -- and this hardware's
+  quick-release harness has known wandering power latches, so a momentary ignition-false could
+  otherwise present as "offroad" for ~a second while the stack is running and the car is moving,
+  letting an open confirm dialog skip even the speed check."""
+  if not onroad and not carstate_alive:
+    return True
+  return decide_confirm_outcome(v_ego, engaged, carstate_alive) is ConfirmOutcome.ENABLE
+
+
+def alpha_long_toggle_should_disable(v_ego: float, engaged: bool, carstate_alive: bool = True,
+                                     onroad: bool = True) -> bool:
+  """expbtnguard2pnw (Fable review, MEDIUM -- a PRE-EXISTING third door): whether the Settings
+  toggle may turn alpha-long OFF right now.
+
+  The disable branch of _on_alpha_long_enabled wrote AlphaLongitudinalEnabled=False +
+  OnroadCycleRequested=True with NO gates whatsoever -- no standstill, no engaged, no liveness --
+  while the toggle itself is live onroad whenever merely disengaged
+  (`set_enabled(lambda: not ui_state.engaged)`). So a passenger flipping it off while the truck was
+  doing 70 disengaged reloaded modeld/controlsd/card AT SPEED: exactly the hazard the enable
+  direction and the onroad Experimental button both refuse, reached through the one path nobody had
+  gated. exp_button's own disable direction already answers HOLD_MOVING for this.
+
+  Reuses decide_disable_outcome rather than duplicating the rule, and applies it onroad-only on the
+  same reasoning as alpha_long_confirm_should_enable: offroad there is no stack to tear down."""
+  if not onroad and not carstate_alive:
+    return True
+  return decide_disable_outcome(v_ego, engaged, carstate_alive) is DisableOutcome.DISABLE
 
 
 def compute_alpha_long_toggle_state(*, op_long_native: bool, alpha_long_available: bool,
@@ -308,7 +354,9 @@ class DeveloperLayout(Widget):
           # driver engages via the stalk and drives off (nothing here auto-dismisses it), so a stale
           # "was safe when opened" check is not enough. See alpha_long_confirm_should_enable's
           # docstring for the standstill-vs-engaged rationale.
-          if alpha_long_confirm_should_enable(ui_state.sm["carState"].vEgo, ui_state.engaged):
+          if alpha_long_confirm_should_enable(ui_state.sm["carState"].vEgo, ui_state.engaged,
+                                              ui_state.sm.alive["carState"],
+                                              ui_state.sm["deviceState"].started):
             self._params.put_bool("AlphaLongitudinalEnabled", True)
             self._params.put_bool("OnroadCycleRequested", True)
             self._update_toggles()
@@ -330,6 +378,14 @@ class DeveloperLayout(Widget):
       gui_app.push_widget(dlg)
 
     else:
-      self._params.put_bool("AlphaLongitudinalEnabled", False)
-      self._params.put_bool("OnroadCycleRequested", True)
+      # Fable review (MEDIUM): this direction used to be completely ungated, so it could reload the
+      # whole onroad stack at speed. Same gate as the enable direction and as exp_button's own
+      # disable path; on refusal, snap the toggle visual back to the real param (the enable
+      # direction's dialog-cancel branch does the same) so the UI never shows a state that wasn't
+      # applied.
+      if alpha_long_toggle_should_disable(ui_state.sm["carState"].vEgo, ui_state.engaged,
+                                          ui_state.sm.alive["carState"],
+                                          ui_state.sm["deviceState"].started):
+        self._params.put_bool("AlphaLongitudinalEnabled", False)
+        self._params.put_bool("OnroadCycleRequested", True)
       self._update_toggles()
