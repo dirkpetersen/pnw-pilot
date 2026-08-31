@@ -11,6 +11,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW  # tightfollow2pnw v2
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController  # vtsc
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import SpeedAdjustController  # speedadjust2pnw
@@ -205,9 +206,22 @@ class LongitudinalPlanner:
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    # tightfollow2pnw: None on every car/personality except the Lightning's Aggressive — see
+    # tightfollow2pnw v2: None on every car/personality except the Lightning's Aggressive — see
     # PnwVehicle.aggressive_t_follow (capability-gated, the shared upstream T_FOLLOW is untouched).
-    t_follow_override = self.veh.aggressive_t_follow(sm['selfdriveState'].personality)
+    # v2 is lead-stability-gated and slewed, so it needs the live lead + v_ego + the personality's
+    # own baseline each tick. leadOne is the lead the MPC itself follows.
+    personality = sm['selfdriveState'].personality
+    t_follow_override = self.veh.aggressive_t_follow(
+      personality,
+      # Fable review (LOW): SubMaster CONFLATES, so a hung radard leaves the last (possibly calm)
+      # lead frozen in place and the gate would hold the tightened target on stale data until the
+      # process watchdog ends the drive. Hand in None instead -> the calm clock zeroes and the
+      # override slews back to baseline within ~2 s.
+      lead=sm['radarState'].leadOne if sm.alive['radarState'] else None,
+      v_ego=sm['carState'].vEgo,
+      baseline=get_T_FOLLOW(personality),
+      dt=self.dt,
+    )
     self.mpc.update(sm['radarState'], v_cruise, personality=sm['selfdriveState'].personality,
                      t_follow_override=t_follow_override)
 

@@ -9,6 +9,7 @@ Pure and defensive: works with a capnp CarParams reader, the structs dataclass, 
 all-False capabilities), so UI code can call it before a car is fingerprinted.
 """
 import json
+import math
 import os
 import stat
 
@@ -17,10 +18,31 @@ from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the 
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
 _MPH_TO_MS = 0.44704
-# tightfollow2pnw: Lightning-only Aggressive T_FOLLOW override (s), vs. the shared upstream 1.25s.
-# Deliberately a MODEST first cut for a heavy work truck, not an attempt to match the stock ACC's
-# tightest bar setting outright — validate on the road and retune from here.
-_TIGHT_AGGRESSIVE_T_FOLLOW = 1.0
+# tightfollow2pnw v2: Lightning-only Aggressive T_FOLLOW override (s), vs. the shared upstream 1.25s.
+# v1 used a FLAT 1.0 and was reverted after on-road measurement made things worse (see the
+# tight_aggressive_follow comment in __init__). v2 is deliberately shallower (1.15 = 0.10s tighter
+# than baseline, not 0.25s), and is applied only through the stability gate + slew below.
+_TIGHT_AGGRESSIVE_T_FOLLOW = 1.15
+# The upstream Aggressive T_FOLLOW, used only as a fallback when the caller doesn't pass the live
+# baseline (keeps this module free of a long_mpc import -- pnw_vehicle is imported by UI code too).
+_TIGHT_AGGRESSIVE_BASELINE = 1.25
+# Stability gate. The lead must look CALM for this long before any tightening starts; ANY excursion
+# restarts the clock from zero (fail toward the looser baseline, never toward the tighter target).
+_TIGHT_STABLE_MIN_S = 5.0
+# Thresholds are applied to the KALMAN-FILTERED lead fields only. This is the whole lesson of the v1
+# revert: radard's `vRel` is RAW (get_RadarState_from_vision sets it from lead_v_rel_pred, unfiltered)
+# while `vLeadK`/`aLeadK` come out of Track's KF1D or radarless2pnw's VisionLeadFilter. Gating on raw
+# vRel would chatter on exactly the per-frame model noise v1 tripped over, so relative speed is
+# DERIVED here as (vLeadK - v_ego) rather than read from lead.vRel.
+_TIGHT_MAX_ABS_VREL = 2.0            # m/s, |vLeadK - v_ego|
+_TIGHT_MAX_ABS_ALEAD = 0.5           # m/s^2, |aLeadK| (same 0.5 rule Track uses to call accel constant)
+# A step in dRel means a DIFFERENT car (cut-in / lead swap), not a manoeuvre by the car we were
+# tracking -- restart the stability clock rather than carrying credit across two vehicles.
+_TIGHT_LEAD_JUMP_M = 8.0
+# Slew the override rather than stepping it, so the gate flipping can never hand the MPC a
+# discontinuous target (a step in T_FOLLOW is a step in desired following distance).
+_TIGHT_SLEW_S_PER_S = 0.05
+_TIGHT_DT_DEFAULT = 0.05             # planner tick (DT_MDL) when the caller doesn't pass one
 
 # standstillsoft2pnw: the launch accel ramp rises to this ceiling by launch_v (slightly above the stock
 # ~2.0 m/s^2 max so the cap never binds the normal accel envelope at/after launch_v).
@@ -306,7 +328,18 @@ class PnwVehicle:
     # Lightning-specific), then reintroduce tightening as a smaller (~1.15s), lead-stability-gated,
     # slewed target -- not a flat constant. See PENDING-WORK.md. Left as an inert capability (False) so
     # the plumbing (aggressive_t_follow / t_follow_override) stays in place for that follow-up.
-    self.tight_aggressive_follow: bool = False
+    # tightfollow2pnw v2 (2026-08-31): RE-ENABLED for the Lightning now that the v1 root cause is
+    # actually fixed upstream of here -- radarless2pnw (a46d8749b8) added VisionLeadFilter, so the
+    # vision-only lead's vLead/aLeadK are Kalman-filtered instead of raw per-frame model output.
+    # v2 differs from the reverted v1 in three ways, all required: a shallower target (1.15 vs 1.0),
+    # a lead-stability gate, and a slew. Kept a Lightning capability rather than keying on
+    # CP.radarUnavailable: this is the DRIVER's preference for this truck, not a physics property,
+    # and radarUnavailable would silently opt in any future radarless car nobody asked for.
+    self.tight_aggressive_follow: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+    # slew/stability state for aggressive_t_follow (reset whenever the override is not applicable)
+    self._tight_stable_s: float = 0.0
+    self._tight_prev_drel: float | None = None
+    self._tight_t_follow: float | None = None
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
@@ -435,13 +468,92 @@ class PnwVehicle:
     frac = _clamp(v_ego / v_lift, 0.0, 1.0)
     return a0 + frac * (_LAUNCH_TOP - a0)
 
-  def aggressive_t_follow(self, personality) -> float | None:
-    """tightfollow2pnw: a tighter T_FOLLOW (s) for the Lightning's Aggressive personality only —
+  def _tight_reset(self) -> None:
+    """Drop all tight-follow state. Called whenever the override cannot apply, so a later re-entry
+    starts from the baseline with a fresh stability clock instead of resuming mid-slew."""
+    self._tight_stable_s = 0.0
+    self._tight_prev_drel = None
+    self._tight_t_follow = None
+
+  def _tight_lead_is_calm(self, lead, v_ego: float, dt: float) -> bool:
+    """Advance the stability clock; True once this lead has been calm for _TIGHT_STABLE_MIN_S.
+
+    Fail-closed by construction: a missing lead, a malformed field, a lead SWAP (dRel step) or any
+    excursion past the vRel/aLead thresholds zeroes the clock, so the answer on anything unexpected
+    is False -> slew back toward the looser baseline."""
+    status = False
+    try:
+      status = bool(lead.status)
+    except AttributeError:
+      status = False
+    if lead is None or not status:
+      self._tight_stable_s = 0.0
+      self._tight_prev_drel = None
+      return False
+    try:
+      d_rel = float(lead.dRel)
+      v_lead_k = float(lead.vLeadK)
+      a_lead_k = float(lead.aLeadK)
+    except (AttributeError, TypeError, ValueError):
+      self._tight_stable_s = 0.0
+      self._tight_prev_drel = None
+      return False
+    if not (math.isfinite(d_rel) and math.isfinite(v_lead_k) and math.isfinite(a_lead_k)):
+      self._tight_stable_s = 0.0
+      self._tight_prev_drel = None
+      return False
+
+    prev_drel = self._tight_prev_drel
+    self._tight_prev_drel = d_rel
+    if prev_drel is not None and abs(d_rel - prev_drel) > _TIGHT_LEAD_JUMP_M:
+      self._tight_stable_s = 0.0            # different car -> no credit carried over
+      return False
+    # DERIVED from the filtered lead speed, never lead.vRel (which is raw) -- see the constants above.
+    if abs(v_lead_k - v_ego) > _TIGHT_MAX_ABS_VREL or abs(a_lead_k) > _TIGHT_MAX_ABS_ALEAD:
+      self._tight_stable_s = 0.0
+      return False
+    self._tight_stable_s += dt
+    return self._tight_stable_s >= _TIGHT_STABLE_MIN_S
+
+  def aggressive_t_follow(self, personality, lead=None, v_ego: float = 0.0,
+                          baseline: float | None = None, dt: float | None = None) -> float | None:
+    """tightfollow2pnw v2: a tighter T_FOLLOW (s) for the Lightning's Aggressive personality only —
     None (unchanged upstream behavior) for every other car and every other personality, including
     the Tesla's own Aggressive. The caller passes this straight through as long_mpc's optional
-    t_follow_override; None there means "use the shared get_T_FOLLOW(personality) as before"."""
-    if not self.tight_aggressive_follow:
+    t_follow_override; None there means "use the shared get_T_FOLLOW(personality) as before".
+
+    v2 is gated and slewed rather than flat (v1's flat 1.0 was reverted — it asked the MPC to chase
+    unfiltered vision-lead noise). Tightening applies only while the lead has been CALM for
+    _TIGHT_STABLE_MIN_S, and the target is slewed at _TIGHT_SLEW_S_PER_S so neither entering nor
+    leaving the gate can step the MPC's desired following distance.
+
+    Directionality is deliberate and asymmetric in the safe sense: `target` is clamped into
+    [tight, baseline], so this can only ever ask for a gap between the two — it can never tighten
+    past _TIGHT_AGGRESSIVE_T_FOLLOW nor loosen beyond the personality's own baseline."""
+    if not self.tight_aggressive_follow or personality != log.LongitudinalPersonality.aggressive:
+      self._tight_reset()
       return None
-    if personality != log.LongitudinalPersonality.aggressive:
+
+    step_dt = _TIGHT_DT_DEFAULT if dt is None else float(dt)
+    if not math.isfinite(step_dt) or step_dt <= 0.0:
+      step_dt = _TIGHT_DT_DEFAULT
+    base = _TIGHT_AGGRESSIVE_BASELINE if baseline is None else float(baseline)
+    if not math.isfinite(base):
+      base = _TIGHT_AGGRESSIVE_BASELINE
+    v_ego_f = float(v_ego) if math.isfinite(float(v_ego)) else 0.0
+
+    lo, hi = min(_TIGHT_AGGRESSIVE_T_FOLLOW, base), max(_TIGHT_AGGRESSIVE_T_FOLLOW, base)
+    target = _TIGHT_AGGRESSIVE_T_FOLLOW if self._tight_lead_is_calm(lead, v_ego_f, step_dt) else base
+    target = _clamp(target, lo, hi)
+
+    cur = base if self._tight_t_follow is None else self._tight_t_follow
+    cur = _clamp(cur, lo, hi)                       # a baseline change (personality edit) can't strand us
+    step = _TIGHT_SLEW_S_PER_S * step_dt
+    cur = min(cur + step, target) if cur < target else max(cur - step, target)
+    self._tight_t_follow = cur
+
+    # Indistinguishable from the shared baseline -> hand back None so the untouched upstream path
+    # runs (keeps the override genuinely inert whenever it isn't doing anything).
+    if abs(cur - base) < 1e-3:
       return None
-    return _TIGHT_AGGRESSIVE_T_FOLLOW
+    return cur

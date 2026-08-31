@@ -2,6 +2,7 @@
 import json
 import math
 
+from cereal import log
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
@@ -329,3 +330,171 @@ def test_display_name_defensive_on_bad_input():
   class Garbage:
     pass
   assert pv.display_name(Garbage()) is None
+
+
+# --------------------------------------------------------------------------------------------------
+# tightfollow2pnw v2 — stability-gated + slewed Aggressive T_FOLLOW (the v1 flat 1.0 was reverted)
+# --------------------------------------------------------------------------------------------------
+AGGRESSIVE = log.LongitudinalPersonality.aggressive
+STANDARD = log.LongitudinalPersonality.standard
+BASE = pv._TIGHT_AGGRESSIVE_BASELINE
+TIGHT = pv._TIGHT_AGGRESSIVE_T_FOLLOW
+DT = pv._TIGHT_DT_DEFAULT
+
+
+class FakeLead:
+  """Mimics a cereal radarState lead reader: only the fields aggressive_t_follow actually reads."""
+  def __init__(self, d_rel=50.0, v_lead_k=20.0, a_lead_k=0.0, status=True):
+    self.dRel = d_rel
+    self.vLeadK = v_lead_k
+    self.aLeadK = a_lead_k
+    self.status = status
+    self.vRel = 99.0        # deliberately garbage: v2 must NEVER read raw vRel (the v1 failure)
+
+
+def _tight_lightning():
+  return PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=True))
+
+
+def _settle(veh, lead, v_ego=20.0, ticks=400, baseline=BASE):
+  """Run the gate for `ticks` planner ticks, returning the final override."""
+  out = None
+  for _ in range(ticks):
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=v_ego, baseline=baseline, dt=DT)
+  return out
+
+
+def test_tight_follow_is_lightning_aggressive_only():
+  tesla = PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True))
+  assert not tesla.tight_aggressive_follow
+  assert _settle(tesla, FakeLead()) is None                      # Tesla Aggressive unchanged
+  assert _tight_lightning().tight_aggressive_follow
+  # right car, wrong personality -> untouched upstream path
+  veh = _tight_lightning()
+  assert veh.aggressive_t_follow(STANDARD, lead=FakeLead(), v_ego=20.0, baseline=1.45, dt=DT) is None
+
+
+def test_calm_lead_reaches_the_tight_target():
+  veh = _tight_lightning()
+  assert _settle(veh, FakeLead(v_lead_k=20.0), v_ego=20.0) == TIGHT
+
+
+def test_no_tightening_before_the_stability_window():
+  """The clock must actually gate: one tick in, nothing has moved off baseline yet."""
+  veh = _tight_lightning()
+  lead = FakeLead(v_lead_k=20.0)
+  assert veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=BASE, dt=DT) is None
+  # still inside the 5 s window -> still baseline (None)
+  for _ in range(int(pv._TIGHT_STABLE_MIN_S / DT) - 2):
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=BASE, dt=DT)
+  assert out is None
+
+
+def test_output_is_slewed_not_stepped():
+  """Crossing the gate must not hand the MPC a discontinuity."""
+  veh = _tight_lightning()
+  lead = FakeLead(v_lead_k=20.0)
+  prev = BASE
+  seen_intermediate = False
+  for _ in range(400):
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=BASE, dt=DT)
+    cur = BASE if out is None else out
+    assert abs(cur - prev) <= pv._TIGHT_SLEW_S_PER_S * DT + 1e-9, "T_FOLLOW stepped"
+    if TIGHT < cur < BASE:
+      seen_intermediate = True
+    prev = cur
+  assert seen_intermediate, "never observed a partially-slewed value -- the slew is not engaged"
+
+
+def test_never_exceeds_the_declared_envelope():
+  """Whatever the lead does, the override stays inside [TIGHT, BASE] — never tighter, never looser."""
+  veh = _tight_lightning()
+  import random
+  rng = random.Random(1234)
+  for i in range(3000):
+    lead = FakeLead(d_rel=rng.uniform(5.0, 90.0), v_lead_k=rng.uniform(0.0, 40.0),
+                    a_lead_k=rng.uniform(-3.0, 3.0), status=rng.random() > 0.2)
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=BASE, dt=DT)
+    if out is not None:
+      assert TIGHT - 1e-9 <= out <= BASE + 1e-9, f"escaped envelope at {i}: {out}"
+
+
+def test_excursion_releases_back_toward_baseline():
+  veh = _tight_lightning()
+  assert _settle(veh, FakeLead(v_lead_k=20.0), v_ego=20.0) == TIGHT
+  # lead brakes hard -> filtered aLeadK past the threshold -> must relax back to baseline
+  hard = FakeLead(v_lead_k=20.0, a_lead_k=-2.0)
+  out = None
+  for _ in range(400):
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=hard, v_ego=20.0, baseline=BASE, dt=DT)
+  assert out is None, "did not return to baseline after a lead excursion"
+
+
+def test_lead_swap_restarts_the_clock():
+  """A cut-in is a NEW car: credit earned behind the previous lead must not transfer."""
+  veh = _tight_lightning()
+  assert _settle(veh, FakeLead(d_rel=60.0, v_lead_k=20.0), v_ego=20.0) == TIGHT
+  cutin = FakeLead(d_rel=25.0, v_lead_k=20.0)          # 35 m step >> _TIGHT_LEAD_JUMP_M
+  out = veh.aggressive_t_follow(AGGRESSIVE, lead=cutin, v_ego=20.0, baseline=BASE, dt=DT)
+  assert out is not None and out > TIGHT, "cut-in did not start releasing"
+  assert veh._tight_stable_s == 0.0
+
+
+def test_lost_lead_and_malformed_lead_fail_closed():
+  for bad in (None, FakeLead(status=False), FakeLead(v_lead_k=float('nan')),
+              FakeLead(a_lead_k=float('inf'))):
+    veh = _tight_lightning()
+    assert _settle(veh, bad, v_ego=20.0) is None
+
+
+def test_raw_vrel_is_never_consulted():
+  """v1's failure was reading the UNFILTERED vRel. FakeLead.vRel is garbage (99 m/s) on every lead
+  in this file; if the gate ever reads it, the calm-lead cases above cannot reach TIGHT."""
+  veh = _tight_lightning()
+  lead = FakeLead(v_lead_k=20.0)
+  assert lead.vRel > pv._TIGHT_MAX_ABS_VREL          # the trap is armed
+  assert _settle(veh, lead, v_ego=20.0) == TIGHT     # ...and the gate ignored it
+
+
+def test_personality_switch_resets_state():
+  veh = _tight_lightning()
+  assert _settle(veh, FakeLead(v_lead_k=20.0), v_ego=20.0) == TIGHT
+  assert veh.aggressive_t_follow(STANDARD, lead=FakeLead(), v_ego=20.0, baseline=1.45, dt=DT) is None
+  assert veh._tight_t_follow is None and veh._tight_stable_s == 0.0
+  # re-entering Aggressive starts from baseline again, not mid-slew
+  out = veh.aggressive_t_follow(AGGRESSIVE, lead=FakeLead(v_lead_k=20.0), v_ego=20.0,
+                                baseline=BASE, dt=DT)
+  assert out is None
+
+
+def test_envelope_holds_when_the_baseline_moves_mid_slew():
+  """The clamps exist ONLY for a baseline that CHANGES between calls, and nothing else in this file
+  varies it -- so without this test the clamps are unfalsifiable (Fable review: removing both clamp
+  lines left all other tests passing, which made the commit's mutation claim false).
+
+  Concretely: park `cur` mid-slew at ~1.20 with the 1.25 baseline, then hand in a baseline of 1.16.
+  The declared envelope is now [1.15, 1.16], but `cur` is 1.20 -- above it. Unclamped, the override
+  returns 1.20 and asks the MPC for a LOOSER gap than the caller's own baseline allows."""
+  veh = _tight_lightning()
+  lead = FakeLead(v_lead_k=20.0)
+  ticks_to_open = int(pv._TIGHT_STABLE_MIN_S / DT)
+  for _ in range(ticks_to_open + 20):                 # gate opens, then ~20 ticks of slew
+    veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=BASE, dt=DT)
+  assert veh._tight_t_follow is not None and veh._tight_t_follow > 1.16, "fixture didn't park mid-slew"
+
+  moved_base = 1.16
+  out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=moved_base, dt=DT)
+  cur = moved_base if out is None else out
+  assert TIGHT - 1e-9 <= cur <= moved_base + 1e-9, \
+    f"escaped the envelope after a baseline move: {cur} not in [{TIGHT}, {moved_base}]"
+
+
+def test_envelope_holds_when_the_baseline_drops_below_the_tight_target():
+  """Degenerate but reachable if get_T_FOLLOW is ever retuned below 1.15: the envelope inverts
+  (lo/hi swap), and the override must still never return something outside it."""
+  veh = _tight_lightning()
+  lead = FakeLead(v_lead_k=20.0)
+  for _ in range(400):
+    out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=1.05, dt=DT)
+    if out is not None:
+      assert 1.05 - 1e-9 <= out <= TIGHT + 1e-9, f"escaped inverted envelope: {out}"
