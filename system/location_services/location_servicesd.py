@@ -152,6 +152,24 @@ POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this 
 # candidate set and the closest of it wins, by plain straight-line distance (which is stable at
 # short range, unlike the path projection). A far report cannot interrupt a near one.
 POLICE_NEAR_MI = 1.0
+# policeretain2pnw (2026-09-04, driver report + forensics): a police report the driver's own Waze app
+# was still showing at 0.1 mi was NOT in our overlay. The forensics log settled why, and it is not a
+# filter bug -- every report that tick was verdict "kept" and the nearest was 6.6 mi. The report HAD
+# been in our feed, first seen 24 mi out, and it AGED OUT of the aggregator before we arrived:
+#   report A  first seen 19:35:54 @ 24.2 mi age 14m   last seen 19:51:12 @ 12.6 mi age 29m
+#   report B  first seen 19:35:54 @ 24.1 mi age 21m   last seen 19:44:35 @ 19.6 mi age 29m
+#   ...we then drove within 0.12 mi and 0.02 mi of them at ~20:04.
+# Across 208 reports watched from young, 30% make their FINAL appearance in the 25-35 min band and
+# only 4% survive past 40 min. At 60 mph a report 24 mi ahead takes ~24 min to reach -- comparable to
+# its entire lifetime in the feed -- so the further ahead a report is when first seen, the more likely
+# it expires before you get there. Waze itself does not have this problem because passing drivers keep
+# re-confirming the sighting; our snapshot-only view simply loses it.
+# Fix: once seen, KEEP a report locally until recede retires it (we physically drove past) or this TTL
+# expires. A retained report is forced to the `unconfirmed` tier, which already means "displayed in
+# amber, never allowed to command a slowdown" -- so the worst case is an amber banner for police that
+# has moved on, and a retained report can never brake the car.
+POLICE_RETAIN_S = 45 * 60          # drop a vanished report this long after its last feed appearance
+POLICE_RETAIN_MAX = 200            # bound the cache; evict least-recently-seen first
 # policetier2pnw (2026-08-18): grade each report "confirmed" vs "unconfirmed" instead of dropping old
 # ones (driver: "I still do want to see it" when nothing fresher is in range). Waze does not publish a
 # report lifetime -- their Help says only "reports appear on the map for a certain amount of time and
@@ -360,6 +378,8 @@ class PoliceUpdater(threading.Thread):
     self._lock = threading.Lock()
     self._alerts: list = []         # cached raw POLICE alerts (lat, lon, magvar, ts, uuid, street)
     self._state = "nodata"          # 'ok' (fresh poll, may be empty) | 'nodata' (no config/poll failed)
+    self._retain = {}               # policeretain2pnw: uuid -> {"al":…, "seen":epoch} for reports
+                                    #   that have left the feed but that we have not driven past yet
     self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "daily limit", "HTTP 403", "no key")
     self._stop = threading.Event()
     self._speed_ok = False          # wazespeedgate2pnw: hysteresis state for the >=45mph poll gate (fail-closed)
@@ -610,6 +630,10 @@ class PoliceUpdater(threading.Thread):
               src_used = "direct-fallback"
           else:
             alerts = self._poll(cfg, gps[0], gps[1])
+          # policeretain2pnw: publish the union of this poll and reports that have aged out of the
+          # feed but that we have not yet driven past. Retained ones are forced to `unconfirmed`
+          # downstream, so they can display but never command a slowdown.
+          alerts, self._retain = merge_retained_police(self._retain, alerts, _now_epoch())
           with self._lock:
             self._alerts, self._state, self._err = alerts, "ok", ""
           cloudlog.info("location_services: police poll ok (%d alerts, %s)", len(alerts),
@@ -773,6 +797,65 @@ def _police_tier_knobs():
     _police_tier_cache["id"] = None
   _police_tier_cache["base"], _police_tier_cache["bonus"] = base, bonus
   return base, bonus
+
+
+def merge_retained_police(cache, alerts, now, retain_s=POLICE_RETAIN_S, cap=POLICE_RETAIN_MAX):
+  """(published_alerts, new_cache) -- union of this poll with reports we have seen before.
+
+  `cache` maps uuid -> {"al": alert, "seen": epoch}. Reports still in `alerts` refresh their entry
+  and are published as-is. Reports that have LEFT the feed are re-published from cache, flagged
+  `retained` (which forces the unconfirmed tier, see _tier_of), until `retain_s` since their last
+  real appearance. Recede-tracking retires them the moment we actually drive past.
+
+  Ordering matters: live alerts come first, so any downstream nearest-first selection prefers a
+  report the feed still vouches for over a retained one at the same distance.
+  """
+  new_cache = dict(cache)
+  live_ids = set()
+  for al in alerts:
+    u = al.get("uuid")
+    if not u:
+      continue                                   # no identity -> cannot retain it; publish live only
+    live_ids.add(u)
+    fresh_al = dict(al)
+    # Defence in depth, NOT load-bearing: the retained copy is made with dict() below and never
+    # aliases the cache, so an alert arriving from the API cannot already carry this flag. Mutation
+    # testing confirms removing this line breaks nothing. Kept so that a future change which does
+    # alias (or a proxy that echoes our own fields back) cannot silently publish a stale "retained".
+    fresh_al.pop("retained", None)
+    new_cache[u] = {"al": fresh_al, "seen": now}
+
+  out = list(alerts)
+  for u, ent in list(new_cache.items()):
+    if u in live_ids:
+      continue
+    if now - ent.get("seen", 0.0) > retain_s:
+      del new_cache[u]                           # expired locally -> stop carrying it
+      continue
+    held = dict(ent["al"])
+    held["retained"] = True
+    out.append(held)
+
+  if len(new_cache) > cap:                       # bound the cache: drop least-recently-seen first
+    for u, _ in sorted(new_cache.items(), key=lambda kv: kv[1].get("seen", 0.0))[:len(new_cache) - cap]:
+      del new_cache[u]
+    out = [al for al in out if not al.get("retained") or al.get("uuid") in new_cache]
+  return out, new_cache
+
+
+def _tier_of(al, now, base, bonus):
+  """Tier for one report, forcing `unconfirmed` on anything we are retaining locally.
+
+  policeretain2pnw: a retained report left the aggregator feed, so by definition the driver's Waze
+  app is no longer being told about it either -- it must never be treated as confirmed. This is the
+  single safety property of the retention feature: `confirmed` is what licenses a slowdown, and a
+  retained report must never reach that list. Age alone is NOT enough to guarantee it (effective
+  life is BASE + BONUS*thumbs, so a 6-thumb report grades confirmed for 70 minutes), which is why
+  this is an explicit override rather than a consequence.
+  """
+  if al.get("retained"):
+    return "unconfirmed"
+  return _police_tier(_age_min(al.get("ts"), now), al.get("thumbs"), base, bonus)
 
 
 def _police_tier(age_min, thumbs, base_min=None, bonus_min=None):
@@ -962,7 +1045,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
     try:
       dbg.append({"lat": round(float(al.get("lat", 0)), 5), "lon": round(float(al.get("lon", 0)), 5),
                   "mi": recede.live_mi(al, lat, lon), "age_min": age, "v": verdict,
-                  "thumbs": al.get("thumbs"), "tier": _police_tier(age, al.get("thumbs"), base, bonus),
+                  "thumbs": al.get("thumbs"), "tier": _tier_of(al, now, base, bonus), "retained": bool(al.get("retained")),
                   # policedbguuid2pnw: log the FULL uuid. Waze ids look like
                   # "alert-34594548/83073a43-e136-4dc7-...", so the old [:8] slice collapsed every
                   # report to "alert-34"/"alert-35" — distinct sightings became indistinguishable,
@@ -1013,8 +1096,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   # CONTROL pick is published SEPARATELY as `cap` -- the nearest CONFIRMED report, which is the only
   # thing allowed to command a slowdown or raise the banner. Neither channel can suppress the other.
   poi, _a = _select(fresh)
-  confirmed = [al for al in fresh if _police_tier(_age_min(al.get("ts"), now), al.get("thumbs"),
-                                                  base, bonus) == "confirmed"]
+  confirmed = [al for al in fresh if _tier_of(al, now, base, bonus) == "confirmed"]
   cap_poi, _ca = _select(confirmed)
   _police_debug_log(dbg, poi, lat, lon, brg)
   if poi is None:
@@ -1029,7 +1111,7 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
          # driver's own app is likely showing it too. "unconfirmed" = API-only -> shown in amber
          # (never dropped), but display-only. This tier describes the DISPLAYED report; what may act
          # on the car is the separate `cap` channel below.
-         "tier": _police_tier(poi_age, poi.get("thumbs"), base, bonus),
+         "tier": _tier_of(poi, now, base, bonus),
          "thumbs": poi.get("thumbs"),
          "uuid": poi.get("uuid"), "town": poi.get("town", "")}
   # CONTROL channel: the nearest CONFIRMED report, or absent when there is none. Its presence is what
