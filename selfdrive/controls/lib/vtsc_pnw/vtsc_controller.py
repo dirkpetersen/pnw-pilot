@@ -483,6 +483,16 @@ class VTSCController:
         "mapKV": round(float(self._tele_mapk_v), 1),
         "mapKN": int(self._tele_mapk_n),
         "mapKAhead": bool(self._tele_mapk_ahead),
+        # waysel2pnw: these MUST go on THIS dict, not self.msg. self.msg feeds the cereal publisher,
+        # which copies a fixed whitelist that has no such members; /dev/shm VTSCStatus is the only
+        # channel ces_pnw reads. Adding them to self.msg alone (as the first cut did) published
+        # nothing and the ces_events fields all read null -- verified live on 2026-09-03.
+        "curveWin": str(self._tele_curve_win),
+        "rsnMap": round(float(self._tele_rsn_map), 2),
+        "rsnVis": round(float(self._tele_rsn_vis), 2),
+        "apexCurvature": round(float(self.msg.get("apexCurvature", 0.0)), 5),
+        "apexDist": round(float(self.msg.get("apexDist", 0.0)), 0),
+        "vCurveSafe": round(float(self.msg.get("vCurveSafe", 0.0)), 1),
         "visK": round(float(self._tele_vis_k), 5),
         "visD": round(float(self._tele_vis_d), 0),
         "visV": round(float(self._tele_vis_v), 1),

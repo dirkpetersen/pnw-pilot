@@ -227,6 +227,7 @@ def main():
   mapd_down = 0            # consecutive loops mapd (mapdExtendedOut) has been silent — debounces "down"
   mapd_out_down = 0        # nudgelesshighway2pnw: consecutive loops mapdOut has been silent — debounces
                             # the MapHighwayClass self-clear below the same way mapd_down debounces "down"
+  waysel_warned = False          # waysel2pnw: one-shot guard so a broken bridge warns once, not at 20 Hz
   last_requested_region = None   # region of the pull we last asked for (used to hold its retry clock)
   retry = RegionRetry()          # mapdgate2pnw: per-region escalating backoff, survives coverage
 
@@ -283,8 +284,13 @@ def main():
         try:
           mem.put_nonblocking("MapWaySel", str(mo.waySelectionType))
           mem.put_nonblocking("MapWayOffset", str(round(float(mo.distanceFromWayCenter), 2)))
-        except Exception:
-          pass   # older mapd / missing field -> just don't log it; never break the bridge
+        except Exception as e:
+          # NEVER swallow this silently: the first cut did, and an UnknownKeyName from the unregistered
+          # params_keys.h entries then looked exactly like "this mapd is too old to have the field".
+          # Log once so a dead bridge is visible instead of reading as legitimately-absent data.
+          if not waysel_warned:
+            cloudlog.warning(f"mapd_configd: way-selection bridge failed, telemetry will read null: {e!r}")
+            waysel_warned = True
       else:
         # nudgelesshighway2pnw: mapdOut is not alive (mapd crashed / binary wiped / never started, or
         # simply not publishing this field yet on an old mapd version). Self-clear the bridged highway

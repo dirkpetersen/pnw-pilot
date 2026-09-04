@@ -95,6 +95,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // freeway reading. Mem-only (tmpfs /dev/shm/params); never touched by the on-disk clear_all() passes.
     {"MapHighwayClassTs", {PERSISTENT, STRING}},
     {"MapWayId", {PERSISTENT, STRING}},                 // OSM way id (int64 as string)
+    {"MapWaySel", {PERSISTENT, STRING}},                // waysel2pnw: mapd waySelectionType --
+                                                        //   current/predicted/possible/extended/fail
+    {"MapWayOffset", {PERSISTENT, STRING}},             // waysel2pnw: metres off the selected way centre
     {"MapConditionalSpeedLimit", {PERSISTENT, STRING}}, // raw OSM maxspeed:conditional text; "" = none
     {"MapDownloadStatus", {CLEAR_ON_MANAGER_START, STRING}},  // mapd2pnw: live OSM DB download state ("OK"/"downloading X/Y"/"incomplete X/Y"/"none") for the debug overlay (updates ~1Hz -> not PERSISTENT)
     {"OsmDbUpdatesCheck", {PERSISTENT, BOOL}},
