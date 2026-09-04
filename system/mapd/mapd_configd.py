@@ -40,6 +40,27 @@ TILE_GRID_DEGREES = 2
 # than this — only a region CHANGE re-triggers immediately. Bounds the retry-in-case-mapd's-socket-
 # wasn't-up-yet resend (the old code's "resend every loop" behavior) to a sane cadence instead of 1 Hz.
 REGION_RESEND_INTERVAL_S = 60.0
+# mapdgate2pnw: bound that resend. A whole-STATE download is expensive and mapd has NO incremental
+# fetch -- every retry refetches the entire region -- so a region that keeps coming back uncovered
+# (tiles that never load, a genuine gap in mapd's coverage, a pull that failed) turns the 60 s resend
+# above into an unbounded whole-state download loop for as long as the car sits there. That is the
+# "maps downloading the whole drive" symptom. Escalate geometrically after each failed attempt and
+# cap, so a stuck region degrades to an occasional retry instead of hammering. Deliberately still
+# retries forever at the cap: the owner would rather burn cellular than be stranded without maps.
+# A region CHANGE, coverage arriving, or "Refresh this location map" all reset the escalation.
+REGION_MAX_RESEND_INTERVAL_S = 1800.0   # 30 min
+
+
+def next_region_interval(attempts: int) -> float:
+  """Seconds to wait before re-requesting the SAME still-uncovered region.
+
+  `attempts` = how many requests we have already sent for this region. The first retry keeps the
+  plain REGION_RESEND_INTERVAL_S, which covers the common benign case of mapd missing the message
+  because its mapdIn socket wasn't up yet; every further failure doubles, capped.
+  """
+  if attempts <= 1:
+    return REGION_RESEND_INTERVAL_S
+  return min(REGION_RESEND_INTERVAL_S * (2.0 ** (attempts - 1)), REGION_MAX_RESEND_INTERVAL_S)
 
 
 def _grid_cells_for_bbox(bbox: list[float]) -> list[tuple[int, int]]:
@@ -148,6 +169,8 @@ def main():
                             # the MapHighwayClass self-clear below the same way mapd_down debounces "down"
   last_requested_region = None   # region code mapd_configd last sent a download request for
   last_request_ts = -1e9         # monotonic ts of that request (resend-interval retry, see below)
+  region_attempts = 0            # mapdgate2pnw: requests sent for last_requested_region while still
+                                 # uncovered; drives next_region_interval's escalating backoff
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -285,6 +308,7 @@ def main():
       # "Refresh this location map" delete — re-triggers a fresh download instead of being treated
       # as a duplicate of a stale request.
       last_requested_region = None
+      region_attempts = 0            # mapdgate2pnw: manual refresh clears any backoff
 
     # mapdstate2pnw: "Refresh this location map" (param RefreshLocationMap) — user-triggered delete
     # of the CURRENT region's tiles, so the uncovered-state auto-download below re-fetches it fresh.
@@ -318,6 +342,7 @@ def main():
           pm.send('mapdIn', msg)
           last_requested_region = region
           last_request_ts = time.monotonic()
+          region_attempts = 1            # mapdgate2pnw: manual refresh restarts the escalation
           cloudlog.warning(f"mapd_configd: RefreshLocationMap re-requested download {key}")
         else:
           cloudlog.warning("mapd_configd: RefreshLocationMap: no region under current GPS fix; no-op")
@@ -345,19 +370,28 @@ def main():
     # box, so the region code itself doesn't flicker at typical highway speeds. A genuine border
     # crossing (e.g. dipping across I-5's WA/OR line) IS meant to re-trigger — that's the feature.
     uncovered = has_fix and not tile_here
+    # mapdgate2pnw: coverage arrived -> the region is fixed, so drop any accumulated backoff. If it
+    # goes uncovered again later that is a NEW problem and deserves a prompt retry, not the old cap.
+    if tile_here and region_attempts:
+      region_attempts = 0
     if uncovered and sm.alive['mapdExtendedOut'] and not sm['mapdExtendedOut'].downloadProgress.active:
       g = sm[gps_service]
       region, key = coverage.region_and_key_for_gps(float(g.latitude), float(g.longitude))
       now = time.monotonic()
-      if region is not None and key is not None and \
-         (region != last_requested_region or now - last_request_ts > REGION_RESEND_INTERVAL_S):
-        msg = messaging.new_message('mapdIn')
-        msg.mapdIn.type = 'download'
-        msg.mapdIn.str = key
-        pm.send('mapdIn', msg)
-        last_requested_region = region
-        last_request_ts = now
-        cloudlog.warning(f"mapd_configd: uncovered in {region}; requested download {key}")
+      if region is not None and key is not None:
+        # mapdgate2pnw: a genuinely NEW region always requests immediately and starts its own count.
+        if region != last_requested_region:
+          region_attempts = 0
+        if region != last_requested_region or now - last_request_ts > next_region_interval(region_attempts):
+          msg = messaging.new_message('mapdIn')
+          msg.mapdIn.type = 'download'
+          msg.mapdIn.str = key
+          pm.send('mapdIn', msg)
+          last_requested_region = region
+          last_request_ts = now
+          region_attempts += 1
+          nxt = next_region_interval(region_attempts)
+          cloudlog.warning(f"mapd_configd: uncovered {region}; req {key} (try {region_attempts}, next {nxt:.0f}s)")
 
 
 if __name__ == "__main__":
