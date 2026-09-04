@@ -46,6 +46,15 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 # Persistent, append-only "each adoption" trail. Lives OUTSIDE /data/openpilot so it survives the
 # boot overlay-swap AND swaglog rotation (a long drive rotates swaglog and would lose early events).
 # One JSON line per CES mode transition, with GPS so we can map where each adoption happened.
+# waysel2pnw: the VTSCStatus keys this module lifts off /dev/shm into every ces_events record.
+# Module-level so vtsc_pnw's tests can assert the publisher actually emits all of them -- see
+# VTSCController.overlay_payload(). Adding a key here without adding it there (or vice versa) silently
+# produces a null column that reads as "the feature did not trigger"; that has happened three times.
+VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
+                  "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
+                  "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis",
+                  "timeToApex")
+
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
 # cesretain2pnw: keep N rotated generations (.1 .. .N), not one. A single .1 gave a ~1-day window:
@@ -1910,8 +1919,11 @@ class CESController:
       self._cond_spd_lim = str(csl) if csl not in (None, b"") else ""
     except Exception:
       self._cond_spd_lim = ""
-    # waysel2pnw: same cross-process mem-param pattern; both stay None when mapd is dead or old, so a
-    # missing value is visibly "no data" in the log rather than a plausible-looking default.
+    # waysel2pnw: same cross-process mem-param pattern. Both stay None when mapd is DEAD (the bridge
+    # self-clears them) -- but note they do NOT protect against an OLD mapd: capnp's default for
+    # waySelectionType is ordinal 0, which is `current`, so a binary that never sets the field would
+    # log a confident "current" rather than nothing. Only reachable with a pre-v2.0.0 binary behind
+    # /data/mapd/.override; the pin is v2.3.0 and mapd has set it unconditionally since v2.0.0.
     try:
       ws = self.mem_params.get("MapWaySel", return_default=True)
       self._way_sel = str(ws) if ws not in (None, "", b"") else None
@@ -1943,9 +1955,7 @@ class CESController:
       # waysel2pnw: apexCurvature/apexDist/vCurveSafe are the FINAL post-fold values that actually set
       # the cap -- they were already being published here and discarded by this very list, so the cap's
       # own curvature had to be back-computed from the cap. curveWin/rsnMap/rsnVis say which source won.
-      for k in ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
-                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
-                "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis"):
+      for k in VTSC_TELE_KEYS:
         self._vtsc_tele[k] = vt.get(k)
     except Exception:
       self._vtsc_cap = self._vtsc_state = None

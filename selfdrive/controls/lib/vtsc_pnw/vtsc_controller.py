@@ -39,6 +39,15 @@ from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
 
+def _fin(x, nd: int, default: float = 0.0) -> float:
+  """Round, substituting `default` for NaN/Inf. See the note at the call sites in overlay_payload()."""
+  try:
+    v = float(x)
+  except (TypeError, ValueError):
+    return default
+  return round(v, nd) if math.isfinite(v) else default
+
+
 class VTSCController:
   def __init__(self, CP, params=None):
     import platform
@@ -179,7 +188,11 @@ class VTSCController:
     The MTSC scale (driver: mapd targets ran ~10 mph slow) + clamp are applied INSIDE the selection so the
     chosen curve matches the value used here."""
     self._tele_map_floored = False               # per-fold, so the flag never survives a stale tick
-    self._tele_curve_win = "none"                # waysel2pnw: set below only if the fold actually chose
+    # waysel2pnw: deliberately does NOT reset _tele_curve_win here. It did, and that was a real defect:
+    # with VtscMapCurves=1 (default ON, the deployed Tesla config) cap() ALWAYS enters this fold, and
+    # both early returns below (exception, no qualifying map curve) leave without setting a winner --
+    # so every vision-authored cap logged "none", which is the overwhelmingly common case and exactly
+    # the case the field exists to name. The caller sets "vis" before calling; only a map win overrides.
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
@@ -282,7 +295,10 @@ class VTSCController:
     # waysel2pnw: vision is the author unless the map fold below outbids it. Setting it here (not only
     # inside the fold) keeps the field honest when there is no map data at all -- otherwise a
     # vision-only cap would log curveWin="none" and read as "nobody asked for this".
-    self._tele_curve_win = "vis"
+    # Gated on d_apex >= 0: without it a dead-straight road (no apex, v_curve = inf) logged "vis"
+    # beside a null cap, claiming an author for a cap that never happened.
+    if d_apex >= 0.0:
+      self._tele_curve_win = "vis"
     sharp_map = False
     if self._map_curves:                        # ces-i90-2pnw (MTSC) + sharpcurve2pnw
       horizon_m = C.MAP_SOURCE_HORIZON_M        # scan the FULL ~500 m mapd publishes (envelope gates binding)
@@ -463,7 +479,18 @@ class VTSCController:
       return
     self._tele_last = now
     try:
-      self.mem_params.put_nonblocking("VTSCStatus", {
+      self.mem_params.put_nonblocking("VTSCStatus", self.overlay_payload())
+    except Exception:
+      pass
+
+  def overlay_payload(self) -> dict:
+    """The VTSCStatus snapshot. Split out from _publish_overlay so a test can assert this dict's keys
+    cover ces_pnw's cherry-pick list WITHOUT a device or a live Params. That contract has now silently
+    broken three times (62a51a4772, satele2pnw's polKey, waysel2pnw): a field is added, the cherry-pick
+    list is not updated -- or, as in waysel2pnw, the field is added to self.msg, which feeds the cereal
+    publisher's fixed whitelist rather than this /dev/shm channel. Either way it publishes nothing and
+    the ces_events column reads null, which looks exactly like 'the feature did not trigger'."""
+    return {
         "enabled": self.msg["enabled"], "engaged": self.msg["active"], "state": self.msg["state"],
         "cap": round(self.msg["vTarget"], 1), "vCruise": round(self.msg["vCruise"], 1),
         # vtsctele2pnw: penalty components actually applied (ces_events picks these up per tick)
@@ -487,15 +514,20 @@ class VTSCController:
         # which copies a fixed whitelist that has no such members; /dev/shm VTSCStatus is the only
         # channel ces_pnw reads. Adding them to self.msg alone (as the first cut did) published
         # nothing and the ces_events fields all read null -- verified live on 2026-09-03.
+        # _fin(): a NaN here serialises as a bare `NaN` token -- not valid JSON -- and because the
+        # publish is wrapped in a bare except, that would lose the WHOLE snapshot for the tick, not
+        # just the one field. mapKV above already guards for the same reason.
         "curveWin": str(self._tele_curve_win),
-        "rsnMap": round(float(self._tele_rsn_map), 2),
-        "rsnVis": round(float(self._tele_rsn_vis), 2),
-        "apexCurvature": round(float(self.msg.get("apexCurvature", 0.0)), 5),
-        "apexDist": round(float(self.msg.get("apexDist", 0.0)), 0),
-        "vCurveSafe": round(float(self.msg.get("vCurveSafe", 0.0)), 1),
+        "rsnMap": _fin(self._tele_rsn_map, 2),
+        "rsnVis": _fin(self._tele_rsn_vis, 2),
+        "apexCurvature": _fin(self.msg.get("apexCurvature", 0.0), 5),
+        "apexDist": _fin(self.msg.get("apexDist", 0.0), 0),
+        "vCurveSafe": _fin(self.msg.get("vCurveSafe", 0.0), 1),
+        # timeToApex has been computed and thrown away since this file was written -- it was in
+        # self.msg but never on this channel, so ces_pnw could never see it. It is the "did we brake
+        # too early?" signal, which is the whole question the Tumwater over-slow raised.
+        "timeToApex": _fin(self.msg.get("timeToApex", -1.0), 2, -1.0),
         "visK": round(float(self._tele_vis_k), 5),
         "visD": round(float(self._tele_vis_d), 0),
         "visV": round(float(self._tele_vis_v), 1),
-      })
-    except Exception:
-      pass
+      }
