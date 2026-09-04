@@ -1754,6 +1754,10 @@ class CESController:
     # only, never gates any curve/speed-limit decision here. See docs/MAPD-V220-UPGRADE.md.
     self._hwy_class = None          # HighwayClass enum name, e.g. "motorway" (None = no data yet)
     self._cond_spd_lim = ""         # raw OSM maxspeed:conditional text; "" = none
+    # waysel2pnw (PURE OBSERVATION): how confident mapd is about WHICH way we are on, and how far off
+    # its centreline. Answers "was the map even looking at our road?" when a curve target is absurd.
+    self._way_sel = None            # current / predicted / possible / extended / fail (None = no data)
+    self._way_off = None            # metres from the selected way's centreline (None = no data)
     self._frame = 0
     # telemetry / logging (display + diagnostics only — never gates control)
     self._last_mode = "off"         # last logged mode: off / chill / experimental
@@ -1906,6 +1910,18 @@ class CESController:
       self._cond_spd_lim = str(csl) if csl not in (None, b"") else ""
     except Exception:
       self._cond_spd_lim = ""
+    # waysel2pnw: same cross-process mem-param pattern; both stay None when mapd is dead or old, so a
+    # missing value is visibly "no data" in the log rather than a plausible-looking default.
+    try:
+      ws = self.mem_params.get("MapWaySel", return_default=True)
+      self._way_sel = str(ws) if ws not in (None, "", b"") else None
+    except Exception:
+      self._way_sel = None
+    try:
+      wo = self.mem_params.get("MapWayOffset", return_default=True)
+      self._way_off = float(wo) if wo not in (None, "", b"") else None
+    except Exception:
+      self._way_off = None
     # VTSC applied cap + state — logging only (see _event_record)
     try:
       vt = self.mem_params.get("VTSCStatus", return_default=True)
@@ -1924,8 +1940,12 @@ class CESController:
       # these here they never leave /dev/shm -- VTSCStatus is volatile and overwritten at 5 Hz, and
       # this cherry-picking read was the ONLY consumer, so the fields published by 62a51a4772 were
       # being computed and thrown away. That made the drive-replay they exist for impossible.
+      # waysel2pnw: apexCurvature/apexDist/vCurveSafe are the FINAL post-fold values that actually set
+      # the cap -- they were already being published here and discarded by this very list, so the cap's
+      # own curvature had to be back-computed from the cap. curveWin/rsnMap/rsnVis say which source won.
       for k in ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
-                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead"):
+                "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
+                "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis"):
         self._vtsc_tele[k] = vt.get(k)
     except Exception:
       self._vtsc_cap = self._vtsc_state = None
@@ -2780,6 +2800,8 @@ class CESController:
       # condSpdLim truncated to bound the JSONL row size (raw OSM text, unbounded upstream).
       "hwyClass": self._hwy_class,
       "condSpdLim": (self._cond_spd_lim[:80] if self._cond_spd_lim else ""),
+      "waySel": self._way_sel,          # waysel2pnw
+      "wayOff": self._way_off,          # waysel2pnw
       "dRel": tele.get("dRel"), "vLead": tele.get("vLead"),
       # vtsctele2pnw: explicit lead-present bool + gap time (s) + lead speed delta (m/s)
       # leadrate2pnw: "hasLead" is an ALIAS of the same value as "lead" below (both come straight from

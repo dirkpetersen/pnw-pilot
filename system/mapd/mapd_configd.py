@@ -271,6 +271,20 @@ def main():
         mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
         mem.put_nonblocking("MapWayId", str(int(mo.wayId)))
         mem.put_nonblocking("MapConditionalSpeedLimit", mo.conditionalSpeedLimit or "")
+        # waysel2pnw (PURE OBSERVATION, never gates anything): mapd already publishes HOW CONFIDENT it
+        # is about which OSM way we are on (waySelectionType: current/predicted/possible/extended/fail)
+        # and how far off that way's centreline we are. Both have been in cereal since the v2.2.0
+        # bridge and were forwarded NOWHERE, so every "the map said something implausible" question so
+        # far has been unanswerable. Motivating case: I-5 NB at Tumwater 2026-09-03 19:01:44, mapd
+        # reported hwyClass=motorway AND a 42 mph curve target on a 772 m-radius curve (true safe speed
+        # ~98 mph) -- a ramp-shaped number on a mainline. If waySelectionType there is anything but
+        # `current`, mapd was reading an adjacent way (the interchange ramp) and the velocity is
+        # explained. Logged so the next occurrence answers itself.
+        try:
+          mem.put_nonblocking("MapWaySel", str(mo.waySelectionType))
+          mem.put_nonblocking("MapWayOffset", str(round(float(mo.distanceFromWayCenter), 2)))
+        except Exception:
+          pass   # older mapd / missing field -> just don't log it; never break the bridge
       else:
         # nudgelesshighway2pnw: mapdOut is not alive (mapd crashed / binary wiped / never started, or
         # simply not publishing this field yet on an old mapd version). Self-clear the bridged highway
@@ -282,6 +296,10 @@ def main():
         if mapd_out_down == 5:
           mem.put_nonblocking("MapHighwayClass", "")
           mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
+          # waysel2pnw: clear these too, so a dead mapd cannot leave a stale "current" in the log and
+          # make a later bad target look well-sourced.
+          mem.put_nonblocking("MapWaySel", "")
+          mem.put_nonblocking("MapWayOffset", "")
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point

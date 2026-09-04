@@ -65,6 +65,8 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
+    self._tele_curve_win = "none"
+    self._tele_rsn_map = self._tele_rsn_vis = -1.0
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
@@ -177,6 +179,8 @@ class VTSCController:
     The MTSC scale (driver: mapd targets ran ~10 mph slow) + clamp are applied INSIDE the selection so the
     chosen curve matches the value used here."""
     self._tele_map_floored = False               # per-fold, so the flag never survives a stale tick
+    self._tele_curve_win = "none"                # waysel2pnw: set below only if the fold actually chose
+    self._tele_rsn_map = self._tele_rsn_vis = -1.0
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
         self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
@@ -195,9 +199,16 @@ class VTSCController:
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
+    # waysel2pnw telemetry: record WHICH source won and by how much. Without this the log shows a cap
+    # but not its author -- the I-5 Tumwater over-slow (2026-09-03) had to be attributed by matching
+    # vtscCap against mapEff by eye. rsn* are the decel-envelope values the choice is actually made on.
+    self._tele_rsn_map = float(rsn_map) if rsn_map != float('inf') else -1.0
+    self._tele_rsn_vis = float(rsn_vis) if rsn_vis != float('inf') else -1.0
     if rsn_map < rsn_vis:                       # map curve is the more binding -> use it
       k_map = (self.tune['A_LAT_TARGET'] / (mv * mv)) if mv > 0.0 else 0.0   # equiv curvature, logging only
+      self._tele_curve_win = "map"
       return k_map, md, mv, sharp
+    self._tele_curve_win = "vis"
     return k_apex, d_apex, v_curve, False
 
   def cap(self, sm, v_cruise: float, v_ego: float) -> float:
@@ -211,6 +222,8 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
+    self._tele_curve_win = "none"
+    self._tele_rsn_map = self._tele_rsn_vis = -1.0
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
@@ -266,6 +279,10 @@ class VTSCController:
     # checkable if what vision actually saw is recorded.
     self._tele_vis_k, self._tele_vis_d = float(k_apex), float(d_apex)
     self._tele_vis_v = 0.0 if v_curve == float('inf') else float(v_curve)
+    # waysel2pnw: vision is the author unless the map fold below outbids it. Setting it here (not only
+    # inside the fold) keeps the field honest when there is no map data at all -- otherwise a
+    # vision-only cap would log curveWin="none" and read as "nobody asked for this".
+    self._tele_curve_win = "vis"
     sharp_map = False
     if self._map_curves:                        # ces-i90-2pnw (MTSC) + sharpcurve2pnw
       horizon_m = C.MAP_SOURCE_HORIZON_M        # scan the FULL ~500 m mapd publishes (envelope gates binding)
@@ -430,6 +447,9 @@ class VTSCController:
                     visK=float(getattr(self, '_tele_vis_k', 0.0)),
                     visD=float(getattr(self, '_tele_vis_d', 0.0)),
                     visV=float(getattr(self, '_tele_vis_v', 0.0)),
+                    curveWin=str(getattr(self, '_tele_curve_win', 'none')),
+                    rsnMap=float(getattr(self, '_tele_rsn_map', -1.0)),
+                    rsnVis=float(getattr(self, '_tele_rsn_vis', -1.0)),
                     enabled=bool(self._enabled), active=bool(active), state=self._state,
                     vCruise=float(v_cruise), vTarget=float(capped), vEgo=float(v_ego),
                     apexDist=float(d_apex), apexCurvature=float(k_apex), vCurveSafe=vcs,
