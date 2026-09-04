@@ -139,8 +139,10 @@ def manager_init() -> None:
   # not, by design (see its docstring).
   # mapdgate2pnw: this comment used to claim the tile set was "~20 MB" and "Wi-Fi-gated". Both were
   # wrong and actively misleading — the tile set is a WHOLE US STATE (the WA/OR/ID set alone was
-  # 286 MB), and mapdstate2pnw removed the Wi-Fi gate on purpose. What IS bounded is the retry:
-  # mapd_configd.next_region_interval backs off a region that keeps coming back uncovered.
+  # 286 MB), and mapdstate2pnw removed the Wi-Fi gate on purpose. What IS bounded is the REPEAT
+  # pull for a region that keeps coming back uncovered: mapd_configd.RegionRetry escalates that
+  # region's retry interval and measures it from the pull's END. The first pull for a region the
+  # device has not seen is still immediate and unbounded in size -- that is the intended behaviour.
   def _install_mapd():
     from openpilot.system.mapd.installer import is_installed
     backoff = 10
