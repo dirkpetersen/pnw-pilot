@@ -133,9 +133,14 @@ def manager_init() -> None:
   #
   # NETWORK-AGNOSTIC ON PURPOSE: the binary fetch (installer.ensure_mapd -> plain urlopen
   # of the pinned release URL) is NOT gated on Wi-Fi, priority networks, or metered state —
-  # it downloads over whatever connection has internet (LTE, hotspot, any Wi-Fi). Only the
-  # ~20 MB map TILE set is Wi-Fi-gated (mapd_configd); the binary must always come back so
-  # mapd can run, regardless of which network the device happens to be on.
+  # it downloads over whatever connection has internet (LTE, hotspot, any Wi-Fi). The binary must
+  # always come back so mapd can run, regardless of which network the device happens to be on.
+  # The map TILE set is likewise NOT gated — mapd_configd requests it on any network, metered or
+  # not, by design (see its docstring).
+  # mapdgate2pnw: this comment used to claim the tile set was "~20 MB" and "Wi-Fi-gated". Both were
+  # wrong and actively misleading — the tile set is a WHOLE US STATE (the WA/OR/ID set alone was
+  # 286 MB), and mapdstate2pnw removed the Wi-Fi gate on purpose. What IS bounded is the retry:
+  # mapd_configd.next_region_interval backs off a region that keeps coming back uncovered.
   def _install_mapd():
     from openpilot.system.mapd.installer import is_installed
     backoff = 10
