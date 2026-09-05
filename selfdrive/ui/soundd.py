@@ -213,7 +213,13 @@ class Soundd:
               ls = self.mem.get("LocationServices", return_default=True)
               p = ls.get("police", {}) if isinstance(ls, dict) else {}
               pd = p.get("dist_mi")
-              near = p.get("state") == "alert" and pd is not None and pd <= POLICE_NEAR_MI
+              # policeretain2pnw: never chirp for a RETAINED report -- one we are showing only
+              # because we saw it in an earlier poll, after it left the aggregator feed. Those are
+              # displayed (amber, unconfirmed) but are not evidence anybody still sees police there,
+              # and without this every spot we have ever driven past police would chirp again for
+              # the 45 min retention window. The banner still shows; only the siren is suppressed.
+              near = (p.get("state") == "alert" and pd is not None and pd <= POLICE_NEAR_MI
+                      and not p.get("retained"))
               if near:
                 uuid = p.get("uuid")
                 if not self.siren_near or uuid != self.siren_uuid:   # new appearance or new report -> chirp

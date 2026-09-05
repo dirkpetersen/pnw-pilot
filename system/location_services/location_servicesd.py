@@ -809,6 +809,12 @@ def merge_retained_police(cache, alerts, now, retain_s=POLICE_RETAIN_S, cap=POLI
 
   Ordering matters: live alerts come first, so any downstream nearest-first selection prefers a
   report the feed still vouches for over a retained one at the same distance.
+
+  The cache deliberately SURVIVES gated/failed periods (speed gate below 45 mph, no GPS, disabled,
+  poll error) -- those wipe `_alerts` but not `_retain`. So leaving the freeway for 20 min and
+  coming back republishes what we still hold, which is the point: the driver has not passed those
+  reports yet. `seen` keeps ticking through the gap, so nothing outlives `retain_s`, and recede's
+  passed-set survives too, so anything we DID drive past stays suppressed.
   """
   new_cache = dict(cache)
   live_ids = set()
@@ -818,10 +824,12 @@ def merge_retained_police(cache, alerts, now, retain_s=POLICE_RETAIN_S, cap=POLI
       continue                                   # no identity -> cannot retain it; publish live only
     live_ids.add(u)
     fresh_al = dict(al)
-    # Defence in depth, NOT load-bearing: the retained copy is made with dict() below and never
-    # aliases the cache, so an alert arriving from the API cannot already carry this flag. Mutation
-    # testing confirms removing this line breaks nothing. Kept so that a future change which does
-    # alias (or a proxy that echoes our own fields back) cannot silently publish a stale "retained".
+    # Defence in depth, NOT load-bearing, and it only cleans the CACHED copy: `out` below starts as
+    # list(alerts), so a proxy that echoed `retained` back at us would still publish it on the live
+    # alert. That direction is fail-safe (it forces unconfirmed and suppresses the siren -- it can
+    # never promote anything), which is why this is left as a cheap guard rather than a filter over
+    # `out`. Mutation testing confirms removing this line breaks nothing today; it exists so a future
+    # change that DOES alias the cache cannot carry a stale flag forward across polls.
     fresh_al.pop("retained", None)
     new_cache[u] = {"al": fresh_al, "seen": now}
 
@@ -1112,6 +1120,11 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
          # (never dropped), but display-only. This tier describes the DISPLAYED report; what may act
          # on the car is the separate `cap` channel below.
          "tier": _tier_of(poi, now, base, bonus),
+         # policeretain2pnw: TRUE when this report has left the aggregator feed and we are only
+         # showing it because we saw it earlier. The driver cannot otherwise tell a retained amber
+         # from a merely-aged amber, and soundd uses this to NOT chirp the siren for one (a phantom
+         # chirp at every spot we have ever passed police would train the driver to ignore it).
+         "retained": bool(poi.get("retained")),
          "thumbs": poi.get("thumbs"),
          "uuid": poi.get("uuid"), "town": poi.get("town", "")}
   # CONTROL channel: the nearest CONFIRMED report, or absent when there is none. Its presence is what
