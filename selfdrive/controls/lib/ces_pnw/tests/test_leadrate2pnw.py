@@ -154,6 +154,7 @@ class _SteerLogHarness:
     self._vtsc_cap = None
     self._vtsc_state = None
     self._lc_corr = self._lc_act = self._lc_gate = self._lc_err = None
+    self._lc_lim_n = None   # lcroc2pnw: lane-centering ROC-cap clip counter
     self._sl_curv_lim = self._sl_safe_lim = False
     self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = 0.0
     self._sl_lat_dem = self._sl_lat_max = self._sl_curv_max = 0.0

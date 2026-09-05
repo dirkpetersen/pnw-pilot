@@ -10,13 +10,14 @@ WHAT THIS IS
   replacement path planner: every path the raw correction can produce is hard-clamped to a tiny
   curvature delta (see `max_raw_correction` below) long before it reaches the actuator.
 
-  This is a straight port of StarPilot's `LaneCenteringController`
+  This is a port of StarPilot's `LaneCenteringController`
   (selfdrive/controls/lib/lane_centering.py in the frog/StarPilot tree). The correction math, the
   confidence gates, the graceful smooth-release behavior, and the end-to-end (E2E) authority blend
-  are preserved EXACTLY — this file changes only how the controller is *tuned*, not what it computes.
-  If you are auditing this port for correctness, diff `_raw_correction()` and `update()` against the
-  StarPilot source line-by-line; they should match modulo the tuning-source indirection described
-  next.
+  are preserved as StarPilot wrote them. If you are auditing this port for correctness, diff
+  `_raw_correction()` and `update()` against the StarPilot source line-by-line; they should match
+  modulo (a) the tuning-source indirection described next and (b) the `correction_roc` growth rate
+  limiter in `update()` (lcroc2pnw, ported from BluePilot af4bc410c9 — see its use site). Those are
+  the only two deliberate departures; (b) can only ever BOUND the correction, never enlarge it.
 
 HOW TUNING WORKS HERE (the one real change from StarPilot)
   StarPilot hardcoded its tuning as module-level constants, with `offset`/`e2e_authority` passed in
@@ -90,6 +91,7 @@ DEFAULT_TUNING: dict[str, float | bool] = {
   "lookahead_min": 8.0,           # lower bound of the speed-derived lookahead distance (m)
   "lookahead_max": 35.0,          # upper bound of the speed-derived lookahead distance (m)
   "smooth_tau": 0.4,              # time constant easing the correction toward its target (s)
+  "correction_roc": 0.0009,       # cap on how fast the correction may GROW (1/m per second)
   "signal_release_tau": 0.20,     # time constant releasing the correction during a turn signal (s)
   "confidence_release_tau": 0.20, # time constant releasing the correction when confidence is lost (s)
   "min_lane_prob": 0.6,           # minimum model confidence required in both adjacent lane lines
@@ -146,6 +148,21 @@ _CLAMPS: dict[str, tuple[float, float]] = {
   "smooth_tau": (0.01, 5.0),
   "signal_release_tau": (0.01, 5.0),
   "confidence_release_tau": (0.01, 5.0),
+  # correction_roc caps how fast the applied correction may GROW, in 1/m per SECOND, independently
+  # of smooth_tau (see the "why a second limiter" comment at its use site in update()).
+  #   Floor 0.0001 1/m/s: a smaller-than-default value only ever slows the correction's growth,
+  #     which is de-authorizing and therefore always safe; the floor is above zero purely so a bad
+  #     edit can't silently freeze the trim at whatever value it happened to be holding.
+  #   Ceiling 0.0018 1/m/s (= 1.8e-5 per 100 Hz tick, 2x the default). The guarantee this buys is
+  #     UNCONDITIONAL and does not depend on any other tuning value: because this envelope is
+  #     hardcoded here, |correction| can never grow by more than hi * DT_CTRL = 1.8e-5 1/m in one
+  #     tick, under ANY legal JSON. (For scale: at default tuning the exponential filter alone would
+  #     step alpha * max_raw_correction * max_gain = 0.0247 * 0.004 * 0.30 = 2.96e-5 1/m when
+  #     re-applying a full-scale correction from zero, so the cap still bites there even dialed to
+  #     the top. At a very large smooth_tau the filter is slower than the cap and the cap simply
+  #     never engages -- harmless, the filter is then the tighter bound.) The JSON can loosen this
+  #     limiter 2x; it can never remove it.
+  "correction_roc": (0.0001, 0.0018),
   # min_lane_prob is a model-reported probability — [0, 1] is its entire valid domain.
   "min_lane_prob": (0.0, 1.0),
   # max_lane_std (and e2e_max_path_std below) are model uncertainty in METERS, NOT a normalized
@@ -274,6 +291,10 @@ class LaneCenteringController:
 
   def __init__(self) -> None:
     self._correction = 0.0
+    # Telemetry-only (see `status` below): how many ticks the correction_roc cap has actually
+    # clipped since this controller was constructed. Deliberately NOT reset by reset() -- it is a
+    # drive-long odometer, not per-engagement state, and nothing in the control path reads it.
+    self._roc_limited_ticks = 0
     self._tuning: dict[str, float | bool] = dict(DEFAULT_TUNING)
     self._tuning_mtime: float | None = None
     self._last_check_mono = 0.0
@@ -329,6 +350,7 @@ class LaneCenteringController:
       "yStd": None,    # E2E path position.yStd at lookahead (m)
       "w": None,       # apparent lane width at lookahead (m)
       "v": 0.0,        # v_ego (m/s)
+      "limN": 0,       # cumulative ticks the correction_roc cap actually clipped (see update())
     }
 
   def _finish_status(self, gate: str, v_ego) -> None:
@@ -353,6 +375,12 @@ class LaneCenteringController:
       self.status["gate"] = gate
       self.status["corr"] = float(self._correction)
       self.status["act"] = bool(self._correction != 0.0)
+      # Cumulative, NOT per-tick: the CES logger samples this at ~1 Hz out of a ~5 Hz publish of a
+      # 100 Hz signal, so a per-tick boolean would almost never be caught. A monotonic counter
+      # survives that sampling -- the difference between two consecutive ces_events records is the
+      # number of ticks the cap bit in between, which is what tells you whether this limiter is
+      # doing anything on the road. Telemetry-only, like every other field here.
+      self.status["limN"] = int(self._roc_limited_ticks)
       v = float(v_ego)
       if math.isfinite(v):
         self.status["v"] = v
@@ -523,7 +551,62 @@ class LaneCenteringController:
     # clamp before the gain means max_gain can never be used to smuggle a bigger raw signal through —
     # the two multipliers are independent hard stops, not one combined budget.
     target = float(np.clip(raw_correction, -t["max_raw_correction"], t["max_raw_correction"])) * t["max_gain"]
-    self._correction = float(smooth_value(target, self._correction, t["smooth_tau"], dt=DT_CTRL))
+    filtered = float(smooth_value(target, self._correction, t["smooth_tau"], dt=DT_CTRL))
+
+    # Why a SECOND limiter on top of smooth_tau (ported from BluePilot af4bc410c9).
+    #   smooth_value bounds how fast the correction CHASES its target; it does not bound how far the
+    #   TARGET may step. Its per-tick delta is alpha * (target - correction), so the filter's fastest
+    #   slew happens immediately after a target jump and is proportional to that jump. A curve-exit
+    #   confidence flip -- lane lines lost through a tight curve (correction released toward 0 via
+    #   confidence_release_tau), then re-acquired at the exit with a full-scale error -- is exactly
+    #   such a step, and it front-loads the whole re-application into the first tenth of a second.
+    #
+    #   THIS IS HARDENING, NOT A DIAGNOSIS. It was motivated by, but does NOT close, the open item
+    #   "after a slow tight curve the Tesla is definitely over steering and is getting into the
+    #   upcoming traffic" (docs/PENDING-WORK.md, 2026-09-03) -- that report is explicitly marked
+    #   NOT YET DIAGNOSED and no telemetry was pulled for it before this change. In particular a
+    #   growth-only cap does nothing about the tracker's own candidate #1 (a correction that
+    #   RELEASES too slowly as the curve straightens); it bounds the opposite direction. The
+    #   `DisableLaneCentering` A/B and the ces_events "ev":"steer" pull are still the first step.
+    #
+    # Deriving 0.0009 1/m/s for OUR pipeline (do NOT copy BluePilot's 0.00015 -- different units):
+    #   BluePilot rate-limits 0.00015 1/m per 20 Hz tick = 0.003 1/m/s across a +/-0.004 correction
+    #   span (0.008 wide) => ~2.7 s to traverse the full span, and their cap starts binding once the
+    #   target gap exceeds 0.00015 / alpha_bp = 0.00015 / (1 - exp(-0.05/0.4)) = 0.00128, i.e. ~16%
+    #   of their span. Our span at default tuning is max_raw_correction * max_gain = 0.004 * 0.30 =
+    #   +/-0.0012 (0.0024 wide), and our tick is 100 Hz. Same fractional pacing =>
+    #   0.0024 / 2.7 s = 0.00089 ~= 0.0009 1/m per second = 9.0e-6 1/m per DT_CTRL tick. Cross-check:
+    #   our alpha = 1 - exp(-0.01/0.4) = 0.0247, so the cap starts binding at a target gap of
+    #   9.0e-6 / 0.0247 = 3.6e-4 = 15% of our span -- the same knee BluePilot lands on.
+    #   Physically, lateral jerk = v^2 * dk/dt: 0.0009 1/m/s is 0.76 m/s^3 at 29 m/s (65 mph) and
+    #   0.15 m/s^3 at 13 m/s (30 mph) -- inside normal ride-comfort jerk at any speed we run at.
+    #   Cost of a full-scale curve-exit re-acquisition from zero, before -> after: first-tick step
+    #   2.96e-5 -> 9.0e-6 1/m (3.3x smaller). The cap then actually binds for 93 ticks (0.93 s),
+    #   after which the exponential filter is the slower of the two and takes over; the correction
+    #   reaches 95% of full at 1.66 s instead of 1.20 s. It is the front-loaded first tenth of a
+    #   second -- what the driver feels -- that is removed, not the eventual authority.
+    #
+    # GROWTH ONLY, and only for a SAME-SIGN shrink. The clip is skipped when the step both reduces
+    # |correction| AND keeps its sign, because slowing a de-authorizing step would hold authority
+    # longer than today's code does, and this change is only ever allowed to bound existing
+    # behavior. The sign condition is load-bearing, not decoration: `abs(filtered) < abs(correction)`
+    # alone is ALSO true on the tick that crosses zero into the opposite sign, and that tick moves
+    # by up to alpha * 2 * FULL = 5.9e-5 1/m at default tuning (6.6x the cap) and up to 6.1e-3 at
+    # the envelope's legal corner (smooth_tau 0.01, max_gain 0.5, max_raw_correction 0.01). A
+    # magnitude-only test would therefore have left the single largest per-tick jump this limiter
+    # exists to bound -- a full-scale sign flip at curve exit -- completely unbounded. With the sign
+    # term, the crossing tick is clipped to `correction -/+ step`, which holds at most one step's
+    # worth (<= 1.8e-5 1/m, ~1.5% of full authority) of the OLD sign for a tick or two: a bounded,
+    # negligible cost in exchange for bounding an otherwise unbounded jump in the NEW direction.
+    # reset() and the signal / low-confidence release paths are untouched: those all reduce
+    # authority and are never paced.
+    if not (abs(filtered) <= abs(self._correction) and filtered * self._correction >= 0.0):
+      step = float(t["correction_roc"]) * DT_CTRL
+      clipped = float(np.clip(filtered, self._correction - step, self._correction + step))
+      if clipped != filtered:
+        self._roc_limited_ticks += 1  # telemetry only (see _finish_status)
+      filtered = clipped
+    self._correction = filtered
     # Final backstop: the correction is provably finite here given the sanitized tuning and the
     # finite-geometry gates above, but this is a lateral-adjacent command — never let a non-finite
     # value reach clip_curvature/the actuator. If it somehow is, drop the correction entirely.

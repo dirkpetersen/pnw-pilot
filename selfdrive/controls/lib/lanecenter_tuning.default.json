@@ -39,6 +39,7 @@
   "lookahead_min": 8.0,
   "lookahead_max": 35.0,
   "smooth_tau": 0.4,
+  "correction_roc": 0.0009,
   "signal_release_tau": 0.20,
   "confidence_release_tau": 0.20,
   "min_lane_prob": 0.6,

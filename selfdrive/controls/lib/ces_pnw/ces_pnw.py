@@ -1786,6 +1786,10 @@ class CESController:
     self._lc_s1 = self._lc_s2 = None    # laneLineStds[1]/[2] (m)
     self._lc_ystd = None     # E2E path position.yStd at lookahead (m)
     self._lc_w = None        # apparent lane width at lookahead (m)
+    # lcroc2pnw: cumulative count of ticks the lane-centering correction_roc growth cap actually
+    # clipped. CUMULATIVE, not per-tick — diff two consecutive records to see how often the cap bit
+    # in that second. A per-tick boolean would be invisible at this 1 Hz sampling of a 5 Hz publish.
+    self._lc_lim_n = None
     # steerlimit-log2pnw telemetry: steering-limit status (from SteerLimitStatus, published by
     # controlsd — see docs/STEERING-LIMITS.md) — logging only, never gates control here. Defaulted
     # so a missing/never-published param (before the first controlsd tick lands) reads as a clean
@@ -2063,10 +2067,13 @@ class CESController:
       self._lc_ystd = round(float(ystd), 2) if ystd is not None else None
       w = lc.get("w")
       self._lc_w = round(float(w), 2) if w is not None else None
+      lim_n = lc.get("limN")
+      self._lc_lim_n = int(lim_n) if lim_n is not None else None
     except Exception:
       self._lc_corr = self._lc_err = None
       self._lc_p1 = self._lc_p2 = self._lc_s1 = self._lc_s2 = None
       self._lc_ystd = self._lc_w = None
+      self._lc_lim_n = None
       self._lc_act = False
       self._lc_gate = None
     # steerlimit-log2pnw telemetry: steering-limit status — logging only (see _event_record). Same
@@ -2382,6 +2389,7 @@ class CESController:
         **getattr(self, "_sa_tele", {}),
         # lanecenter2pnw fields (from LaneCenterStatus) — same subset the enabled-path tick logs.
         "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
+        "lcLimN": self._lc_lim_n,
         # steerlimit-log2pnw / steertele2pnw / fordkappalog2pnw fields (from SteerLimitStatus).
         "slCurvLim": self._sl_curv_lim, "slSafetyLim": self._sl_safe_lim,
         "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
@@ -2890,6 +2898,8 @@ class CESController:
       "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
       "lcP1": self._lc_p1, "lcP2": self._lc_p2, "lcS1": self._lc_s1, "lcS2": self._lc_s2,
       "lcYStd": self._lc_ystd, "lcW": self._lc_w,
+      # lcroc2pnw: cumulative ticks the correction_roc growth cap clipped (diff consecutive records).
+      "lcLimN": self._lc_lim_n,
       # steerlimit-log2pnw telemetry: steering-limit status (from SteerLimitStatus) — display/log
       # only, same as lc* above. PURE OBSERVATION: never gates or alters any control value. See
       # docs/STEERING-LIMITS.md for what each field means and how to read them together.
