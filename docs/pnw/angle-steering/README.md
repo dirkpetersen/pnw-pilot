@@ -6,7 +6,13 @@ into the PNW line, the two live-drive sessions, and the tooling built around it.
 **Upstream source of truth:** `BluePilotDev/bluepilot` branch `bp-7.0`
 (`opendbc_repo/opendbc/sunnypilot/car/ford/lateral_angle_ext.py`). **Our port:** `pnw-opendbc`
 branch `angle2pnw-faithful2` → `opendbc/car/ford/lateral_angle_pnw.py`.
-**Feature gate:** `FordAngleLateral` (default **0**) + `PnwVehicle.angle_lat`.
+**Feature gate:** `NoFordAngleSteering` (opt-**out**, registered `"0"`) + `PnwVehicle.angle_lat`.
+**Angle steering is ON by DEFAULT** on `3devpnw` and `3testpnw` — confirmed on-road 2026-09-05 as
+better and safer than the curvature path, so it ships enabled and a driver who dislikes it turns it
+off in settings. `FordAngleLateral` is only the legacy live mirror that the opendbc submodule still
+reads; `manager_init` seeds it `True` on a fresh install and re-syncs it every boot. (Earlier
+revisions of this line said "default **0**" — that described the pre-`toggles-invert2pnw` state and
+was wrong for every build since.)
 **Tuning overlay:** `/data/pnw/angle_tuning.json` — hot-reloads every ~5 s, no restart needed.
 In-code defaults are Alan Polk's exact values; an absent file == his code.
 
