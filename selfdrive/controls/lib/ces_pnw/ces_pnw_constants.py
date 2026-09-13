@@ -5,7 +5,10 @@ ALL values are starting points to be finalized on real drive logs (see CES.md "c
 anchors": I-5 Terwilliger ~2.0 m/s² @ 50 mph must trip; the R≈550 m curve must be easy @70 / hard
 @90). Lateral acceleration is v²·curvature, so curve triggering is speed-adaptive.
 """
+import time
+
 from openpilot.common.constants import CV
+from openpilot.common.swaglog import cloudlog
 
 # --- speed thresholds (stored in m/s; UI exposes mph) -----------------------
 CES_SPEED          = 40 * CV.MPH_TO_MS   # no lead: below this -> allow Experimental (city/complex)
@@ -351,6 +354,99 @@ ICBM_FLOOR_MAX_LIMIT = 13.5    # m/s; INCLUSIVE of a real 30 mph = 30 * 0.44704 
 # forever; the event window floored at 8.45 m/s = 19 mph, not the 10.73 = 24 mph the feature was
 # written for). Flicker and a real change are the SAME SIZE; only their PERSISTENCE differs.
 ICBM_FLOOR_RISE_HOLD_S = 3.0   # a higher limit must persist this long before the floor follows it up
+
+
+# icbmrestorecap2pnw (driver report 2026-09-13 15:46 PT, live): a curve episode tapped the stock set
+# 45 -> 27 mph just as the truck entered a 25 mph zone; the curve cleared and RESTORE tapped the set
+# 27 -> 60 over 13 s -- the pre-curve ceiling -- with the posted limit reading 25 the entire time.
+# Only a slower lead car kept the truck near 30. Restore "gives back what the curve took", and it
+# had no notion that the road it was giving it back on had changed.
+#
+# The cap is the posted limit PLUS the driver's own habit, measured from his own log rather than
+# chosen: 9,063 weekend ticks where HE set the speed (stock ACC on, ICBM silent, limit known) sit at
+# the limit to +5 mph (p50 0..5, p75 ~5 across 35/45/55/60/65 zones). Restoring above that would be
+# commanding a speed he himself does not choose.
+ICBM_RESTORE_LIMIT_MARGIN_MS = 5.0 * 0.44704   # m/s; +5 mph over the posted limit
+ICBM_RESTORE_LIMIT_RISE_HOLD_S = 3.0           # a HIGHER limit must persist this long (same reasoning
+                                               # as ICBM_FLOOR_RISE_HOLD_S: flicker and a real 5 mph
+                                               # step are the same size; only persistence separates them)
+ICBM_RESTORE_LIMIT_STALE_S = 30.0              # how long an UNKNOWN reading keeps the last known limit
+_ICBM_RCAP_ERR_LOG_S = 30.0                    # throttle for the failure log below (~4 Hz caller)
+_icbm_rcap_err_last = -1e9
+
+
+def icbm_restore_limit(spd_lim: float, state=None, now: float = 0.0):
+  """Debounced posted limit that CAPS a restore. Returns (limit_ms, state); limit_ms 0.0 = no cap.
+
+  `state` is (limit, last_seen, pending_limit, pending_since) or None -- carry it across calls.
+
+  ASYMMETRIC, and deliberately the opposite trade-off from a floor, because a cap fails the other way:
+    * a LOWER known limit is adopted IMMEDIATELY -- a lower cap only holds the restore sooner;
+    * a HIGHER known limit must PERSIST for ICBM_RESTORE_LIMIT_RISE_HOLD_S before the cap rises;
+    * an UNKNOWN reading (0, negative, non-finite) does NOT lift the cap. A missing limit is not
+      evidence that the limit went up -- mapd drops the limit on rural roads routinely, and letting a
+      dropout inside a real 25 zone release the restore toward the pre-curve set is the exact bug
+      this exists to prevent. The last known limit is held for ICBM_RESTORE_LIMIT_STALE_S, and only
+      after that does it become genuinely unknown (no cap), so a town's 25 cannot follow the truck
+      twenty miles down an unmapped highway and cap a restore there.
+
+  Unlike icbm_floor_limit there is NO upper scope bound: a floor can demand an unholdable lateral
+  load on a fast road, but a cap can only ever make a restore more conservative, at any speed.
+
+  Pure and TOTAL: nothing raises. Any nonsensical `state` is treated as no history. This matters more
+  than it looks: the state is CARRIED across ticks, and _icbm_step swallows exceptions. A state that
+  made this raise would therefore raise on every following tick too and silently disable ICBM for the
+  rest of the drive -- so a malformed carry-over is discarded, never trusted (Gemini review
+  2026-09-13: the first version validated only `lim` and would raise on a bad pending entry).
+  """
+  try:
+    return _icbm_restore_limit(spd_lim, state, now)
+  except Exception:
+    # Rule 2 (Fable review): falling back to "no cap" is the right BEHAVIOUR, but doing it silently
+    # would mean the fix quietly switches itself off on every tick with nothing in the log --
+    # precisely the failure CLAUDE.md bans. Throttled, because this runs at ~4 Hz.
+    global _icbm_rcap_err_last
+    t_log = time.monotonic()
+    if t_log - _icbm_rcap_err_last >= _ICBM_RCAP_ERR_LOG_S:
+      _icbm_rcap_err_last = t_log
+      cloudlog.exception("icbm_restore_limit failed -- restore posted-limit cap DISABLED (no cap) this tick")
+    return 0.0, None                               # no cap, no history: the pre-fix behaviour
+
+
+def _icbm_restore_limit(spd_lim, state, now):
+  now = float(now)
+  if not (now == now):
+    return 0.0, None
+  lim, seen, pend, since = 0.0, None, None, None
+  if state:
+    try:
+      lim, seen, pend, since = state
+      lim = float(lim)
+      seen = None if seen is None else float(seen)
+      pend = None if pend is None else float(pend)
+      since = None if since is None else float(since)
+      if not all(x is None or x == x for x in (lim, seen, pend, since)) or (pend is None) != (since is None):
+        raise ValueError("inconsistent state")
+    except (TypeError, ValueError):
+      lim, seen, pend, since = 0.0, None, None, None   # malformed carry-over -> discard, never trust
+  try:
+    v = float(spd_lim)
+  except (TypeError, ValueError):
+    v = 0.0
+  known = (v == v) and v > 0.0 and v != float("inf")
+
+  if not known:
+    if lim > 0.0 and seen is not None and (now - seen) <= ICBM_RESTORE_LIMIT_STALE_S:
+      return lim, (lim, seen, None, None)          # hold the last known limit through a dropout
+    return 0.0, None                               # genuinely unknown -> no cap (pre-fix behaviour)
+  if lim <= 0.0 or v <= lim + 1e-6:
+    return v, (v, now, None, None)                 # first reading, same, or LOWER -> adopt now
+  # a rise: keep the lower cap until the higher limit has stood for the full hold
+  if pend is None or abs(pend - v) > 1e-6:
+    return lim, (lim, now, v, now)                 # new candidate -> start its clock (still SEEN)
+  if (now - since) >= ICBM_RESTORE_LIMIT_RISE_HOLD_S:
+    return v, (v, now, None, None)                 # it stuck -> adopt
+  return lim, (lim, now, pend, since)
 
 
 def icbm_floor_limit(spd_lim: float, prev: float, now: float = 0.0, pending=None):

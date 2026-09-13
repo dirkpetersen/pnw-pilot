@@ -762,6 +762,7 @@ class IcbmEpisode:
     self._last_cap_vego = 0.0
     self._apex_passed = False
     self._late_tap_set = None
+    self._rcap_hold_set = None          # icbmrestorecap2pnw: stock set when the posted-limit hold began
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -821,8 +822,34 @@ class IcbmEpisode:
       return confirmed, True
     return held, False
 
+  def _restore_target(self, stock_set, restore_cap):
+    """The restore's publish for this tick: (target, "inc"), or (None, None) to HOLD silently.
+
+    icbmrestorecap2pnw (driver report 2026-09-13 15:46 PT): restore used to return the latched
+    ceiling unconditionally -- the set from BEFORE the curve -- so a curve that ended as the truck
+    entered a 25 mph zone restored the set to 60 there, over 13 s, with the limit reading 25 the whole
+    time. The cap bounds what "giving back what the curve took" may mean on the road the truck is now
+    on. Holding (rather than ending) at the cap keeps the episode alive so a rising limit can resume
+    it; the existing restore window still bounds how long that can last, so after a long low zone the
+    set is simply left at the cap for the driver to raise.
+    """
+    target = self.ceiling
+    if restore_cap is not None:
+      try:
+        cap = float(restore_cap)
+      except (TypeError, ValueError):
+        cap = None
+      if cap is not None and cap == cap and cap > 0.0 and cap < target:
+        target = cap
+        if stock_set is not None and stock_set >= target - ICBM_RESTORE_DONE_TOL:
+          if getattr(self, "_rcap_hold_set", None) is None:
+            self._rcap_hold_set = stock_set   # snapshot: from here nothing of OURS moves the set
+          return None, None             # AT the posted-limit cap: hold, keep the episode
+    self._rcap_hold_set = None          # publishing again -> the snapshot no longer applies
+    return target, "inc"
+
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
-           cap_dist=None, v_ego=0.0, in_curve=False):
+           cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -834,7 +861,15 @@ class IcbmEpisode:
       in_curve  vehicle currently lateral-loaded (icbm_in_curve): a restore may not BEGIN and a
                 running restore PAUSES (silent — executor stale-stops — WITHOUT resetting, so it
                 resumes when the load clears) while True. Never raise the set mid-curve. All abort
-                guards stay live throughout."""
+                guards stay live throughout.
+
+    icbmrestorecap2pnw optional input:
+      restore_cap  absolute m/s the restore may not raise the set above (posted limit + the driver's
+                   margin), or None = no cap. The restore target becomes min(ceiling, restore_cap).
+                   At the cap the restore HOLDS silently -- it does not end -- so if the limit rises
+                   within the restore window it follows back up toward the ceiling, never above
+                   either. The executor already clamps target <= ceiling and presses inc only while
+                   the set is below the TARGET, so a target below the ceiling needs no executor change."""
     if v_set is None or v_set <= 0.0:
       self.reset()                      # no valid driver set -> hands off everything
       return None, None
@@ -987,7 +1022,7 @@ class IcbmEpisode:
         self._t0 = now
         self._last_stock = stock_set
         self._last_t = now
-        return self.ceiling, "inc"
+        return self._restore_target(stock_set, restore_cap)
       self.reset()
       return None, None
 
@@ -1008,6 +1043,16 @@ class IcbmEpisode:
         if stock_set > self._last_stock + ICBM_EXEC_STEP_MS * (dt / ICBM_TAP_PERIOD_S + 1.6):
           self.reset()                  # rose faster than our taps can: driver holding SET+
           return None, None
+      # icbmrestorecap2pnw (Fable review): while HOLDING at the posted-limit cap the brain publishes
+      # nothing, so any rise beyond one in-flight tap is the driver pressing SET+. Without this a
+      # single tap every few seconds slipped under the fast-rise detector above and was absorbed as
+      # if it were ours -- a residual that existed before, but the hold stretched its window from
+      # the ~13 s a restore used to take to the full 45 s restore window. Same tolerance, same
+      # reasoning as the cap-phase hold's _hold_set0 snapshot.
+      hold0 = getattr(self, "_rcap_hold_set", None)
+      if hold0 is not None and stock_set > hold0 + ICBM_LATE_TAP_TOL:
+        self.reset()
+        return None, None
       self._last_stock = stock_set
       self._last_t = now
       if in_curve:
@@ -1015,7 +1060,7 @@ class IcbmEpisode:
         # executor stale-stops, but keep the episode so the restore resumes once the load clears.
         # All the aborts above (pedal/ACC/window/decrease/fast-rise) ran this tick and stay live.
         return None, None
-      return self.ceiling, "inc"
+      return self._restore_target(stock_set, restore_cap)
 
     return None, None                   # idle, no cap
 
@@ -1913,6 +1958,8 @@ class CESController:
     # the same trap waysel2pnw fell into when its fields never reached ces_events.
     self._icbm_floor_lim = 0.0
     self._icbm_floor_pend = None   # (candidate_limit, first_seen) while a RISE settles
+    self._icbm_rcap_state = None   # icbmrestorecap2pnw: icbm_restore_limit carry-over
+    self._icbm_rcap = 0.0          # icbmrestorecap2pnw: the restore cap in force (m/s), 0 = none
     self._icbm_floor_hit = False
     # icbmconsist2pnw: the POINT-MATCHED polyline reading beside mapd's own target -- telemetry only,
     # nothing reads these for control. icbmKAtGap is the load-bearing one: it says how far the nearest
@@ -2837,6 +2884,8 @@ class CESController:
         self._icbm_floor_lim = 0.0
         self._icbm_floor_pend = None
         self._icbm_floor_hit = False
+        self._icbm_rcap_state = None    # icbmrestorecap2pnw: no stale limit across a Chill interlude
+        self._icbm_rcap = 0.0
         # icbmconsist2pnw: never publish a stale point-match alongside icbmT=None
         self._icbm_k_at = 0.0
         self._icbm_k_at_d = 0.0
@@ -3000,9 +3049,19 @@ class CESController:
       # for the early restore) and the in-curve flag (restore entry deferral / restore pause).
       src_dist = {"map": sig.get("map_target_dist", float("inf")),
                   "vis": vis_dist, "far": far_dist}.get(self._icbm_src)
+      # icbmrestorecap2pnw: bound what a RESTORE may give back by the road the truck is on NOW.
+      # Driver report 2026-09-13 15:46 PT: the curve cleared as the truck entered a 25 mph zone and
+      # restore tapped the set 27 -> 60 there. Updated every tick (not only during restore) so the
+      # debounce history is warm when a restore begins.
+      # getattr, not a bare attribute: an AttributeError here would be swallowed by this method's
+      # own except and silently skip ICBM for the tick -- same reason _icbm_err_last is read this way.
+      rcap_lim, self._icbm_rcap_state = C.icbm_restore_limit(sig.get("spd_lim", 0.0),
+                                                             getattr(self, "_icbm_rcap_state", None), now)
+      self._icbm_rcap = rcap_lim + C.ICBM_RESTORE_LIMIT_MARGIN_MS if rcap_lim > 0.0 else 0.0
       pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
                                                  self._stock_set, self._stock_on, driver_pedal,
-                                                 cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve)
+                                                 cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve,
+                                                 restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
@@ -3110,6 +3169,10 @@ class CESController:
       tele["icbmKAtN"] = int(self._icbm_k_at_n)
       tele["icbmKAtGap"] = round(float(self._icbm_k_at_gap), 0)
       tele["icbmFlr"] = round(float(self._icbm_floor_lim), 1)
+      tele["icbmRCap"] = round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1)   # icbmrestorecap2pnw: 0 = no cap
+      # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
+      # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
+      tele["icbmPhase"] = getattr(getattr(self, "_icbm_ep", None), "phase", None)
       tele["icbmFlrHit"] = bool(self._icbm_floor_hit)
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
       tele["icbmSet"] = self._stock_set
@@ -3273,6 +3336,8 @@ class CESController:
       "icbmKAtN": int(self._icbm_k_at_n), "icbmKAtGap": round(float(self._icbm_k_at_gap), 0),
 
       "icbmFlr": round(float(self._icbm_floor_lim), 1), "icbmFlrHit": bool(self._icbm_floor_hit),
+      "icbmRCap": round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1),   # icbmrestorecap2pnw: restore cap, 0 = none
+      "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,
       # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether
