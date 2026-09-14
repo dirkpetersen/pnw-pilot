@@ -67,6 +67,92 @@ class LinkVerdict(NamedTuple):
   pending: tuple[str, float] | None      # a bring-up still awaiting judgement (ssid, raised_at)
 
 
+# --- netscanpin2pnw: the driver's manual pick sticks, and a tier-1/2 link keeps looking for cheaper ---
+
+PIN_JOIN_WINDOW_S = 90.0   # a pick that has not become the active network this long after the arbiter
+                           # first saw it has failed to join (wrong password, AP gone). NM's DHCP timeout
+                           # is 45 s; the UI's password path also deletes and re-adds the profile first.
+UPGRADE_SCAN_S = 120.0     # at most one cost-upgrade scan per this, on a non-tier-0 client link
+
+
+def parse_manual_pick(raw: object) -> tuple[tuple[str, float] | None, str]:
+  """WifiManualPick -> ((ssid, ts), "") or (None, why). `why` is "" ONLY for a genuinely absent pick.
+
+  Absence and damage are different facts and must stay different: None (never written, or cleared on
+  boot) is a real "no pin"; a value that is present but unusable is a problem the caller logs, because
+  it means the driver may have picked a network that the arbiter cannot honour."""
+  if raw is None:
+    return None, ""
+  if not isinstance(raw, dict):
+    return None, f"not an object: {type(raw).__name__}"
+  ssid, ts = raw.get("ssid"), raw.get("ts")
+  if not isinstance(ssid, str) or not ssid.strip():
+    return None, "missing or empty ssid"
+  if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+    return None, "missing or non-numeric ts"
+  return (ssid.strip(), float(ts)), ""
+
+
+class PinVerdict(NamedTuple):
+  pinned_ssid: str    # "" -> no pin in force this tick
+  seen_active: bool   # the pinned network has been the active link at least once since this pick
+  ended: str          # why the pin ended THIS tick ("" if it did not)
+
+
+def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid: str | None,
+              blamed_failed: bool, now: float, join_window_s: float = PIN_JOIN_WINDOW_S) -> PinVerdict:
+  """Is the driver's manual pick still in force?
+
+  A pin HOLDS the radio: while it is in force the arbiter takes no cost-driven action at all. That
+  covers both the join itself (so the arbiter never fights the UI's own activation) and the time the
+  driver spends on the network he chose.
+
+  It ENDS -- and the cost ladder resumes -- when:
+    * failed        judge_link blamed the pinned network (associated, no usable link, past the DHCP
+                    grace). A pin must never hold the device offline; the failure ledger then applies.
+    * dropped       it WAS the active link and no longer is (out of range, or the driver joined
+                    something else by a path that did not record a pick).
+    * join_timeout  it never became the active link within join_window_s (wrong password, AP gone).
+    * superseded    a newer pick replaced it -- decided by the caller, which sees the new (ssid, ts).
+    * reboot        WifiManualPick is CLEAR_ON_MANAGER_START.
+
+  `active_ssid` None means the active connection COULD NOT BE READ (nmcli failed). That is no evidence,
+  so the pin neither ends nor advances -- an unreadable tick must not look like "the network dropped".
+  An empty string is a real reading: nothing is active."""
+  if not pick_ssid:
+    return PinVerdict("", False, "")
+  if active_ssid is None:
+    return PinVerdict(pick_ssid, seen_active, "")
+  if blamed_failed:
+    return PinVerdict("", seen_active, "failed")
+  if active_ssid.lower() == pick_ssid.lower():
+    return PinVerdict(pick_ssid, True, "")
+  if seen_active:
+    return PinVerdict("", True, "dropped")
+  if now - first_seen >= join_window_s:
+    return PinVerdict("", False, "join_timeout")
+  return PinVerdict(pick_ssid, False, "")
+
+
+def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, on_tier0: bool, pinned: bool,
+                     now: float, last_scan: float, interval_s: float = UPGRADE_SCAN_S) -> bool:
+  """Should the arbiter scan for a CHEAPER network although the geo-gate would not?
+
+  The geo-gate stops scanning once we are on client WiFi away from a learned location. That rule was
+  written when the only client WiFi the arbiter could be on was a PRIORITY network, i.e. already the
+  cheapest. The cost ladder broke the assumption: on a tier-1/2 link -- the driver's metered Starlink --
+  a cheaper network can come into range and can only be SEEN by scanning. Measured 2026-09-13: 66 min on
+  metered KarlMoik with the unmetered iPhone never considered, and NM 1.46 does not rescan on its own
+  while associated (LastScan unchanged across 75 s; the --rescan no cache pruned to the current AP).
+
+  Not on tier 0 (nothing to gain), not while a manual pick holds the radio (the driver chose), not with
+  the ladder disabled (kill switch = pre-ladder behaviour), and at most once per interval, because a scan
+  takes the single radio off-channel. The gate's own worry -- disturbing tethered clients -- does not
+  arise on a client link: the comma's hotspot is down whenever wlan0 is a client."""
+  return (ladder_on and on_client_wifi and not on_tier0 and not pinned
+          and now - last_scan >= interval_s)
+
+
 def pending_for_new_link(active_ssid: str, pending: tuple[str, float] | None,
                         prev_active_ssid: str, now: float) -> tuple[str, float] | None:
   """A client link that APPEARS without us raising it still needs the DHCP grace.

@@ -624,7 +624,36 @@ class WifiManager:
     settings_addr = DBusAddress(NM_SETTINGS_PATH, bus_name=NM, interface=NM_SETTINGS_IFACE)
     self._router_main.send_and_get_reply(new_method_call(settings_addr, 'AddConnection', 'a{sa{sv}}', (connection,)))
 
+  def _record_manual_pick(self, ssid: str) -> None:
+    """netscanpin2pnw: remember that the DRIVER chose this network in Settings.
+
+    network_arbiterd reads WifiManualPick and will not move him off that network for cost reasons
+    while it stays active and usable. Driver, 2026-09-13: "if you can identify that a handpicked Wi-fi
+    was selected then we want that to stick."
+
+    Called from BOTH human join paths, because they are different NetworkManager calls and a driver
+    picking an already-saved network never types a password:
+      * connect_to_network  -> AddAndActivateConnection2 (new network, or password re-entry)
+      * activate_connection -> ActivateConnection        (tap on a saved network)
+    Every UI call site of either is a human action (Settings network list, password dialog, hidden
+    network entry). The ONE non-human caller is set_tethering_active, which activates the comma's own
+    hotspot through activate_connection -- that is excluded here, since tethering is not a WiFi pick.
+
+    The write is best-effort and LOUD on failure. A pick that could not be recorded means the arbiter
+    may later move the driver off a network he chose, so that is logged, never swallowed. An unknown
+    key (a device whose params_pyx.so was not rebuilt for this change) lands in the same path."""
+    if ssid == self._tethering_ssid or Params is None:
+      return
+    try:
+      # ts is an IDENTITY, not a clock the arbiter does arithmetic across: it tells one pick of an SSID
+      # from a later pick of the same SSID. CLOCK_MONOTONIC is system-wide, and the param never outlives
+      # a boot (CLEAR_ON_MANAGER_START), so monotonic is sufficient and immune to wall-clock jumps.
+      Params().put_nonblocking("WifiManualPick", {"ssid": ssid, "ts": time.monotonic()})
+    except Exception:
+      cloudlog.exception(f"netscanpin: FAILED to record manual WiFi pick {ssid!r} -- the arbiter will not know the driver chose it")
+
   def connect_to_network(self, ssid: str, password: str, hidden: bool = False):
+    self._record_manual_pick(ssid)
     self._set_connecting(ssid)
 
     def worker():
@@ -692,6 +721,7 @@ class WifiManager:
       threading.Thread(target=worker, daemon=True).start()
 
   def activate_connection(self, ssid: str, block: bool = False):
+    self._record_manual_pick(ssid)
     self._set_connecting(ssid)
 
     def worker():

@@ -21,6 +21,7 @@ import subprocess
 import pytest
 
 import openpilot.system.networkd.network_arbiterd as d
+from openpilot.system.networkd.network_arbiter import PIN_JOIN_WINDOW_S
 
 PHONE, STAR, HOME = "Dirk's iPhone 13", "KarlMoik", "Hannelore"
 HOTSPOT = "Hotspot"
@@ -42,6 +43,9 @@ class FakeNM:
     self.fail_reads: set[str] = set()
     self.t = 0.0
     self.ups: list[str] = []
+    self.scans = 0                              # netscanpin2pnw: `dev wifi list` calls that returned data
+    self.scan_times: list[float] = []           # ...and when
+    self.up_log: list[tuple[float, str]] = []   # (t, connection) for every `con up`
 
   def nmcli(self, args):
     a = " ".join(args)
@@ -50,6 +54,8 @@ class FakeNM:
     if "--active" in a:
       return f"{self.active}:802-11-wireless:wlan0\n" if self.active else ""
     if "dev wifi list" in a:
+      self.scans += 1
+      self.scan_times.append(self.t)
       return "\n".join(self.scan) + "\n"
     if a == "-t -f NAME con show":
       return "\n".join(self.saved) + "\n"
@@ -65,6 +71,7 @@ class FakeNM:
     if args[:2] == ["con", "up"]:
       c = args[2]
       self.ups.append(c)
+      self.up_log.append((self.t, c))
       if c == HOTSPOT:
         self.active = HOTSPOT
         return ""
@@ -86,8 +93,14 @@ class FakeNM:
     return ""
 
 
-def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,), ladder=True):
-  """Drive main() for `ticks` polls. Returns the list of connections it brought up, in order."""
+def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,), ladder=True,
+             params=None):
+  """Drive main() for `ticks` polls. Returns the list of connections it brought up, in order.
+
+  `params` (netscanpin2pnw): a dict consulted by the fake Params.get for any other key -- hooks may
+  mutate it mid-run (the driver picking a network). A value that is an Exception instance is RAISED,
+  to model a read failure such as UnknownKeyName."""
+  params = {} if params is None else params
   state = {"n": 0}
   monkeypatch.setattr(d, "_nmcli", nm.nmcli)
   monkeypatch.setattr(d, "_run", lambda args: subprocess.CompletedProcess(args, 0, "", ""))
@@ -107,7 +120,12 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
       return k == "TetheringEnabled"
 
     def get(self, k):
-      return json.dumps(nets) if k == "TetheringPriorityNetworks" else None
+      if k == "TetheringPriorityNetworks":
+        return json.dumps(nets)
+      v = params.get(k)
+      if isinstance(v, Exception):
+        raise v
+      return v
 
     def put(self, *a):
       pass
@@ -236,3 +254,281 @@ class TestTheKillSwitch:
     nm.metered[PHONE] = "no"
     ups = run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(), ladder=False)
     assert d.priority_connection_id(PHONE) not in ups, f"kill switch ignored: {ups}"
+
+
+# ================================================================================================
+# netscanpin2pnw — (1) a tier-1/2 link keeps looking for something cheaper; (2) a manual pick sticks.
+#
+# Measured 2026-09-13: 66 minutes on metered Starlink ("KarlMoik") with the unmetered iPhone never
+# considered, because the geo-gate stops scanning on ANY client WiFi away from a learned location.
+# Driver, on the fix: "Yes if you can identify that a handpicked Wi-fi was selected then we want that to
+# stick." Every scenario below starts AWAY from home (near_home=False), which is where the bug lived.
+# ================================================================================================
+
+ID_PHONE, ID_STAR = d.priority_connection_id(PHONE), d.priority_connection_id(STAR)
+POLL = d.POLL_INTERVAL_S
+
+
+@pytest.fixture
+def events(monkeypatch):
+  """Every cloudlog.event the daemon emits, as (name, kwargs). Rule 2: the pin and the upgrade scan
+  must be visible where a human would look, so the tests assert on them."""
+  got: list[tuple[str, dict]] = []
+  monkeypatch.setattr(d.cloudlog, "event", lambda name, **kw: got.append((name, kw)))
+  return got
+
+
+def names(events):
+  return [n for n, _ in events]
+
+
+def _away(nm, active, *, scan=(STAR, PHONE)):
+  """Both networks physically in range: Starlink asserted metered, the iPhone asserted unmetered."""
+  nm.scan = list(scan)
+  nm.metered = {STAR: "yes", PHONE: "no"}
+  nm.active = active
+  if active and active != HOTSPOT:
+    nm.ip[active] = "10.0.0.2"
+
+
+def _pick(ssid, ts=1.0):
+  return {"ssid": ssid, "ts": ts}
+
+
+class TestStarlinkToPhone:
+  """Part 1 — on a non-tier-0 client link, scan for something cheaper, throttled."""
+
+  def test_the_phone_takes_over_from_metered_starlink_within_one_scan_interval(self, monkeypatch, events):
+    """THE REPORT. On KarlMoik (usable, metered, not a priority entry); the iPhone appears LATER, after
+    an upgrade scan has already run, so the switch must come from the NEXT throttled scan."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    appear = 2 * POLL
+    hooks = [lambda nm, tk: nm.scan.append(PHONE) if tk == 2 else None]
+    run_loop(monkeypatch, nm, ticks=12, near_home=False, hooks=hooks, priority=(HOME, PHONE))
+    switch = [t for t, c in nm.up_log if c == ID_PHONE]
+    assert switch, f"stayed on metered Starlink with the phone in range; ups={nm.up_log} scans={nm.scan_times}"
+    assert switch[0] - appear <= d.UPGRADE_SCAN_S + POLL, f"took {switch[0] - appear:.0f} s after the phone appeared"
+    assert "netcosttier_upgrade_scan" in names(events)
+
+  def test_the_upgrade_scan_is_throttled(self, monkeypatch, events):
+    """A scan takes the single radio off-channel. Nothing cheaper around -> at most one per interval."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    run_loop(monkeypatch, nm, ticks=16, near_home=False, priority=(HOME, PHONE))   # 320 s
+    assert nm.ups == [], f"moved off Starlink with nothing cheaper in range: {nm.ups}"
+    gaps = [b - a for a, b in zip(nm.scan_times, nm.scan_times[1:], strict=False)]
+    assert nm.scans >= 2, f"expected repeated upgrade scans over 320 s, got {nm.scan_times}"
+    assert all(g >= d.UPGRADE_SCAN_S for g in gaps), f"scans closer than {d.UPGRADE_SCAN_S} s: {nm.scan_times}"
+    assert names(events).count("netcosttier_upgrade_scan") == nm.scans
+
+  def test_no_scans_at_all_while_on_a_priority_network(self, monkeypatch, events):
+    """The geo-gate's purpose survives: already on the cheapest tier, away from home -> zero scans."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE)
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, priority=(HOME, PHONE))
+    assert nm.ups == [] and nm.scans == 0, f"ups={nm.ups} scans={nm.scan_times}"
+    assert "netcosttier_upgrade_scan" not in names(events)
+
+  def test_a_METERED_priority_entry_is_not_tier_0_and_keeps_looking(self, monkeypatch, events):
+    """choose_wifi demotes a metered priority entry into the ladder, so being on one is not 'done'."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME, STAR, PHONE))
+    assert nm.scans >= 1, "a metered priority entry was treated as the cheapest tier"
+
+  def test_after_the_upgrade_it_does_not_flap_back(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    run_loop(monkeypatch, nm, ticks=14, near_home=False, priority=(HOME, PHONE))
+    assert nm.ups == [ID_PHONE], f"expected exactly one switch to the phone: {nm.ups}"
+    assert nm.active == ID_PHONE
+
+
+class TestManualPickSticks:
+  """Part 2 — when the driver picks a network in Settings, the ladder does not move him off it."""
+
+  def test_a_manual_pick_of_starlink_is_not_overridden_by_the_phone(self, monkeypatch, events):
+    """THE DRIVER'S DECISION. On the phone; he picks KarlMoik in Settings (UI writes WifiManualPick, NM
+    joins it). The phone is still in range and cheaper. The arbiter must leave him on KarlMoik."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE)
+    params = {}
+    def pick_starlink(nm, tk):
+      if tk == 2:
+        params["WifiManualPick"] = _pick(STAR)
+        nm.active = ID_STAR
+        nm.ip[ID_STAR] = "10.0.0.3"
+    run_loop(monkeypatch, nm, ticks=16, near_home=False, hooks=[pick_starlink], priority=(HOME, PHONE),
+             params=params)
+    assert ID_PHONE not in nm.ups, f"the arbiter overrode the driver's manual pick: {nm.up_log}"
+    assert nm.active == ID_STAR
+    assert "netcosttier_pin_set" in names(events)
+    assert "netcosttier_upgrade_scan" not in names(events), "scanned for something cheaper while pinned"
+
+  def test_the_pin_holds_the_radio_DURING_the_join(self, monkeypatch, events):
+    """The UI's password path deletes and re-adds the profile, so for a moment NOTHING is active. The
+    arbiter must not use that moment to raise the phone over the driver's in-progress choice."""
+    nm = FakeNM()
+    _away(nm, None)
+    params = {"WifiManualPick": _pick(STAR)}
+    def join_lands(nm, tk):
+      if tk == 3:
+        nm.active = ID_STAR
+        nm.ip[ID_STAR] = "10.0.0.3"
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=[join_lands], priority=(HOME, PHONE),
+             params=params)
+    assert nm.ups == [], f"fought the UI's join: {nm.up_log}"
+    assert "netcosttier_pin_held" in names(events)
+
+  def test_the_pin_ends_when_the_pinned_network_DROPS_and_the_ladder_resumes(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    params = {"WifiManualPick": _pick(STAR)}
+    def starlink_gone(nm, tk):
+      if tk == 3:
+        nm.active = None
+        nm.scan = [PHONE]
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, hooks=[starlink_gone], priority=(HOME, PHONE),
+             params=params)
+    assert ID_PHONE in nm.ups, f"the ladder did not resume after the pinned network dropped: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "dropped"}) in events
+
+  def test_a_pick_that_never_joins_ends_on_the_join_window(self, monkeypatch, events):
+    """Wrong password / AP gone: the pick never becomes active. Held for PIN_JOIN_WINDOW_S, no longer."""
+    nm = FakeNM()
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    params = {"WifiManualPick": _pick(STAR)}
+    run_loop(monkeypatch, nm, ticks=9, near_home=False, priority=(HOME, PHONE), params=params)
+    ups = [t for t, c in nm.up_log if c == ID_PHONE]
+    assert ups, f"the pin held the radio forever after a failed join: {nm.up_log}"
+    assert ups[0] >= PIN_JOIN_WINDOW_S, f"gave up on the join after only {ups[0]:.0f} s"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "join_timeout"}) in events
+
+  def test_a_pinned_network_that_FAILS_does_not_hold_the_device_offline(self, monkeypatch, events):
+    """Associated to the pinned network, no address. After the DHCP grace it is blamed, the pin ends,
+    the failure ledger records it, and the device moves on -- a pin must never mean 'offline'."""
+    nm = FakeNM()
+    _away(nm, None)
+    nm.active = ID_STAR
+    nm.ip[ID_STAR] = None
+    params = {"WifiManualPick": _pick(STAR)}
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, priority=(HOME, PHONE), params=params)
+    assert ID_PHONE in nm.ups or HOTSPOT in nm.ups, f"held on a dead pinned link: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "failed"}) in events
+    assert any(n == "netcosttier_assoc_failed" and kw.get("ssid") == STAR.lower() for n, kw in events)
+
+  def test_a_newer_pick_supersedes_the_old_one(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_PHONE)
+    params = {"WifiManualPick": _pick(PHONE, ts=1.0)}
+    def repick(nm, tk):
+      if tk == 3:
+        params["WifiManualPick"] = _pick(STAR, ts=2.0)
+        nm.active = ID_STAR
+        nm.ip[ID_STAR] = "10.0.0.3"
+    run_loop(monkeypatch, nm, ticks=12, near_home=False, hooks=[repick], priority=(HOME, PHONE), params=params)
+    assert ID_PHONE not in nm.ups and nm.active == ID_STAR, f"new pick not honoured: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": PHONE, "reason": "superseded", "by": STAR}) in events
+
+
+class TestAnEndedPinStaysEnded:
+  """Found by mutation: two ways a pin's lifecycle could go wrong without any earlier test noticing."""
+
+  def test_an_ended_pin_does_not_come_back_when_its_network_returns(self, monkeypatch, events):
+    """The pinned network drops (pin ends), then NM autoconnects it again with NO new pick. That is
+    not the driver choosing it -- the ladder must treat it like any other network and move to the
+    cheaper phone. Had the ended pin not been marked ended, it would silently resurrect here."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    params = {"WifiManualPick": _pick(STAR)}
+    def drop_then_return(nm, tk):
+      if tk == 2:
+        nm.active = None                       # Starlink drops: pin ends
+      if tk == 3:
+        nm.active = ID_STAR                    # NM autoconnects it back -- no pick written
+        nm.ip[ID_STAR] = "10.0.0.3"
+        nm.scan = [STAR, PHONE]
+    run_loop(monkeypatch, nm, ticks=14, near_home=False, hooks=[drop_then_return], priority=(HOME, PHONE),
+             params=params)
+    assert ID_PHONE in nm.ups, f"an ended pin resurrected and held a metered link: {nm.up_log}"
+    assert names(events).count("netcosttier_pin_cleared") == 1, \
+      f"pin_cleared must be logged once, not every tick: {names(events)}"
+
+  def test_a_REPICK_whose_join_takes_a_moment_is_still_honoured(self, monkeypatch, events):
+    """On a pinned phone, the driver picks KarlMoik. The phone is still the active link for a tick or
+    two while NM switches. The NEW pin must start fresh -- carrying the old pick's 'seen active' would
+    call it 'dropped' before the join lands, and the ladder would then pull him back to the phone."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE)
+    params = {"WifiManualPick": _pick(PHONE, ts=1.0)}
+    def repick_slow_join(nm, tk):
+      if tk == 3:
+        params["WifiManualPick"] = _pick(STAR, ts=2.0)   # phone still active this tick
+      if tk == 5:
+        nm.active = ID_STAR
+        nm.ip[ID_STAR] = "10.0.0.3"
+    run_loop(monkeypatch, nm, ticks=16, near_home=False, hooks=[repick_slow_join], priority=(HOME, PHONE),
+             params=params)
+    later_phone = [t for t, c in nm.up_log if c == ID_PHONE]
+    assert not later_phone and nm.active == ID_STAR, f"the new pick was overridden: {nm.up_log}"
+
+
+class TestReleasingAPinByHand:
+  def test_removing_WifiManualPick_releases_the_pin_and_the_ladder_resumes(self, monkeypatch, events):
+    """The escape hatch from an SSH session: delete the param. (A reboot does the same through
+    CLEAR_ON_MANAGER_START.) An ABSENT param is a real reading, unlike a failed one."""
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    params = {"WifiManualPick": _pick(STAR)}
+    def release(nm, tk):
+      if tk == 3:
+        params.pop("WifiManualPick")
+    run_loop(monkeypatch, nm, ticks=14, near_home=False, hooks=[release], priority=(HOME, PHONE), params=params)
+    assert ID_PHONE in nm.ups, f"a removed pick still held the radio: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "param_removed"}) in events
+
+
+class TestPinAbsenceOfEvidence:
+  def test_an_unreadable_ACTIVE_read_does_not_end_the_pin(self, monkeypatch, events):
+    """nmcli failing to list active connections is not 'the driver's network dropped'."""
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    params = {"WifiManualPick": _pick(STAR)}
+    hooks = [lambda nm, tk: nm.fail_reads.add("--active") if tk == 2 else nm.fail_reads.discard("--active")]
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=hooks, priority=(HOME, PHONE), params=params)
+    assert ID_PHONE not in nm.ups, f"one unreadable tick ended the pin: {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+  def test_an_unreadable_PICK_param_is_logged_and_changes_nothing(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    params = {"WifiManualPick": _pick(STAR)}
+    def breaks(nm, tk):
+      if tk == 3:
+        params["WifiManualPick"] = RuntimeError("UnknownKeyName")
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=[breaks], priority=(HOME, PHONE), params=params)
+    assert ID_PHONE not in nm.ups, f"a failed param read ended the pin: {nm.up_log}"
+    assert "netcosttier_pin_unreadable" in names(events)
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+  def test_a_DAMAGED_pick_is_logged_not_honoured_silently(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME, PHONE),
+             params={"WifiManualPick": {"ts": 1.0}})
+    unreadable = [kw for n, kw in events if n == "netcosttier_pin_unreadable"]
+    assert unreadable and "ssid" in unreadable[0]["problem"]
+
+
+class TestKillSwitchKeepsItsMeaning:
+  def test_with_the_ladder_disabled_the_behaviour_is_pre_ladder_binary(self, monkeypatch, events):
+    """DisableNetworkCostLadder = the old arbiter: a configured priority network, or our own hotspot.
+    It never knew about manual picks, so a pick is NOT honoured and no upgrade scans run."""
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME, PHONE), ladder=False,
+             params={"WifiManualPick": _pick(STAR)})
+    assert nm.ups and nm.ups[0] == HOTSPOT, f"kill switch did not give the pre-ladder binary behaviour: {nm.ups}"
+    assert "netcosttier_upgrade_scan" not in names(events)
+    assert "netcosttier_pin_held" not in names(events)

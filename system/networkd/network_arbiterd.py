@@ -43,9 +43,13 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.networkd.network_arbiter import (
   HOTSPOT_CONNECTION_ID,
+  UPGRADE_SCAN_S,
   decide,
   judge_link,
+  judge_pin,
+  parse_manual_pick,
   pending_for_new_link,
+  upgrade_scan_due,
   priority_connection_id,
   ssid_of,
 )
@@ -346,19 +350,28 @@ def _blocked(ledger: dict[str, tuple[int, float]], now: float) -> set[str]:
   return {ssid for ssid, (_f, until) in ledger.items() if until > now}
 
 
-def _active_wifi_connection() -> str | None:
-  """The NM connection id currently active on the wlan device, or None."""
+def _active_wifi_read() -> tuple[str | None, bool]:
+  """(active wifi connection id or None, whether the read SUCCEEDED).
+
+  netscanpin2pnw: `_active_wifi_connection()` returns None for two different facts -- "nothing is
+  active" and "nmcli failed". The manual-pick pin needs them apart: an unreadable tick must not look
+  like "the driver's network dropped" and end his pin. Everything else keeps the old contract."""
   out = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"])
   if out is None:
-    return None
+    return None, False
   for raw in out.splitlines():
     parts = raw.split(":")
     if len(parts) < 2:
       continue
     name, conn_type = parts[0], parts[1]
     if "wireless" in conn_type:
-      return name
-  return None
+      return name, True
+  return None, True
+
+
+def _active_wifi_connection() -> str | None:
+  """The NM connection id currently active on the wlan device, or None."""
+  return _active_wifi_read()[0]
 
 
 # --- hotspot NAT (so the arbiter-raised AP actually passes traffic, like the UI toggle does) --------
@@ -628,6 +641,16 @@ def main() -> NoReturn:
   pending_up: tuple[str, float] | None = None   # netcosttier2pnw: (ssid, raised_at) awaiting judgement
   absent_scans: dict[str, int] = {}             # netcosttier2pnw: ssid -> consecutive REAL scans missing it
   prev_active_ssid = ""                          # netcosttier2pnw: to spot a link appearing that we did not raise
+  # netscanpin2pnw: the driver's manual pick. The arbiter never WRITES WifiManualPick; it tracks the
+  # (ssid, ts) it last saw and ends a pin by marking that identity ended, so a new pick written by the UI
+  # while an old pin is ending can never be clobbered.
+  pin_key: tuple[str, float] | None = None      # the pick identity currently tracked
+  pin_first_seen = 0.0                          # monotonic time the arbiter first saw pin_key
+  pin_seen_active = False                       # pin_key's network has been the active link since then
+  pin_ended_key: tuple[str, float] | None = None  # pin_key once it has ended (dropped/failed/...)
+  pin_problem = ""                              # last logged pick-read problem (change-only log)
+  pin_held_logged: tuple | None = None          # last logged hold (change-only log)
+  last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
 
 
   while True:
@@ -641,7 +664,29 @@ def main() -> NoReturn:
                       legacy_ssid=(params.get("TetheringPriorityWifi") or ""),
                       legacy_home_raw=params.get("TetheringHomeLocation"))
       net_ssids = pn.ssids(nets)
-      current_active = _active_wifi_connection()
+      current_active, active_read_ok = _active_wifi_read()
+
+      # netscanpin2pnw: the driver's manual pick. Read failures and damaged values are logged and change
+      # NOTHING -- they are not evidence that a pin ended, nor that a new one began.
+      try:
+        pick, problem = parse_manual_pick(params.get("WifiManualPick"))
+      except Exception as e:                    # e.g. UnknownKeyName on a device whose params_pyx.so was not rebuilt
+        pick, problem = None, f"read failed: {type(e).__name__}: {e}"
+      if problem != pin_problem:
+        if problem:
+          cloudlog.event("netcosttier_pin_unreadable", problem=problem, keeping=pin_key[0] if pin_key else None)
+        pin_problem = problem
+      if not problem:
+        if pick is not None and pick != pin_key:
+          if pin_key is not None and pin_key != pin_ended_key:
+            cloudlog.event("netcosttier_pin_cleared", ssid=pin_key[0], reason="superseded", by=pick[0])
+          pin_key, pin_first_seen, pin_seen_active, pin_ended_key = pick, time.monotonic(), False, None
+          cloudlog.event("netcosttier_pin_set", ssid=pick[0])
+        elif pick is None and pin_key is not None and pin_key != pin_ended_key:
+          # present last tick, absent now: only a manager start (CLEAR_ON_MANAGER_START) or a hand removal
+          cloudlog.event("netcosttier_pin_cleared", ssid=pin_key[0], reason="param_removed")
+          pin_ended_key = pin_key
+      pin_in_force = pin_key is not None and pin_key != pin_ended_key
       gps = _read_gps(params, mem_params)
 
       # auto-learn each network's location: if we're connected to one of OUR priority SSIDs right now,
@@ -672,7 +717,21 @@ def main() -> NoReturn:
       # WiFi to recover and sits stranded forever. Geo-gating only avoids needless scans once we're
       # already on a real client network; otherwise finding WiFi wins.
       on_client_wifi = current_active is not None and current_active != HOTSPOT_CONNECTION_ID
-      allow_scan = (not on_client_wifi) or near_any_home(pn.locations(nets), gps)
+      # netscanpin2pnw: the geo-gate below was written when the only client WiFi the arbiter could be on
+      # was a priority network (tier 0 = already cheapest). On a tier-1/2 link a cheaper network can come
+      # into range and can only be seen by scanning -- see network_arbiter.upgrade_scan_due for the
+      # measured 66-minute case. "Tier 0" here = a configured entry NOT known to be metered (a metered
+      # priority entry is demoted into the ladder by choose_wifi, so it is not done either).
+      active_ssid_now = ssid_of(current_active or "")
+      on_tier0 = bool(active_ssid_now) and any(
+        active_ssid_now.lower() == e["ssid"].lower() for e in nets
+      ) and _metered_cache.get(active_ssid_now) != "yes"
+      upgrade_due = upgrade_scan_due(tethering_enabled and fallback_enabled, on_client_wifi, on_tier0,
+                                     pin_in_force, time.monotonic(), last_upgrade_scan)
+      if upgrade_due:
+        last_upgrade_scan = time.monotonic()   # throttle the ATTEMPT, so a failing scan cannot hammer
+        cloudlog.event("netcosttier_upgrade_scan", active=current_active, interval_s=UPGRADE_SCAN_S)
+      allow_scan = (not on_client_wifi) or near_any_home(pn.locations(nets), gps) or upgrade_due
       # netcosttier2pnw: `net_ssids` alone is no longer the right precondition. That gate exists so
       # we do not burn the single radio scanning for nothing -- but with the cost ladder on there IS
       # something to look for even when the driver has configured no priority networks at all: every
@@ -748,6 +807,20 @@ def main() -> NoReturn:
         _usable_cache[raw_active_ssid.lower()] = usable
       active_ssid = verdict.sticky_ssid
       pending_up = verdict.pending
+      # netscanpin2pnw: is the driver's manual pick still in force? Judged AFTER judge_link, so a pinned
+      # network that has failed its usability check (and was just blamed for it) ends the pin THIS tick --
+      # a pin must never hold the device offline. active_ssid None = the read failed = no evidence.
+      pin_ssid = pin_key[0] if pin_in_force and pin_key else ""
+      pv = judge_pin(pin_ssid, pin_first_seen, pin_seen_active,
+                     raw_active_ssid if active_read_ok else None,
+                     bool(pin_ssid) and verdict.blame.lower() == pin_ssid.lower() and not verdict.blame_ok,
+                     now)
+      pin_seen_active = pv.seen_active
+      if pv.ended:
+        cloudlog.event("netcosttier_pin_cleared", ssid=pin_ssid, reason=pv.ended)
+        pin_ended_key = pin_key
+      pinned = bool(pv.pinned_ssid)
+
       if verdict.blame:
         _note_attempt(assoc_fail, verdict.blame, verdict.blame_ok, now)
 
@@ -775,6 +848,16 @@ def main() -> NoReturn:
         unmetered_ssids=unmetered_ssids,
         active_ssid=active_ssid,
       )
+      # netscanpin2pnw: HOLD. While the driver's pick is in force the arbiter takes no radio action for
+      # cost reasons -- neither during the join (so it never fights the UI's own activation) nor after.
+      # Pins are a cost-ladder feature: with DisableNetworkCostLadder set the behaviour is the pre-ladder
+      # binary one, which never knew about manual picks. down_hotspot is never suppressed.
+      if pinned and tethering_enabled and fallback_enabled and action in ("up_priority", "up_fallback", "up_hotspot"):
+        held = (pin_key, action, target_ssid)
+        if held != pin_held_logged:
+          cloudlog.event("netcosttier_pin_held", pinned=pv.pinned_ssid, suppressed=action, target=target_ssid)
+          pin_held_logged = held
+        action, target_ssid = "noop", ""
       _apply(action, target_ssid)
       if action in ("up_priority", "up_fallback") and target_ssid:
         # Remember what we raised. A `con up` that fails outright leaves NOTHING active, so this is
