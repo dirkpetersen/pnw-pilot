@@ -33,9 +33,24 @@ class _RaisingDetector:
   def __init__(self):
     self.calls = 0
 
-  def update(self, lead, v_ego, a_ego):
+  def update(self, lead, v_ego, a_ego, carstate_valid):
     self.calls += 1
     raise RuntimeError("detector exploded")
+
+
+class _RecordingDetector:
+  def __init__(self):
+    self.args = None
+
+  def update(self, lead, v_ego, a_ego, carstate_valid):
+    self.args = (lead, v_ego, a_ego, carstate_valid)
+
+
+class _SM(dict):
+  """A SubMaster stand-in: item access plus the per-service `valid` flags."""
+  def __init__(self, *a, valid=None, **k):
+    super().__init__(*a, **k)
+    self.valid = valid if valid is not None else {"carState": True}
 
 
 class _StopAfterShadow(Exception):
@@ -88,8 +103,8 @@ def _planner(lp):
 
 def test_update_survives_raising_detector_and_logs_once(lp, logs, clock):
   p = _planner(lp)
-  sm = {"carControl": types.SimpleNamespace(orientationNED=[]), "carState": _CarState(),
-        "radarState": types.SimpleNamespace(leadOne=object())}
+  sm = _SM({"carControl": types.SimpleNamespace(orientationNED=[]), "carState": _CarState(),
+           "radarState": types.SimpleNamespace(leadOne=object())})
   # update() must get PAST the shadow step: the next statement reads carState.vCruise, which stops the test.
   # Without the guard the detector's RuntimeError escapes instead.
   with pytest.raises(_StopAfterShadow):
@@ -104,7 +119,7 @@ def test_update_survives_raising_detector_and_logs_once(lp, logs, clock):
 
 def test_failure_log_is_rate_limited_to_once_a_minute(lp, logs, clock):
   p = _planner(lp)
-  sm = {"carState": _CarState(), "radarState": types.SimpleNamespace(leadOne=object())}
+  sm = _SM({"carState": _CarState(), "radarState": types.SimpleNamespace(leadOne=object())})
 
   for _ in range(5):                               # 20 Hz burst at t=0: one line, not five
     p._leadloss_shadow_step(sm, 12.0)
@@ -133,3 +148,15 @@ def test_sm_access_errors_are_caught_too(lp, logs, clock):
   p = _planner(lp)
   p._leadloss_shadow_step({}, 12.0)                # no radarState at all -> KeyError inside the guard
   assert len(logs.leadloss()) == 1
+
+
+def test_carstate_valid_flag_is_passed_through(lp, logs, clock):
+  """leadlossgate2pnw: the detector's carState gate is only as good as the flag the planner hands it."""
+  p = lp.LongitudinalPlanner(car.CarParams.new_message())
+  p.leadloss = _RecordingDetector()
+  lead = object()
+  for flag in (False, True):
+    p._leadloss_shadow_step(_SM({"carState": _CarState(), "radarState": types.SimpleNamespace(leadOne=lead)},
+                                valid={"carState": flag}), 12.0)
+    assert p.leadloss.args == (lead, 12.0, _CarState.aEgo, flag)
+  assert logs.leadloss() == []

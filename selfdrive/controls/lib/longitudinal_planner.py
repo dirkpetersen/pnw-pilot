@@ -127,7 +127,9 @@ class LongitudinalPlanner:
     failure immediately (with traceback), then at most one line per LEADLOSS_ERR_LOG_S, each carrying how many
     failures happened since the previous line."""
     try:
-      self.leadloss.update(sm['radarState'].leadOne, v_ego, sm['carState'].aEgo)
+      # leadlossgate2pnw: sm.valid['carState'] is the carState message's own valid flag -- False on the frozen-carState /
+      # canBusMissing segments that produced 3 of the reviewed shadow events
+      self.leadloss.update(sm['radarState'].leadOne, v_ego, sm['carState'].aEgo, sm.valid['carState'])
     except Exception:
       self._leadloss_err_n += 1
       now = time.monotonic()
