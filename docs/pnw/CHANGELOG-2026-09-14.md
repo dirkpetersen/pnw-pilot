@@ -7,8 +7,15 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip / installed on the truck:** `d379b4a0f5` (= pin bump `03ee7fc3db` + docs; opendbc `97be35a7`;
-installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own reboot.
+**Channel tip:** `origin/3devpnw` = `e69cf192c1` (units2pnw), pushed 14:50 PT, not yet installed. The truck has been out of
+reach since ~12:43 PT (on LTE, then off). **Last known install:** `d379b4a0f5` (09:10 PT, BootCount 208). `fe4bf3116e`
+(silentexc 1/6) is also on origin, not installed.
+
+## 🔴 Cars — the Lightning cluster switched to km/h (09-13 21:07 PT); set speed misread 1.609×
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| pnw-opendbc `4fd9826c` `8f3548e5` `6bc7347d` `2063b773` `7ff5d541` (master-pnw) + pnw-pilot `cafe86283f` `63278b8f06` `79c62521bb` `d7409df46e` pin `e69cf192c1` **truckdecode2pnw + units2pnw** | (A) The truck's own dead-reckoning flag (0x463) is decoded into CarGps and logged as `truck_dr` (telemetry only). (B) `cruiseState.speedClusterUnit` follows the cluster's own `MetricActv_B_Actl` (unknown until 0x430 is seen). Ford CAN FD `cruiseState.speed` is now TRUE m/s: `Veh_V_DsplyCcSet` is converted in the cluster's unit, and unknown keeps mph and logs. ICBM taps are one cluster unit, so 1 km/h on a km/h cluster. The MADS brain no longer converts. | **Why:** the owner's cluster has shown km/h since Sun 09-13 21:06–21:08 PT (parked; `drives/2026-09-14/units-kmh/`). openpilot read the set speed as mph, so every gas-set tripped the overshoot-cancel rule, and the Corvallis 21:16 "set 55 mph at 34 mph" was 55 km/h. No openpilot transmission or write caused the switch (only its usual 4 addresses); the cause is not in the logs. **Proof:** RqCcSet/DsplyCcSet = 1.571–1.587 with MetricActv 0 (86,313 samples) and 0.976–0.978 with 1 (6,473 samples), claim-verified. The first "both signals" gate (Fable-approved earlier) was WRONG on the real data (IsaVLimUnit stays Mph) and is superseded here. **Fable SHIP on every commit:** an mph cluster is field-identical to base; a never-received 0x430 is identical; a mid-drive flip allows at most one spurious 1-unit SET− tap and no acceleration path; the Tesla is untouched; `@7` is appended. 493 + 1187 tests, 40/40 mutants. Pushed 14:50 PT; **installs first** when the truck is reachable (first boot rebuilds cereal). Fix next: the ICBM tracking-window step and the 0.69 vs 0.8 m/s² slew on km/h. Not to 3testpnw until a km/h drive confirms. |
 
 ## Networking — arbiter logging
 
