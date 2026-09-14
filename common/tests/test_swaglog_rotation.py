@@ -103,3 +103,13 @@ def test_warning_checks_later_deletions_after_unknown_age(tmp_path, errors):
   os.utime(os.path.join(tmp_path, "swaglog.0000000000"), (future, future))
   _boot(tmp_path, 3, 2)  # deletes 0 (age unknown, quiet), then 1 (1 min old, warns)
   assert len(errors) == 1 and "swaglog.0000000001" in errors[0]
+
+
+def test_warn_if_young_survives_a_file_removed_underneath_it(tmp_path):
+  """Fable: getmtime can race a concurrent os.remove; the check must return quietly, never raise."""
+  from openpilot.common.swaglog import SwaglogRotatingFileHandler
+  h = SwaglogRotatingFileHandler.__new__(SwaglogRotatingFileHandler)
+  h.warned_young_delete = False
+  h.backup_count = 2500
+  h._warn_if_young(str(tmp_path / "swaglog.0000000001"))   # never existed
+  assert h.warned_young_delete is False

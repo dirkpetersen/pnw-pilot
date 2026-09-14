@@ -75,7 +75,12 @@ class SwaglogRotatingFileHandler(BaseRotatingHandler):
   def _warn_if_young(self, path):
     if self.warned_young_delete:
       return
-    age_s = time.time() - os.path.getmtime(path)  # noqa: TID251 -- file mtimes are wall-clock time
+    try:
+      age_s = time.time() - os.path.getmtime(path)  # noqa: TID251 -- file mtimes are wall-clock time
+    except OSError:
+      # Fable: a concurrent handler may remove the file first. logmessaged is restart_if_crash=False, so a raise
+      # here would end all logging until the next boot; the age is simply unknown for this file.
+      return
     # A negative age means the clock is behind the file's mtime (a boot before time sync), so the age is unknown.
     if 0 <= age_s < YOUNG_DELETE_WARN_S:
       self.warned_young_delete = True
