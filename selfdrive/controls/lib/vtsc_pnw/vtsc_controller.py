@@ -72,6 +72,8 @@ class VTSCController:
     self._mode = CES.CES_MODE_OFF
     self.tune = dict(C.DEFAULT_PROFILE)
     self._enabled = False
+    self._enable_err_t = None  # silentexc2pnw: monotonic time of the last logged _read_enabled failure (None = never)
+    self._enable_err_n = 0     # silentexc2pnw: _read_enabled failures since that log line
     # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
     self._map_curves = False
     # curvefloor2pnw telemetry — initialised here (not just in cap()) so the fold is inspectable and
@@ -153,9 +155,22 @@ class VTSCController:
           self._is_freeway = (ctx == "freeway")
         except Exception:
           self._speed_limit, self._is_freeway = 0.0, False
-      except Exception:
+      except Exception as e:
+        # silentexc2pnw (Rule 2): this was a bare `except Exception:`, so a read error switched VTSC off with no trace --
+        # no VTSC curve slowdown (vision or map) on an op-long car, which looks exactly like CESMode=Off. The
+        # fallback is unchanged (VTSC off, no map curves until a read succeeds, ~1 s later); it is now logged in the
+        # twistyr2pnw style: first failure at once, then at most one line per TWISTY_ERR_LOG_S with the count since the
+        # previous line. What reaches here in practice is an UnknownKeyName from get_bool("VtscMapCurves") on a
+        # params_keys.h / params_pyx.so mismatch, or a code defect (the other reads have their own excepts). Caught
+        # broadly: plannerd is restart_if_crash=False, so an escaping exception disengages both cars with no re-engage.
         self._enabled = False
         self._map_curves = False
+        self._enable_err_n += 1
+        if self._enable_err_t is None or now - self._enable_err_t >= TWISTY_ERR_LOG_S:
+          cloudlog.exception(f"VTSC: enable/mode read FAILED ({type(e).__name__}) -- VTSC is OFF, NO curve slowdowns " +
+                             f"while this lasts ({self._enable_err_n} failure(s) since the last log)")
+          self._enable_err_t = now
+          self._enable_err_n = 0
 
   def _reset(self):
     self._state = "idle"
