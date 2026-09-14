@@ -862,7 +862,8 @@ class SelfdriveD:
         cruise_enabled=bool(CS.cruiseState.enabled),
         cruise_available=bool(CS.cruiseState.available),
         set_speed_ms=float(CS.cruiseState.speed),
-        # truckdecode2pnw: the cluster's unit for that number (getattr: a schema without the field reads unknown)
+        # units2pnw: the cluster's unit, for the record (the speed above is already true m/s; getattr: a schema
+        # without the field reads unknown)
         set_speed_unit=speed_unit_name(getattr(CS.cruiseState, "speedClusterUnit", None)),
         v_ego=float(CS.vEgo),
         standstill=bool(CS.standstill),
@@ -876,8 +877,8 @@ class SelfdriveD:
       if out.cancel:
         self.set_high_cancel_pending = True
         cloudlog.error("madsresume2pnw: stock set came back > 3 mph above what our own press wanted, no driver button -- CANCELLING cruise. "
-                       "Set values are converted by the record's `unit` (carState.cruiseState.speedClusterUnit); with unit unknown the "
-                       "cluster was assumed mph, and gotDisplayMph ~1.6x wantDisplayMph on every cancel means km/h. (records: %s)", out.records)
+                       "Set values are true m/s (carstate converts by carState.cruiseState.speedClusterUnit); if the record's unit is "
+                       "unknown, carstate assumed mph, and gotDisplayMph ~1.6x wantDisplayMph on every cancel means km/h. (records: %s)", out.records)
 
       # --- publish / withdraw the offer -------------------------------------------------------
       # Withdrawal is IMMEDIATE and unthrottled: the executor's freshness bound only limits how
@@ -929,12 +930,11 @@ class SelfdriveD:
           ])
           cloudlog.warning("madsresume2pnw: %s press sent, stock cruise never re-engaged. %s (record: %s)",
                            rec.get("mode", "?"), why, rec)
-        if rec.get("phase") == "verify" and rec.get("unit") in ("kph", "unknown"):
-          # truckdecode2pnw (Rule 2): the 3 mph rule either converted from km/h (never yet seen on this truck) or could
-          # not establish the unit and ASSUMED mph. Either way it must be visible, not only in ces_events.
-          cloudlog.warning("madsresume2pnw: verify compared set speeds with cluster unit %s -- %s (record: %s)", rec["unit"],
-                           "converted from km/h" if rec["unit"] == "kph" else
-                           "unit NOT established, mph ASSUMED; the carstate log names IsaVLimUnit_D_Rq / MetricActv_B_Actl", rec)
+        if rec.get("unitAssumed"):
+          # units2pnw (Rule 2): carstate could not establish the cluster unit (Cluster_Info1_FD1 never received) and
+          # ASSUMED mph, so the 3 mph rule compared on that assumption. Flagged by the brain once per change to unknown.
+          cloudlog.warning("madsresume2pnw: verify compared set speeds with the cluster unit NOT established -- carstate " +
+                           "ASSUMED mph; the carstate units2pnw log line has MetricActv_B_Actl (record: %s)", rec)
         if rec.get("loud"):
           cloudlog.error("madsresume2pnw: cruise resumed to %.2f m/s, ABOVE the driver's captured set speed %.2f m/s -- investigate (record: %s)",
                          rec.get("gotMs", 0.0), rec.get("wantMs", 0.0), rec)
