@@ -1373,6 +1373,7 @@ def test_one_short_accelerator_tap_sets_the_speed(stop_s, gas_s):
   _pull_away_and_lift(d, gas_s=gas_s, v=12.0)
   assert d.fired(), f"a {gas_s}s tap after a {stop_s}s stop must set; records={d.records[-4:]}"
   assert [r for r in d.records if r["phase"] == "fire"][-1]["mode"] == "set"
+  assert d.b._gas_spent, "a tap at 12 m/s is a real press and uses up the first press, even a one-tick one"
 
 
 def test_a_gas_opened_episode_can_never_offer_RESUME():
@@ -1718,3 +1719,32 @@ def test_a_driver_button_that_engaged_nothing_stops_holding_off_our_press_after_
   d.tick(int(2.0 / DT), v_ego=15.0, **STEER_ONLY)
   assert d.fired(), d.records[-3:]
   assert d.offers[0][0] - lift >= M.GAS_SET_RELEASE_MIN_S - 0.3 + M.DRIVER_BTN_HOLDOFF_S - 1e-6
+
+
+def test_S4_a_creep_that_never_reaches_5ms_does_not_use_up_the_first_press():
+  """OWNER DECISION 2026-09-13, "Creeping doesn't count" (Fable S4). Stop-and-go: the driver creeps to 3.5 m/s and
+  lifts for well over the 1.0 s wait. That is not the first press; the real pull-away afterwards sets."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(200, gas_pressed=True, v_ego=3.5, **STEER_ONLY)
+  d.tick(150, v_ego=3.5, **STEER_ONLY)                                # creep lift, 1.5 s
+  assert not d.fired() and not d.b._gas_spent, "a creep must not use up the first press"
+  _pull_away_and_lift(d, gas_s=3.0, v=15.0)
+  assert d.fired() and d.offers[-1][2] == pytest.approx(15.0), d.records[-4:]
+
+
+def test_S4_a_pull_away_before_a_brake_does_not_make_the_next_creep_count():
+  """The creep test must hold after a real pull-away that was cut short by a brake: the brake re-arms and forgets
+  the earlier press's speed, so a creep after it is still not the first press."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(300, gas_pressed=True, v_ego=15.0, **STEER_ONLY)           # pull away to 15 m/s...
+  d.tick(30, v_ego=15.0, **STEER_ONLY)                               # ...lift 0.3 s (not yet judged)...
+  d.tick(200, brake_pressed=True, v_ego=0.0, standstill=True, **STEER_ONLY)   # ...and brake to a stop
+  d.tick(30, v_ego=0.0, standstill=True, **STEER_ONLY)
+  d.tick(200, gas_pressed=True, v_ego=3.5, **STEER_ONLY)            # creep
+  d.tick(150, v_ego=3.5, **STEER_ONLY)
+  assert not d.b._gas_spent, "a pre-brake pull-away's speed made the creep count"
+  n = len(d.offers)
+  _pull_away_and_lift(d, gas_s=3.0, v=14.0)
+  assert len(d.offers) > n and d.offers[-1][2] == pytest.approx(14.0), d.records[-4:]

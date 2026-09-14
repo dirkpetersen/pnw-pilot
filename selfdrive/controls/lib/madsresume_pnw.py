@@ -467,6 +467,10 @@ class MadsResumeBrain:
     # Cleared ONLY by a new brake arm -- deliberately NOT by an episode ending (armExpired, a refusal), or
     # an overtake minutes later would get a second attempt. Every record carries it (`gasSpent`).
     self._gas_spent = False
+    # engagegoal2pnw, OWNER DECISION 2026-09-13 ("Creeping doesn't count"): the highest speed reached during the
+    # current accelerator press. A press that never reaches V_EGO_MIN_MS before its lift-off is judged is a creep
+    # (stop-and-go) and does not use up the first press. Reset by a brake arm (a press that reached it is spent).
+    self._gas_v_max = 0.0
     # when our own resume last fired, for the post-resume rejection check
     self._fired_t: float | None = None
     # cruise_enabled edge detector, for clearing the opt-out. THREE-STATE like _lat_prev.
@@ -571,6 +575,7 @@ class MadsResumeBrain:
       self._gas_prev = bool(i.gas_pressed)
       self._lat_braked = False
       self._gas_spent = False
+      self._gas_v_max = 0.0
       self._fired_t = None
       self._v_max = None
       self._v_max_t = 0.0
@@ -779,8 +784,11 @@ class MadsResumeBrain:
       self._last_block = "armed"
       if start:
         self._gas_spent = False        # a new brake press arms the first-press rule again
+        self._gas_v_max = 0.0          # ...and forgets the speed of any press before it
       if gas_start:
         self._used_gas = True          # SET mode from the first tick: a one-tick tap must not fall back to RES
+        if _finite(i.v_ego):
+          self._gas_v_max = max(self._gas_v_max, float(i.v_ego))
         out.records.append(self._snap(i, {"phase": "arm", "reason": "gas", "fired": False}))
         return out
       out.records.append(self._snap(i, {"phase": "arm", "reason": None, "fired": False}))
@@ -827,6 +835,8 @@ class MadsResumeBrain:
                                         "mode": "set"}))
       self._disarm()
       return out
+    if i.gas_pressed and _finite(i.v_ego):
+      self._gas_v_max = max(self._gas_v_max, float(i.v_ego))
     if i.gas_pressed:
       # engagegoal2pnw / D1 (Rule 2): the driver went back on the power while a lift-off window was open
       # and refusing. `_last_block` -- the gate that held it (`decelUnknown`, `slow`, `noEntry`, a lead
@@ -911,7 +921,9 @@ class MadsResumeBrain:
 
     since = i.now - self._released_t
     if self._used_gas and since >= GAS_SET_RELEASE_MIN_S:
-      self._gas_spent = True           # first press only: this press's lift-off is judged from here on
+      # first press only: this press's lift-off is judged from here on -- unless it was only a creep
+      if self._gas_v_max >= V_EGO_MIN_MS:
+        self._gas_spent = True
 
     # --- an offer already in flight: keep it alive only while every gate still holds ------------
     if self._offer_t is not None:
