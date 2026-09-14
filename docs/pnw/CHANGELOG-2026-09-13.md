@@ -8,7 +8,10 @@ landed on `3devpnw` today, one change per reboot, each reviewed **Fable** (the o
 Drive reports referenced live under `../../../../drives/<date>/` (i.e. `~/gh/comma/drives/<date>/` from
 the workbench root).
 
-**Channel tip at time of writing:** `origin/3devpnw` = `5f9bb8b3f4` (gpssel2pnw).
+**Channel tip at time of writing:** `origin/3devpnw` = `3871d12733` (gpsdrgate2pnw — stale-GPS
+curve-cap hold). Late additions past midnight (engagegoal2pnw's 10-commit stack, gpsdr2pnw,
+gpslag2pnw, gpsdrgate2pnw) verified healthy on the truck **2026-09-14 00:30 PT**; filed under this
+date because the work session started 2026-09-13.
 
 ## TL;DR
 
@@ -63,6 +66,37 @@ audio is very annoying... we only want the silence while MADS keeps steering. Wh
 can still chime."
 
 **Installed on the truck 2026-09-13.**
+
+---
+
+## Engagement — gas-set
+
+10-commit stack, `271a4b7d3c..b1288f5004`. Owner goal, verbatim: "If I hit the cruise control button
+and anything is on, it needs to be off. If I want to resume longitudinal control and accelerate I can
+either push the + or I should be able to hit the gas pedal once and then it should overwrite this and
+set the new speed." Full verification of every path (raw CAN, qlogs, `ces_events`): section 10 of
+`docs/MADS-RESUME-TO-DRIVER-SPEED.md`.
+
+| Commit(s) | What changed for the driver | Notes |
+|---|---|---|
+| `271a4b7d3c` **engagegoal2pnw** | After a steering-only stop (e.g. a traffic light), one accelerator press now sets/engages cruise at the current speed — closes the gap where a stop held more than 20 s (armExpired) left the gas pedal doing nothing until the next brake. ON/OFF and SET+/RES behavior while steering-only was verified unchanged, not touched. | Fable: **SHIP WITH FIXES** — F1 (a refused press wrote nothing, fixed next commit), F2 (MADS-unavailable clear untested, fixed here). F3 (cap lift records) declined — measured ~1/s worst case, not a flood. F4 (pre-existing, an inert-branch disarm writes no terminal) flagged only. 229 tests, 12/12 mutants killed. |
+| `11388568e1` | A gas press refused by the post-resume double-tap opt-out is now also on record (previously the opt-out held correctly but left no trace). | Fable re-review: **SHIP**, completes F1. 231 tests, 16/16 mutants. |
+| `d46ba6130d` **first press only** | Only the FIRST accelerator press after a brake can set the speed; a later press in the same stop (e.g. an overtake minutes later) is ignored and logged as refused. A new brake re-arms it. Owner decision, replacing any time limit. | A press refused by a gate still counts as used (owner's explicit choice, flagged Rule 1 — fails toward cruise staying off). 234 tests, 25/25 mutants. |
+| `6cd0ce7c51` **ignore regen** | A gas-set is no longer refused just because the truck is still slowing from regen after lift-off (1.5-1.9 m/s² is normal, and a SET to the current speed commands no acceleration). A real simultaneous brake still wins outright. Owner decision (Q-C4: "Ignore regen, set"). | 237 tests, 31/31 mutants. |
+| `d5ca781152` | The gas-set now waits **1.0 s** after lift-off before firing, so a driver who lifts to slow down and brakes a moment later gets the brake, not an unwanted SET. Owner decision (Q-C5: "Wait 1.0 s"). | 266 tests, 35/35 mutants. |
+| `03c9c30ba9` **cancel on overshoot** | If our own SET/RES press brings the truck's cruise set back more than **3 mph** above what was asked for, cruise is now cancelled outright — steering drops too — instead of being left running high. New alert: "Cruise set too high - cancelled." Found live: a gas-set SET− made the PCM engage at 55 mph from 34 mph actual with a 42 mph memory (`drives/2026-09-13/corvallis-resume-55/`). Owner decision, option (a): "Cancel, steering drops too." | Adds `EventName.madsResumeSetTooHigh`, **log.capnp `@104`** — the established pnw event pattern (`greenLight @99` … `cruiseOffRequested @103`). A driver's own cruise button in the window is never cancelled. 282 tests, 11/11 mutants. |
+| `3b07240cf8` **Fable B1 (blocking)** | Fixed: a driver's own RES/SET pressed just before our gas-set fired was being read as "our overshoot" and wrongly cancelled. Now: no gas-set/RES press of ours at all within **1 s** of a driver cruise-button press. | Fable-requested, blocking. 287 tests, 4/4 mutants. |
+| `d444e38b9f` **creep exemption** | Creeping in stop-and-go traffic (never reaching ~11 mph / 5 m/s) no longer uses up the first press — only a press that actually got the truck rolling counts, so the real pull-away afterward can still set. Owner decision (Fable's S4 question: "Creeping doesn't count"). | 289 tests, 5/5 mutants. |
+| `b92c798e60` | Verify records now carry the raw cluster set values (`gotDisplayMph`/`wantDisplayMph`) so a future km/h-cluster mismatch would be self-diagnosing instead of silently cancelling every press. Telemetry only, no behavior change. | Fable, non-blocking: the cancel rule assumes an mph cluster and no opendbc signal exists to detect km/h — follow-up tracked in `docs/PENDING-WORK.md`. |
+| `b1288f5004` | An offer withdrawn by a rejection brake now writes its own `offerEnd` record (previously the `suppress` record was the only trace). Telemetry only. | **Fable re-review of the full 10-commit stack: SHIP.** 300/300 tests pass, merge-tree clean. |
+
+**Not changed / still open** (owner questions in `docs/MADS-RESUME-TO-DRIVER-SPEED.md` section 10.4): an
+automatic RES on brake release ("D3"); repeat ON/OFF within 3 s; ON/OFF from Standby while openpilot is
+off; keeping steering through a no-input stock dropout (needs a panda + opendbc change). The "S6
+residual" (a PCM raising the set after the engage tick, uncaught) is also open — see `docs/PENDING-WORK.md`.
+
+**Installed on the truck 2026-09-14, verified healthy 00:30 PT** (tip `3871d12733`, alongside the GPS
+work below).
 
 ---
 
@@ -158,6 +192,14 @@ next occurrence the evidence to explain itself.
 |---|---|---|
 | `501ecfccd8` **gpsfix2pnw** | Both cars. The position every consumer reads (`LastGPSPosition`: speed limits, police/rest-area alerts, WiFi location) is written only when the GPS actually reports a fix. Before, a no-fix sample could put the truck 2.2-2.4 km off (four times on the weekend). Fix loss and recovery are logged. | Fable APPROVE. Installed on the truck 2026-09-13 22:53 PT. |
 | `5f9bb8b3f4` **gpssel2pnw** | Lightning only. While the truck's own CAN GPS is provably live, it becomes the position source (median 1.6 m vs 3.0 m error, 99.98% vs 98.6% availability, stable heading at stops). It falls back to the comma's GPS on a stale, frozen or silent feed. Every switch is logged; the position records `src`. mapd itself stays on the comma's receiver. The Tesla is byte-identical (no CAN GPS). | Fable APPROVE. Installed 22:59 PT; the source switched to `car` after 3 healthy updates. Evidence: `drives/2026-09-12/central-oregon-weekend/GPS_TRUCK_VS_COMMA.md`. |
+| `0c0a1e5468` **gpsdr2pnw** | Lightning only. When the truck's own GPS reads degraded (HDOP ≥ 3.8 for 10 s straight — dead-reckoning), the device's fresher GPS fix takes the position over; the truck's fix takes it back the moment the device fix isn't fresh. Owner decision: "Yes, prefer the good comma fix." | Fable: SHIP, with two follow-ups fixed by the next commit — the one weekend firing (a parked truck) was net-negative, and a "fresh" device fix had no steadiness check. |
+| `62987f7e5d` **gpsdrgate2pnw** | Narrows the above: the device fix is only preferred while the truck is **moving**, and only once the device fix has itself been steady for 10 s. Fixes what Fable found: a parked, HDOP-degraded truck (exactly right) lost to a device fix jittering 3.7 m mean / 8.7 m max for 381 s. | Fable: **APPROVE** (this commit and its parent together). Weekend replay: DR now switches nowhere unwanted. |
+| `1c5ea1d9e2` **gpsdrgate2pnw** | Test-only: the in-episode receiver-switch test can now actually observe a curve-cap restore (the harness's simulated cruise set previously never moved, so the "not a restore" half of the test was unfalsifiable). No driver-visible change. | Fable, gpslag2pnw review point (b). |
+| `bdf3094cc2` **gpslag2pnw** | Lightning/ICBM only. ICBM now projects the GPS fix forward to the current tick (it was reading a position up to ~1.8 s stale) instead of the raw 1 Hz read — curve-slowdown start timing is **unchanged by design** (the projection keep-time is calibrated so the median start point doesn't move). A fix older than 5 s counts as no GPS for curve lookups. Owner decision: "Build it, keep curve timing." | Fable: **SHIP**. Projection error stays bounded (~30 m along-track normally, ~14 m at the 5 s ceiling, absorbed by the 60 m point-match). |
+| `3871d12733` **gpsdrgate2pnw** | If GPS goes stale (both receivers gone ≥5 s) in the middle of a curve slowdown, the truck now **holds** its current speed cap instead of restoring back up toward a curve it can no longer see — held for up to 60 s, or until the fix returns, a new curve binds by vision, or the truck has driven well past where the cap was set. | Fable re-review: **SHIP** (first pass was REQUEST CHANGES on two findings — a vision co-bind silently erasing the hold, and the 60 s timeout wrongly restoring toward a still-unlocated curve — both fixed here). **Channel tip.** |
+
+**Installed on the truck 2026-09-14, verified healthy 00:30 PT** (gpsdr2pnw through the final
+gpsdrgate2pnw commit, tip `3871d12733`).
 
 ## Device settings — lat-accel cap
 
@@ -190,26 +232,24 @@ this is a margin decision, not a fix for a measured problem): `drives/2026-09-12
 - **mapd default pin is v2.3.1.** Do **not** adopt upstream `pfeiferj/mapd` PR #136. Our own
   tile-validation work was opened upstream as `pfeiferj/mapd#138`.
 - **The ON/OFF cruise button means everything off** (reaffirmed).
-- **Gas-set (gasset2pnw) refinements, IN PROGRESS, not shipped**: the first accelerator press after a
-  brake should be the only one that arms; regen slowing down the truck should be ignored (not read as a
-  deceleration); the arm should wait 1.0 s after lift-off before firing; and — revised after the
-  unexplained 55 mph engagement below — the cancel rule is **option (a): cancel, and steering drops
-  too**, if the truck sets itself materially above the driver's wanted speed, rather than a raise-only
-  guard.
+- **Gas-set (engagegoal2pnw) refinements — SHIPPED** (10-commit stack, `271a4b7d3c..b1288f5004`, see
+  *Engagement — gas-set* above): first accelerator press after a brake is the only one that arms; regen
+  slowing the truck is ignored (not read as a deceleration); the arm waits 1.0 s after lift-off before
+  firing; and — revised after the unexplained 55 mph engagement below — the cancel rule is **option
+  (a): cancel, and steering drops too**, if the truck sets itself materially (>3 mph) above the driver's
+  wanted speed, rather than a raise-only guard.
 - **Keep full (non-deferred) uploads over the iPhone hotspot.**
 - **The lateral-accel cap is 5.0 m/s² below 50 mph** (device file updated, see above).
-- **Truck GPS selection is approved in principle** — fix the ~1.8 s plumbing lag first (IN PROGRESS).
+- **Truck GPS selection is approved in principle — the ~1.8 s plumbing lag is fixed** (`gpslag2pnw`
+  `bdf3094cc2` projects the GPS fix forward each ICBM tick; curve-slowdown start timing unchanged by
+  design). A degraded truck fix yields to a steady, moving device fix (`gpsdr2pnw`/`gpsdrgate2pnw`), and
+  a fix going stale mid-curve holds the running cap instead of restoring blind (`gpsdrgate2pnw`
+  `3871d12733`, the channel tip).
 
 ---
 
 ## In progress (not shipped this session)
 
-- **`engagegoal2pnw`** (7 commits) — the gas-pedal engagement fixes and the gas-set decisions above
-  (first-press-only, ignore regen, 1.0 s lift-off wait, and the option-(a) cancel-with-steering-drop
-  rule prompted by the unexplained 55 mph engagement in `corvallis-resume-55`).
-- **GPS, remaining:** `gpsdr2pnw` (use the comma's fix while the truck's GPS is only dead-reckoning, owner
-  decision) and `gpslag2pnw` (project the position forward at every ICBM tick, curve-slowdown start timing
-  kept unchanged, stop projecting past 5 s, ICBM/Lightning only). Parts 1-2 shipped; see *GPS* above.
 - **Tailgate chime FORScan session** — tooling (`scripts/read-ford-asbuilt.py`, the `0x313` before/after
   test) is ready; the owner runs the session at the truck.
 
@@ -255,4 +295,4 @@ These are analysis, not code — several of today's shipped fixes came directly 
 
 ---
 
-**Channel tip:** `origin/3devpnw` = `5f9bb8b3f4` (`gpssel2pnw`).
+**Channel tip:** `origin/3devpnw` = `3871d12733` (`gpsdrgate2pnw`).
