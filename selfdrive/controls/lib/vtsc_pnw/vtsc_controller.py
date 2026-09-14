@@ -601,7 +601,10 @@ class VTSCController:
         # such members), so the fix's own effectiveness would have been unobservable in any log.
         "mapRaw": round(float(self._tele_map_raw), 1),
         "mapEff": round(float(self._tele_map_eff), 1),
-        "mapD": round(float(self._tele_map_d), 0),
+        # silentexc2pnw: null when the fold found no map curve. The fold stores inf then, which json writes as a bare
+        # `Infinity` -- not valid JSON -- into VTSCStatus and, via ces_pnw, every ces_events record (4506 of 8633 on
+        # 2026-09-03, VtscMapCurves=1). A finite distance (incl. the 0.0 of a tick with no fold) is written as before.
+        "mapD": round(float(self._tele_map_d), 0) if math.isfinite(self._tele_map_d) else None,
         "mapFlr": bool(self._tele_map_floored),
         # mapcurv2pnw: measured map curvature + what it would advise (m/s). Telemetry only.
         "mapK": round(float(self._tele_mapk), 5),
