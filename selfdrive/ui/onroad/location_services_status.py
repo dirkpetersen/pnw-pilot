@@ -222,7 +222,10 @@ class LocationServicesStatusRenderer(Widget):
     freeway = bool(self._st.get("freeway"))
     header = "HAPPENING AHEAD" if freeway else "NEARBY (3 MI)"
     content = []
-    if freeway:
+    # policemiss2pnw: off a mapd "freeway" (every 2-lane highway) the daemon now publishes a police report
+    # while polling at highway speed. Show the line when there IS one; keep the surface-street box free of
+    # the "Police -" / reason line otherwise.
+    if freeway or self._st.get("police", {}).get("state") == "alert":
       content.append((*self._police_line(), self.font))
     content.append((*self._rest_line(), self.font))
     content.append((*self._ev_line(), self.font))

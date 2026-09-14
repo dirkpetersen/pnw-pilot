@@ -1373,6 +1373,29 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   return out
 
 
+def _police_payload(on_freeway, police, lat, lon, brg, path, recede):
+  """The police overlay line for this tick.
+
+  policemiss2pnw: shown on a mapd RoadContext=freeway road (as before) OR whenever the police poll is
+  ARMED, i.e. we are at highway speed and paying for the poll anyway. mapd's classifier needs an
+  Interstate name/ref or >= 4 lanes, so every 2-lane highway reads "unknown"/"city": measured 2026-09-07..13,
+  209 of 460 min at >= 45 mph (46%) were off "freeway" -- US-97, OR-58, OR-138, OR-99 -- and 202 of the 434
+  qlog-covered polls were paid for while the result could not be displayed. Selection is straight-line +
+  forward hemisphere since policenear2-2pnw, so it no longer needs a freeway path.
+
+  Off a freeway the line is DISPLAY-ONLY: `cap` is withheld, so no banner and no speedadjust slowdown --
+  control behaviour off-freeway is exactly what it was (the line used to be nodata, which also released
+  the latch). Whether police should slow the car on those roads is an owner decision."""
+  if not (on_freeway or police.armed()):
+    recede.last_pick.clear()   # same reason as _line_police's nodata return: no hemisphere hold across a gap
+    return {"state": "nodata"}
+  alerts, state, err = police.snapshot()
+  line = _line_police(alerts, state, err, lat, lon, brg, path, recede)
+  if not on_freeway:
+    line.pop("cap", None)
+  return line
+
+
 class _Hold:
   """Anti-flicker debounce for one overlay line. On a curvy road the highway 'ahead' cone swings a POI in
   and out each second, so the line blinks. Keep the last good POI for POI_HOLD_S after it drops, re-emitting
@@ -1770,11 +1793,7 @@ def main():
       out["ev"] = {"state": "nodata"}
       rest_hold.poi = ev_hold.poi = sc_hold.poi = other_hold.poi = None     # no fix -> drop any held POI
     else:
-      if on_freeway:
-        alerts, pstate, perr = police.snapshot()
-        out["police"] = _line_police(alerts, pstate, perr, lat, lon, brg, path, police_recede)
-      else:
-        out["police"] = {"state": "nodata"}
+      out["police"] = _police_payload(on_freeway, police, lat, lon, brg, path, police_recede)
 
       # rest area (car-agnostic). rest2pnw (2026-07-09): corridor-identity selection FIRST — stable
       # 15 mi previews on a known corridor (no heading-line flapping on curves); geometric fallback

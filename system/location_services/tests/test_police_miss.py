@@ -374,3 +374,82 @@ class TestHeldTtlOutlivesNoBackoff:
   def test_still_inside_the_ttl_is_shown(self, monkeypatch):
     out = self._park(monkeypatch, seen_ago_s=40 * 60, shown_after_s=lsd.POLICE_RETAIN_S - 40 * 60)   # exactly TTL
     assert out["state"] == "alert"
+
+# 2026-09-12 PT, Diamond Lake Junction: OR-138 east, stop at 13:18:17, north onto US-97 ("The Dalles-California
+# Highway", 2 lanes, mapd RoadContext "unknown"), 62-66 mph, and past report alert-108833002 at 0.01 mi at
+# 13:19:47. Polls reached AWS at 13:13:21 and 13:17:24 with the report (published ~13:01) ~1.5 mi inside the
+# box, but the police line was not displayable anywhere on this road. Report position from the forensics log
+# (first logged 13:20:28, when a 4-lane stretch briefly read "freeway"); track + bearings from qlog gpsLocation.
+REPORT_0912_US97 = (43.09969, -121.81730, "alert-108833002/14101133", 16, 0)   # age at the 13:17:24 poll
+TRACK_0912_US97 = [(43.08401, -121.82374, 18.3), (43.08652, -121.82271, 16.6), (43.08901, -121.82169, 16.7),
+                   (43.09160, -121.82067, 16.0), (43.09418, -121.81952, 18.1), (43.09698, -121.81831, 17.5)]
+
+
+class _FakePolice:
+  def __init__(self, alerts, state="ok", err="", armed=True):
+    self._snap, self._armed = (alerts, state, err), armed
+
+  def snapshot(self):
+    return list(self._snap[0]), self._snap[1], self._snap[2]
+
+  def armed(self):
+    return self._armed
+
+
+class TestOffFreewayHighwayDisplay:
+  def _run(self, on_freeway, armed, thumbs=0):
+    lat, lon, uuid, age, _ = REPORT_0912_US97
+    police = _FakePolice([_real(lat, lon, uuid, age, thumbs)], armed=armed)
+    recede = _recede()
+    return [lsd._police_payload(on_freeway, police, la, lo, b, [], recede) for la, lo, b in TRACK_0912_US97]
+
+  def test_the_real_us97_pass_is_displayed_while_polling(self):
+    for out in self._run(on_freeway=False, armed=True):
+      assert out["state"] == "alert" and out["uuid"].startswith("alert-108833002"), out
+
+  def test_off_freeway_is_display_only(self):
+    """Same real geometry with the report made CONFIRMED (6 thumbs): a freeway road publishes `cap`
+    (banner + slowdown); an off-freeway road must not -- control off-freeway stays what it was."""
+    assert all("cap" in o for o in self._run(on_freeway=True, armed=True, thumbs=6))
+    off = self._run(on_freeway=False, armed=True, thumbs=6)
+    assert all(o["state"] == "alert" and "cap" not in o for o in off)
+
+  def test_not_polling_off_a_freeway_shows_nothing(self):
+    """Surface streets below the gate keep the old behaviour."""
+    assert all(o == {"state": "nodata"} for o in self._run(on_freeway=False, armed=False))
+
+  def test_freeway_behaviour_unchanged_when_not_armed(self):
+    assert all(o["state"] == "alert" for o in self._run(on_freeway=True, armed=False))
+
+  def test_the_hemisphere_hold_does_not_survive_a_not_displayed_gap(self):
+    recede = _recede()
+    recede.last_pick["display"] = "stale"
+    lsd._police_payload(False, _FakePolice([], armed=False), *TRACK_0912_US97[0], [], recede)
+    assert recede.last_pick == {}
+
+  def test_the_overlay_renders_the_police_line_off_freeway(self, monkeypatch):
+    """UI: the box used to drop the police line whenever `freeway` was False, so even a published alert
+    was invisible. Built headless (fonts/measurement stubbed), asserting on the assembled lines only."""
+    from types import SimpleNamespace
+    import openpilot.selfdrive.ui.onroad.location_services_status as ui
+    monkeypatch.setattr(ui, "measure_text_cached", lambda font, text, fs: SimpleNamespace(x=len(text) * fs * 0.5))
+    r = ui.LocationServicesStatusRenderer.__new__(ui.LocationServicesStatusRenderer)
+    r.font = r.font_bold = None
+    r._rect = None
+    alert = {"state": "alert", "dist_mi": 1.9, "tier": "unconfirmed", "last_seen_min": 2, "town": ""}
+
+    def texts(st):
+      r._st = st
+      return [t for t, _, _ in r._build_layout()[0]]
+    base = {"enabled": True, "freeway": False, "rest": {"state": "nodata"}, "ev": {"state": "nodata"}}
+    assert any(t.startswith("Police") for t in texts({**base, "police": alert}))
+    assert not any(t.startswith("Police") for t in texts({**base, "police": {"state": "nodata", "err": "speed <45mph"}}))
+    assert any(t.startswith("Police") for t in texts({**base, "freeway": True, "police": {"state": "nodata"}}))
+
+  def test_main_publishes_through_police_payload(self):
+    """Wiring guard: main() is an endless Params/msgq loop with no seam, so check that its police line is
+    built by _police_payload and not by a direct (freeway-gated) _line_police call."""
+    import inspect
+    src = inspect.getsource(lsd.main)
+    assert src.count("_police_payload(on_freeway, police,") == 1
+    assert "_line_police(" not in src
