@@ -74,6 +74,8 @@ class VTSCController:
     self._enabled = False
     self._enable_err_t = None  # silentexc2pnw: monotonic time of the last logged _read_enabled failure (None = never)
     self._enable_err_n = 0     # silentexc2pnw: _read_enabled failures since that log line
+    self._rain_err_t = None    # silentexc3pnw: monotonic time of the last logged RainMode read/push failure (None = never)
+    self._rain_err_n = 0       # silentexc3pnw: RainMode read/push failures since that log line
     # ces-i90-2pnw (MTSC): optional pfeiferj map curve fold, gated by VtscMapCurves (default OFF)
     self._map_curves = False
     # curvefloor2pnw telemetry — initialised here (not just in cap()) so the fold is inspectable and
@@ -143,8 +145,18 @@ class VTSCController:
         # disables VTSC (curve control is not rain's dependant); worst case rain stays at its last tier.
         try:
           self.veh.set_rain_tier(self.params.get("RainMode", return_default=True))
-        except Exception:
-          pass
+        except Exception as e:
+          # silentexc3pnw (Rule 2): was `except Exception: pass`. Fallback unchanged: the capability view keeps its last
+          # rain tier (0 = None until a push succeeds), so a failure right after the driver changes RainMode silently keeps
+          # the old wet-weather margin in VTSC's curve targets and freeway floor. An unset RainMode reads its "0"
+          # default, and set_rain_tier() maps None / garbage to 0 itself, so neither reaches here; UnknownKeyName on a
+          # params_keys.h / params_pyx.so mismatch or a code defect does. Logged in the twistyr2pnw style, own state.
+          self._rain_err_n += 1
+          if self._rain_err_t is None or now - self._rain_err_t >= TWISTY_ERR_LOG_S:
+            cloudlog.exception(f"VTSC: RainMode unreadable ({type(e).__name__}) -- the rain tier stays at its last value " +
+                               f"while this lasts ({self._rain_err_n} failure(s) since the last log)")
+            self._rain_err_t = now
+            self._rain_err_n = 0
         self._enabled = self._long_ok and CES.ces_enabled(self._mode)
         self.tune = dict(C.GENTLE_PROFILE) if CES.ces_is_gentle(self._mode) else dict(C.DEFAULT_PROFILE)
         # ces-i90-2pnw (MTSC): fold map curves only when VTSC is enabled AND opted-in via the param

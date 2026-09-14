@@ -2652,6 +2652,8 @@ class CESController:
     #   _shadow  -> CES runs shadow with ICBM as the actuator (stock-ACC buttons, no op-long)
     veh = PnwVehicle(CP)
     self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
+    self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
+    self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
     self._long_ok = veh.op_long
     self._shadow = veh.ces_shadow
     # icbm2pnw: latched driver set speed while a curve cap is active (see icbm_curve_target), a
@@ -2732,8 +2734,19 @@ class CESController:
       # target below; applies in shadow too). Defensive — never let a param hiccup break _read_params.
       try:
         self._veh.set_rain_tier(self.params.get("RainMode", return_default=True))
-      except Exception:
-        pass
+      except Exception as e:
+        # silentexc3pnw (Rule 2): was `except Exception: pass`. Fallback unchanged: the capability view keeps its last
+        # rain tier, so ICBM's curve targets keep the old wet-weather margin. An unset RainMode reads its "0" default
+        # and set_rain_tier() maps None / garbage to 0 itself, so neither reaches here; UnknownKeyName on a
+        # params_keys.h / params_pyx.so mismatch or a code defect does. Logged once, then at most once per
+        # CURVELEAD_ERR_LOG_S (60 s) with a count, own state (this runs ~1 Hz inside selfdrived's guarded call).
+        self._rain_err_n += 1
+        now = time.monotonic()
+        if self._rain_err_t is None or now - self._rain_err_t >= CURVELEAD_ERR_LOG_S:
+          cloudlog.exception(f"ces_pnw: RainMode unreadable ({type(e).__name__}) -- the rain tier stays at its last value " +
+                             f"while this lasts ({self._rain_err_n} failure(s) since the last log)")
+          self._rain_err_t = now
+          self._rain_err_n = 0
       # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode) —
       # except in Lightning shadow mode, where the pipeline runs for telemetry/display only.
       self._enabled = (self._long_ok or self._shadow) and C.ces_enabled(self._mode)
