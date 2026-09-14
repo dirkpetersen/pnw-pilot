@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `ec6dd71a6d` (coopsteerfix2pnw, pushed 08:56 PT, staging).
-**Installed on the truck:** `8678df74a6` (foldlog2pnw, 08:52 PT).
+**Channel tip:** `origin/3devpnw` = `f65fdbdaf9` (arbiterfu2pnw, pushed 09:03 PT, staging).
+**Installed on the truck:** `ed02e0a216` (coopsteerfix2pnw `ec6dd71a6d` + docs, 09:00 PT).
 
 ## Networking — arbiter logging
 
@@ -56,6 +56,12 @@ as each change ships.
 |---|---|---|
 | `365d287034` **behindgate2pnw** | ICBM (the Lightning's stock-ACC curve slowdowns) can no longer START a slowdown for a map curve the truck has already passed. A point counts as passed when it is more than 5 m behind along mapd's path AND behind the heading. When that can't be determined (under 5 m/s, no heading, off the path), nothing is gated. Logged as `icbmGate "mapPassed"` plus a change-only `ces_icbm_passed` event. | Fable SHIP: no genuinely-ahead curve could be made to read passed (from ICBM's lagged projected position; heading via sin/cos; mapd's path really includes the nodes behind). The gate has its own try, and the Tesla hash is identical. Evidence (`drives/2026-09-12/central-oregon-weekend/behindgate/`): 0 of 214,877 points still ahead read as passed, against 3,879 for heading alone. All 25 passed-point starts were flagged (21 suppressed) and none of the 42 real starts. It fixes Sun 12:05:28 (60 → 51 mph), 13:55:51, 12:43:54, 13:18:37, Sat 12:47:21 and 09-08 19:36:58. It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, and the item stays open. Installed 08:40 PT (BootCount 202), healthy. Owner question: should a passed point also stop lowering a slowdown that is already running? |
 
+## Tesla — coop-steer shadow
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `ec6dd71a6d` **coopsteerfix2pnw** | The Tesla coop-steer shadow (it logs, never actuates) treats steering torque above 1.0 Nm as an override on the same tick. Before, it waited for the 50 ms-debounced `steeringPressed`, and for those 5 frames it computed the FULL 12° nudge exactly as the driver took over. The carstate debounce is untouched. | Fable SHIP: replay of route `00000105--0a36ee017d` reproduces exactly (active ticks above 1 Nm 77 → 0, peak offset 11.5° → 10.1°); 5/5 mutants; still shadow-only (the actuator command is final before the shadow runs). Keep strict `>`; no separate reason code needed. Installed 09:00 PT (BootCount 204), healthy. Still needed before this could ever actuate: a light-hand-steering drive. |
+
 ## Location services — police misses
 
 | Commit(s) | What changed | Notes |
@@ -68,10 +74,7 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`coopsteerfix2pnw`** (Fable SHIP; `ec6dd71a6d` pushed 08:56 PT, installing; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
-  an override on the same tick instead of waiting for the 50 ms-debounced `steeringPressed`. Replay: active ticks
-  above 1 Nm 77 → 0, peak offset 11.5° → 10.1°.
-- **`arbiterfu2pnw`** (`0a1bd865e7`, Fable SHIP with Fable's optional hardening applied, test + 2 mutants):
+- **`arbiterfu2pnw`** (Fable SHIP with Fable's optional hardening applied, test + 2 mutants; `f65fdbdaf9` pushed 09:03 PT, installing):
   - An unreadable verification read after a bring-up no longer blames that network. The judgement waits for the
     next good read, bounded by the unreadable hold, and an unverified blame past the bound is logged at ERROR.
   - The fallback line says why each candidate was not chosen, instead of "no priority network in range".
