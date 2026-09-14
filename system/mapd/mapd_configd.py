@@ -105,6 +105,12 @@ CAR_CAPABILITY_RECHECK_S = 5.0
 CAR_GPS_DR_HDOP = 3.8
 CAR_GPS_DR_ENTER_S = 10.0
 CAR_GPS_DR_EXIT_S = 5.0
+# gpslag2pnw: `fix_ts` = the monotonic time a written fix was VALID, so a consumer can project it to the
+# instant it decides on (ICBM, ces_pnw). Owner decision 2026-09-13: the device fix is its arrival here
+# minus the MEASURED qcomgpsd latency (GNSS time is wrong until the clock syncs after boot); the truck fix
+# is its CAN receipt (`ts` minus the publish-time `age`). The truck position is itself ~0.2 s older than
+# its receipt (GPS_TRUCK_VS_COMMA.md s2, per boot -0.08..+0.62 s); no constant is applied for that.
+DEVICE_GPS_FIX_LATENCY_S = 0.57   # fix epoch -> gpsLocation publish, p1/50/99 0.43/0.57/0.67 s, 23,410 fixes
 
 
 class CarGpsSource:
@@ -131,6 +137,7 @@ class CarGpsSource:
     self._key = None       # (lat, lon, hdg) of the last valid publish
     self._repeats = 0      # consecutive valid publishes, while moving, with an unchanged _key
     self._healthy = 0      # consecutive healthy publishes
+    self.age = 0.0         # gpslag2pnw: CAN frame age of the last healthy publish (-> fix_ts)
     self.dr = False        # gpsdr2pnw: degraded (HDOP) long enough that a fresh device fix is preferred
     self._poor_since = None  # monotonic time of the first publish in the current HDOP >= DR run
     self._good_since = None  # while dr: monotonic time of the first publish in the current good run
@@ -185,6 +192,7 @@ class CarGpsSource:
       detail = f"lat/lon/hdg unchanged on {self._repeats + 1} publishes while moving"
       return self._bad("frozen", detail + f" (car {spd_mph:.0f} mph, device {device_speed} m/s)")
     self._healthy += 1
+    self.age = age
     if not self.usable:
       self.kind, self.detail = "reacquiring", f"{self._healthy}/{CAR_GPS_REACQUIRE_PUBLISHES} healthy publishes"
       return None
@@ -456,18 +464,21 @@ def main():
         if not g.hasFix:
           nofix_dropped += 1
         elif not use_car:
+          t_arr = time.monotonic()
           mem.put_nonblocking("LastGPSPosition", json.dumps({
             "latitude": float(g.latitude), "longitude": float(g.longitude),
             "bearing": float(getattr(g, "bearingDeg", 0.0)),
             "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
             # which receiver produced this fix: "device" here, "car" below
             "src": "device",
-            "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
+            "ts": t_arr,  # system-wide monotonic clock: lets the police gate reject stale speed
+            "fix_ts": t_arr - DEVICE_GPS_FIX_LATENCY_S}))  # gpslag2pnw
       if use_car and car_fix is not None:
         # One write per NEW healthy publish (~1 Hz), stamped when this process first saw it; the fix
         # itself is CAN-frame `age` older (0.0-1.03 s). bearing = the truck's heading, which held
         # within 2.6 deg at every stop where the device's wandered >10 deg at 22 of 46.
-        mem.put_nonblocking("LastGPSPosition", json.dumps({**car_fix, "src": "car", "ts": now_fix}))
+        mem.put_nonblocking("LastGPSPosition", json.dumps({**car_fix, "src": "car", "ts": now_fix,
+                                                           "fix_ts": now_fix - car_gps.age}))  # gpslag2pnw: CAN receipt
       if car_gps_capable:
         # Rule 2: every source switch, and every change in WHY the car is not used, is logged once.
         src = "car" if use_car else ("device" if cur_fix_state == "fix" else "none")

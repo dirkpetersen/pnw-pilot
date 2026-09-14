@@ -356,6 +356,7 @@ def test_car_blob_shape(monkeypatch):
   res = _run(monkeypatch, 5.0, (), truck)
   t, raw = next((t, v) for t, k, v in res.mem.writes if k == "LastGPSPosition")
   d = json.loads(raw)
-  assert list(d) == ["latitude", "longitude", "bearing", "speed", "src", "ts"]
+  assert list(d) == ["latitude", "longitude", "bearing", "speed", "src", "ts", "fix_ts"]
   assert d["src"] == "car" and d["bearing"] == 0.0 and d["speed"] == pytest.approx(45 * 0.44704)
   assert d["ts"] == pytest.approx(t)
+  assert d["fix_ts"] == pytest.approx(t - 0.4)   # gpslag2pnw: the CAN receipt (publish-time age 0.4 s)

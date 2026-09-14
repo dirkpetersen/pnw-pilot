@@ -168,6 +168,8 @@ def test_blob_shape_is_what_the_readers_parse(monkeypatch):
   res = R.run(monkeypatch, _steps([(0.0, 47.6, -122.3, 25.0, 180.0, True, 5.0)], 2.0, t0=1.0))
   raw = res.mem.store["LastGPSPosition"]
   d = json.loads(raw)
-  assert list(d) == ["latitude", "longitude", "bearing", "speed", "src", "ts"]
+  assert list(d) == ["latitude", "longitude", "bearing", "speed", "src", "ts", "fix_ts"]
   assert d["src"] == "device"
+  assert d["fix_ts"] == pytest.approx(d["ts"] - mapd_configd.DEVICE_GPS_FIX_LATENCY_S)   # gpslag2pnw
+  assert mapd_configd.DEVICE_GPS_FIX_LATENCY_S == 0.57
   assert mapd_configd.GPS_SILENT_S == 3.0

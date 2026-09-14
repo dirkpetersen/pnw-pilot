@@ -253,6 +253,48 @@ ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the f
 
 
 ICBM_ERR_LOG_S = 30.0   # rule-2: throttle the _icbm_step failure log (it runs at ~4 Hz)
+# gpslag2pnw (owner 2026-09-13: "build it, keep curve timing"). ICBM re-derives its own ego position on
+# every ~4 Hz tick from the LastGPSPosition fix and its `fix_ts` (mapd_configd), instead of holding the
+# 1 Hz read. The position is projected along the bearing to (now - ICBM_GPS_LAG_KEEP_S), NOT to now:
+# every ICBM start rule is a distance threshold, and the weekend's ICBM starts were decided on an ego
+# that lagged by a median 1.79 s (p5/95 1.09/2.31, drives/2026-09-12/central-oregon-weekend/gps/
+# q1_results.txt). Projecting to now would start every slowdown ~v*1.8 s earlier. The keep is centred on
+# the TRUCK fix, the Lightning's primary source (owner 2026-09-13): its fix_ts is the CAN receipt, and the
+# truck position is itself ~0.20 s older than that (GPS_TRUCK_VS_COMMA.md s2), so 1.79 - 0.20 = 1.59 s
+# reproduces the weekend's average start on the truck fix. Device-fix starts (the fallback) sit ~0.2 s
+# earlier by design. Either way the spread goes (fix age, 1 Hz read phase, receiver switches).
+ICBM_GPS_LAG_KEEP_S = 1.59
+# A fix older than this is not projected: ICBM's map-curve lookups see NO GPS (no map/far candidate,
+# map reach 0 so vision may start). 126 s of frozen device GPS in the SR 99 tunnel is the case.
+ICBM_GPS_MAX_AGE_S = 5.0
+
+
+def icbm_project_position(lat, lon, bearing, fix_ts, v_ego, now,
+                          keep_s=ICBM_GPS_LAG_KEEP_S, max_age_s=ICBM_GPS_MAX_AGE_S):
+  """gpslag2pnw: ICBM's ego position for THIS tick -> (lat, lon, age, state).
+
+  state: "proj" projected by v_ego*(age - keep_s) along `bearing`; "stale" age outside [0, max_age_s]
+  (lat/lon None: no GPS for the map lookups; a negative age is a `fix_ts` from a previous boot);
+  "raw" no fix time or no usable bearing/speed (position used unprojected, as before gpslag2pnw);
+  "none" no position. Pure; never raises."""
+  if lat is None or lon is None:
+    return None, None, None, "none"
+  try:
+    age = float(now) - float(fix_ts)
+  except (TypeError, ValueError):
+    return lat, lon, None, "raw"
+  if not 0.0 <= age <= max_age_s:
+    return None, None, age, "stale"
+  try:
+    d = float(v_ego) * (age - keep_s)
+    brg = math.radians(float(bearing))
+    la, lo = float(lat), float(lon)
+    if not (math.isfinite(d) and math.isfinite(brg)):
+      raise ValueError("non-finite projection")
+  except (TypeError, ValueError):
+    return lat, lon, age, "raw"
+  return (la + d * math.cos(brg) / 111320.0,
+          lo + d * math.sin(brg) / (111320.0 * max(math.cos(math.radians(la)), 1e-6)), age, "proj")
 
 
 def icbm_approach_decel(v_ego, apex, firm_decel=0.0, a_base=ICBM_A_DECEL,
@@ -2336,6 +2378,8 @@ class CESController:
     self._cur_lat = self._cur_lon = self._cur_bearing = None
     self._car_gps = None       # cargps2pnw: last CarGps dict from the ford carstate (None on Tesla)
     self._gps_src = None       # gpssel2pnw: LastGPSPosition "src" -- which receiver lat/lon/bearing came from
+    self._gps_fix_ts = None    # gpslag2pnw: LastGPSPosition "fix_ts" (monotonic time the fix was valid)
+    self._icbm_gps_age = None  # gpslag2pnw: age (s) of the fix ICBM projected on its last tick; None = no fix / ICBM idle
     # steerpower2pnw I3 review fix: bounded (wall_time, bearing, gps_valid) history, appended once per
     # _read_map() refresh (~1 Hz) -- see _nearest_bearing() above. Lets a steerEvent record look up
     # the bearing at its actual saturation ONSET instead of the live value at emit time.
@@ -2570,9 +2614,10 @@ class CESController:
       self._cur_lat = float(pos["latitude"]); self._cur_lon = float(pos["longitude"])
       self._cur_bearing = float(pos.get("bearing", 0.0))
       self._gps_src = pos.get("src")   # gpssel2pnw: "car" | "device"; None = written before gpsfix2pnw
+      self._gps_fix_ts = float(pos["fix_ts"]) if pos.get("fix_ts") is not None else None   # gpslag2pnw
     except Exception:
       self._cur_lat = self._cur_lon = self._cur_bearing = None
-      self._gps_src = None
+      self._gps_src = self._gps_fix_ts = None
     # icbmcurv2pnw: measure the polyline geometry ICBM is about to act on. TELEMETRY ONLY -- no
     # control path reads these, and polyline_curvature() is pure and documented never to raise.
     # WHY IT LIVES HERE AND NOT IN VTSC: vtsc_controller.py:283 runs the same call, but its own
@@ -3388,6 +3433,7 @@ class CESController:
         self._icbm_dir = None
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
+        self._icbm_gps_age = None         # gpslag2pnw
         # curvefloor2pnw (Fable 2026-09-05, F5): reset the floor state too. Without this a stale
         # icbmFlrHit=True is published alongside icbmT=None, and _icbm_floor_lim survives a Chill
         # interlude -- so the debounce carries a limit from before the gap into the road after it.
@@ -3412,6 +3458,21 @@ class CESController:
         trk = self._icbm_lead_trk = IcbmLeadTrack()
       lead_s, lead_why = trk.update(now, sig.get("has_lead", False), sig.get("lead_drel", 0.0),
                                     sig.get("lead_vlead", 0.0), sig["v_ego"])
+      # gpslag2pnw: ICBM's own ego position for THIS tick (icbm_project_position). Every map lookup below
+      # uses plat/plon, and the near map candidate is re-derived from it here, so the CES decision that
+      # built `sig` is untouched. A stale fix (> ICBM_GPS_MAX_AGE_S) is NO GPS for these lookups.
+      prev_gps_state = getattr(self, "_icbm_gps_state", None)
+      plat, plon, gps_age, gps_state = icbm_project_position(self._cur_lat, self._cur_lon, self._cur_bearing,
+                                                             getattr(self, "_gps_fix_ts", None), sig["v_ego"], now)
+      self._icbm_gps_age = round(gps_age, 2) if gps_age is not None else None
+      if gps_state != prev_gps_state:   # Rule 2: change-only, incl. the stale -> no-map-lookups state
+        cloudlog.event("ces_icbm_gps", state=gps_state, prev=prev_gps_state, age=self._icbm_gps_age,
+                       src=getattr(self, "_gps_src", None))
+        self._icbm_gps_state = gps_state
+      if gps_state in ("proj", "stale"):
+        # "raw"/"none": the caller's candidate was computed from this very position already
+        map_tv, map_td = upcoming_curve(self._map_targets, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
+        sig = {**sig, "map_target_v": map_tv, "map_target_dist": map_td}
       # curveslow-lightning: vision curve candidate (the 493-curve gap: ICBM was MAP-ONLY and blind to
       # camera-seen curves). icbm_curve_target picks the more-binding of map / vision / far-map.
       vis_v, vis_dist = icbm_vision_apex(sig["v_ego"], sig.get("curve_lat_accel_vision", 0.0),
@@ -3427,7 +3488,7 @@ class CESController:
       ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
       # icbmtrack2pnw: ICBM-only capped scale (19:58:37Z root cause — the tiered sweeper end
       # inflated a raw 64.9 mph curve to an effective 107 mph, so it never bound vs set 90).
-      far_v, far_dist = icbm_far_map_candidate(self._map_targets, self._cur_lat, self._cur_lon,
+      far_v, far_dist = icbm_far_map_candidate(self._map_targets, plat, plon,
                                                sig["v_ego"], ref, icbm_map_eff_scale,
                                                self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
       # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
@@ -3439,7 +3500,7 @@ class CESController:
       self._icbm_gate = None
       self._icbm_map_reach = None
       if starting:
-        map_reach = icbm_map_reach(self._map_targets, self._cur_lat, self._cur_lon)
+        map_reach = icbm_map_reach(self._map_targets, plat, plon)
         self._icbm_map_reach = round(map_reach, 0)
       target, _, self._icbm_src = icbm_curve_target(
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
@@ -3483,9 +3544,9 @@ class CESController:
           if self._icbm_src == "vis":
             is_left = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0) > 0.0
           elif self._icbm_src == "far":
-            is_left = map_turn_direction(self._map_targets, self._cur_lat, self._cur_lon, far_dist) > 0
+            is_left = map_turn_direction(self._map_targets, plat, plon, far_dist) > 0
           elif self._icbm_src == "map":
-            is_left = map_turn_direction(self._map_targets, self._cur_lat, self._cur_lon,
+            is_left = map_turn_direction(self._map_targets, plat, plon,
                                          sig.get("map_target_dist", float("inf"))) > 0
         except Exception:
           is_left = False
@@ -3552,7 +3613,7 @@ class CESController:
           at_d = {"map": sig.get("map_target_dist", float("inf")), "far": far_dist}.get(self._icbm_src)
           if at_d is not None and math.isfinite(float(at_d)):
             kat, katd, katn, katgap, _ = polyline_curvature_at(
-              self._map_targets, self._cur_lat, self._cur_lon, MAP_SOURCE_HORIZON_M,
+              self._map_targets, plat, plon, MAP_SOURCE_HORIZON_M,
               float(at_d), self._cur_bearing)
             self._icbm_k_at = float(kat)
             self._icbm_k_at_d = float(katd)
@@ -3589,7 +3650,7 @@ class CESController:
         sane_t, sane_why = icbm_map_sanity(own_t, ref, sig["v_ego"], self._icbm_src, cand_dist,
                                            self._icbm_k_at, self._icbm_k_at_n, self._icbm_k_at_gap,
                                            vis_k, vis_reach, a_lead)
-        behind = (icbm_path_behind(self._map_targets, self._cur_lat, self._cur_lon, cand_dist)
+        behind = (icbm_path_behind(self._map_targets, plat, plon, cand_dist)
                   if own_t is not None and self._icbm_src in ("map", "far") else None)
         _curvelead_note(self, now, own_t, pace, lead_pace_why, lead_s, sig.get("lead_vlead", 0.0), k_tight,
                         vis_k, sane_t, sane_why, behind)
@@ -3885,6 +3946,7 @@ class CESController:
       # icbm2pnw closed-loop trace: published curve target (m/s, None = ICBM idle), latched driver
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.
+      "icbmGpsAge": self._icbm_gps_age,   # gpslag2pnw: > ICBM_GPS_MAX_AGE_S = no map lookups that tick
       "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling, "icbmSrc": self._icbm_src,
       # curvelead2pnw: icbmOwnT = ICBM's own curve target, icbmLeadT = the lead-paced cap that replaced it
       # (None = not relaxed), icbmLeadWhy = the gate that decided, icbmLeadS = seconds the lead has been

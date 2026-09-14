@@ -147,3 +147,69 @@ there. No rule based on what `CarGps` carries distinguishes it.
 
 **Tesla**: same 52 s replay, all-writes sha256 `4aad6a81998d1349`, identical to gpssel2pnw.
 **Tests**: `system/mapd/tests/test_gps_dr_prefer_device.py`; 9 of 9 mutants killed.
+
+## 4. gpslag2pnw — ICBM projects the position to every tick, keeping today's curve timing
+
+Owner decision 2026-09-13: "Build it, keep curve timing". Lightning only: ICBM runs only under
+`PnwVehicle.ces_shadow`.
+
+**Blob.** `fix_ts` = the monotonic time the fix was valid. Device fix: its arrival minus
+`DEVICE_GPS_FIX_LATENCY_S = 0.57` (measured qcomgpsd latency, p1/50/99 0.43/0.57/0.67 s; GNSS time is
+wrong until the clock syncs). Truck fix: its CAN receipt (`ts − age`). The truck position is itself
+~0.2 s older than its receipt (per boot −0.08…+0.62 s); no constant corrects that.
+
+**ICBM** (`ces_pnw.icbm_project_position`, called on every ~4 Hz `_icbm_step`):
+- It projects the 1 Hz-read fix along its bearing to `now − ICBM_GPS_LAG_KEEP_S` (1.59 s), not to now.
+- Every ICBM start rule is a distance threshold, and the weekend's starts were decided on a position a
+  median 1.79 s old (p5/95 1.09/2.31). Projecting to now would start every slowdown ~v × 1.8 s earlier.
+- The keep is centred on the **truck fix**, the Lightning's primary source (owner 2026-09-13): 1.79 s minus
+  the truck position's own ~0.20 s receipt lag = 1.59 s.
+- **Device-fix starts (the fallback) sit ~0.2 s earlier by design.**
+- All ICBM position lookups use the one projected position: the near map candidate (re-derived
+  in `_icbm_step`), the far candidate, map reach, turn direction, point-matched curvature, and
+  path-behind. CES's `sig`, CES `upcoming_curve` and VTSC are untouched.
+- A fix older than `ICBM_GPS_MAX_AGE_S = 5 s`, or from a previous boot, is **no GPS** for those lookups:
+  no map/far candidate, reach 0, so vision may start.
+- A missing `fix_ts` or bearing uses the position unprojected, as before.
+- Logging: `cloudlog.event("ces_icbm_gps", state=proj|stale|raw|none)`, change-only. The fix age is in
+  `ces_events` as `icbmGpsAge`, which reads null on the Tesla.
+
+**Timing-equivalence replay.** This is not a log replay: the map polyline is not logged. It is a closed
+loop through the real `_icbm_step`:
+- All 92 weekend + I-5 map/far ICBM episode starts: logged vEgo, vSet and mapV on a straight approach, with
+  mapd's path at 1 Hz and ICBM at 4 Hz.
+- Old pipeline (gpsdr2pnw code) calibrated to the measured held-fix age: model p5/50/95 1.10/1.79/2.46 s
+  vs measured 1.09/1.79/2.31.
+- 72 episodes start in every run; the other 20 don't start in the simulation on their logged numbers.
+
+| start distance to the curve, p10 / p50 / p90 | m |
+|---|---|
+| old | 69.8 / 168.8 / 326.1 |
+| new, truck fix (primary) | 69.0 / 165.7 / 327.6 |
+| new, device fix (fallback) | 74.3 / 170.5 / 329.3 |
+
+| start-time shift new − old per episode, p10 / p50 / p90 (s; + = earlier) | truck fix | device fix |
+|---|---|---|
+| | −0.75 / **0.00** / +0.50 | −0.25 / **+0.25** / +0.75 |
+
+| start-time error vs a perfect receiver (same code, lag exactly 1.59 s), p10 / p50 / p90 | s | within one tick (0.25 s) |
+|---|---|---|
+| old | −0.75 / −0.25 / +0.25 | 36/72 |
+| new, truck fix | −0.50 / −0.25 / 0.00 | 29/72 (the receipt lag; the replay draws it uniform −0.08…+0.62 s per start) |
+| new, device fix | 0.00 / 0.00 / 0.00 | 70/72 |
+
+On the truck fix the median start is unchanged (0.00 s). The per-episode shift is the old pipeline's own
+spread being removed. Device-fix starts are one tick earlier by design.
+
+**Receiver switch** (Fable, gpssel note 3). A 6 m along-track step plus the 0.2 s receipt lag moves
+ICBM's projected position by ≤ 6 m + v·0.2. That is about one tick of travel; the old 1 Hz read stepped
+v·1 s (25 m at 25 m/s) every second. Tested: the start moves by at most that step, and a switch inside an
+episode neither ends it nor turns it into a restore.
+
+**Tesla**: same 52 s replay through gpsdr2pnw and this commit:
+- mapd_configd writes are identical once `fix_ts` is removed (sha256 `f347c36eaa4f6db8`).
+- CES `_read_map` + `upcoming_curve` and VTSC `_read_map` + `polyline_curvature` over every write hash
+  identically (`b910a46ec0e071b8`; 21 distinct outputs, 11 with a finite candidate).
+- `CarGps` is never read; the ICBM projection is unreachable (`ces_shadow` False).
+
+**Tests**: `selfdrive/controls/lib/ces_pnw/tests/test_gpslag_icbm.py`; 16 of 16 mutants killed.
