@@ -687,7 +687,23 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
 # record as "sa<Key>". A module constant so a test can assert publisher keys == forwarded keys against
 # the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
 SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
-                "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt")
+                "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt", "zoneN", "zoneLast",
+                "icbmHold")
+
+
+def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
+  """sazoneset2pnw: fold this tick's posted limit and speedadjust's forwarded status (`sa_tele`, the "sa"-prefixed
+  SA_TELE_KEYS dict) into the episode's restore bound. The ONE wiring point, shared by _icbm_step and the closed-loop
+  tests so they cannot drift apart.
+  "Proportional" = the driver has zone speeds on (speedadjust AutoSpeedReduce >= 2). A missing/unreadable mode is not
+  evidence it is on: it falls back to limit + 5."""
+  sa_tele = sa_tele or {}
+  try:
+    proportional = sa_tele.get("saMode") is not None and int(sa_tele.get("saMode")) >= 2
+  except (TypeError, ValueError):
+    proportional = False
+  ep.note_limit(limit_now if limit_now is not None and limit_now > 0.0 else None, proportional)
+  ep.note_sa_zone(sa_tele.get("saZoneTgt"), sa_tele.get("saZoneN"), sa_tele.get("saZoneLast"))
 
 
 class IcbmEpisode:
@@ -712,7 +728,9 @@ class IcbmEpisode:
   def __init__(self, window_s: float = ICBM_RESTORE_WINDOW_S, clear_delay_s: float = ICBM_RESTORE_DELAY_S):
     self.latch_limit = None             # sazoneset2pnw (also cleared in reset()): limit at ceiling latch
     self.zone_cap = None                # sazoneset2pnw: STICKY stale-ceiling restore cap (m/s)
-    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / None
+    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / "saZone" / None
+    self.zone_n0 = None                 # sazoneset2pnw (also cleared in reset()): speedadjust's zone count at latch
+    self._sa_zone_n_idle = None         # ...as last read while idle; deliberately NOT cleared by reset()
     self._window_s = window_s
     self._clear_delay_s = clear_delay_s
     self.phase = "idle"                 # idle | cap | restore
@@ -775,7 +793,8 @@ class IcbmEpisode:
     self._rcap_hold_set = None          # icbmrestorecap2pnw: stock set when the posted-limit hold began
     self.latch_limit = None             # sazoneset2pnw: debounced posted limit when the ceiling latched
     self.zone_cap = None                # sazoneset2pnw: STICKY stale-ceiling restore cap (m/s), only lowered
-    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / None
+    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / "saZone" / None
+    self.zone_n0 = None                 # sazoneset2pnw: speedadjust's zone count when this episode began
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -845,6 +864,37 @@ class IcbmEpisode:
     cap, why = C.icbm_stale_zone_cap(self.ceiling, self.latch_limit, limit_now, proportional)
     if cap is not None and (self.zone_cap is None or cap < self.zone_cap):
       self.zone_cap, self.zone_why = cap, why
+
+  def note_sa_zone(self, zone_tgt, zone_n, zone_last) -> None:
+    """sazoneset2pnw (Fable review, measured): bound the RESTORE by speedadjust's zone speed when a zone set was in
+    progress during this episode or BEGAN during it. A curve overlapping a zone entry latches the pre-zone set as
+    its ceiling, and the posted limit may already read low at the latch -- so icbm_stale_zone_cap sees nothing
+    stale and the restore handed back 75 mph in a 45 zone, permanently. Inputs are speedadjust's forwarded status
+    (~1 Hz): zoneTgt (in progress, else None), zoneN (zone episodes opened), zoneLast (the latest one's target).
+    zoneN catches a zone that opened and completed between two reads -- which happens when our own taps already
+    had the set below the zone speed. Same contract as note_limit: call before step(); only lowers zone_cap;
+    never touches the ceiling. An unreadable count at the start only loses the completed-zone case, logged via
+    icbmZoneWhy never becoming "saZone"; an in-progress zone still binds."""
+    def _pos(x):
+      try:
+        x = float(x)
+      except (TypeError, ValueError):
+        return None
+      return x if math.isfinite(x) and x > 0.0 else None
+    try:
+      n = int(zone_n) if zone_n is not None else None
+    except (TypeError, ValueError):
+      n = None
+    if self.phase not in ("cap", "restore") or self.ceiling is None:
+      self._sa_zone_n_idle = n
+      return
+    if self.zone_n0 is None:
+      self.zone_n0 = self._sa_zone_n_idle if self._sa_zone_n_idle is not None else n
+    bound = _pos(zone_tgt)
+    if bound is None and n is not None and self.zone_n0 is not None and n != self.zone_n0:
+      bound = _pos(zone_last)
+    if bound is not None and (self.zone_cap is None or bound < self.zone_cap):
+      self.zone_cap, self.zone_why = bound, "saZone"
 
   def _restore_target(self, stock_set, restore_cap):
     """The restore's publish for this tick: (target, "inc"), or (None, None) to HOLD silently.
@@ -3088,12 +3138,7 @@ class CESController:
       # ONLY when the limit dropped while this episode ran (see icbm_stale_zone_cap), and that cap is sticky.
       # "Proportional" = the driver has zone speeds on (speedadjust AutoSpeedReduce >= 2), read from its
       # forwarded status. A missing/unreadable mode is not evidence it is on: it falls back to limit + 5.
-      sa_mode = (getattr(self, "_sa_tele", None) or {}).get("saMode")
-      try:
-        proportional = sa_mode is not None and int(sa_mode) >= 2
-      except (TypeError, ValueError):
-        proportional = False
-      self._icbm_ep.note_limit(rcap_lim if rcap_lim > 0.0 else None, proportional)
+      icbm_note_speedadjust(self._icbm_ep, getattr(self, "_sa_tele", None), rcap_lim)
       self._icbm_rcap = float(self._icbm_ep.zone_cap) if self._icbm_ep.zone_cap is not None else 0.0
       pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
                                                  self._stock_set, self._stock_on, driver_pedal,

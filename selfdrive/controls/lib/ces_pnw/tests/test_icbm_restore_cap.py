@@ -307,7 +307,7 @@ class TestThroughTheControllerStep:
     return c, cls._icbm_step.__get__(c)
 
   def _run(self, monkeypatch, lim_curve_mph, lim_after_mph=None, sa_mode=None, new_curve_at=None,
-           rise_at=None, lim_rise_mph=None):
+           rise_at=None, lim_rise_mph=None, sa_tele=None):
     """Drive the controller through a curve and its restore. The simulated stock set RESPONDS to the
     controller's own commands at the executor's tap cadence -- the first version held the set fixed,
     so the hold-at-cap branch never executed through the controller at all (Gemini review).
@@ -318,6 +318,8 @@ class TestThroughTheControllerStep:
     c, step = self._controller(monkeypatch, clock)
     if sa_mode is not None:
       c._sa_tele = {"saMode": sa_mode}
+    if sa_tele is not None:
+      c._sa_tele = dict(getattr(c, "_sa_tele", None) or {}, **sa_tele)
     lim_after_mph = lim_curve_mph if lim_after_mph is None else lim_after_mph
     set_mph = 60.0
     # a SHARP curve, so the tapped-down set lands clearly below any cap under test. (With a 27 mph map
@@ -353,6 +355,15 @@ class TestThroughTheControllerStep:
       phases.append(c._icbm_ep.phase)
       clock[0] += 0.5
     return c, incs, phases, published
+
+  def test_a_zone_set_running_during_the_curve_bounds_the_restore_through_the_controller(self, monkeypatch):
+    """sazoneset2pnw (Fable review): the limit already read 25 when the curve latched, so nothing is stale -- but
+    speedadjust was setting a 40 mph zone speed meanwhile. _icbm_step must fold the forwarded status in."""
+    c, incs, _, _ = self._run(monkeypatch, 25, sa_mode=2, sa_tele={"saZoneTgt": 40 * MPH, "saZoneN": 1,
+                                                                   "saZoneLast": 40 * MPH})
+    assert incs, "no restore was ever published -- the test proves nothing"
+    assert math.isclose(max(incs), 40 * MPH, abs_tol=0.05), \
+      f"restore published {max(incs) / MPH:.1f} mph, want the 40 mph zone speed (pre-curve set 60)"
 
   def test_a_curve_entirely_inside_a_zone_restores_to_the_pre_curve_set(self, monkeypatch):
     """CHANGED by sazoneset2pnw. This was `test_in_a_25_zone_the_published_restore_stops_at_limit_plus_margin`,

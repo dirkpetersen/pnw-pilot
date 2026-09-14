@@ -10,6 +10,12 @@ zone, re-published every 0.25 s, so arbitrate() never let a curve restore run in
 long trimmed zone left the set at 35 mph on a 60 road until the driver tapped. The driver's model (2026-09-13):
 zone entry sets his percentage once and forgets, a curve returns to the speed before the curve, and nothing
 restores when the zone ends.
+
+Wired the way the car is (sazoneset2pnw, Fable review of the first version): speedadjust reads the IcbmTarget
+mem-param the executor reads, at its real 1 Hz limit-read cadence, and ICBM sees speedadjust only through its
+SpeedAdjustStatus publish, re-read at ~1 Hz and folded in by ces_pnw.icbm_note_speedadjust (the same call
+_icbm_step makes). The first harness read the limit every brain tick and never let either brain see the other,
+which is how a curve overlapping the zone ENTRY -- 75 mph left in a 45 zone -- got through a green suite.
 """
 import json
 import types
@@ -17,7 +23,7 @@ import types
 import pytest
 
 import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as sa
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode, SA_TELE_KEYS, icbm_note_speedadjust
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from opendbc.car.ford.icbm_pnw import arbitrate, decide_press, RestoreGuard, PressGovernor, IcbmCommand
 
@@ -38,13 +44,15 @@ class _Clock:
 
 class _Mem:
   def __init__(self):
-    self.sl, self.police, self.calls = 0.0, None, []
+    self.sl, self.police, self.calls, self.icbm = 0.0, None, [], {}
 
   def get(self, k, return_default=True):
     if k == "MapSpeedLimit":
       return str(self.sl) if self.sl else ""
     if k == "LocationServices":
       return json.dumps({"police": self.police}) if self.police else "{}"
+    if k == "IcbmTarget":
+      return self.icbm
     return None
 
   def put_nonblocking(self, k, v):
@@ -76,8 +84,9 @@ def _cmd(d):
   return None
 
 
-def simulate(monkeypatch, script, T, v0_mph=75, mode=2):
-  """script(t) -> (limit_mph, curve_target_mph or None, police or None). Returns (final set mph, trace)."""
+def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0):
+  """script(t) -> (limit_mph, curve_target_mph or None, police or None). Returns (final set mph, trace, controller).
+  tele_phase (0..99 frames) shifts ICBM's ~1 Hz status read against the brains' ticks."""
   _Clock.t = 1000.0
   monkeypatch.setattr(sa, "time", _Clock)
   c = sa.SpeedAdjustController(types.SimpleNamespace(openpilotLongitudinalControl=False), params=_P(mode))
@@ -85,7 +94,7 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2):
   sm, ep, guard, gov = _SM(), IcbmEpisode(), RestoreGuard(), PressGovernor()
   stock, pending, rcap_state = v0_mph * MPH, [], None
   sa_cmd = icbm_cmd = None
-  last_dec_ts, frame, trace = None, 0, []
+  last_dec_ts, frame, trace, sa_tele = None, 0, [], {}
   while _Clock.t - 1000.0 < T:
     frame += 1
     _Clock.t += 0.01
@@ -96,12 +105,15 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2):
         stock += p[1]
         pending.remove(p)
     sm.cs.cruiseState.speed = stock
+    if frame % 100 == tele_phase:                         # ces_pnw re-reads SpeedAdjustStatus at ~1 Hz
+      st = next((v for k, v in reversed(c.mem_params.calls) if k == "SpeedAdjustStatus"), None) or {}
+      sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in SA_TELE_KEYS}
     if frame % 25 == 0:                                   # both brains at 4 Hz
       c.mem_params.sl, c.mem_params.police = lim * MPH, pol
-      c._last_read = -1e9
       c.cap(sm, stock, stock, stock, True)
+      c._sa_pub_t = -1e9                                  # it publishes status at 5 Hz from a 20 Hz loop on the car
       rl, rcap_state = C.icbm_restore_limit(lim * MPH, rcap_state, now)
-      ep.note_limit(rl if rl > 0 else None, mode >= 2)
+      icbm_note_speedadjust(ep, sa_tele, rl)
       tgt, d = ep.step(now, curve * MPH if curve else None, stock, stock, True, False,
                        restore_cap=ep.zone_cap, limit_now=rl if rl > 0 else None)
       pub = {}
@@ -109,6 +121,7 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2):
         pub = {"target": tgt, "ceiling": ep.ceiling if ep.ceiling is not None else stock, "ts": now}
         if d == "inc":
           pub["dir"] = "inc"
+      c.mem_params.icbm = pub
       icbm_cmd = _cmd(pub)
       tc = [v for k, v in c.mem_params.calls if k == "SpeedAdjustTarget"]
       sa_cmd = _cmd(tc[-1] if tc else None)
@@ -124,7 +137,7 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2):
     if btn and was is None:
       pending.append((now + 0.3, (1 if btn == "inc" else -1) * MPH))
     if frame % 100 == 0:
-      trace.append((round(now - 1000.0), round(stock / MPH, 1), lim, curve, ep.phase))
+      trace.append((round(now - 1000.0), round(stock / MPH, 1), lim, curve, ep.phase, ep.zone_why, c._ovr))
   return stock / MPH, trace, c
 
 
@@ -183,5 +196,66 @@ class TestTheDriversZoneModel:
     def script(t):
       return (45 if t < 12 else 25), (15 if 3 <= t < 20 else None), None
     final, trace, _ = simulate(monkeypatch, script, 90, v0_mph=60, mode=mode)
-    in_zone_after_curve = [s for (t, s, lim, cv, ph) in trace if t >= 22]
+    in_zone_after_curve = [row[1] for row in trace if row[0] >= 22]
     assert max(in_zone_after_curve) <= bound + 1.0, f"set reached {max(in_zone_after_curve):.1f}, bound {bound:.1f}\n{trace}"
+
+
+def _overlap(t0, length=12.0, curve=35, drop_t=5.0, lim0=60, lim1=45):
+  def script(t):
+    return (lim0 if t < drop_t else lim1), (curve if t0 <= t < t0 + length else None), None
+  return script
+
+
+class TestACurveOverlappingTheZoneEntry:
+  """Fable review of sazoneset2pnw's first version, MEASURED: the limit drops 60 -> 45 at t=5 s with the set at 75
+  and a 35 mph curve starts at t0. Final set in the 45 zone was 56 / 75 / 75 / 75 / 73 / 68 / 64 / 57 for
+  t0 = 4 / 5 / 6 / 7 / 9 / 11 / 13 / 16 -- and it stuck. Two mechanisms:
+    (i)  ICBM's taps drove the set below the zone target, speedadjust declared the zone reached and forgot it, and
+         ICBM restored to its ceiling (the pre-zone set, or one latched mid-slew) -- no stale-limit cap forms,
+         because the limit ALREADY read 45 when the curve latched;
+    (ii) ICBM's SET- taps landing around the drop confirm read as driver overrides and re-anchored speedadjust's
+         ratio to the tapped-down set, so the zone never trimmed at all."""
+
+  @pytest.mark.parametrize("t0", [4.0, 5.0, 6.0, 7.0, 9.0, 11.0, 13.0, 16.0])
+  def test_the_measured_family_ends_at_the_zone_speed(self, monkeypatch, t0):
+    final, trace, _ = simulate(monkeypatch, _overlap(t0), 120)
+    assert abs(final - ZONE) <= 1.0, f"t0={t0}: final {final:.1f} mph in the 45 zone, want ~{ZONE:.1f}\n{trace}"
+
+  @pytest.mark.parametrize("tele_phase", [0, 50])
+  def test_a_dense_sweep_of_curve_start_times_and_read_phases(self, monkeypatch, tele_phase):
+    bad = []
+    for i in range(41):                                    # t0 = 0.0 .. 20.0 s in 0.5 s steps
+      t0 = i * 0.5
+      final, _, _ = simulate(monkeypatch, _overlap(t0), 120, tele_phase=tele_phase)
+      if abs(final - ZONE) > 1.0:
+        bad.append((t0, round(final, 1)))
+    assert not bad, f"curve start / final set outside {ZONE:.1f} +- 1: {bad}"
+
+  @pytest.mark.parametrize("length,curve", [(3.0, 35), (5.0, 35), (8.0, 50), (12.0, 60)])
+  def test_short_curves_and_curve_speeds_near_the_zone_speed(self, monkeypatch, length, curve):
+    bad = []
+    for i in range(0, 41, 2):
+      final, _, _ = simulate(monkeypatch, _overlap(i * 0.5, length=length, curve=curve), 120)
+      if abs(final - ZONE) > 1.0:
+        bad.append((i * 0.5, round(final, 1)))
+    assert not bad, f"{length:.0f} s curve at {curve} mph: {bad}"
+
+  def test_a_small_limit_drop_is_bounded_just_the_same(self, monkeypatch):
+    """55 -> 50 at a set of 60: the zone speed is 54.5, a few taps -- so ICBM's taps easily pass it before the drop
+    even confirms, and the zone opens and completes between two of ICBM's status reads (the zoneN case)."""
+    zone, bad = 50 * 60 / 55, []
+    for i in range(41):
+      final, _, _ = simulate(monkeypatch, _overlap(i * 0.5, curve=40, lim0=55, lim1=50), 120, v0_mph=60)
+      if abs(final - zone) > 1.0:
+        bad.append((i * 0.5, round(final, 1)))
+    assert not bad, f"want ~{zone:.1f}: {bad}"
+
+  @pytest.mark.parametrize("t0", [4.0, 7.0])
+  def test_a_second_drop_during_the_same_curve_repeats_from_the_zone_speed(self, monkeypatch, t0):
+    """60 -> 45 -> 35 inside one curve: the second zone is relative to the first zone's speed (35 x 75/60 = 43.75),
+    not to the pre-zone ceiling the curve latched. t0=7 latches AFTER the first drop, so the stale-limit cap would
+    scale the 75 by 35/45 (58 mph) -- only speedadjust's zone speed bounds it."""
+    def script(t):
+      return (60 if t < 5 else 45 if t < 12 else 35), (30 if t0 <= t < 20 else None), None
+    final, trace, _ = simulate(monkeypatch, script, 90)
+    assert abs(final - 35 * 75 / 60) <= 1.0, f"final {final:.1f}\n{trace}"

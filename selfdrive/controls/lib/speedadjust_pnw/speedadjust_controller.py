@@ -171,6 +171,9 @@ SL_DROP_EPS = 0.1                        # m/s tolerance when matching the pendi
 # (ces_pnw_constants.ICBM_RESTORE_LIMIT_RISE_HOLD_S): flicker and a real 5 mph step are the same size,
 # only persistence separates them. Kept LOCAL, like the other mirrors in this file (no cross-feature import).
 SL_RISE_CONFIRM_S = 3.0
+# Persistence is WALL TIME, and an unknown read does not interrupt it (Fable review, measured: resetting on unknown
+# made a rise need 4 consecutive valid reads, and with the ~1 Hz valid<->unknown flicker above the Tesla stayed
+# capped at a 35-zone trim on a 60 road indefinitely). The persisted time also counts toward RELEASE_S (see cap()).
 # sazoneset2pnw (driver directive 2026-09-13): a limit-drop slowdown is a ONE-SHOT zone set. The episode
 # ends -- and this module goes silent -- once the truck's own reported set has reached the zone target.
 ZONE_SET_DONE_TOL = 0.6 * 1.0 * MPH_TO_MS      # == the executor's DEADBAND_MS (0.6 of a 1 mph tap)
@@ -212,6 +215,11 @@ SET_CHANGE_EPS = 0.15                     # m/s
 # suppressed for this long after any such transition so a late-landing tap of OUR OWN can't be
 # misread as a driver override.
 SA_ACTUATION_GRACE_S = 2.0                # s; stock-ACC only
+# sazoneset2pnw (Fable review, measured): the CURVE brain (ces_pnw ICBM -> IcbmTarget) taps the same stock set.
+# Its SET- taps used to read here as driver overrides -- re-anchoring the zone ratio to the tapped-down set, so
+# a curve overlapping a zone entry left the truck at 75 in a 45 zone. We read the IcbmTarget mem-param the Ford
+# executor reads; a command older than the executor's STALE_LIMIT_S is not being executed. LOCAL mirror, as above.
+SA_ICBM_FRESH_S = 2.0
 
 
 def _police_key(rep):
@@ -245,6 +253,7 @@ class SpeedAdjustController:
     self._sl_pending_t = 0.0      # monotonic stamp of when that pending value was first seen
     self._sl_rise_pending = 0.0   # sazoneset2pnw: a HIGHER limit awaiting SL_RISE_CONFIRM_S (0 = none)
     self._sl_rise_pending_t = 0.0
+    self._sl_rise_since = None    # first sighting of a rise adopted on THIS read (consumed the same tick)
     self._sl_ref = 0.0            # baseline limit (the limit we were last uncapped at)
     self._ratio = 0.0            # ANCHORED over-limit ratio (v_set/limit) captured at the baseline —
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
@@ -292,6 +301,17 @@ class SpeedAdjustController:
     # it has been actuatable without being reached (see ZONE_SET_TIMEOUT_S).
     self._zone_target = None
     self._zone_elapsed = 0.0
+    # ...and, for the curve brain, which zone episode this is and the target it had: ICBM bounds a restore by a
+    # zone that was in progress or BEGAN during its episode, including one that opened and completed between two
+    # of its ~1 Hz status reads (Fable review). Published as zoneN / zoneLast.
+    self._zone_n = 0
+    self._zone_last = None
+    # sazoneset2pnw: the curve brain's live command (stock ACC only; see SA_ICBM_FRESH_S)
+    self._icbm_cmd = None
+    self._icbm_read_t = -1e9
+    self._icbm_read_warned = False
+    self._icbm_dec_t = -1e9      # monotonic time a fresh ICBM dec was last seen on the bus
+    self._icbm_hold = False      # the set is lowered by ICBM: the limit-drop ratio keeps the pre-curve set
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
     self._min_pub_target = None  # restore-hardening #1: running MIN of _cap_out published this cap
                                   # episode — the "explainability floor" (mirrors ces_pnw's
@@ -343,12 +363,13 @@ class SpeedAdjustController:
           self._sl_rise_pending_t = now
         if now - self._sl_rise_pending_t < SL_RISE_CONFIRM_S:
           return self._sl                      # unconfirmed rise → keep the previous limit
+        self._sl_rise_since = self._sl_rise_pending_t
       self._sl_rise_pending = 0.0
       return sl
-    # Unknown read: break any confirmation chain (a drop that flickers valid/unknown has not
-    # "persisted"), then fall through to the existing brief-dropout hold.
+    # Unknown read: break a pending DROP's confirmation chain (a drop that flickers valid/unknown has not
+    # "persisted"), then fall through to the existing brief-dropout hold. A pending RISE is deliberately kept:
+    # only a valid read at or below the held limit cancels it (see SL_RISE_CONFIRM_S for why).
     self._sl_pending = 0.0
-    self._sl_rise_pending = 0.0
     if now - self._sl_valid_t < SL_HOLD_S and self._sl > 0.0:
       return self._sl                        # brief dropout → hold the last valid limit
     return 0.0
@@ -461,8 +482,14 @@ class SpeedAdjustController:
     record a bogus-low ratio (which can silently disable the trim on the next real limit drop)."""
     sl = self._sl
     if sl > 0.0 and sl >= self._sl_ref:      # known limit, at/above baseline → uncapped; track it up
+      if self._icbm_hold and self._sl_ref > 0.0:
+        # sazoneset2pnw: a curve has the set tapped down -- that is not the driver's speed. Keep the driver's
+        # pre-curve set as the reference (only rescaled to the new baseline limit), so a zone entered during
+        # the curve still gets "the same percentage as I was driving before".
+        self._ratio *= self._sl_ref / sl
+      else:
+        self._ratio = v_cruise_set / sl      # anchor the over-limit ratio HERE (v_set/limit)
       self._sl_ref = sl
-      self._ratio = v_cruise_set / sl        # anchor the over-limit ratio HERE (v_set/limit)
 
   def _limit_drop_cap(self):
     """Trim the driver's OVER-limit excess as the posted limit drops: cap = SL × (v_set/SL_ref), using
@@ -520,6 +547,9 @@ class SpeedAdjustController:
       "epLim": bool(getattr(self, "_ep_limit_drop", False)),   # sanorestore2pnw
       "noRst": getattr(self, "_no_restore_why", None),          # sanorestore2pnw (+ zoneSet / zoneAbandoned)
       "zoneTgt": _r(getattr(self, "_zone_target", None)),       # sazoneset2pnw: zone target, None = no zone episode
+      "zoneN": self._zone_n,                                    # sazoneset2pnw: zone episodes opened (ICBM restore bound)
+      "zoneLast": _r(self._zone_last),                          # ...and the most recent one's target
+      "icbmHold": bool(self._icbm_hold),                        # ratio holding the pre-curve set (ICBM has it tapped down)
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -612,6 +642,37 @@ class SpeedAdjustController:
       return abs(float(orz[0]) * float(vx[0])) >= SA_IN_CURVE_LAT_ACCEL
     except Exception:
       return False
+
+  def _read_icbm(self, now: float):
+    """sazoneset2pnw: the curve brain's live button command, from the same IcbmTarget mem-param the Ford executor
+    reads, at the executor's own ~4 Hz. Returns "dec"/"inc" while a command is fresh (SA_ICBM_FRESH_S), else None.
+    Stock ACC only -- an op-long car has no executor, and this must not change what cap() returns there. An
+    unreadable param is logged once and reads as "no command": the pre-sazoneset behaviour, never a guess."""
+    if self._long_ok or self.mem_params is None:
+      return None
+    if now - self._icbm_read_t >= PUB_THROTTLE_S:
+      self._icbm_read_t = now
+      try:
+        raw = self.mem_params.get("IcbmTarget", return_default=True)
+        if isinstance(raw, (bytes, str)):
+          raw = json.loads(raw) if raw else None
+        self._icbm_cmd = raw if isinstance(raw, dict) else None
+      except Exception:
+        self._icbm_cmd = None
+        if not self._icbm_read_warned:
+          self._icbm_read_warned = True
+          cloudlog.exception("speedadjust: IcbmTarget unreadable -- curve taps can read as driver set changes")
+    c = self._icbm_cmd
+    if not c or "target" not in c or "ts" not in c:
+      return None
+    try:
+      age = time.time() - float(c["ts"])  # noqa: TID251 -- the executor's wall-clock heartbeat
+    except (TypeError, ValueError):
+      return None
+    if not math.isfinite(age) or age > SA_ICBM_FRESH_S:
+      return None
+    d = c.get("dir", "dec")
+    return d if d in ("dec", "inc") else None
 
   def _end_zone(self, now: float, why: str, target: float, stock_now: float, v_cruise: float) -> float:
     """sazoneset2pnw: end a limit-drop-only episode and FORGET it. `why` is "zoneSet" (the truck's set
@@ -784,6 +845,7 @@ class SpeedAdjustController:
     if now - self._last_read >= READ_S:
       self._last_read = now
       self._read_inputs()
+    rise_since, self._sl_rise_since = self._sl_rise_since, None
 
     # speedanchor2pnw (F_uninit, Fable-caught): an uninitialized cruise is not a real driver set —
     # anchoring/seeding off the ~145 km/h sentinel would inflate _ratio (silently no-ops the next real
@@ -805,8 +867,13 @@ class SpeedAdjustController:
       self._last_v_set = None
       self._zone_target = None               # sazoneset2pnw
       self._zone_elapsed = 0.0
+      self._icbm_hold = False
       self._publish_target(None)
       return v_cruise
+
+    icbm_dir = self._read_icbm(now)          # sazoneset2pnw: None on op-long
+    if icbm_dir == "dec":
+      self._icbm_dec_t = now
 
     # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either
     # direction) is an explicit "resume — don't slow me for this" override. Must run BEFORE
@@ -844,6 +911,13 @@ class SpeedAdjustController:
         self._ovr = "grace"
       elif self._is_own_actuation(self._last_v_set, v_cruise_set):
         self._ovr = "ownTap"
+      elif (not self._long_ok and v_cruise_set < self._last_v_set
+            and now - self._icbm_dec_t < SA_ACTUATION_GRACE_S):
+        # sazoneset2pnw (Fable review, measured): a SET- while the curve brain's dec is on the bus -- or within the
+        # in-flight grace after it -- is ICBM's tap. Read as the driver's, it re-anchored the ratio to the tapped-down
+        # set and the zone never trimmed. Same known limitation as FIX C: a driver SET- in that window is not an
+        # override (an opposite-direction SET+ still is).
+        self._ovr = "icbmTap"
       else:
         self._ovr = "applied"
       if self._ovr == "applied":
@@ -939,6 +1013,16 @@ class SpeedAdjustController:
     # speedanchor2pnw (F3): re-anchor the limit-drop baseline whenever the feature is active (mode 1 or
     # 2) — not just when the drop-cap itself is computed (mode 2 only) — so it never goes stale across
     # an AutoSpeedReduce 1→2 switch.
+    # sazoneset2pnw: while the curve brain has the set tapped down the ratio holds the pre-curve set. The hold
+    # starts on any fresh ICBM command and survives ICBM's silent gaps (clear debounce, in-curve pause); it ends
+    # on a pedal or ACC off, or once the set is back at the reference with ICBM quiet -- which includes the driver's
+    # own set change: the override above has just re-anchored the reference to the set he chose.
+    if self._long_ok or not engaged or intervening:
+      self._icbm_hold = False
+    elif icbm_dir is not None:
+      self._icbm_hold = True
+    elif self._icbm_hold and self._read_stock_set(sm) >= self._ratio * self._sl_ref - ZONE_SET_DONE_TOL:
+      self._icbm_hold = False
     self._update_baseline(v_cruise_set)
     lc = None
     if self._mode >= 2:                       # limit-drop cap itself: mode 2 only
@@ -955,7 +1039,10 @@ class SpeedAdjustController:
         self._step_restore(now, sm)
         return v_cruise
       if self._release_t is None:
-        self._release_t = now
+        # sazoneset2pnw (Fable review): a limit RISE adopted this tick has already persisted SL_RISE_CONFIRM_S --
+        # it is debounced, not a flapping source -- so that time counts toward RELEASE_S. Without the credit the
+        # rise hold stacked on the debounce and a Tesla under the ~1 Hz map flicker released 6-8 s after the sign.
+        self._release_t = now if rise_since is None else min(now, rise_since)
       if now - self._release_t < RELEASE_S:
         self._publish_target(self._cap_out, self._pub_ceiling, "dec")  # still capping through debounce
         return max(0.0, min(v_cruise, self._cap_out))   # hold the last cap through the debounce window
@@ -1065,7 +1152,10 @@ class SpeedAdjustController:
     # "Reached" needs EVIDENCE: an unreadable stock set (0.0) never completes the zone -- it waits.
     zone_only = lc is not None and pc is None and not self._long_ok
     if zone_only:
+      if self._zone_target is None:
+        self._zone_n += 1                    # a zone episode opens (see _zone_n)
       self._zone_target = target
+      self._zone_last = target
       stock_now = self._read_stock_set(sm)
       if stock_now > 0.0 and stock_now <= target + ZONE_SET_DONE_TOL:
         return self._end_zone(now, "zoneSet", target, stock_now, v_cruise)

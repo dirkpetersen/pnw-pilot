@@ -8,6 +8,7 @@ speedanchor2pnw: cap() takes v_cruise_set (the driver's raw, PRE-VTSC set) separ
 v_cruise_set=v_cruise and v_cruise_initialized=True so every pre-existing test (which never modeled
 VTSC or an unset cruise) keeps calling them unchanged; the new tests below pass v_cruise_set /
 v_cruise_initialized explicitly to exercise the three speedanchor2pnw fixes."""
+import json
 import time
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
   SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S, SL_RISE_CONFIRM_S,
-  ZONE_SET_TIMEOUT_S, ZONE_SET_DONE_TOL,
+  ZONE_SET_TIMEOUT_S, ZONE_SET_DONE_TOL, SA_ICBM_FRESH_S,
   _police_key)
 
 MPH = MPH_TO_MS
@@ -1682,3 +1683,298 @@ def test_the_zone_target_is_cleared_on_the_SAME_tick_the_zone_completes():
     if isinstance(last, dict) and "target" in last and stock > last["target"] + ZONE_SET_DONE_TOL:
       stock -= 1 * MPH
   raise AssertionError("the zone never completed -- the test proves nothing")
+
+
+# ---- sazoneset2pnw, Fable review of the first version (DO NOT SHIP, two measured defects) -----------------------
+
+class _IcbmMem(_FakeMemParams):
+  """_FakeMemParams that also serves the IcbmTarget payload ces_pnw publishes (and the Ford executor reads)."""
+  def __init__(self):
+    super().__init__()
+    self.icbm = {}
+
+  def get(self, key, return_default=False):
+    return self.icbm if key == "IcbmTarget" else None
+
+
+def _icbm(target_mph, ceiling_mph, age_s=0.0, direction="dec"):
+  d = {"target": target_mph * MPH, "ceiling": ceiling_mph * MPH, "ts": time.time() - age_s}  # noqa: TID251 -- the executor's wall-clock heartbeat
+  if direction == "inc":
+    d["dir"] = "inc"
+  return d
+
+
+def _curve_ctrl(sl=V60):
+  """Set 75 on a 60 (+25%), uncapped, stock ACC, with the curve brain's mem-param readable."""
+  c = _zone_ctrl(sl=sl)
+  c.mem_params = _IcbmMem()
+  c.cap(_sm(speed=V75), V75, V75, V75, True)
+  return c
+
+
+def _set_tick(c, stock, **sm_kw):
+  c._icbm_read_t = -1e9                                  # the ~4 Hz IcbmTarget read, every tick here
+  _tick(c, v_cruise=stock, v_ego=stock, v_cruise_set=stock, sm=_sm(speed=stock, **sm_kw))
+
+
+def _tap_down(c, stock, n):
+  for _ in range(n):
+    stock -= 1 * MPH
+    _set_tick(c, stock)
+  return stock
+
+
+def test_a_curve_brain_SET_minus_is_NOT_a_driver_override_and_the_ratio_keeps_the_pre_curve_set():
+  """Defect 1(ii), measured: ICBM's SET- taps read as the driver's own set changes. Each one re-anchored the ratio
+  to the tapped-down set, so a zone confirmed during the curve trimmed from 60/60 instead of 75/60 -- or not at
+  all -- and the curve restore then handed back 75 in a 45 zone."""
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = V75
+  for _ in range(15):
+    stock -= 1 * MPH
+    _set_tick(c, stock)
+    assert c._ovr == "icbmTap", f"an ICBM tap read as {c._ovr!r}"
+  assert c._icbm_hold and abs(c._ratio - 1.25) < 1e-9, f"ratio {c._ratio:.3f} followed the curve's taps"
+  c._sl = V45                                            # the zone confirms mid-curve
+  _set_tick(c, stock)
+  assert c._zone_target is not None and abs(c._zone_target - V45 * 1.25) < 0.01, \
+    f"zone target {c._zone_target} is not the driver's pre-curve percentage of 45"
+
+
+def test_the_ratio_hold_survives_the_curve_brains_silent_gaps():
+  """ICBM goes quiet (IcbmTarget {}) through its clear debounce and in-curve pauses while the set is still down."""
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 20)
+  c.mem_params.icbm = {}
+  for _ in range(10):
+    _set_tick(c, stock)
+  assert c._icbm_hold and abs(c._ratio - 1.25) < 1e-9, f"ratio {c._ratio:.3f} after ICBM went quiet"
+  c._sl = 65 * MPH                                       # a limit RISE meanwhile rescales the same set, 75
+  _set_tick(c, stock)
+  assert abs(c._ratio * c._sl_ref - V75) < 0.01, f"reference set {c._ratio * c._sl_ref / MPH:.2f} mph, want 75"
+
+
+@pytest.mark.parametrize("icbm", [None, "stale"])
+def test_a_driver_SET_minus_with_no_live_curve_command_is_still_an_override(icbm):
+  c = _curve_ctrl()
+  if icbm == "stale":
+    c.mem_params.icbm = _icbm(35, 75, age_s=SA_ICBM_FRESH_S + 0.5)
+  _set_tick(c, V75 - 1 * MPH)
+  assert c._ovr == "applied" and not c._icbm_hold
+
+
+def test_a_curve_tap_landing_just_AFTER_the_curve_brain_went_quiet_is_still_its_own():
+  """The truck reports the set with lag, so ICBM's last SET- can land after IcbmTarget is already {}."""
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 3)
+  c.mem_params.icbm = {}
+  _set_tick(c, stock - 1 * MPH)
+  assert c._ovr == "icbmTap", f"an in-flight curve tap read as {c._ovr!r}"
+
+
+def test_the_in_flight_grace_after_a_curve_dec_expires():
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 3)
+  c.mem_params.icbm = {}
+  c._icbm_dec_t -= SA_ACTUATION_GRACE_S + 0.1
+  _set_tick(c, stock - 1 * MPH)
+  assert c._ovr == "applied", "a SET- long after the curve brain stopped was not the driver's"
+
+
+@pytest.mark.parametrize("end", ["gas", "acc_off", "driver_up"])
+def test_the_ratio_hold_ends_when_the_set_is_the_drivers_again(end):
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 10)
+  c.mem_params.icbm = {}
+  for _ in range(3):
+    _set_tick(c, stock)
+  assert c._icbm_hold
+  if end == "gas":
+    _set_tick(c, stock, gas=True)
+  elif end == "acc_off":
+    _set_tick(c, stock, cruise_enabled=False)
+  else:
+    c._icbm_dec_t -= SA_ACTUATION_GRACE_S + 0.1
+    _set_tick(c, stock + 1 * MPH)
+    assert c._ovr == "applied"
+  assert not c._icbm_hold, f"hold survived {end}"
+
+
+def test_the_ratio_hold_ends_once_the_set_is_back_at_the_reference_with_the_curve_quiet():
+  """A curve command that never needed a tap (target above the set, or already there) must not leave the hold on."""
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(74, 75)
+  for _ in range(3):
+    _set_tick(c, V75)
+  assert c._icbm_hold
+  c.mem_params.icbm = {}
+  _set_tick(c, V75)
+  assert not c._icbm_hold
+
+
+def test_the_ratio_hold_does_not_end_while_the_set_is_still_down_and_the_curve_is_quiet():
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 10)
+  c.mem_params.icbm = {}
+  for _ in range(20):
+    _set_tick(c, stock)
+  assert c._icbm_hold
+
+
+def test_the_tesla_never_reads_the_curve_brains_command():
+  """op-long: byte-identical cap() -- no IcbmTarget read at all (even one serving a fresh dec), every set change is
+  the driver's, no hold."""
+  class _Spy(_IcbmMem):
+    def __init__(self):
+      super().__init__()
+      self.reads = []
+
+    def get(self, key, return_default=False):
+      self.reads.append(key)
+      return super().get(key, return_default)
+  c = _ctrl(op_long=True, mode=2, sl_ref=V60, ratio=1.25, sl=V60)
+  c.mem_params = _Spy()
+  c.mem_params.icbm = _icbm(35, 75)
+  c.cap(_sm(speed=V75), V75, V75, V75, True)
+  c._icbm_read_t = -1e9
+  _tick(c, v_cruise=V75 - MPH, v_ego=V75, v_cruise_set=V75 - MPH, sm=_sm(speed=V75 - MPH))
+  assert "IcbmTarget" not in c.mem_params.reads
+  assert c._ovr == "applied" and not c._icbm_hold
+
+
+def test_an_unreadable_curve_command_is_LOGGED_once(monkeypatch):
+  import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as m
+  logged = []
+  monkeypatch.setattr(m.cloudlog, "exception", lambda msg, *a, **k: logged.append(msg))
+  class _Bad(_FakeMemParams):
+    def get(self, key, return_default=False):
+      if key == "IcbmTarget":
+        raise OSError("shm gone")
+      return None
+  c = _zone_ctrl(sl=V60)
+  c.mem_params = _Bad()
+  c.cap(_sm(speed=V75), V75, V75, V75, True)
+  for _ in range(5):
+    c._icbm_read_t = -1e9
+    _tick(c, v_cruise=V75, v_ego=V75, v_cruise_set=V75, sm=_sm(speed=V75))
+  assert len([x for x in logged if "IcbmTarget" in x]) == 1
+
+
+def test_zone_episodes_are_counted_and_the_last_target_outlives_the_zone():
+  """ICBM bounds a restore by a zone that BEGAN during its episode, including one that opened and completed
+  between two of its ~1 Hz status reads -- which needs a count, not just the in-progress target."""
+  c = _zone_ctrl()
+  assert c._zone_n == 0 and c._zone_last is None
+  stock = _drive(c, 75 * MPH, 80)
+  assert c._no_restore_why == "zoneSet" and c._zone_n == 1
+  assert c._zone_target is None and abs(c._zone_last - V45 * 1.25) < 0.01
+  c._sl = 35 * MPH
+  stock = _drive(c, stock, 80)
+  assert c._zone_n == 2, "a second zone episode was not counted"
+  c._sa_pub_t = -1e9
+  _tick(c, v_cruise=stock, v_ego=stock, v_cruise_set=stock, sm=_sm(speed=stock))
+  st = [p for k, p in c.mem_params.calls if k == "SpeedAdjustStatus"][-1]
+  assert st["zoneN"] == 2 and st["zoneLast"] is not None and "icbmHold" in st
+
+
+def test_an_unknown_read_does_NOT_cancel_a_pending_rise():
+  """Defect 2, measured: resetting a pending rise on an unknown read made a rise need 4 consecutive valid 1 Hz
+  reads; under the map's documented valid<->unknown flicker the Tesla held a 35-zone trim on a 60 road forever."""
+  c = _sl_reader(V45, V60)
+  assert c._read_speed_limit() == V45 and c._sl_rise_pending == V60
+  t0 = c._sl_rise_pending_t
+  c.mem_params.value = None
+  assert c._read_speed_limit() == V45
+  assert c._sl_rise_pending == V60 and c._sl_rise_pending_t == t0, "an unknown read cancelled the pending rise"
+  c.mem_params.value = V60
+  c._sl_rise_pending_t -= SL_RISE_CONFIRM_S + 0.1
+  assert c._read_speed_limit() == V60
+
+
+def test_a_stray_higher_read_is_still_cancelled_by_the_real_limit_across_a_dropout():
+  c = _sl_reader(V60, 65 * MPH)
+  c._read_speed_limit()
+  c.mem_params.value = None
+  c._read_speed_limit()
+  c.mem_params.value = V60
+  assert c._read_speed_limit() == V60 and c._sl_rise_pending == 0.0
+
+
+class _FlickerClock:
+  t = 1000.0
+
+  @classmethod
+  def monotonic(cls):
+    return cls.t
+
+  @classmethod
+  def time(cls):
+    return cls.t
+
+
+@pytest.mark.parametrize("pattern", [[True], [True, False], [True, True, False], [True, True, True, False],
+                                     [True, True, True, True, False], [True, False, False]])
+def test_the_tesla_releases_a_limit_rise_promptly_under_map_flicker(monkeypatch, pattern):
+  """Fable's table, through the real reader and release path at 20 Hz: op-long, set 70 on a 60, limit 35 from 5 s
+  (cap 40.8), back to 60 at 20 s; after that the 1 Hz read is valid or unknown per `pattern`. Base (no rise hold):
+  3.1 / 4.1 / 3.1 / 3.1 / 3.1 / 5.2 s. The first version of this change: 6.2 / NEVER / NEVER / 66 / 10.4 / NEVER."""
+  import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as m
+  _FlickerClock.t = 1000.0
+  monkeypatch.setattr(m, "time", _FlickerClock)
+  c = SpeedAdjustController(_CP(True), params=type("P", (), {"get": lambda self, k, return_default=True: "2"})())
+
+  class _Map(_FakeMemParams):
+    def get(self, key, return_default=False):
+      if key != "MapSpeedLimit":
+        return None
+      t = _FlickerClock.t - 1000.0
+      v = 60 if t < 5 else 35 if t < 20 else (60 if pattern[int(t - 20.0) % len(pattern)] else 0)
+      return str(v * MPH) if v else ""
+  c.mem_params = _Map()
+  v70, released = 70 * MPH, None
+  while _FlickerClock.t - 1000.0 < 60.0:
+    _FlickerClock.t += 0.05
+    c.cap(_sm(speed=v70), v70, v70, 25.0, True)
+    t = _FlickerClock.t - 1000.0
+    if 15.0 < t < 20.0:
+      assert c._cap_out is not None, "the test proves nothing: the 35 never capped"
+    if t > 20.0 and released is None and c._cap_out is None:
+      released = t - 20.0
+  assert released is not None and released <= 6.5, f"released {released} s after the sign"
+
+
+def test_the_rise_credit_is_used_only_by_the_release_on_the_same_tick(monkeypatch):
+  """The persisted rise counts toward RELEASE_S only for the release it causes. A rise adopted while a POLICE cap
+  still binds must not leave a stale credit that lets the later police release skip its whole debounce."""
+  import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as m
+  _FlickerClock.t = 1000.0
+  monkeypatch.setattr(m, "time", _FlickerClock)
+  police = {"state": "alert", "dist_mi": 0.1}
+  c = SpeedAdjustController(_CP(True), params=type("P", (), {"get": lambda self, k, return_default=True: "2"})())
+
+  class _Map(_FakeMemParams):
+    def get(self, key, return_default=False):
+      t = _FlickerClock.t - 1000.0
+      if key == "MapSpeedLimit":
+        return str((60 if t < 5 else 35 if t < 20 else 60) * MPH)
+      if key == "LocationServices":
+        return json.dumps({"police": police}) if t < 40 else "{}"
+      return None
+  c.mem_params = _Map()
+  v70 = 70 * MPH
+  first_clear = None
+  while _FlickerClock.t - 1000.0 < 60.0:
+    _FlickerClock.t += 0.05
+    c.cap(_sm(speed=v70), v70, v70, 25.0, True)
+    t = _FlickerClock.t - 1000.0
+    if 30.0 < t < 39.0:
+      assert c._cap_out is not None and c._sl == 60 * MPH, "the test proves nothing: police must still cap after the rise"
+    if t > 40.0 and first_clear is None and c._cap_out is None:
+      first_clear = t - 40.0
+  assert first_clear is not None and first_clear >= RELEASE_S, f"police cap released {first_clear} s after it cleared"

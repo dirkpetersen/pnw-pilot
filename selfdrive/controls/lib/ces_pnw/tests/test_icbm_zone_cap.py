@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode, ICBM_RESTORE_DELAY_S
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode, ICBM_RESTORE_DELAY_S, icbm_note_speedadjust
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import (
   ICBM_RESTORE_LIMIT_MARGIN_MS, icbm_restore_limit, icbm_stale_zone_cap)
 
@@ -102,6 +102,93 @@ class TestTheEpisodeKeepsTheCapSticky:
             restore_cap=ep.zone_cap, limit_now=25 * MPH)
     ep.step(t + 10, 20 * MPH, 30 * MPH, 30 * MPH, True, False, limit_now=25 * MPH)   # DEC ALWAYS WINS
     assert ep.phase == "cap" and math.isclose(ep.latch_limit, 25 * MPH) and ep.zone_cap is None
+
+
+class TestSpeedadjustsZoneBoundsTheRestore:
+  """Fable review, measured: a curve overlapping the zone entry latched the PRE-zone set (75) as its ceiling with the
+  limit already reading 45, so nothing looked stale and the restore went back to 75 in the 45 zone -- permanently.
+  The restore is now also bounded by speedadjust's zone speed whenever a zone set ran during the episode."""
+
+  @staticmethod
+  def _episode(n_idle=3):
+    ep = IcbmEpisode()
+    ep.note_sa_zone(None, n_idle, 50 * MPH)              # idle reads before the curve
+    ep.step(100.0, 35 * MPH, 75 * MPH, 75 * MPH, True, False, limit_now=45 * MPH)
+    assert ep.phase == "cap"
+    return ep
+
+  def test_a_zone_in_progress_bounds_the_restore_and_never_the_ceiling(self):
+    ep = self._episode()
+    ep.note_sa_zone(56.25 * MPH, 4, 56.25 * MPH)
+    assert ep.zone_why == "saZone" and math.isclose(ep.zone_cap, 56.25 * MPH)
+    assert math.isclose(ep.ceiling, 75 * MPH), "SAFETY: the zone bound edited the cap-phase ceiling"
+
+  def test_a_zone_that_BEGAN_and_completed_between_two_reads_still_bounds_it(self):
+    """Our own taps had the set below the zone speed before the drop confirmed, so the zone opened and completed on
+    one speedadjust tick: zoneTgt was never published. Only the count says a zone happened."""
+    ep = self._episode(n_idle=3)
+    ep.note_sa_zone(None, 4, 56.25 * MPH)
+    assert ep.zone_why == "saZone" and math.isclose(ep.zone_cap, 56.25 * MPH)
+
+  def test_the_count_at_the_START_is_the_last_idle_read(self):
+    """ICBM reads the status at ~1 Hz; the first read inside the episode may already include a zone that began
+    after the latch. The reference is the last read before the episode, not the first one inside it."""
+    ep = self._episode(n_idle=3)
+    ep.note_sa_zone(None, 4, 56.25 * MPH)
+    assert ep.zone_n0 == 3 and ep.zone_cap is not None
+
+  def test_a_zone_completed_BEFORE_the_curve_does_not_bound_it(self):
+    """S1L: the zone set 56 long ago, the curve latched 56 (or the driver has since raised the set to 65) --
+    the pre-curve set already belongs to this road."""
+    ep = self._episode(n_idle=3)
+    for _ in range(5):
+      ep.note_sa_zone(None, 3, 50 * MPH)
+    assert ep.zone_cap is None and ep.zone_why is None
+
+  def test_the_NEXT_episode_takes_a_fresh_reference_count(self):
+    """A zone that completed between two curves happened before the second one -- it must not bound its restore."""
+    ep = self._episode(n_idle=3)
+    ep.note_sa_zone(None, 3, 50 * MPH)                   # episode 1 takes its reference count
+    assert ep.zone_n0 == 3
+    ep.reset()                                           # episode 1 ends
+    ep.note_sa_zone(None, 4, 50 * MPH)                   # a zone opens and completes while idle
+    ep.step(200.0, 35 * MPH, 56 * MPH, 56 * MPH, True, False, limit_now=45 * MPH)
+    ep.note_sa_zone(None, 4, 50 * MPH)
+    assert ep.zone_n0 == 4 and ep.zone_cap is None
+
+  def test_the_bound_only_ever_lowers(self):
+    ep = self._episode()
+    ep.note_sa_zone(50 * MPH, 4, 50 * MPH)
+    ep.note_sa_zone(60 * MPH, 5, 60 * MPH)
+    assert math.isclose(ep.zone_cap, 50 * MPH)
+
+  @pytest.mark.parametrize("tgt,n,last", [("x", 4, None), (float("nan"), 3, None), (-1.0, 3, None),
+                                          (None, "junk", 56 * MPH), (None, None, 56 * MPH)])
+  def test_garbage_and_unreadable_status_bound_nothing(self, tgt, n, last):
+    ep = self._episode()
+    ep.note_sa_zone(tgt, n, last)
+    assert ep.zone_cap is None
+
+  def test_idle_notes_bound_nothing_and_reset_keeps_the_idle_count(self):
+    ep = IcbmEpisode()
+    ep.note_sa_zone(40 * MPH, 7, 40 * MPH)
+    assert ep.zone_cap is None and ep.zone_n0 is None
+    ep.reset()
+    assert ep._sa_zone_n_idle == 7
+
+  def test_the_wiring_helper_feeds_both_bounds(self):
+    ep = self._episode()
+    icbm_note_speedadjust(ep, {"saMode": 2, "saZoneTgt": None, "saZoneN": 3, "saZoneLast": None}, 25 * MPH)
+    assert ep.zone_why == "prop" and math.isclose(ep.zone_cap, 25 * MPH * 75 / 45)
+    icbm_note_speedadjust(ep, {"saMode": 2, "saZoneTgt": 30 * MPH, "saZoneN": 4, "saZoneLast": 30 * MPH}, 25 * MPH)
+    assert ep.zone_why == "saZone" and math.isclose(ep.zone_cap, 30 * MPH)
+
+  @pytest.mark.parametrize("tele", [None, {}, {"saMode": "x"}, {"saMode": 1}])
+  def test_the_wiring_helper_without_zone_speeds_uses_the_backstop(self, tele):
+    ep = IcbmEpisode()
+    ep.step(100.0, 30 * MPH, 60 * MPH, 60 * MPH, True, False, limit_now=45 * MPH)
+    icbm_note_speedadjust(ep, tele, 25 * MPH)
+    assert ep.zone_why == "limit5"
 
 
 class TestTheRealIncident:
