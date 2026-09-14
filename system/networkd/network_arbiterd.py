@@ -45,6 +45,7 @@ from openpilot.system.networkd.network_arbiter import (
   HOTSPOT_CONNECTION_ID,
   UPGRADE_SCAN_S,
   decide,
+  explain_fallback,
   home_to_yield_to,
   update_home_arrival,
   judge_link,
@@ -437,9 +438,11 @@ def _expected_active(action: str, ssid: str) -> str | None:
   return None
 
 
-def _apply(action: str, ssid: str, current_active: str | None = None, active_read_ok: bool = True) -> None:
+def _apply(action: str, ssid: str, current_active: str | None = None, active_read_ok: bool = True,
+           why: str = "") -> None:
   """Run the one action chosen by decide(). All failures are logged, never raised.
-  `current_active`/`active_read_ok` are this tick's read, used only to say in the log what is being left."""
+  `current_active`/`active_read_ok` are this tick's read, used only to say in the log what is being left.
+  `why` (arbiterfu2pnw) is explain_fallback's text for an up_fallback, used only in its log line."""
   if action == "noop":
     return
   if action == "up_priority":
@@ -451,7 +454,7 @@ def _apply(action: str, ssid: str, current_active: str | None = None, active_rea
     # netcosttier2pnw: tier 1/2 -- some other saved wifi, cheaper than our own LTE.
     conn_id = priority_connection_id(ssid.strip())
     leaving = _leaving(current_active, active_read_ok)
-    cloudlog.info(f"network_arbiterd: no priority network in range; falling back to saved wifi '{ssid}' -> {conn_id} ({leaving})")
+    cloudlog.info(f"network_arbiterd: falling back to saved wifi '{ssid}' -> {conn_id} [{why}] ({leaving})")
     _set_hotspot_nat(False)
     _nmcli(["con", "up", conn_id])
   elif action == "up_hotspot":
@@ -773,6 +776,7 @@ def main() -> NoReturn:
   unread_since: float | None = None             # unreadhold2pnw: start of the current run of FAILED active reads (None = last read ok)
   unread_hold_logged: tuple | None = None       # unreadhold2pnw: last logged hold (change-only log)
   unread_release_logged = False                 # unreadhold2pnw: this run's release past the bound is logged
+  verify_deferred_logged: tuple | None = None   # arbiterfu2pnw: the pending bring-up whose deferred judgement is logged
 
   while True:
     try:
@@ -964,12 +968,30 @@ def main() -> NoReturn:
       portal_entry = pn.entry_for_ssid(nets, raw_active_ssid) if raw_active_ssid else None
       usable = _client_link_usable(current_active, bool(portal_entry and portal_entry.get("portal"))) \
         if raw_active_ssid else None
-      verdict = judge_link(raw_active_ssid, usable, pending_up, now, DHCP_GRACE_S,
+      # arbiterfu2pnw: a failed active read is NO EVIDENCE about a pending bring-up (judge_link: None) -- for the same
+      # bound as the unreadable hold below, and releasing on the same tick. Past it, judged as before: nothing readable
+      # counts as nothing active, and an unverified blame is logged at ERROR level just below.
+      # Fable: gated on the same "something to hold onto" as the hold below, so a deferral can never happen without
+      # the hold also blocking radio actions -- structurally, not just because pending_up implies it. (A loop exception
+      # on the judging tick could otherwise leave a pending bring-up with nothing seen or requested.)
+      defer_judgement = unread_since is not None and bool(seen_active or requested_active) \
+        and now - unread_since < ACTIVE_UNREADABLE_HOLD_S
+      if not defer_judgement:
+        verify_deferred_logged = None           # re-armed, so the next unreadable episode is logged again
+      elif pending_up is not None and pending_up != verify_deferred_logged:
+        cloudlog.event("netcosttier_verify_deferred", ssid=pending_up[0], unreadable_s=round(now - unread_since, 1),
+                       hold_s=ACTIVE_UNREADABLE_HOLD_S, reason="nmcli con show --active failed; judged on the next good read")
+        verify_deferred_logged = pending_up
+      verdict = judge_link(None if defer_judgement else raw_active_ssid, usable, pending_up, now, DHCP_GRACE_S,
                            last_known_usable=_usable_cache.get(raw_active_ssid.lower()))
       if usable is not None and raw_active_ssid:
         _usable_cache[raw_active_ssid.lower()] = usable
       active_ssid = verdict.sticky_ssid
       pending_up = verdict.pending
+      if verdict.blame and not verdict.blame_ok and unread_since is not None:
+        cloudlog.event("netcosttier_blamed_unverified", ssid=verdict.blame.lower(), unreadable_s=round(now - unread_since, 1),
+                       hold_s=ACTIVE_UNREADABLE_HOLD_S,
+                       error="nmcli con show --active kept failing past the hold; counting the bring-up as failed without a verification read")
       if verdict.blame:
         _note_attempt(assoc_fail, verdict.blame, verdict.blame_ok, now)
 
@@ -1093,7 +1115,17 @@ def main() -> NoReturn:
                          unreadable_s=unread_s, hold_s=ACTIVE_UNREADABLE_HOLD_S,
                          error="nmcli con show --active kept failing past the hold; acting without knowing the active link")
           unread_release_logged = True
-      _apply(action, target_ssid, current_active, active_read_ok)
+      # arbiterfu2pnw: the fallback line's reason, from decide()'s own inputs. Log text must never alter a decision, and an
+      # exception here would escape to the loop's handler and skip the bring-up -- so it is caught, logged, and replaced.
+      why = ""
+      if action == "up_fallback":
+        try:
+          why = explain_fallback(net_ssids, scan, saved, target_ssid, metered_ssids, unmetered_ssids, blocked,
+                                 active_ssid or "", scanned=scan_raw is not None)
+        except Exception as e:
+          cloudlog.exception("network_arbiterd: could not explain the fallback choice; joining it anyway")
+          why = f"reason unavailable: {type(e).__name__}"
+      _apply(action, target_ssid, current_active, active_read_ok, why)
       expected = _expected_active(action, target_ssid)
       if expected is not None:
         requested_active = expected

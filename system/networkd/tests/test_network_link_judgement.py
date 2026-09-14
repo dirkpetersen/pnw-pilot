@@ -39,6 +39,23 @@ class TestRefuse:
     assert v.pending is None, "a judged bring-up must not be judged twice"
 
 
+class TestUnreadableActiveRead:
+  """arbiterfu2pnw: active_ssid None = `con show --active` failed. That is not "nothing active", so it is no
+  evidence that a pending bring-up never took."""
+
+  def test_an_unreadable_read_does_not_blame_a_pending_bring_up(self):
+    v = judge_link(None, None, (STAR, 90.0), 100.0, GRACE)
+    assert v == (STAR, "", False, (STAR, 90.0)), "blamed a bring-up on a read that failed"
+
+  def test_not_even_past_the_grace__the_caller_owns_that_bound(self):
+    """The DHCP grace judges a link we can SEE without an address; an unreadable tick sees nothing."""
+    v = judge_link(None, None, (STAR, 10.0), 100.0, GRACE)
+    assert v == (STAR, "", False, (STAR, 10.0))
+
+  def test_with_nothing_pending_it_concludes_nothing__as_before(self):
+    assert judge_link(None, None, None, 100.0, GRACE) == ("", "", False, None)
+
+
 class TestSomeoneElsesChoice:
   def test_a_network_the_driver_joined_by_hand_takes_over_without_blame(self):
     """We raised STAR; the driver picked PHONE from the UI. STAR did not fail, it was overruled."""

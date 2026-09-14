@@ -1307,3 +1307,242 @@ class TestAnUnreadableActiveReadHoldsTheRadio:
     assert nm.up_log == [(14 * POLL, HOTSPOT)], nm.up_log
     assert len(_holds(events)) == 2, f"a new episode must be logged again: {_holds(events)}"
     assert _releases(events) == []
+
+
+# ================================================================================================
+# arbiterfu2pnw (1) — an UNREADABLE verification read is not a failed bring-up (Fable follow-up to unreadhold2pnw).
+#
+# After `con up`, the next tick judges the pending bring-up. A failed `nmcli con show --active` read as "nothing
+# active", so judge_link concluded "the bring-up never took", blamed the network and started its retry backoff --
+# on no evidence at all. Inside ACTIVE_UNREADABLE_HOLD_S the judgement now waits for the next good read; past the
+# bound it is made as before, and said at ERROR level.
+# ================================================================================================
+
+@pytest.fixture
+def timed_events(monkeypatch):
+  """(t, name, kwargs) for every cloudlog.event -- the sequences below are about WHEN a network is blamed."""
+  got: list[tuple[float, str, dict]] = []
+  clock = {"nm": None}
+  monkeypatch.setattr(d.cloudlog, "event", lambda name, **kw: got.append((clock["nm"].t, name, kw)))
+  return got, clock
+
+
+def _named(timed, name):
+  return [(t, kw) for t, n, kw in timed if n == name]
+
+
+class TestAnUnreadableVerificationReadIsNotAFailure:
+  def test_ONE_unreadable_read_right_after_a_bring_up_blames_nobody(self, monkeypatch, timed_events):
+    """The phone comes up fine at 0 s; the read at 20 s fails. Before: netcosttier_assoc_failed for the phone (a
+    60 s backoff) and netcosttier_recovered at 40 s. Now: nothing in the ledger, and the deferral is logged once."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[_unreadable({1})], priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE)], nm.up_log
+    assert _named(timed, "netcosttier_assoc_failed") == [], _named(timed, "netcosttier_assoc_failed")
+    assert _named(timed, "netcosttier_recovered") == []
+    deferred = _named(timed, "netcosttier_verify_deferred")
+    assert [(t, kw["ssid"]) for t, kw in deferred] == [(POLL, PHONE)], deferred
+
+  def test_a_bring_up_that_REALLY_failed_is_blamed_on_the_next_GOOD_read(self, monkeypatch, timed_events):
+    """The phone refuses at 0 s, the read at 20 s fails, the read at 40 s succeeds and shows nothing active: that
+    is the evidence, so the phone is blamed at 40 s and the hotspot comes back on that same tick."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, hooks=[_unreadable({1})], priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (2 * POLL, HOTSPOT)], nm.up_log
+    failed = _named(timed, "netcosttier_assoc_failed")
+    assert [(t, kw["ssid"], kw["consecutive_failures"]) for t, kw in failed] == [(2 * POLL, PHONE.lower(), 1)], failed
+    assert _named(timed, "netcosttier_blamed_unverified") == []
+
+  def test_the_DHCP_grace_still_counts_from_the_bring_up_and_a_dead_link_is_blamed_once(self, monkeypatch, timed_events):
+    """The phone associates at 0 s but never gets an address; the read at 20 s fails. Before: blamed at 20 s
+    (failure 1), its grace RESTARTED at 40 s as a 'new' link, blamed again at 100 s (failure 2, a 5 min backoff),
+    hotspot at 100 s. Now: one failure, at the end of the grace from the bring-up, hotspot at 60 s."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "no_dhcp"
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[_unreadable({1})], priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (d.DHCP_GRACE_S, HOTSPOT)], nm.up_log
+    failed = _named(timed, "netcosttier_assoc_failed")
+    assert [(t, kw["consecutive_failures"]) for t, kw in failed] == [(d.DHCP_GRACE_S, 1)], failed
+
+  def test_a_SECOND_unreadable_episode_is_logged_again_and_does_not_stretch_the_grace(self, monkeypatch, timed_events):
+    """No address ever; reads fail at 20 s and 60 s. Each episode logs its deferral (re-armed by the good read at 40 s),
+    and the dead link is blamed on the first GOOD read past the grace (80 s) -- not held off by the second episode."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "no_dhcp"
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[_unreadable({1, 3})], priority=(HOME, PHONE))
+    assert [t for t, _kw in _named(timed, "netcosttier_verify_deferred")] == [POLL, 3 * POLL], timed
+    assert nm.up_log == [(0.0, ID_PHONE), (4 * POLL, HOTSPOT)], nm.up_log
+    assert [t for t, _kw in _named(timed, "netcosttier_assoc_failed")] == [4 * POLL]
+
+  def test_a_PERSISTENTLY_unreadable_nmcli_blames_at_the_bound_as_before_and_says_so_loudly(self, monkeypatch, timed_events):
+    """Reads fail from 20 s on, forever. The bring-up is judged when the unreadable run reaches HOLD_S (at 140 s,
+    the tick the hold releases): blamed as before, with an ERROR-level event saying no verification read was
+    possible -- so the released action moves on to the hotspot instead of re-upping the phone blind."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, hooks=[_unreadable(range(1, 10**6))], priority=(HOME, PHONE))
+    bound = POLL + HOLD_S
+    assert nm.up_log == [(0.0, ID_PHONE), (bound, HOTSPOT)], nm.up_log
+    failed = _named(timed, "netcosttier_assoc_failed")
+    assert [(t, kw["ssid"]) for t, kw in failed] == [(bound, PHONE.lower())], failed
+    loud = _named(timed, "netcosttier_blamed_unverified")
+    assert [(t, kw["ssid"], kw["unreadable_s"]) for t, kw in loud] == [(bound, PHONE.lower(), HOLD_S)], loud
+    assert "error" in loud[0][1], "the unverified blame must be logged at ERROR level (cloudlog.event error=)"
+    assert len(_named(timed, "netcosttier_verify_deferred")) == 1, "the deferral is logged once, not every tick"
+
+  def test_at_BOOT_the_first_connection_is_not_delayed_and_not_blamed(self, monkeypatch, timed_events):
+    """unreadhold2pnw's boot rule, kept: reads failing from before tick 0, the phone is raised at 0 s. And the
+    unreadable ticks that follow no longer put it in backoff."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, None, scan=(PHONE,))
+    nm.fail_reads.add("--active")
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, hooks=[_unreadable(range(10**6))], priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE)], f"boot connection delayed or bounced: {nm.up_log}"
+    assert _named(timed, "netcosttier_assoc_failed") == [], _named(timed, "netcosttier_assoc_failed")
+
+  def test_a_deferral_never_happens_without_the_hold__double_fault(self, monkeypatch, timed_events):
+    """Fable's probe. The phone refuses at 0 s. At 20 s a GOOD read shows nothing active, so seen_active is '' and
+    nothing is requested, but the loop raises before judging, so the pending bring-up survives. Reads fail from 40 s.
+    Without the gate the judgement was deferred with no hold: the refusing phone was re-upped blind at 40 s and the
+    hotspot waited until 160 s. With it: there is nothing to hold, so the phone is blamed at 40 s and the hotspot
+    comes up on that tick."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    real_saved = d._saved_connections
+
+    def saved_raising_on_the_judging_tick():
+      if nm.t == POLL:
+        raise RuntimeError("synthetic nmcli failure on the judging tick")
+      return real_saved()
+    monkeypatch.setattr(d, "_saved_connections", saved_raising_on_the_judging_tick)
+    monkeypatch.setattr(d.cloudlog, "exception", lambda *a, **k: None)
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, hooks=[_unreadable(range(2, 10**6))], priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (2 * POLL, HOTSPOT)], nm.up_log
+    assert _named(timed, "netcosttier_verify_deferred") == []
+
+
+# ================================================================================================
+# arbiterfu2pnw (2) — the fallback line says what happened. It said "no priority network in range", which netrank2pnw
+# made false: a configured network can be in range and lose on cost, or be excluded by a backoff or a missing profile.
+# LOG TEXT ONLY: every test also pins the bring-up, and a broken explanation must not stop it.
+# ================================================================================================
+
+def _fallback_lines(infos):
+  return [m for m in infos if "falling back to saved wifi" in m]
+
+
+class TestTheFallbackLineTellsTheTruth:
+  def test_a_configured_network_IN_RANGE_that_loses_on_cost_is_named_as_outranked(self, monkeypatch, infos):
+    """The phone is configured, in range and explicitly metered; CafeFree is not configured and explicitly unmetered.
+    Cost dominates membership, so CafeFree wins -- with the phone in range, which the old line denied."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE, CAFE], {PHONE: "yes", CAFE: "no"}
+    run_loop(monkeypatch, nm, ticks=2, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_CAFE)], nm.up_log
+    lines = _fallback_lines(infos)
+    assert len(lines) == 1, lines
+    assert "no priority network in range" not in lines[0], lines[0]
+    want = f"[unmetered, not a configured priority network -- '{HOME}': not in the scan; '{PHONE}': in range, metered, outranked]"
+    assert want in lines[0], lines[0]
+    assert lines[0].endswith("(dropping hotspot)"), lines[0]
+
+  def test_a_configured_network_in_FAILURE_BACKOFF_is_named_as_such(self, monkeypatch, infos):
+    """The phone (configured, unmetered) refuses at 0 s and serves a backoff; CafeFree (cost unknown) is joined at 20 s."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE, CAFE], {PHONE: "no"}
+    nm.behave[ID_PHONE] = "refuse"
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(PHONE,))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, ID_CAFE)], nm.up_log
+    lines = _fallback_lines(infos)
+    assert len(lines) == 1 and f"[cost unknown, not a configured priority network -- '{PHONE}': in range, in failure backoff]" \
+      in lines[0], lines
+
+  def test_a_configured_network_in_range_WITHOUT_a_saved_profile_is_named_as_such(self, monkeypatch, infos):
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan = HOTSPOT, [VISITOR, CAFE]
+    run_loop(monkeypatch, nm, ticks=2, near_home=False, priority=(VISITOR,))
+    assert nm.up_log == [(0.0, ID_CAFE)], nm.up_log
+    lines = _fallback_lines(infos)
+    assert len(lines) == 1 and f"-- '{VISITOR}': in range, no saved profile]" in lines[0], lines
+
+  def test_with_no_priority_networks_configured_it_says_that(self, monkeypatch, infos):
+    nm = FakeNM()
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE], {PHONE: "no"}
+    run_loop(monkeypatch, nm, ticks=2, near_home=False, priority=())
+    lines = _fallback_lines(infos)
+    assert len(lines) == 1 and "[unmetered -- no priority networks configured]" in lines[0], lines
+
+  def test_still_logged_only_when_the_radio_moves_not_every_tick(self, monkeypatch, infos):
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE, CAFE], {PHONE: "yes", CAFE: "no"}
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_CAFE)], nm.up_log
+    assert len(_fallback_lines(infos)) == 1, _fallback_lines(infos)
+
+  def test_the_explanation_is_computed_from_the_inputs_decide_RANKED(self, monkeypatch, infos):
+    """Wiring: on metered KarlMoik (configured, active, usable) an upgrade scan finds CafeFree, unmetered and not
+    configured. The explanation must see what decide() saw -- including the active link -- or it can contradict it."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    _away(nm, ID_STAR, scan=(STAR, CAFE))
+    nm.metered[CAFE] = "no"
+    ranked, explained = [], []
+    real_decide, real_explain = d.decide, d.explain_fallback
+    def spy_decide(**kw):
+      out = real_decide(**kw)
+      ranked.append((kw, out))
+      return out
+    def spy_explain(*a, **kw):
+      explained.append((a, kw))
+      return real_explain(*a, **kw)
+    monkeypatch.setattr(d, "decide", spy_decide)
+    monkeypatch.setattr(d, "explain_fallback", spy_explain)
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME, STAR))
+    assert nm.up_log == [(POLL, ID_CAFE)], nm.up_log      # the first upgrade scan waits one tick for the link to settle
+    (kw, out), = [r for r in ranked if r[1][0] == "up_fallback"]
+    (args, ekw), = explained
+    assert args == (kw["priority_ssids"], kw["scan_ssids"], kw["saved_connections"], out[1], kw["metered_ssids"],
+                    kw["unmetered_ssids"], kw["blocked_ssids"], kw["active_ssid"]), (args, kw)
+    assert kw["active_ssid"] == STAR and ekw == {"scanned": True}, (kw["active_ssid"], ekw)
+    assert f"'{STAR}': in range, metered, outranked]" in _fallback_lines(infos)[0], infos
+
+  def test_a_BROKEN_explanation_never_stops_the_bring_up_it_describes(self, monkeypatch, infos):
+    """Log text must not be able to alter a decision. An exception in it would escape to the loop's `except
+    Exception` and skip _apply -- the device would stay on the hotspot. It is caught, logged, and the join happens."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE, CAFE], {PHONE: "yes", CAFE: "no"}
+    def boom(*a, **k):
+      raise ValueError("synthetic")
+    monkeypatch.setattr(d, "explain_fallback", boom)
+    exceptions: list[str] = []
+    monkeypatch.setattr(d.cloudlog, "exception", lambda msg, *a, **k: exceptions.append(str(msg)))
+    run_loop(monkeypatch, nm, ticks=2, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_CAFE)], f"a log-text failure changed the decision: {nm.up_log}"
+    assert len(exceptions) == 1 and "explain" in exceptions[0], f"explained only for the up_fallback tick: {exceptions}"
+    lines = _fallback_lines(infos)
+    assert len(lines) == 1 and "[reason unavailable: ValueError]" in lines[0], lines

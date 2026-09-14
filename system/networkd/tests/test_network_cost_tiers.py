@@ -31,7 +31,7 @@ TWO RANKINGS THAT WERE REJECTED, and the tests that pin them out:
 import pytest
 
 from openpilot.system.networkd.network_arbiter import (COST_UNKNOWN, COST_UNMETERED, HOTSPOT_CONNECTION_ID, choose_wifi, decide,
-                                                       priority_connection_id, ssid_of)
+                                                       explain_fallback, priority_connection_id, ssid_of)
 
 
 def act(*a, **k):
@@ -437,3 +437,33 @@ class TestBinaryModeIsPreLadder:
   def test_an_active_priority_entry_absent_from_the_scan_stays_put(self):
     """The geo-gate suppresses scanning on client WiFi; being ON the entry is reach enough."""
     assert decide(True, HOME, [], ALL_SAVED, ID_HOME) == ("noop", HOME)
+
+
+class TestExplainFallback:
+  """arbiterfu2pnw: the reason text on the up_fallback log line. The loop tests pin the common cases; these pin the ones
+  the loop cannot reach -- and every one of them is text only."""
+
+  def test_a_scan_that_did_not_RUN_is_not_called_out_of_range(self):
+    """The geo-gate suppresses scans on client WiFi: an empty scan there is no statement about range."""
+    txt = explain_fallback([HOME], [], ALL_SAVED, STARLINK, scanned=False)
+    assert "'Hannelore': not seen, no scan ran this tick" in txt, txt
+    assert "not in the scan" not in txt, txt
+
+  def test_the_usable_active_link_counts_as_in_range_and_is_never_in_backoff(self):
+    """Mirrors choose_wifi: the sticky active link is a candidate without a scan result, and a verified link is never
+    blocked. Here it is metered and loses to an unmetered non-member."""
+    txt = explain_fallback([STARLINK], [PHONE], ALL_SAVED, PHONE, metered_ssids={STARLINK}, unmetered_ssids={PHONE},
+                           blocked_ssids={STARLINK.lower()}, active_ssid=STARLINK)
+    assert txt == "unmetered, not a configured priority network -- 'KarlMoik': in range, metered, outranked", txt
+
+  def test_a_member_that_should_have_WON_is_reported_as_a_disagreement_not_given_a_made_up_reason(self):
+    txt = explain_fallback([HOME], [HOME, PHONE], ALL_SAVED, PHONE, unmetered_ssids={HOME, PHONE})
+    assert "'Hannelore': in range, unmetered, NOT outranked: explanation disagrees with the ranking" in txt, txt
+
+  def test_blank_entries_are_not_members(self):
+    assert explain_fallback(["", "  "], [PHONE], ALL_SAVED, PHONE) == "cost unknown -- no priority networks configured"
+
+  def test_case_is_folded_like_the_ranking_does(self):
+    txt = explain_fallback(["hannelore"], ["HANNELORE"], ALL_SAVED, PHONE, metered_ssids={"HANNELORE"},
+                           unmetered_ssids={PHONE}, blocked_ssids=set())
+    assert "'hannelore': in range, metered, outranked" in txt, txt

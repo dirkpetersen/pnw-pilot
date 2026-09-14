@@ -325,7 +325,7 @@ def pending_for_new_link(active_ssid: str, pending: tuple[str, float] | None,
   return pending
 
 
-def judge_link(active_ssid: str, usable: bool | None, pending: tuple[str, float] | None,
+def judge_link(active_ssid: str | None, usable: bool | None, pending: tuple[str, float] | None,
                now: float, grace_s: float, last_known_usable: bool | None = None) -> LinkVerdict:
   """Decide what the client link's state means: is it sticky, and does anything go in the ledger?
 
@@ -357,11 +357,21 @@ def judge_link(active_ssid: str, usable: bool | None, pending: tuple[str, float]
     poll is 20 s, so the first look can legally land mid-activation. Inside `grace_s` this is not a
     failure and the link stays sticky -- tearing it down here was measured to drop a link that would
     have completed a few seconds later.
+
+  `active_ssid` None means the active connection COULD NOT BE READ (arbiterfu2pnw; judge_pin's convention).
+  "" is a real reading: nothing is active. Only a pending bring-up treats them differently -- see below.
   """
   act = (active_ssid or "").strip()
 
   if pending is not None:
     ssid_p, raised_at = pending
+    if active_ssid is None:
+      # arbiterfu2pnw (Fable, unreadhold2pnw follow-up): AN UNREADABLE READ IS NOT A BRING-UP THAT NEVER TOOK. A failed
+      # `con show --active` read as "nothing active" here, so the tick after a `con up` blamed the network and started
+      # its backoff on no evidence; a link still in DHCP was then re-seen as new, its grace restarted, and it was
+      # blamed twice. Same rule as `usable is None` below: keep waiting, grace still counted from `raised_at`, and
+      # the next GOOD read judges it. The caller bounds how long (ACTIVE_UNREADABLE_HOLD_S) by passing "" after it.
+      return LinkVerdict(ssid_p, "", False, pending)
     if act.lower() != ssid_p.lower():
       if not act:
         return LinkVerdict("", ssid_p, False, None)      # the bring-up never took -> blame it
@@ -488,6 +498,44 @@ def choose_wifi(priority_ssids: str | list[str], scan_ssids: list[str], saved_co
   candidates.sort()
   klass, _member, _low, ssid = candidates[0]
   return (klass, ssid)
+
+
+_COST_NAMES = {COST_UNMETERED: "unmetered", COST_UNKNOWN: "cost unknown", COST_METERED: "metered"}
+
+
+def explain_fallback(priority_ssids: list[str], scan_ssids: list[str], saved_connections: list[str], chosen_ssid: str,
+                     metered_ssids: set[str] | None = None, unmetered_ssids: set[str] | None = None,
+                     blocked_ssids: set[str] | None = None, active_ssid: str = "", scanned: bool = True) -> str:
+  """arbiterfu2pnw: why decide() joined a NON-member (`up_fallback`), for its log line. TEXT ONLY -- no decision reads it.
+
+  The line said "no priority network in range", which netrank2pnw made false: a configured network can be in range
+  and lose on cost (an explicitly unmetered non-member outranks a default or metered member), or be excluded by a
+  failure backoff or a missing saved profile. Takes choose_wifi's own inputs and mirrors its eligibility rules, and
+  says for each configured network which rule excluded it. `scanned` False = no scan ran this tick (geo-gate)."""
+  chosen_cost = cost_class(chosen_ssid, metered_ssids, unmetered_ssids)
+  members = [m.strip() for m in priority_ssids if m and m.strip()]
+  if not members:
+    return f"{_COST_NAMES[chosen_cost]} -- no priority networks configured"
+  active = (active_ssid or "").strip().lower()
+  scan = {x.lower() for x in scan_ssids} | ({active} if active else set())
+  blocked = {b.lower() for b in (blocked_ssids or set())} - {active}
+  saved = {ssid_of(c).lower() for c in saved_connections if ssid_of(c)}
+  parts = []
+  for m in members:
+    low = m.lower()
+    cost = cost_class(m, metered_ssids, unmetered_ssids)
+    if low not in scan:
+      why = "not in the scan" if scanned else "not seen, no scan ran this tick"
+    elif low not in saved:
+      why = "in range, no saved profile"
+    elif low in blocked:
+      why = "in range, in failure backoff"
+    elif cost > chosen_cost:
+      why = f"in range, {_COST_NAMES[cost]}, outranked"
+    else:   # cannot happen from decide()'s own inputs -- a member wins a tie -- so say so rather than invent a reason
+      why = f"in range, {_COST_NAMES[cost]}, NOT outranked: explanation disagrees with the ranking"
+    parts.append(f"'{m}': {why}")
+  return f"{_COST_NAMES[chosen_cost]}, not a configured priority network -- " + "; ".join(parts)
 
 
 def decide(
