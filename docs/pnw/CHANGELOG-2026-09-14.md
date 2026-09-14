@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `365d287034` (behindgate2pnw, pushed 08:37 PT, staging).
-**Installed on the truck:** `da0741eb8a` (twistyr2pnw + policer2pnw, 08:31 PT).
+**Channel tip:** `origin/3devpnw` = `8678df74a6` (foldlog2pnw, pushed 08:50 PT, staging).
+**Installed on the truck:** `a8a923d8c5` (behindgate2pnw `365d287034` + docs, 08:40 PT).
 
 ## Networking — arbiter logging
 
@@ -49,6 +49,12 @@ as each change ships.
 |---|---|---|
 | `da0741eb8a` **twistyr2pnw + policer2pnw** | The twisty-descent cap (`vtsc_controller.py`) and the police input read (`speedadjust_controller.py`) used `except Exception: pass`. They now log, with the exception type: the first failure at once, then at most once a minute with a count. The fallbacks are unchanged: no twisty trim; no police report, so no police cap. | Fable REJECTED the first version, which narrowed the excepts. plannerd is `restart_if_crash=False`, so any other error, e.g. `UnknownKeyName` from a params build mismatch, would have disengaged both cars with no re-engage. Fixed: both catch `Exception` again, and mutants that narrow them back are killed. 319 tests. Installed 08:31 PT (BootCount 201): no plannerd crash, no failure lines. Follow-ups: the twisty floor on failure while descending; briefly hold the last good police report. |
 
+## ICBM — curves already passed
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `365d287034` **behindgate2pnw** | ICBM (the Lightning's stock-ACC curve slowdowns) can no longer START a slowdown for a map curve the truck has already passed. A point counts as passed when it is more than 5 m behind along mapd's path AND behind the heading. When that can't be determined (under 5 m/s, no heading, off the path), nothing is gated. Logged as `icbmGate "mapPassed"` plus a change-only `ces_icbm_passed` event. | Fable SHIP: no genuinely-ahead curve could be made to read passed (from ICBM's lagged projected position; heading via sin/cos; mapd's path really includes the nodes behind). The gate has its own try, and the Tesla hash is identical. Evidence (`drives/2026-09-12/central-oregon-weekend/behindgate/`): 0 of 214,877 points still ahead read as passed, against 3,879 for heading alone. All 25 passed-point starts were flagged (21 suppressed) and none of the 42 real starts. It fixes Sun 12:05:28 (60 → 51 mph), 13:55:51, 12:43:54, 13:18:37, Sat 12:47:21 and 09-08 19:36:58. It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, and the item stays open. Installed 08:40 PT (BootCount 202), healthy. Owner question: should a passed point also stop lowering a slowdown that is already running? |
+
 ## Location services — police misses
 
 | Commit(s) | What changed | Notes |
@@ -61,27 +67,24 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`behindgate2pnw`** (Fable SHIP; pushed as `365d287034` 08:37 PT, installing): ICBM will not START a slowdown for a map curve the
-  truck has already passed. A point counts as passed when it is more than 5 m behind along mapd's path AND behind
-  the heading. When that can't be determined, nothing is gated.
-  - Tried on the logged truck fixes: 0 of 214,877 points still ahead were wrongly marked passed. Heading alone got
-    3,879 wrong.
-  - Of 25 starts that came from an already-passed point, all 25 were flagged: 21 suppressed, 2 changed, 2 not
-    reproducible. None of the 42 real starts were flagged.
-  - It fixes Sun 12:05:28 (60 → 51 mph), Sun 13:55:51, Sat 12:47:21, 09-08 19:36:58, and Sun 12:43:54 / 13:18:37.
-  - It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, so the item stays open.
-  - Owner question: should a passed point also stop lowering a slowdown that is already running?
 - **`coopsteerfix2pnw`** (`ff3980a17d`, Fable SHIP; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
   an override on the same tick instead of waiting for the 50 ms-debounced `steeringPressed`. Replay: active ticks
   above 1 Nm 77 → 0, peak offset 11.5° → 10.1°.
-- **`foldlog2pnw`** (`a3be3e9ab6`, Fable reviewing): the map-curve fold's silent except now logs with the
-  exception type, and a new `mapErr` field reaches ces_events.
-- **Building:** `lcabort2pnw` (abort a lane change when the driver steers against it), `arbiterfu2pnw` (two
-  arbiter follow-ups), and a PSCM `LimitReached` investigation.
+- **`foldlog2pnw`** (Fable SHIP; `8678df74a6` pushed 08:50 PT, installing): the map-curve fold's silent except now
+  logs with the exception type, and a new `mapErr` field reaches ces_events.
+- **`arbiterfu2pnw`** (`0a1bd865e7`, Fable SHIP with Fable's optional hardening applied, test + 2 mutants):
+  - An unreadable verification read after a bring-up no longer blames that network. The judgement waits for the
+    next good read, bounded by the unreadable hold, and an unverified blame past the bound is logged at ERROR.
+  - The fallback line says why each candidate was not chosen, instead of "no priority network in range".
+- **PSCM `LimitReached` (investigated):** the 09-08 19:44 PT event was the PSCM's own static limit on the I-5
+  on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
+  Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
+  Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
+- **Building:** `lcabort2pnw` (abort a lane change when the driver steers against it).
 
 ## Deferred to the owner
 
-Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; RES restores the truck's memory vs the driver's set; stock
+Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; PSCM LimitReached: once logged, should a hands-off LimitReached raise Take Control at once, and tell Alan Polk the signal fires in angle mode?; RES restores the truck's memory vs the driver's set; stock
 dropout keeps steering (panda change); brake-release auto RES; the deleter policy when storage is full of
 un-uploaded drives; map downloads over metered links; the Fix B `coast_bias` default; `mapFlr` keep/drop;
 `curveoverride2pnw`; 12 V multimeter; relayMalfunction harness check; a driver-monitoring video check.
