@@ -78,9 +78,10 @@ have. The owner accepted that objection explicitly, on two conditions that are n
 > current speed commands no acceleration. The RES path never had a decel gate and is unchanged (D3
 > undecided). `decelUnknown` is kept: it still holds the tap until a post-lift decel window exists, so
 > fire timing and the logged `decel` are unchanged. A real brake still wins: gate 2, the `reBrake`
-> re-arm, and the executor's pedal gate. **Known consequence:** a lift-off to slow down followed by a
-> brake more than ~0.5–0.8 s later can get the SET first (weekend: Sat 12:41:50). The text below is the
-> history of the gate.
+> re-arm, and the executor's pedal gate. A lift-off to slow down followed by a brake (weekend: Sat
+> 12:41:50, brake at +0.69 s) is covered by the owner's second decision, **"Wait 1.0 s"**: a gas-set waits
+> `GAS_SET_RELEASE_MIN_S` = 1.0 s after lift-off (RESUME keeps 0.5 s), so a brake inside that second wins
+> and nothing is set. The text below is the history of the gate.
 
 MEASURED on this truck, 2026-09-07, route `000000f9` — 7 gas-release events above 5 m/s, decel over
 the 0.4 s after lift-off: **median −0.06, p90 1.33, max 1.33, min −0.67 m/s²**. This Lightning

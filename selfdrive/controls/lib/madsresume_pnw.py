@@ -80,6 +80,13 @@ from dataclasses import dataclass, field
 #      would be a surprise rather than a completion of what they were doing.
 RELEASE_MIN_S = 0.5
 RELEASE_MAX_S = 3.0
+# engagegoal2pnw, OWNER DECISION 2026-09-13 ("Wait 1.0 s"): the GAS-SET path waits 1.0 s after lift-off
+# (RESUME keeps RELEASE_MIN_S). Once regen stopped refusing a gas-set, the SET was offered ~0.6 s after
+# lift-off -- ahead of a driver who lifts to slow down and brakes a moment later (weekend, Sat 12:41:50:
+# brake at +0.69 s, to a stop). Inside this second a brake re-arms and nothing is set. The executor can
+# only DELAY this: it presses only on a published offer (0-250 ms idle poll, carcontroller._resume_button),
+# never before one. A lift shorter than this is still the same press (see `_gas_spent`).
+GAS_SET_RELEASE_MIN_S = 1.0
 
 # How long the offer stays on the wire once every gate has passed. The executor polls the
 # mem-param at 4 Hz and its own freshness limit is 0.5 s, so 1.0 s is comfortably enough for
@@ -368,6 +375,7 @@ class MadsResumeBrain:
         later brake press while it holds -> ARM   (record "arm")
       brake+regen both released        -> the release clock starts
       RELEASE_MIN_S..RELEASE_MAX_S     -> if every gate passes: OFFER (record "fire"), latch _done
+                                          (a gas-set waits GAS_SET_RELEASE_MIN_S instead of RELEASE_MIN_S)
       offer ends                       -> record "offerEnd"
       window passes without an offer   -> record "refuse" naming the binding gate
       cruise comes back within VERIFY_S-> record "verify" (LOUD if it came back above the capture)
@@ -429,7 +437,7 @@ class MadsResumeBrain:
     # engagegoal2pnw, OWNER DECISION 2026-09-13 ("first press only"): after a brake with steering still on
     # there is no time limit, but ONLY THE FIRST accelerator press may set the speed at lift-off. True once
     # that press has been used: its lift-off was judged by the SET gates (fired, or refused by a gate), i.e.
-    # both pedals stayed up for RELEASE_MIN_S. A shorter lift is pedal modulation inside the same press.
+    # both pedals stayed up for GAS_SET_RELEASE_MIN_S. A shorter lift is pedal modulation inside the same press.
     # Cleared ONLY by a new brake arm -- deliberately NOT by an episode ending (armExpired, a refusal), or
     # an overtake minutes later would get a second attempt. Every record carries it (`gasSpent`).
     self._gas_spent = False
@@ -867,7 +875,7 @@ class MadsResumeBrain:
       return out
 
     since = i.now - self._released_t
-    if self._used_gas and since >= RELEASE_MIN_S:
+    if self._used_gas and since >= GAS_SET_RELEASE_MIN_S:
       self._gas_spent = True           # first press only: this press's lift-off is judged from here on
 
     # --- an offer already in flight: keep it alive only while every gate still holds ------------
@@ -894,7 +902,7 @@ class MadsResumeBrain:
       return out
 
     # --- gate 3: the bounded window ------------------------------------------------------------
-    if since < RELEASE_MIN_S:
+    if since < (GAS_SET_RELEASE_MIN_S if self._used_gas else RELEASE_MIN_S):
       self._last_block = "settling"
       return out
     if since > RELEASE_MAX_S:
@@ -968,11 +976,12 @@ class MadsResumeBrain:
       # accelerator (measured 1.5-1.9 m/s^2) no longer refuses a gas-set -- the `slowing` refusal is
       # removed from THIS path only (the RES path never had it). A real brake still wins: gate 2 holds
       # the release clock while the pedal is down, a brake edge re-arms (`reBrake`), and the executor
-      # refuses any press with a pedal down. KNOWN CONSEQUENCE, from the weekend (Sat 12:41:50): a
-      # driver who lifts to slow down and brakes ~0.7 s later can now get the SET first.
-      # `decelUnknown` is kept unchanged: it holds the tap until a decel window taken entirely after
-      # lift-off exists (at most ~0.3 s beyond RELEASE_MIN_S), so the fire record's `decel` is the
-      # post-lift regen this decision was made on, and fire timing is unchanged from before.
+      # refuses any press with a pedal down. A driver who lifts to slow down and brakes a moment later
+      # (weekend, Sat 12:41:50: +0.69 s) is covered by the 1.0 s wait, GAS_SET_RELEASE_MIN_S.
+      # `decelUnknown` is kept as a fail-closed backstop: the tap needs a decel window taken entirely after
+      # lift-off, so the fire record's `decel` is the post-lift regen this decision was made on. Since the
+      # 1.0 s wait (GAS_SET_RELEASE_MIN_S) that window always exists at normal cadence (it closes by +0.8 s),
+      # so it binds only when speed samples go missing.
       if self._released_t is None or self._decel_from < self._released_t:
         return "decelUnknown"
       # A SET-to-current commands no acceleration, so the gates that bound how much ACC may speed up

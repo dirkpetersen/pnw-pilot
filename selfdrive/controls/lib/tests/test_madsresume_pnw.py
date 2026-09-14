@@ -894,24 +894,101 @@ def test_lift_off_then_an_immediate_hard_brake_never_sets():
     assert "reBrake" in d.reasons("refuse"), f"the gas episode must end on the brake; {d.phases()}"
 
 
-def test_known_consequence_a_brake_later_than_the_settle_time_lands_after_the_set():
-  """Pins the consequence the weekend showed (Sat 2026-09-12 12:41:50 PT, qlog replay): the driver lifted
-  at ~21 mph, regen took it down, and he braked to a stop 0.69 s after lift-off. Under "Ignore regen, set"
-  the replay offered the SET at +0.6 s, first; the brake then reads as a rejection of it and latches the
-  opt-out for the rest of that steering-only stretch. Owner question Q-C5 (docs/MADS-RESUME-TO-DRIVER-SPEED.md
-  section 10). A brake between RELEASE_MIN_S and ~0.8 s may or may not beat the offer (it depends on the
-  decel estimator's phase); from 0.85 s on it never does, which is what this pins deterministically."""
+def _lift_then_brake(brake_after_s, v0=9.4):
+  """Sat 2026-09-12 12:41:50 PT, parameters from the qlog: pulling away after a brake, the driver lifts at
+  ~21 mph, regen slows the truck (measured 1.5-1.9 m/s^2), and he brakes `brake_after_s` after lift-off."""
   d = Drive()
   d.tick(50)
   d.tick(20, brake_pressed=True, v_ego=12.0, **STEER_ONLY)
-  d.tick(300, gas_pressed=True, v_ego=9.4, **STEER_ONLY)
-  v = 9.4
-  for _ in range(85):                                                # 0.85 s of regen
+  d.tick(300, gas_pressed=True, v_ego=v0, **STEER_ONLY)
+  v = v0
+  for _ in range(int(round(brake_after_s / DT))):
     v -= REGEN_MS2 * DT
     d.tick(1, v_ego=v, **STEER_ONLY)
-  assert d.fired(), "under the owner decision the SET is offered before a brake 0.85 s after lift-off"
-  d.tick(100, brake_pressed=True, v_ego=v, **STEER_ONLY)
+  n_off = len(d.offers)
+  d.tick(150, brake_pressed=True, v_ego=max(v - 2.0, 0.0), **STEER_ONLY)
+  return d, n_off
+
+
+@pytest.mark.parametrize("brake_after_s", [0.69, 0.9])
+def test_a_brake_inside_the_gas_set_wait_wins_and_nothing_is_set(brake_after_s):
+  """OWNER DECISION 2026-09-13, "Wait 1.0 s" (Q-C5). At 0.69 s (the weekend's stop) and 0.9 s the brake lands
+  inside GAS_SET_RELEASE_MIN_S: no SET is offered, the brake is NOT read as a rejection, and the automatic
+  resume stays on for the stretch (the brake simply re-arms)."""
+  d, n_off = _lift_then_brake(brake_after_s)
+  assert n_off == 0 and not d.offers, f"a SET was offered before a {brake_after_s}s brake; {d.records}"
+  assert not d.b._suppressed and "postResumeBrake" not in d.reasons("suppress"), d.phases()
+  assert d.reasons("refuse")[-1] == "reBrake" and d.records[-1]["phase"] == "arm", d.phases()
+
+
+def test_a_brake_after_the_gas_set_wait_lands_after_the_set_and_cancels_it():
+  """1.1 s: the SET is offered at 1.0 s, then the brake withdraws the offer on its first tick (the executor also
+  refuses a press with a pedal down, and the PCM drops ACC on the brake) and reads as a rejection of it."""
+  d, n_off = _lift_then_brake(1.1)
+  assert n_off > 0, "the SET must be offered once the 1.0 s wait has passed"
+  assert len(d.offers) == n_off, "the offer must be withdrawn on the brake tick"
   assert "postResumeBrake" in d.reasons("suppress"), d.phases()
+
+
+def test_the_gas_set_waits_1s_after_lift_off_and_RESUME_still_waits_0p5s():
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(200, gas_pressed=True, v_ego=16.0, **STEER_ONLY)
+  lift = d.t
+  d.tick(400, v_ego=16.0, **STEER_ONLY)
+  assert d.fired()
+  assert M.GAS_SET_RELEASE_MIN_S - 1e-9 <= d.offers[0][0] - lift <= M.GAS_SET_RELEASE_MIN_S + 0.02, d.offers[0][0] - lift
+  r = normal_brake_and_resume()
+  assert M.RELEASE_MIN_S - 1e-9 <= r.offers[0][0] - RELEASE_T <= M.RELEASE_MIN_S + 0.02, "RESUME timing must not change"
+
+
+def test_a_lift_shorter_than_the_gas_set_wait_does_not_use_up_the_first_press():
+  """First press only counts a press as used once its lift-off is judged -- now at 1.0 s. A 0.7 s lift and back
+  on the power is still the first press, and the real lift-off afterwards sets."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(100, gas_pressed=True, v_ego=14.0, **STEER_ONLY)
+  d.tick(70, v_ego=14.0, **STEER_ONLY)                              # 0.7 s lift
+  assert not d.b._gas_spent and not d.fired(), "precondition"
+  _pull_away_and_lift(d, gas_s=1.0, v=15.0)
+  assert d.fired() and d.offers[-1][2] == pytest.approx(15.0), d.records[-4:]
+
+
+@pytest.mark.parametrize("poll_phase", range(25))
+def test_the_executor_idle_poll_cannot_press_before_the_gas_set_wait(poll_phase):
+  """The seam to opendbc: the executor only ever presses on a PUBLISHED offer. Its idle cadence
+  (carcontroller._resume_button: `if self._resume_cmd is not None or (self.frame % 25) == 0`, reproduced here)
+  can delay the first pressed frame by up to 250 ms, never advance it. Real parser, decision and one-shot latch
+  from opendbc/car/ford/icbm_pnw.py; every poll phase."""
+  from opendbc.car.ford.icbm_pnw import ResumePress, decide_resume, parse_resume_cmd
+  b, press = MadsResumeBrain(), ResumePress()
+  mem, cmd, first_press, lift = {}, None, None, None
+  t = 0.0
+  plan = [dict(n=50), dict(n=20, brake_pressed=True, **STEER_ONLY), dict(n=300, v_ego=0.0, standstill=True, **STEER_ONLY),
+          dict(n=200, gas_pressed=True, v_ego=16.0, **STEER_ONLY), dict(n=400, v_ego=16.0, **STEER_ONLY)]
+  frame = poll_phase
+  for k, step in enumerate(plan):
+    kw = dict(step)
+    n = kw.pop("n")
+    if k == len(plan) - 1:
+      lift = t                                                       # first tick with both pedals up
+    for _ in range(n):
+      out = b.update(mk(t, **kw))
+      if out.offer:
+        mem = {"dir": out.mode, "ts": round(t, 3), "eid": out.eid, "set": round(out.set_ms, 2)}
+      else:
+        mem = {}
+      if cmd is not None or frame % 25 == 0:
+        cmd = parse_resume_cmd(mem)
+      ok = decide_resume(cmd, t, bool(kw.get("cruise_enabled", True)), True,
+                         bool(kw.get("gas_pressed", False) or kw.get("brake_pressed", False)), float(kw.get("set_speed_ms", SET)))
+      if press.update(frame, cmd, ok) and first_press is None:
+        first_press = t
+      t += DT
+      frame += 1
+  assert lift is not None and first_press is not None, "the gas-set must reach the executor"
+  assert first_press - lift >= M.GAS_SET_RELEASE_MIN_S - 1e-9, f"pressed {first_press - lift:.2f}s after lift-off"
+  assert first_press - lift <= M.GAS_SET_RELEASE_MIN_S + 0.26, "the idle poll delays by at most 250 ms"
 
 
 def test_the_noCruise_verify_names_the_RESUME_that_was_pressed():
