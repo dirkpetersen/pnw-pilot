@@ -4,6 +4,7 @@ from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
+from openpilot.common.swaglog import cloudlog
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
@@ -35,6 +36,14 @@ FREEWAY_CLASSES = frozenset({"motorway", "motorwayLink", "trunk", "trunkLink"})
 # freeway onto a city street with mapd wedged). Reject the class as unknown once its bridged write-
 # timestamp (MapHighwayClassTs, mapd_configd.py) is older than this.
 MAP_CLASS_TTL_S = 5.0
+
+# lcabort2pnw: the driver steering AGAINST an openpilot lane change -- carstate's debounced steeringPressed
+# with the torque sign opposite the change direction -- for this many consecutive model ticks (0.3 s).
+# From the 2026-08-31 Raven capture (tests/data/lcabort_2026.json): a 3-tick blip as the wheel first moved
+# under the driver's hands 0.15 s into the change, then the real 15-tick fight that ended in steerDisengage.
+# 6 ticks ignores the blip and fires 0.46 s before that disengage; it also outlasts carstate's own
+# release tail (<= 60 ms, so <= 2 ticks) after a manual nudge.
+LANE_CHANGE_ABORT_TICKS = round(0.3 / DT_MDL)
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -80,6 +89,7 @@ class DesireHelper:
     self.nudgeless_lane_change = self.nudgeless_supported and not self.params.get_bool("NudgeForLaneChange")
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
+    self.against_ticks = 0  # lcabort2pnw: consecutive laneChangeStarting ticks with torque against the change
 
     # nudgelesshighway2pnw: highway/freeway gate for the auto (nudgeless) path — mem-param read of
     # mapd's bridged road class, same guarded-import pattern speedadjust_controller.py uses (a mem
@@ -98,6 +108,13 @@ class DesireHelper:
   @staticmethod
   def get_lane_change_direction(CS):
     return LaneChangeDirection.left if CS.leftBlinker else LaneChangeDirection.right
+
+  @staticmethod
+  def torque_against(CS, direction):
+    # lcabort2pnw: the mirror of the nudge test in preLaneChange (steeringTorque > 0 is left on both our cars:
+    # the Lightning's manual nudges start left changes on +torque, the Raven's torque is co-signed with its angle)
+    return CS.steeringPressed and ((CS.steeringTorque < 0 and direction == LaneChangeDirection.left) or
+                                   (CS.steeringTorque > 0 and direction == LaneChangeDirection.right))
 
   def update(self, carstate, lateral_active, lane_change_prob):
     v_ego = carstate.vEgo
@@ -205,11 +222,22 @@ class DesireHelper:
           self.lane_change_direction = LaneChangeDirection.none
         elif (torque_applied or auto_lane_change) and not blindspot_detected:
           self.lane_change_state = LaneChangeState.laneChangeStarting
+          self.against_ticks = 0
 
       # LaneChangeState.laneChangeStarting
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:
         # fade out over .5s
         self.lane_change_ll_prob = max(self.lane_change_ll_prob - 2 * DT_MDL, 0.0)
+
+        # lcabort2pnw SHADOW: log, once per sustained override, what an abort would act on. Changes nothing.
+        self.against_ticks = self.against_ticks + 1 if self.torque_against(carstate, self.lane_change_direction) else 0
+        if self.against_ticks == LANE_CHANGE_ABORT_TICKS:
+          # error=False still logs at ERROR level, which is what puts the event in every qlog
+          cloudlog.event("lane_change_abort_shadow", error=False,
+                         direction="left" if self.lane_change_direction == LaneChangeDirection.left else "right",
+                         torque=round(carstate.steeringTorque, 2), v_ego=round(v_ego, 2),
+                         lane_change_ll_prob=round(self.lane_change_ll_prob, 3), lane_change_prob=round(lane_change_prob, 3),
+                         t_in_change=round(self.lane_change_timer, 2))
 
         # 98% certainty
         if lane_change_prob < 0.02 and self.lane_change_ll_prob < 0.01:
