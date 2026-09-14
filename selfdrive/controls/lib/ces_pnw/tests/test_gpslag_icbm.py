@@ -42,22 +42,27 @@ def _y(lat):
   return (lat - LAT0) * 111320.0
 
 
-def _path():
+def _path(curve_len=400.0, after=0.0):
+  """Straight (velocity 0 = no target) to CURVE_AT, `curve_len` m of MAPV curve points, then `after` m straight."""
   pts, y = [], -200.0
-  while y < CURVE_AT:
+  while y < CURVE_AT + curve_len + after:
     la, lo = _ll(y)
-    pts.append({"latitude": la, "longitude": lo, "velocity": 0.0})
-    y += 20.0
-  for i in range(40):
-    la, lo = _ll(CURVE_AT + 10.0 * i)
-    pts.append({"latitude": la, "longitude": lo, "velocity": MAPV})
+    v = MAPV if CURVE_AT <= y < CURVE_AT + curve_len else 0.0
+    pts.append({"latitude": la, "longitude": lo, "velocity": v})
+    y += 10.0 if CURVE_AT <= y < CURVE_AT + curve_len else 20.0
   return pts
 
 
-def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_every=1.0):
+def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_every=1.0, follow_set=False,
+              path=None, y_end=CURVE_AT, clear_at=None, events_out=None):
   """blob(t_read) -> None or (y_fix, x_fix, fix_ts or None, src): the LastGPSPosition ces_pnw's _read_map
   copies at t_read (1 Hz on the car). Returns (start (t, true distance to the curve, src) or None, published
-  targets, logged gps events)."""
+  targets, logged gps events).
+
+  follow_set: the stock set (and v_set, as on the car) follows the published target by 1 mph per 0.25 s tick,
+  the way the executor's taps move it -- without it `_stock_set` never moves and a restore can never become
+  eligible, so a test could not see one. path/y_end: a custom mapd path and how far (m) to drive. clear_at:
+  from this time mapd reports no curve at all (its velocities read 0). events_out: all logged events."""
   clock = [0.0]
   monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
   monkeypatch.setattr(m.time, "time", lambda: clock[0])
@@ -78,18 +83,19 @@ def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_ever
                    _icbm_k_at_gap=0.0, _stock_set=VSET, _stock_on=True, _icbm_last_pub=-1e9).items():
     setattr(c, k, v)
   step = cls._icbm_step.__get__(c)
-  pts, start, t = _path(), None, 0.0
-  while t <= t_end and V * t < CURVE_AT:
+  pts, start, t = (path if path is not None else _path()), None, 0.0
+  while t <= t_end and V * t < y_end:
     clock[0] = t
     if abs(t - round(t)) < 1e-9:                         # mapd path, 1 Hz
-      c._map_targets = [p for p in pts if V * t - 5.0 < _y(p["latitude"]) <= V * t + 500.0]
+      cleared = clear_at is not None and t >= clear_at
+      c._map_targets = [dict(p, velocity=0.0) if cleared else p for p in pts if V * t - 5.0 < _y(p["latitude"]) <= V * t + 500.0]
     if abs(t / read_every - round(t / read_every)) < 1e-9:   # ces_pnw blob read
       b = blob(t)
       if b is not None:
         (c._cur_lat, c._cur_lon), c._gps_fix_ts, c._gps_src = _ll(b[0], b[1]), b[2], b[3]
     mtv, mtd = m.upcoming_curve(c._map_targets, c._cur_lat, c._cur_lon, V, m.C.CURVE_MAP_LOOKAHEAD_S)   # the caller
     vis = vision_at is not None and CURVE_AT - V * t <= vision_at
-    sig = {"v_ego": V, "v_set": VSET, "map_target_v": mtv, "map_target_dist": mtd,
+    sig = {"v_ego": V, "v_set": c._stock_set if follow_set else VSET, "map_target_v": mtv, "map_target_dist": mtd,
            "curve_lat_accel_vision": 4.0 if vis else 0.0, "time_to_curve": (CURVE_AT - V * t) / V if vis else 10.0,
            "lat_accel_now": 0.0, "has_lead": False, "lead_drel": 0.0, "lead_vlead": 0.0, "gas": False, "brake": False,
            "spd_lim": 0.0, "pitch": None, "vis_k_max": None, "vis_reach": 0.0}
@@ -98,7 +104,11 @@ def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_ever
     tgt = pubs[-1][1].get("target") if pubs else None
     if start is None and tgt is not None:
       start = (t, CURVE_AT - V * t, c._icbm_src)
+    if follow_set and tgt is not None:                   # the executor: one tap's worth toward the target
+      c._stock_set += max(min(tgt - c._stock_set, 0.447), -0.447) if abs(tgt - c._stock_set) > 0.2 else 0.0
     t = round(t + 0.25, 6)
+  if events_out is not None:
+    events_out.extend(events)
   return start, pubs, [kw for name, kw in events if name == "ces_icbm_gps"]
 
 
@@ -204,14 +214,22 @@ class TestSourceSwitch:
     assert max(steps) <= abs(along) + V * 0.2 + 0.5, f"the projected position jumped {max(steps):.1f} m"
 
   def test_a_switch_inside_the_episode_does_not_end_it(self, monkeypatch):
+    """Fable, gpslag review (b): the first version could not see a restore -- the stub's stock set never moved,
+    so a restore was never eligible. The set now follows the published caps, and the positive control below
+    proves this harness DOES see a restore when the curve really clears."""
     base = _approach(monkeypatch, _fresh(0.6))[0]
     t_sw = base[0] + 3.0
     blob = lambda t: ((V * (t - 0.6), 3.0, t - 0.6, "device") if t < t_sw          # noqa: E731
                       else (V * (t - 1.2) - 6.0, 0.0, t - 1.0, "car"))
-    start, pubs, _ = _approach(monkeypatch, blob)
+    start, pubs, _ = _approach(monkeypatch, blob, follow_set=True)
     after = [p for t, p in pubs if t >= start[0]]
     assert after and all(p.get("target") is not None and p.get("dir", "dec") == "dec" for p in after), \
       "the episode ended or turned into a restore across the switch"
+
+  def test_positive_control_the_harness_sees_a_restore_when_the_curve_really_clears(self, monkeypatch):
+    base = _approach(monkeypatch, _fresh(0.6))[0]
+    _, pubs, _ = _approach(monkeypatch, _fresh(0.6), follow_set=True, clear_at=float(math.ceil(base[0] + 3.0)))
+    assert any(p.get("dir") == "inc" for _, p in pubs), "no restore even on a real clear: the harness is blind"
 
 
 class TestEveryIcbmLookupUsesTheProjectedPosition:
