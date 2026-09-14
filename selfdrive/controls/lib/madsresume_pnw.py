@@ -725,6 +725,11 @@ class MadsResumeBrain:
         if self._armed:
           # An episode was open. The driver has just overruled it; end it now rather than letting
           # its window keep running behind the opt-out they just asked for.
+          if self._offer_t is not None:
+            # Fable review (c): the offer on the wire ends here too; say so, as every other withdrawal does.
+            # (A brake during an offer is always within REJECT_AFTER_FIRE_S of the fire, so this is the only
+            # disarm path an in-flight offer can reach.)
+            out.records.append(self._snap(i, {"phase": "offerEnd", "reason": why, "fired": True}))
           self._terminate(i, out, why)
           self._disarm()
       self._last_brake_t = i.now

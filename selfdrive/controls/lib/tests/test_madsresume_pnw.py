@@ -929,6 +929,8 @@ def test_a_brake_after_the_gas_set_wait_lands_after_the_set_and_cancels_it():
   assert n_off > 0, "the SET must be offered once the 1.0 s wait has passed"
   assert len(d.offers) == n_off, "the offer must be withdrawn on the brake tick"
   assert "postResumeBrake" in d.reasons("suppress"), d.phases()
+  # Fable review (c): the withdrawal is on record, not only implied by the suppress record
+  assert [r.get("reason") for r in d.records if r["phase"] == "offerEnd"] == ["postResumeBrake"], d.phases()
 
 
 def test_the_gas_set_waits_1s_after_lift_off_and_RESUME_still_waits_0p5s():
