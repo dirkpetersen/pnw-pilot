@@ -92,6 +92,8 @@ class VTSCController:
     self._cur_bearing = None
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
+    self._floor_err_t = None   # silentexc3pnw: monotonic time of the last logged MapSpeedLimit/RoadContext read failure
+    self._floor_err_n = 0      # silentexc3pnw: failed floor-input reads since that log line
     self._cur_lat = self._cur_lon = None
     self._map_read_err_t = None  # silentexc2pnw: monotonic time of the last logged MapTargetVelocities read failure
     self._map_read_err_n = 0     # silentexc2pnw: failed MapTargetVelocities reads since that log line
@@ -159,8 +161,23 @@ class VTSCController:
           ctx = self.mem_params.get("RoadContext", return_default=True) if self.mem_params else None
           ctx = ctx.decode() if isinstance(ctx, bytes) else (ctx or "")
           self._is_freeway = (ctx == "freeway")
-        except Exception:
+        except Exception as e:
+          # silentexc3pnw (Rule 2): was a silent `except Exception:`. Fallback unchanged: no limit and not a freeway, so
+          # NO freeway floor at the posted limit -- VTSC may then brake a freeway curve below the limit (the I-90
+          # over-brake class), on both op-long cars. The read runs whether or not VTSC is enabled, so it also logs where
+          # VTSC is off (stock ACC, CESMode Off) -- the read failure is real either way. An unset key is not a failure
+          # (MapSpeedLimit None -> 0.0, RoadContext None -> "", no exception). What raises: UnknownKeyName on a
+          # params_keys.h / params_pyx.so mismatch, float() of a non-numeric limit, or RoadContext bytes that are not
+          # UTF-8. Logged in the twistyr2pnw style with its own state; this try already sits inside _read_enabled's own
+          # except.
           self._speed_limit, self._is_freeway = 0.0, False
+          self._floor_err_n += 1
+          if self._floor_err_t is None or now - self._floor_err_t >= TWISTY_ERR_LOG_S:
+            cloudlog.exception(f"VTSC: MapSpeedLimit/RoadContext unreadable ({type(e).__name__}) -- NO freeway floor at " +
+                               "the posted limit while this lasts: an enabled VTSC may brake freeway curves below the " +
+                               f"limit ({self._floor_err_n} failure(s) since the last log)")
+            self._floor_err_t = now
+            self._floor_err_n = 0
       except Exception as e:
         # silentexc2pnw (Rule 2): this was a bare `except Exception:`, so a read error switched VTSC off with no trace --
         # no VTSC curve slowdown (vision or map) on an op-long car, which looks exactly like CESMode=Off. The
