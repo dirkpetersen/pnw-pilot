@@ -443,6 +443,7 @@ def main() -> None:
 
     updater = Updater()
     update_failed_count = 0 # TODO: Load from param?
+    failed_fetch_count = 0  # updatebackoff2pnw: consecutive passes whose FETCH raised; sets the retry backoff
     wait_helper = WaitTimeHelper()
 
     # invalidate old finalized update
@@ -464,6 +465,7 @@ def main() -> None:
 
       # Attempt an update
       exception = None
+      fetch_started = False
       try:
         # TODO: reuse overlay from previous updated instance if it looks clean
         init_overlay()
@@ -495,6 +497,7 @@ def main() -> None:
           network_type = HARDWARE.get_network_type()
           cloudlog.event("updated: fetching update", metered=params.get_bool("NetworkMetered"),
                          network_type=NETWORK_TYPE_NAMES.get(network_type, network_type), user_requested=user_requested_fetch)
+          fetch_started = True
           updater.fetch_update()
           write_time_to_param(params, "UpdaterLastFetchTime")
         update_failed_count = 0
@@ -520,8 +523,26 @@ def main() -> None:
         cloudlog.exception("uncaught updated exception while setting params, shouldn't happen")
 
       # infrequent attempts if we successfully updated recently
+      # updatebackoff2pnw: a fetch that dies mid-download unlinks OVERLAY_INIT, so the next pass wipes the
+      # staging overlay and re-downloads the git pack, every changed LFS object and any AGNOS image. Retrying
+      # that at a flat 5 min is up to 288 full downloads a day on a metered link. Consecutive failed FETCHES
+      # back off 5, 10, 20, 40, 80 min, capped at the normal 1.5 h interval, so a failing device never polls
+      # less often than a healthy one. A pass that failed before fetching (offline: `git ls-remote` raised)
+      # downloaded nothing and keeps the 5 min retry, so returning connectivity is noticed quickly; it leaves
+      # the backoff level alone. Any successful pass resets it. SIGHUP still wakes this sleep immediately.
+      prev_failed_fetch_count = failed_fetch_count
+      if update_failed_count == 0:
+        failed_fetch_count = 0
+        wait = 1.5*60*60
+      elif fetch_started:
+        failed_fetch_count += 1
+        wait = min(5*60 * 2**(failed_fetch_count - 1), 1.5*60*60)
+      else:
+        wait = 5*60
+      if failed_fetch_count != prev_failed_fetch_count:
+        cloudlog.event("updated: fetch retry backoff", failed_fetches=failed_fetch_count, retry_in_s=wait)
       wait_helper.user_request = UserRequest.NONE
-      wait_helper.sleep(5*60 if update_failed_count > 0 else 1.5*60*60)
+      wait_helper.sleep(wait)
 
 
 if __name__ == "__main__":
