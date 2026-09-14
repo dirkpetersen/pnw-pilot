@@ -1139,6 +1139,11 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
     recede.last_pick.clear()
     return {"state": "nodata", "err": err} if err else {"state": "nodata"}
   now = _now_epoch()
+  if state == "held":
+    # policeship2pnw (Fable review of cfa47c85c9): _hold() expires the retained cache only when the poll
+    # thread wakes, and after a failure it sleeps the whole backoff (15 min under a 402/429 park), so a
+    # held report could outlive POLICE_RETAIN_S by that much. Re-check the TTL here, every 1 Hz tick.
+    alerts = [al for al in alerts if al.get("last_seen") is None or now - float(al["last_seen"]) <= POLICE_RETAIN_S]
   recede.prune(alerts)                           # bound tracking state to the current Waze pull
   # NO staleness drop (2026-07-09, reaffirmed by the driver 2026-08-18): an old report is still worth
   # showing when nothing fresher is in range — age is surfaced to the UI (and will drive a confidence
@@ -1333,6 +1338,11 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
          "retained": bool(poi.get("retained")),
          "thumbs": poi.get("thumbs"),
          "uuid": poi.get("uuid"), "town": poi.get("town", "")}
+  if state == "held" and err:
+    # Rule 2 (Fable review of cfa47c85c9): a held report must not hide WHY we are not polling. Before the
+    # hold, a 429 park or a dead link showed red "daily limit" / "net err" and the driver knew to use their
+    # own Waze; with a held amber report on screen that reason had vanished for up to 45 min.
+    out["err"] = err
   # CONTROL channel: the nearest CONFIRMED report, or absent when there is none. Its presence is what
   # licenses a slowdown/banner -- consumers must NOT act on the display fields above. Keyed off the
   # `tier` key so a pre-tier payload (no `tier`, no `cap`) keeps the old whole-line behaviour.

@@ -126,6 +126,10 @@ class LocationServicesStatusRenderer(Widget):
         txt += " - your way"
       elif d == "opp":
         txt += " - other side"
+      if p.get("err"):
+        # policeship2pnw: a report held while polling is off or failing carries the reason ("net err",
+        # "daily limit", "speed <45mph"), so the driver sees the report AND that it is not being refreshed.
+        txt += f" - {p['err']}"
       # policetier2pnw: colour carries the confidence. Unknown/missing tier renders as CONFIRMED so an
       # older locationd payload can never silently downgrade a live report to the quiet colour.
       color = _C.AMBER if p.get("tier") == "unconfirmed" else _C.ORANGE

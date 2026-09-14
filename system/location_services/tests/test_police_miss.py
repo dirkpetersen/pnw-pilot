@@ -303,3 +303,74 @@ class TestGateRecheck:
       assert len(polls) >= 2, f"the trace is mostly above 45 mph; it must poll more than once, got {polls}"
       gaps = [b - a for a, b in zip(polls, polls[1:], strict=False)]
       assert all(g >= lsd.POLICE_POLL_S for g in gaps), f"polls {gaps} s apart at phase {offset}"
+
+
+class TestHeldLineSaysWhyItIsNotRefreshing:
+  """policeship2pnw, Fable review of cfa47c85c9 (BLOCK): replaying _hold("daily limit") over the real 09-13
+  cache published {state: alert, 11.2 mi, unconfirmed, retained, err: None} -- a 15-min 429 park showed an
+  amber far report and nothing else. The reason must ride on the held line, in the payload and on screen."""
+
+  def _held_line(self, reason):
+    pu = _updater()
+    _, pu._retain = merge_retained_police({}, REPORTS_0913_1603, _now_epoch())
+    pu._hold(reason)
+    lat, lon, brg = GPS_0913_1604[0]
+    return _line_police(*pu.snapshot(), lat, lon, brg, [], _recede())
+
+  @pytest.mark.parametrize("reason", ["daily limit", "net err", "budget exceeded", "speed <45mph"])
+  def test_the_held_payload_carries_the_reason(self, reason):
+    out = self._held_line(reason)
+    assert out["state"] == "alert" and out["retained"] is True
+    assert out["err"] == reason
+
+  def test_a_429_park_through_run_reaches_the_line(self):
+    pu = _updater(n_waits=1)
+    _, pu._retain = merge_retained_police({}, REPORTS_0913_1603, _now_epoch())
+    pu._cur_speed = lambda: SPEED_0913_OR58
+
+    def denied(cfg, lat, lon):
+      raise urllib.error.HTTPError(cfg["proxy_url"], 429, "Too Many Requests", None, None)
+    pu._poll_proxy = denied
+    pu.run()
+    assert pu._stop.waits == [lsd.POLICE_MAX_BACKOFF_S]
+    lat, lon, brg = GPS_0913_1604[0]
+    out = _line_police(*pu.snapshot(), lat, lon, brg, [], _recede())
+    assert out["state"] == "alert" and out["err"] == "daily limit"
+
+  def test_a_live_poll_line_has_no_err(self):
+    lat, lon, brg = GPS_0913_1604[0]
+    alerts, _ = merge_retained_police({}, REPORTS_0913_1603, _now_epoch())
+    assert "err" not in _line_police(alerts, "ok", "", lat, lon, brg, [], _recede())
+
+  def test_the_overlay_line_shows_the_reason(self):
+    import openpilot.selfdrive.ui.onroad.location_services_status as ui
+    r = ui.LocationServicesStatusRenderer.__new__(ui.LocationServicesStatusRenderer)
+    r._st = {"police": self._held_line("daily limit")}
+    txt, color = r._police_line()
+    assert txt.startswith("Police") and "daily limit" in txt, txt
+    assert color == ui._C.AMBER
+    r._st = {"police": {"state": "alert", "dist_mi": 3.0, "tier": "confirmed", "last_seen_min": 0}}
+    assert " - " not in r._police_line()[0], "a live line must not grow a reason suffix"
+
+
+class TestHeldTtlOutlivesNoBackoff:
+  """Fable: after a failure the thread sleeps the whole backoff, so _hold()'s expiry ran every 900 s under a
+  402/429 park and a held report could outlive POLICE_RETAIN_S by up to 15 min. The 1 Hz line re-checks it."""
+
+  def _park(self, monkeypatch, seen_ago_s, shown_after_s):
+    t0 = float(int(_now_epoch()))                      # whole seconds: the TTL boundary test is exact
+    pu = _updater()
+    _, pu._retain = merge_retained_police({}, REPORTS_0913_1603, t0 - seen_ago_s)
+    monkeypatch.setattr(lsd, "_now_epoch", lambda: t0)
+    pu._hold("daily limit")                             # the thread holds, then sleeps 900 s
+    monkeypatch.setattr(lsd, "_now_epoch", lambda: t0 + shown_after_s)
+    lat, lon, brg = GPS_0913_1604[0]
+    return _line_police(*pu.snapshot(), lat, lon, brg, [], _recede())
+
+  def test_expired_during_the_park_is_no_longer_shown(self, monkeypatch):
+    out = self._park(monkeypatch, seen_ago_s=40 * 60, shown_after_s=10 * 60)   # 50 min since last seen
+    assert out == {"state": "nodata", "err": "daily limit"}
+
+  def test_still_inside_the_ttl_is_shown(self, monkeypatch):
+    out = self._park(monkeypatch, seen_ago_s=40 * 60, shown_after_s=lsd.POLICE_RETAIN_S - 40 * 60)   # exactly TTL
+    assert out["state"] == "alert"
