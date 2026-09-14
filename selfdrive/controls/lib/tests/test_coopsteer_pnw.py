@@ -97,6 +97,15 @@ class TestOverrideAndDeadzone:
     assert r.target_deg == 0.0
     assert r.offset_deg == 0.0
 
+  def test_debounced_pressed_still_overrides_below_full_torque(self):
+    """coopsteerfix2pnw: the debounced flag must keep its own authority. Its hysteresis holds it True
+    for a few frames after the torque dips back under 1.0 Nm; those frames must stay override, not
+    flip to a 0.9 Nm (near-full) active nudge. Mutation: `override = <torque test only>` (drop
+    `bool(steering_pressed)`) -> reason active, target ~ 0.86 cap."""
+    s = CoopSteerShadow(DT)
+    r = s.update(True, True, 0.9, 20 * MPH, 0.0)
+    assert r.reason == cs.REASON_OVERRIDE and r.target_deg == 0.0 and r.offset_deg == 0.0
+
   def test_zero_torque_is_exactly_zero(self):
     """Mutation: COOP_DEADZONE_NM = -0.1 -> zero torque produces a non-zero ratio... it does not,
     copysign(0)=0 -- so the real mutation is `dz == 0.0` -> `dz == 0.01`, which mis-labels the
@@ -127,6 +136,82 @@ class TestOverrideAndDeadzone:
     assert s.offset_deg > 1.0
     r = s.update(False, False, 0.9, 20 * MPH, 5.0)
     assert r.reason == cs.REASON_INACTIVE and r.offset_deg == 0.0 and s._lp == 0.0
+
+
+class TestTorqueOverrideBeforeDebounce:
+  """coopsteerfix2pnw -- the 2026-09-07 100 Hz replay defect. Tesla's steeringPressed needs 6
+  consecutive frames of |tq| > 1.0 Nm, so for ~50 ms after the driver crosses 1.0 Nm the flag reads
+  False. The module must call that override from the torque itself, not emit the saturated 12 deg
+  cap in the window (77 of 1585 active ticks on the drive, up to 2.98 Nm)."""
+
+  def test_2nm_without_pressed_is_override_not_saturated_active(self):
+    """THE defect. Mutation: `elif override:` -> `elif steering_pressed:` (the pre-fix branch) ->
+    reason active, target = the full 12 deg cap."""
+    for tq in (2.0, -2.0):
+      s = CoopSteerShadow(DT)
+      r = s.update(True, False, tq, 10 * MPH, 0.0)
+      assert r.reason == cs.REASON_OVERRIDE, (tq, r)
+      assert r.target_deg == 0.0 and r.offset_deg == 0.0
+
+  def test_exact_boundary_is_strict_greater_than_1nm(self):
+    """1.0 Nm exactly is still the top of the nudge band (ratio 1 -> target == cap), matching the
+    carstate's own strict `abs(torque) > STEER_THRESHOLD`; the next representable float above it is
+    override. Literal 1.0 on purpose, not COOP_FULL_NM. Mutations: `>` -> `>=` (1.0 becomes
+    override); `abs(...)` dropped (-1.0000000000000002 stays active)."""
+    above = math.nextafter(1.0, math.inf)
+    for sign in (1.0, -1.0):
+      s = CoopSteerShadow(DT)
+      r = s.update(True, False, sign * 1.0, 20 * MPH, 0.0)
+      assert r.reason == cs.REASON_ACTIVE, (sign, r)
+      assert r.target_deg == pytest.approx(sign * r.cap_deg, rel=1e-9)
+      s = CoopSteerShadow(DT)
+      r = s.update(True, False, sign * above, 20 * MPH, 0.0)
+      assert r.reason == cs.REASON_OVERRIDE, (sign, r)
+      assert r.target_deg == 0.0
+
+  def test_real_tesla_debounce_window_never_reads_active_above_1nm(self):
+    """End to end against the REAL opendbc debouncer (CarStateBase.update_steering_pressed with the
+    Tesla carstate's arguments: > STEER_THRESHOLD, min count 5): a driver ramping from a held 0.9 Nm
+    push to 2.98 Nm. On every tick where |tq| > 1.0 the module must say override with target 0, and
+    the window where steeringPressed is still False must actually exist (else the test is vacuous).
+    Mutation: the pre-fix branch -> active ticks with |tq| > 1.0 and a 12 deg target."""
+    from opendbc.car.interfaces import CarStateBase
+    from opendbc.car.tesla.values import STEER_THRESHOLD
+    deb = type("Deb", (), {"steering_pressed_cnt": 0})()
+    s = CoopSteerShadow(DT)
+    trace = [0.9] * 300 + [1.2, 1.6, 2.1, 2.6, 2.98, 2.98, 2.98, 2.98, 2.98, 2.98]
+    window = 0
+    for tq in trace:
+      pressed = CarStateBase.update_steering_pressed(deb, abs(tq) > STEER_THRESHOLD, 5)
+      r = s.update(True, pressed, tq, 4.6, 0.0)
+      if abs(tq) > 1.0:
+        window += 0 if pressed else 1
+        assert r.reason == cs.REASON_OVERRIDE and r.target_deg == 0.0, (tq, pressed, r)
+    assert window >= 5, f"debounce window not exercised ({window} unpressed ticks above 1 Nm)"
+
+  def test_torque_override_sheds_held_offset_at_the_full_jerk_rate(self):
+    """A torque-derived override is the same override: a held offset sheds at the full jerk budget
+    (Fable should-fix 3), not the gentle release rate. Mutation: slew `or override` ->
+    `or bool(steering_pressed)` -> sheds at half rate in the debounce window."""
+    s = CoopSteerShadow(DT)
+    _run(s, 0.9, 30.0, 400)
+    before = s.offset_deg
+    assert before > 0.5
+    r = s.update(True, False, 2.0, 30.0, 0.0)
+    assert r.reason == cs.REASON_OVERRIDE
+    assert before - r.offset_deg == pytest.approx(1.0 * s.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
+
+  def test_nonfinite_torque_is_still_bad_input_at_the_release_rate(self):
+    """inf torque is a broken input, not a 'huge push': reason badInput and the held offset decays at
+    the pre-fix (half) rate, i.e. the badInput path is unchanged by this fix. Mutation: drop the
+    `_finite(torque_nm) and` guard in the override test -> abs(inf) > 1 -> full-rate shed."""
+    s = CoopSteerShadow(DT)
+    _run(s, 0.9, 30.0, 400)
+    before = s.offset_deg
+    assert before > 0.5
+    r = s.update(True, False, float("inf"), 30.0, 0.0)
+    assert r.reason == cs.REASON_BAD_INPUT
+    assert before - r.offset_deg == pytest.approx(0.5 * s.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
 
 
 class TestWashout:
@@ -172,8 +257,11 @@ class TestWashout:
     the un-clipped ratio (e.g. `self._lp += (tq * 100 - self._lp) * ...`)."""
     s = CoopSteerShadow(DT)
     for _ in range(5000):
-      s.update(True, False, 50.0, 5.0, 0.0)     # absurd 50 Nm (would be steeringPressed in reality)
-    assert abs(s._lp) <= 12.0 + 1e-9
+      # coopsteerfix2pnw: was an absurd 50 Nm, which is now an override (target 0) and would make this
+      # test vacuous. 1.0 Nm is the largest torque that still drives the target to the full cap.
+      s.update(True, False, 1.0, 5.0, 0.0)
+    assert s._lp == pytest.approx(12.0, abs=1e-3)   # it DID wind up to the cap (the test is live)...
+    assert abs(s._lp) <= 12.0 + 1e-9                 # ...and no further
 
   def test_reversal_is_not_attenuated_by_stale_memory(self):
     """A fresh torque reversal must be felt at full raw strength (the clamp caps washed at the raw

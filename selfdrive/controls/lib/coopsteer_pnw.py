@@ -31,7 +31,8 @@ BOUNDS (and why each number):
   Torsion-bar torque under 0.3 Nm is wheel weight / bias noise; 1.0 Nm is where the Tesla
   carstate's steeringPressed (full override) takes over, so the nudge reaches its own maximum
   exactly where the override begins. The nudge lives ONLY in the 0.3-1.0 Nm dead band under the
-  override threshold; steeringPressed itself zeroes it (see `update`).
+  override threshold. Torque above COOP_FULL_NM zeroes it on the same tick, as does steeringPressed
+  (which is debounced 50 ms and so latches later); see `update`.
 
 * COOP_ABS_MAX_DEG = 12.0 (flat, speed-independent)  [carried from Penduras 3b5f67c42]
   Physics check (TESLA-MADS-FEASIBILITY.md s3, Raven sR 15.0, wheelbase 2.96 m): 12 deg at the
@@ -107,7 +108,7 @@ RAVEN_WHEELBASE_M = 2.96
 # means the module decided on zero and says why. None (absent) in telemetry means the car has no
 # coop_steer capability at all -- see telemetry_fields().
 REASON_INACTIVE = "inactive"    # lateral not active: state reset, offset 0
-REASON_OVERRIDE = "override"    # steeringPressed (>= 1 Nm debounced): the driver owns the wheel
+REASON_OVERRIDE = "override"    # steeringPressed (debounced) OR |torque| > 1 Nm this tick: the driver owns the wheel
 REASON_DEADZONE = "deadzone"    # |torque| <= 0.3 Nm: nothing to respond to
 REASON_BAD_INPUT = "badInput"   # NaN/inf on an input: refuse to compute rather than guess
 REASON_ACTIVE = "active"
@@ -181,12 +182,23 @@ class CoopSteerShadow:
       self.reset()
       return CoopSteerResult(0.0, 0.0, 0.0, 0.0, REASON_INACTIVE, float(angle_cmd_deg) if _finite(angle_cmd_deg) else 0.0)
 
+    # coopsteerfix2pnw: override is decided from the torque ITSELF as well as from steeringPressed.
+    # Tesla's steeringPressed is debounced (update_steering_pressed(|tq| > 1.0, 5): 6 consecutive
+    # frames), so for ~50 ms after the driver crosses 1.0 Nm it is still False. Without this the
+    # module stayed "active" in that window and the ratio saturated at 1.0 -> the FULL 12 deg cap,
+    # emitted exactly as the driver takes over (drive 2026-09-07: 77 of 1585 active ticks, up to
+    # 2.98 Nm). Strict `>` matches the carstate's own `abs(torque) > STEER_THRESHOLD`. The debounced
+    # flag is kept too: its hysteresis holds the override for a few frames after torque dips under
+    # 1.0 Nm, which is the conservative side. Do NOT shorten the carstate debounce instead -- that
+    # flag is shared with disengagement logic.
+    override = bool(steering_pressed) or (_finite(torque_nm) and abs(float(torque_nm)) > COOP_FULL_NM)
+
     if not (_finite(torque_nm) and _finite(v_ego) and _finite(angle_cmd_deg)):
       # A NaN torque is a broken input, not "no torque": target zero (the held offset then decays at
       # the normal slew), and SAY SO via the reason code.
       v_eff = float(v_ego) if _finite(v_ego) else COOP_V_FLOOR
       target, cap, reason = 0.0, self.cap_deg(v_eff), REASON_BAD_INPUT
-    elif steering_pressed:
+    elif override:
       target, cap, reason = 0.0, self.cap_deg(v_ego), REASON_OVERRIDE
       v_eff = float(v_ego)
     else:
@@ -219,7 +231,8 @@ class CoopSteerShadow:
     # and any held offset is by definition stale -- sheding it at half rate would be the exact "stale
     # offset fights the driver" case that finding was about. A plain release (torque -> 0, not
     # pressed) keeps the gentle half rate so the return to the model's line is not a snap.
-    opposing = (target != 0.0 and self._offset != 0.0 and (target * self._offset) < 0.0) or bool(steering_pressed)
+    # coopsteerfix2pnw: a torque-derived override is the same override, so it sheds at the same rate.
+    opposing = (target != 0.0 and self._offset != 0.0 and (target * self._offset) < 0.0) or override
     frac = COOP_SLEW_FRAC_OPPOSING if opposing else COOP_SLEW_FRAC_SAME
     rate = min(frac * self.jerk_rate_deg_s(v_eff), COOP_SLEW_MAX_DEG_S)
     if not _finite(rate):
