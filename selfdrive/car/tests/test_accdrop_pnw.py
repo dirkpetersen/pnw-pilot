@@ -329,6 +329,11 @@ def test_route_lookup_nulls_carry_a_reason(tmp_path, mocker, monkeypatch):
   assert "loggerd was not recording" in out["routeStaleWhy"]
   out = adp.current_route_segment(wall() + adp.SEGMENT_S + 5)   # a segment about to roll is NOT stale
   assert out["routeStale"] is False
+  # ...nor one loggerd has not rotated yet because an encoder stalled: its hard fallback is SEGMENT_LENGTH*1.2
+  out = adp.current_route_segment(wall() + adp.SEGMENT_S * 1.2)
+  assert out["routeStale"] is False, out
+  out = adp.current_route_segment(wall() + 76)                  # past STALE_ROUTE_S = 75 s: stale
+  assert out["routeStale"] is True, out
   out = adp.current_route_segment(wall() + 1.2)       # Sun 14:05:46: edge 1.2 s into seg 348
   assert out["segsToKeep"] == [347, 348]
   mocker.patch("openpilot.system.hardware.hw.Paths.log_root", side_effect=OSError("gone"))

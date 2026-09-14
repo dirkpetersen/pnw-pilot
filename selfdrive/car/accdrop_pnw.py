@@ -78,7 +78,9 @@ TX_MAXLEN = 1024              # a cancel is 2 frames/tick at 100 Hz: 1024 covers
 MAX_EVENTS_PER_MIN = 10       # a flapping CcStat must not rotate the whole ces_events log away
 BUTTON_ADDR = 0x083
 SEGMENT_S = 60.0              # loggerd segment length
-STALE_ROUTE_S = SEGMENT_S + 10.0   # newest segment older than this at the edge -> loggerd was not recording
+STALE_ROUTE_S = 75.0         # newest segment older than this at the edge -> loggerd was not recording. Must clear
+                             # loggerd's hard fallback rotation at SEGMENT_LENGTH*1.2 = 72 s (loggerd.cc): with a
+                             # stalled encoder a RECORDING segment can legitimately run 70-72 s (was 70 -> false stale)
 
 CS_COLS = ("ccEn", "ccAv", "accFault", "brake", "gas", "steerPressed", "standstill", "ccStandstill", "gear",
            "blinkL", "blinkR", "door", "belt", "espOff", "steerFaultTmp", "steerFaultPerm", "sensorsInvalid",
@@ -198,9 +200,9 @@ def current_route_segment(edge_wall: float) -> dict:
       keep.add(n + 1)
     out["segsToKeep"] = sorted(keep)
     # loggerd never clears CurrentRoute (loggerd.cc), so when it is stopped -- parknorec2pnw in Park, or anything
-    # else -- the param still names the last route. Recording creates a segment directory every SEGMENT_S, so a
-    # newest one that started longer ago than that means the edge is in NO rlog. Derived from the directories
-    # already read here: no subscription, no dependency on why loggerd stopped.
+    # else -- the param still names the last route. Recording creates a segment directory every SEGMENT_S (at most
+    # every 72 s, loggerd's fallback), so a newest one that started longer ago than STALE_ROUTE_S means the edge is
+    # in NO rlog. Derived from the directories already read here: no subscription, no dependency on why loggerd stopped.
     out["routeStale"] = out["edgeInSegS"] > STALE_ROUTE_S
     if out["routeStale"]:
       out["routeStaleWhy"] = (f"newest segment started {out['edgeInSegS']} s before the edge (> {STALE_ROUTE_S:.0f} s): " +
