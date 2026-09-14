@@ -194,9 +194,12 @@ def update_home_arrival(state: dict[str, tuple[int, bool]],
 
   ABSENCE IS ESTABLISHED ONLY BY EVIDENCE, two kinds:
 
-    * PIN_HOME_ABSENT_SCANS consecutive REAL scans that do not list it. A scan that did not run
-      (scan_ssids None) is no evidence and changes nothing. A single missing result is not absence --
-      APs drop out of scans -- and any scan that DOES list it resets the count, so flicker never adds up.
+    * PIN_HOME_ABSENT_SCANS consecutive REAL scans that do not list it -- ONLY while GPS cannot place the
+      truck within PIN_HOME_FAR_M of the network's learned location (no fix, or no learned location). With
+      GPS saying the truck is still there, a missing result is the AP, not the truck: a router reboot, a
+      DFS check, a weak signal from the garage. A scan that did not run (scan_ssids None) is no evidence
+      and changes nothing. A single missing result is not absence -- APs drop out of scans -- and any scan
+      that DOES list it resets the count, so flicker never adds up.
 
     * GPS: the truck is more than PIN_HOME_FAR_M from that network's LEARNED location, on a tick where no
       real scan listed it. This is how "not visible at pick time" is established when no scan ran around
@@ -224,11 +227,16 @@ def update_home_arrival(state: dict[str, tuple[int, bool]],
     if scan is not None and low in scan:
       out[low] = (0, False)              # seen: present now, and any run of misses is broken
       continue
-    if scan is not None:
+    dist = (haversine_m(lat, lon, gps[0], gps[1])
+            if gps is not None and lat is not None and lon is not None else None)
+    # A missing scan result counts ONLY when GPS cannot say the truck is still at that network's learned
+    # location (Fable, netrank2pnw review). Parked at home, three misses at the 20 s poll is one minute:
+    # a router reboot, a 5 GHz DFS channel-availability check, or a weak AP heard from the garage -- and a
+    # weak home AP is the likeliest reason to pick Starlink at home in the first place. Counting those
+    # ended an at-home pin while GPS said the truck never moved.
+    if scan is not None and not (dist is not None and dist <= PIN_HOME_FAR_M):
       missing += 1
-    far = (gps is not None and lat is not None and lon is not None
-           and haversine_m(lat, lon, gps[0], gps[1]) > PIN_HOME_FAR_M)
-    out[low] = (missing, missing >= PIN_HOME_ABSENT_SCANS or far)
+    out[low] = (missing, missing >= PIN_HOME_ABSENT_SCANS or (dist is not None and dist > PIN_HOME_FAR_M))
   return out
 
 

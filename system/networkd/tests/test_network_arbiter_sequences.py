@@ -116,6 +116,10 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
   # netrank2pnw: near_home may be a callable, so a sequence can ARRIVE home mid-run
   monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home() if callable(near_home) else near_home)
   monkeypatch.setattr(d, "_usable_cache", {})
+  # netrank2pnw: _metered_cache is a module global too. It was never reset here, so a value cached by one
+  # test leaked into the next -- a "failed read with nothing cached" could not be reproduced reliably and
+  # results could depend on test order (Fable had to reset it by hand in its probe).
+  monkeypatch.setattr(d, "_metered_cache", {})
 
   nets = [{"label": s, "ssid": s, "lat": None if s in mobile else 47.0, "lon": None if s in mobile else -122.0,
            "mobile": s in mobile} for s in priority]
@@ -656,7 +660,7 @@ class TestPinYieldsToHome:
              hooks=[arrive], priority=(HOME, PHONE),
              params={"WifiManualPick": _pick(STAR)})
     assert ID_HOME in nm.ups, f"a road pin kept the truck off the home network: {nm.up_log}"
-    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "to": HOME}) in events
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "trigger": HOME}) in events
 
   def test_the_MOBILE_phone_in_range_does_NOT_end_the_pin(self, monkeypatch, events):
     """Scans running (near a learned location), the explicitly unmetered phone in range, Starlink pinned.
@@ -812,24 +816,54 @@ class TestAPickMadeAtHomeSticks:
              params={"WifiManualPick": _pick(STAR)})
     assert ID_HOME not in nm.ups, f"a flickering home network ended the pick: {nm.up_log}"
 
-  def test_but_a_home_that_is_GENUINELY_absent_and_then_returns_does_end_it(self, monkeypatch, events):
-    """The other side of the flicker rule: absence across enough REAL scans is genuine."""
+  def test_home_missing_from_scans_while_GPS_says_the_truck_is_STILL_HOME_does_not_end_it(self, monkeypatch, events):
+    """INVERTED by Fable's netrank2pnw review (D2). This test used to assert the opposite -- that four
+    consecutive real scans without home, then its return, ENDED an at-home pin. Parked at home that is one
+    minute of silence from the AP: a router reboot, a 5 GHz DFS channel check, or a weak signal from the
+    garage -- and a weak home AP is the likeliest reason to pick Starlink at home at all. With GPS placing
+    the truck at the learned home location throughout, the truck never left, so the pick stands."""
     nm = FakeNM()
     self._at_home(nm)
     def outage(nm, tk):
       nm.scan = [STAR] if 2 <= tk < 6 else [STAR, HOME]     # FOUR consecutive real scans without home
+    run_loop(monkeypatch, nm, ticks=14, near_home=True, hooks=[outage], priority=(HOME, PHONE),
+             gps=(47.0, -122.0), params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME not in nm.ups, f"an AP outage ended an at-home pick while GPS said we never moved: {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+  def test_WITHOUT_GPS_a_genuine_scan_absence_still_ends_it(self, monkeypatch, events):
+    """Scan-count absence survives exactly where GPS cannot speak: no fix. Four real scans without home,
+    then back -> the pin ends and the ladder takes home."""
+    nm = FakeNM()
+    self._at_home(nm)
+    def outage(nm, tk):
+      nm.scan = [STAR] if 2 <= tk < 6 else [STAR, HOME]
     run_loop(monkeypatch, nm, ticks=12, near_home=True, hooks=[outage], priority=(HOME, PHONE),
-             params={"WifiManualPick": _pick(STAR)})
-    assert ID_HOME in nm.ups, f"a genuinely returning home network did not end the pin: {nm.up_log}"
-    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "to": HOME}) in events
+             gps=None, params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME in nm.ups, f"with no GPS, a genuine absence did not end the pin: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "trigger": HOME}) in events
+
+  def test_home_flickering_WITHOUT_GPS_does_not_end_it_either(self, monkeypatch, events):
+    """The flicker guard where it still carries weight: no fix, so scan misses are the only evidence, and a
+    presence must reset them. (With GPS at home misses do not count at all, which hid mutation A3.)"""
+    nm = FakeNM()
+    self._at_home(nm)
+    pattern = [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0]
+    assert "000" not in "".join(map(str, pattern * 2)), "precondition: never three misses in a row"
+    def flicker(nm, tk):
+      nm.scan = [STAR, HOME] if pattern[tk % len(pattern)] else [STAR]
+    run_loop(monkeypatch, nm, ticks=36, near_home=True, hooks=[flicker], priority=(HOME, PHONE),
+             gps=None, params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME not in nm.ups, f"flicker without GPS ended the pick: {nm.up_log}"
 
   def test_SCANS_THAT_FAIL_at_home_are_not_absence(self, monkeypatch, events):
-    """nmcli failing to scan for several ticks says nothing about whether home left."""
+    """nmcli failing to scan for several ticks says nothing about whether home left. Run WITHOUT GPS: with
+    GPS at home the D2 guard refuses to count misses anyway, which hid mutation A4."""
     nm = FakeNM()
     self._at_home(nm)
     hooks = [lambda nm, tk: nm.fail_reads.add("dev wifi list") if 2 <= tk < 8 else nm.fail_reads.discard("dev wifi list")]
     run_loop(monkeypatch, nm, ticks=14, near_home=True, hooks=hooks, priority=(HOME, PHONE),
-             params={"WifiManualPick": _pick(STAR)})
+             gps=None, params={"WifiManualPick": _pick(STAR)})
     assert ID_HOME not in nm.ups, f"failed scans were read as home leaving: {nm.up_log}"
 
   def test_a_REPICK_at_home_after_a_road_pick_sticks(self, monkeypatch, events):
@@ -849,3 +883,89 @@ class TestAPickMadeAtHomeSticks:
     run_loop(monkeypatch, nm, ticks=16, near_home=lambda: where["near"], gps=lambda: where["gps"],
              hooks=[trip], priority=(HOME, PHONE), params=params)
     assert ID_HOME not in nm.ups, f"the new pick inherited the old pick's arrival evidence: {nm.up_log}"
+
+
+class TestACostSwitchNeedsACostThatWasRead:
+  """Fable D1 (netrank2pnw review), measured: when the ACTIVE profile's connection.metered read fails and
+  nothing is cached, choose_wifi ranked the active link as unknown and an explicitly unmetered candidate
+  outranked it -- home torn down for the phone at boot, when NM is slowest, and restored 20 s later."""
+
+  @staticmethod
+  def _flaky_home_read(nm, fail_until):
+    orig = nm.nmcli
+    def flaky(args):
+      if "connection.metered" in " ".join(args) and args[-1] == ID_HOME and nm.t < fail_until:
+        return None
+      return orig(args)
+    nm.nmcli = flaky
+
+  def test_one_failed_first_read_of_the_active_cost_does_not_tear_down_home(self, monkeypatch, events):
+    """Fable's harness, verbatim scenario: at home on Hannelore (`no`), phone (`no`) in range, the FIRST
+    read of Hannelore's cost fails. Before the fix: [(0 s, iPhone), (20 s, Hannelore)]."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_HOME] = ID_HOME, "10.0.0.7"
+    nm.scan, nm.metered = [HOME, PHONE], {HOME: "no", PHONE: "no"}
+    self._flaky_home_read(nm, fail_until=1.0)
+    run_loop(monkeypatch, nm, ticks=4, near_home=True, priority=(HOME, PHONE))
+    assert nm.up_log == [], f"one unreadable first read tore down home for the phone: {nm.up_log}"
+    held = [kw for n, kw in events if n == "netcosttier_active_cost_unreadable"]
+    assert held and held[0]["active"] == HOME, "the hold must be LOUD, not silent"
+
+  def test_a_persistently_unreadable_cost_holds_and_logs_ONCE(self, monkeypatch, events):
+    nm = FakeNM()
+    nm.active, nm.ip[ID_HOME] = ID_HOME, "10.0.0.7"
+    nm.scan, nm.metered = [HOME, PHONE], {HOME: "no", PHONE: "no"}
+    self._flaky_home_read(nm, fail_until=1e9)
+    run_loop(monkeypatch, nm, ticks=8, near_home=True, priority=(HOME, PHONE))
+    assert nm.up_log == []
+    assert names(events).count("netcosttier_active_cost_unreadable") == 1, "change-only, not every tick"
+
+  def test_an_unreadable_cost_does_NOT_hold_a_DEAD_link(self, monkeypatch, events):
+    """The exemption: moving off a link that has failed its usability check is failure-driven, not
+    cost-driven. A hold must never keep the device on a dead link."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_HOME] = ID_HOME, None               # associated, never gets an address
+    nm.scan, nm.metered = [HOME, PHONE], {HOME: "no", PHONE: "no"}
+    self._flaky_home_read(nm, fail_until=1e9)
+    run_loop(monkeypatch, nm, ticks=8, near_home=True, priority=(HOME, PHONE))
+    assert ID_PHONE in nm.ups, f"held on a dead link because its cost was unreadable: {nm.up_log}"
+
+  def test_a_successful_read_of_UNKNOWN_is_not_a_failed_read(self, monkeypatch, events):
+    """The distinction the fix rests on: `unknown` is an answer. A default-cost active link with an
+    explicitly unmetered candidate in range is displaced, exactly as the generic rule says."""
+    nm = FakeNM()
+    _with(nm, VISITOR)
+    nm.active, nm.ip[ID_VISITOR] = ID_VISITOR, "10.0.0.4"
+    nm.scan, nm.metered = [VISITOR, PHONE], {PHONE: "no"}   # Visitor reads `unknown` successfully
+    run_loop(monkeypatch, nm, ticks=4, near_home=True, priority=(HOME, VISITOR), mobile=())
+    assert nm.ups[:1] == [ID_PHONE], f"a successful `unknown` was treated as unreadable: {nm.up_log}"
+    assert "netcosttier_active_cost_unreadable" not in names(events)
+
+  def test_a_SECOND_unreadable_episode_is_logged_again(self, monkeypatch, events):
+    """Change-only must reset when a read succeeds -- otherwise the second hold is silent."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_HOME] = ID_HOME, "10.0.0.7"
+    nm.scan, nm.metered = [HOME, PHONE], {HOME: "no", PHONE: "no"}
+    orig = nm.nmcli
+    def flaky(args):
+      bad = nm.t < 30.0 or 60.0 <= nm.t < 90.0              # fail, recover, fail again
+      if "connection.metered" in " ".join(args) and args[-1] == ID_HOME and bad:
+        return None
+      return orig(args)
+    nm.nmcli = flaky
+    # the cache must not paper over the second failure: clear it once recovery has been observed
+    hooks = [lambda nm, tk: d._metered_cache.clear() if tk == 3 else None]
+    run_loop(monkeypatch, nm, ticks=6, near_home=True, hooks=hooks, priority=(HOME, PHONE))
+    assert nm.up_log == []
+    assert names(events).count("netcosttier_active_cost_unreadable") == 2, names(events)
+
+  def test_the_KILL_SWITCH_is_exempt(self, monkeypatch, events):
+    """Binary mode has no notion of cost, so there is nothing cost-driven to hold: on a non-priority link
+    it still tears down to the hotspot exactly as before the ladder, unreadable cost or not."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_STAR] = ID_STAR, "10.0.0.3"
+    nm.scan = [STAR]
+    orig = nm.nmcli
+    nm.nmcli = lambda args: None if ("connection.metered" in " ".join(args) and args[-1] == ID_STAR) else orig(args)
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME,), mobile=(), ladder=False)
+    assert nm.ups[:1] == [HOTSPOT], f"the cost-unreadable hold leaked into binary mode: {nm.up_log}"

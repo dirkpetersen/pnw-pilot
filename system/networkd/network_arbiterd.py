@@ -429,9 +429,28 @@ def _apply(action: str, ssid: str) -> None:
 
 # --- GPS / home-location for the geo-gate ------------------------------------------------------------
 
+GPS_MAX_AGE_S = 10.0   # netrank2pnw: reject a LastGPSPosition older than this (same window location_servicesd uses)
+_gps_stale_logged = ""  # change-only log state for the stale-GPS event
+
+
 def _read_gps(params: Params, mem_params: Params | None) -> tuple[float, float] | None:
-  """Current (lat, lon) from LastGPSPosition (JSON {latitude,longitude}), or None. mapd writes it to
-  the in-memory store; locationd to the persistent one — try both."""
+  """Current (lat, lon) from LastGPSPosition (JSON {latitude, longitude, ..., ts}), or None.
+
+  The only writer in this tree is system/mapd/mapd_configd.py, which bridges the GPS service into the
+  IN-MEMORY store at ~1 Hz with `ts` = time.monotonic() (system-wide, comparable across processes). The
+  previous docstring said "locationd writes the persistent one" -- nothing in this tree does. The
+  persistent key still exists, so an old value can sit there; it is still consulted, and the freshness
+  check below rejects it.
+
+  netrank2pnw FRESHNESS (Fable N2): mapd_configd stops rewriting the param when GPS dies, so a blob can
+  describe where the truck WAS. Consumers here are the geo-gate, geo-learning, and a pin's arrival
+  evidence, which reads "more than 500 m from home" as proof the truck left -- a stale reading is exactly
+  the wrong input for that. A reading older than GPS_MAX_AGE_S, from the future (a `ts` from a previous
+  boot, since monotonic restarts at boot), or without a `ts` (not from the bridge) is treated as NO GPS,
+  and logged once per distinct reason. No GPS is already the fail-safe case everywhere downstream: the
+  geo-gate fails open and a pin gets no arrival evidence."""
+  global _gps_stale_logged
+  problem = "no LastGPSPosition in either store"
   for store in (mem_params, params):
     if store is None:
       continue
@@ -440,9 +459,24 @@ def _read_gps(params: Params, mem_params: Params | None) -> tuple[float, float] 
       if not raw:
         continue
       d = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
-      return float(d["latitude"]), float(d["longitude"])
-    except Exception:
+      lat, lon = float(d["latitude"]), float(d["longitude"])
+      ts = d.get("ts")
+      if ts is None:
+        problem = "LastGPSPosition has no ts (not written by the mapd_configd bridge)"
+        continue
+      age = time.monotonic() - float(ts)
+      if age < 0 or age > GPS_MAX_AGE_S:
+        problem = f"LastGPSPosition is stale (age {age:.0f} s, limit {GPS_MAX_AGE_S:.0f} s)"
+        continue
+      _gps_stale_logged = ""
+      return lat, lon
+    except Exception as e:
+      problem = f"LastGPSPosition unreadable: {type(e).__name__}"
       continue
+  kind = problem.split(" (")[0]
+  if kind != _gps_stale_logged and problem != "no LastGPSPosition in either store":
+    cloudlog.event("network_arbiterd_gps_unusable", problem=problem, treated_as="no GPS")
+    _gps_stale_logged = kind
   return None
 
 
@@ -654,6 +688,7 @@ def main() -> NoReturn:
   pin_problem = ""                              # last logged pick-read problem (change-only log)
   pin_held_logged: tuple | None = None          # last logged hold (change-only log)
   pin_home_state: dict[str, tuple[int, bool]] = {}  # netrank2pnw: home networks' absence since the pick
+  cost_unread_logged: tuple | None = None       # netrank2pnw: last logged hold for an unreadable active cost
   last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
 
 
@@ -871,8 +906,11 @@ def main() -> NoReturn:
                      now, home_ssid=home)
       pin_seen_active = pv.seen_active
       if pv.ended:
+        # `trigger` is the home network whose arrival ended the pin -- NOT necessarily what the ladder
+        # joins next (an explicitly unmetered member earlier in the list would win). The bring-up that
+        # follows logs what is actually joined. (Was `to=`, which claimed the latter.)
         cloudlog.event("netcosttier_pin_cleared", ssid=pin_ssid, reason=pv.ended,
-                       **({"to": home} if pv.ended == "home" else {}))
+                       **({"trigger": home} if pv.ended == "home" else {}))
         pin_ended_key = pin_key
       pinned = bool(pv.pinned_ssid)
 
@@ -889,6 +927,27 @@ def main() -> NoReturn:
         active_ssid=active_ssid,
         priority_ssids=net_ssids,          # netrank2pnw: membership = a tiebreak inside a cost class
       )
+      # netrank2pnw (Fable D1): A COST-DRIVEN SWITCH NEEDS A COST THAT WAS ACTUALLY READ. When the ACTIVE
+      # profile's connection.metered read FAILED and nothing is cached (active_metered None -- distinct from
+      # a successful read of "unknown"), choose_wifi ranks the active link as unknown and an explicitly
+      # unmetered candidate outranks it. Measured in Fable's loop harness: at home on Hannelore (`no`) with
+      # the phone (`no`) in range, one failed first read -> [(0 s, iPhone), (20 s, Hannelore)] -- home torn
+      # down and restored, at boot, which is exactly when NM is slowest to answer. So: while the active
+      # link is USABLE and its cost unread, the ladder may not displace it. Hold, and say so. A link that is
+      # NOT usable is exempt: that move is failure-driven, and a hold must never keep the device on a dead
+      # link. The kill switch's binary mode has no notion of cost and is exempt too.
+      if (tethering_enabled and fallback_enabled and raw_active_ssid and active_metered is None
+          and active_ssid and active_ssid.lower() == raw_active_ssid.lower()
+          and action in ("up_priority", "up_fallback", "up_hotspot")):
+        held = (raw_active_ssid, action, target_ssid)
+        if held != cost_unread_logged:
+          cloudlog.event("netcosttier_active_cost_unreadable", active=raw_active_ssid, suppressed=action,
+                         target=target_ssid, error="connection.metered read failed and nothing is cached")
+          cost_unread_logged = held
+        action, target_ssid = "noop", ""
+      elif active_metered is not None:
+        cost_unread_logged = None
+
       # netscanpin2pnw: HOLD. While the driver's pick is in force the arbiter takes no radio action for
       # cost reasons -- neither during the join (so it never fights the UI's own activation) nor after.
       # Pins are a cost-ladder feature: with DisableNetworkCostLadder set the behaviour is the pre-ladder

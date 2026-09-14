@@ -178,11 +178,20 @@ def effective_metered(network_type: int, metered: bool, at_home: bool) -> bool:
   module decides with -- uploadgate3pnw (2026-09-10).
 
   NM's `metered` bit is about the LINK. This is about the POLICY: the driver's spec says a
-  configured, GPS-gated priority network is his to use, metered or not ("nothing should be blocked
-  when on a wifi that is (1) either GPS preferred location or (2) unmetered"). So a metered priority
-  WiFi is NOT expensive for our purposes, and everything downstream must agree on that -- the pass-1
-  gate AND the per-file throttle inside list_upload_files, which on a `metered` listing silently
-  drops qcamera.ts and any boot/crash log younger than 12 h.
+  configured, GPS-gated priority network is his to use ("nothing should be blocked when on a wifi
+  that is (1) either GPS preferred location or (2) unmetered"). So on such a network a link NM
+  reports as metered is NOT expensive for our purposes, and everything downstream must agree on that --
+  the pass-1 gate AND the per-file throttle inside list_upload_files, which on a `metered` listing
+  silently drops qcamera.ts and any boot/crash log younger than 12 h.
+
+  netrank2pnw NARROWED WHAT COUNTS AS "SUCH A NETWORK" -- this function did not change, `at_home` did.
+  OnPriorityNetwork is set by network_arbiterd.on_priority_network: a configured entry whose saved NM
+  profile is NOT EXPLICITLY `connection.metered = yes`. An earlier version of this docstring said a
+  priority network qualifies "metered or not"; that is no longer true. The relaxation above now covers
+  a configured network NM merely GUESSES is metered (the device-level `guess-yes` that deviceState's
+  networkMetered reports for a profile nobody marked), and never one the driver explicitly marked
+  metered: that is his statement that the link costs money, and list membership does not override it --
+  the 2026-09-10 incident was 2,642 MB over a metered Starlink that was a configured entry at the time.
 
   That silent drop is why this is a named function and not an expression in the gate (Fable review
   2026-09-10). The first cut passed the RAW metered bit to step() while the gate used the relaxed

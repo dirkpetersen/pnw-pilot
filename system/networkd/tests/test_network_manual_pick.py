@@ -207,26 +207,46 @@ class TestUpdateHomeArrival:
   def gone(self, state):
     return state.get(HOME.lower(), (0, False))[1]
 
-  def test_consecutive_REAL_scans_missing_it_establish_absence(self):
+  def test_consecutive_REAL_scans_missing_it_establish_absence_WITHOUT_GPS(self):
+    """Fable D2: scan-count absence applies only where GPS cannot place the truck. This test used to run
+    with GPS at home; under the corrected rule that is precisely the case where misses do NOT count."""
     st = {}
     for _ in range(2):                      # concrete: two misses are not absence, the third is
-      st = self.step(st, [STAR])
+      st = self.step(st, [STAR], gps=None)
     assert not self.gone(st), "two missing scans must not be absence"
-    st = self.step(st, [STAR])
+    st = self.step(st, [STAR], gps=None)
+    assert self.gone(st)
+
+  def test_missing_scans_do_NOT_count_while_GPS_says_the_truck_is_still_there(self):
+    """At the learned location, and inside twice the geofence: the AP went quiet, the truck did not leave."""
+    for gps in (self.AT_HOME, self.NEAR):
+      st = {}
+      for _ in range(10):
+        st = self.step(st, [STAR], gps=gps)
+      assert not self.gone(st), f"ten misses at {gps} were read as the truck leaving"
+
+  def test_with_no_LEARNED_location_scan_misses_still_count(self):
+    st = {}
+    for _ in range(3):
+      st = update_home_arrival(st, [(HOME, None, None)], [STAR], self.AT_HOME)
     assert self.gone(st)
 
   def test_a_scan_that_LISTS_it_resets_the_count(self):
-    """Flicker never adds up."""
+    """Flicker never adds up. Run WITHOUT GPS: since Fable's D2 fix, misses don't count at all while GPS
+    places the truck at home, so with GPS at home this test could no longer tell whether presence resets
+    the count -- mutation A3 survived exactly that way."""
     st = {}
     for _ in range(10):
-      st = self.step(st, [STAR])            # missing
-      st = self.step(st, [STAR, HOME])      # present again
+      st = self.step(st, [STAR], gps=None)            # missing
+      st = self.step(st, [STAR], gps=None)            # missing
+      st = self.step(st, [STAR, HOME], gps=None)      # present again
     assert not self.gone(st)
 
   def test_a_scan_that_did_not_RUN_is_no_evidence(self):
+    """WITHOUT GPS (mutation A4 survived with GPS at home, where D2 already refuses to count any miss)."""
     st = {}
     for _ in range(20):
-      st = self.step(st, None)
+      st = self.step(st, None, gps=None)
     assert st.get(HOME.lower(), (0, False)) == (0, False)
 
   def test_GPS_confidently_far_establishes_absence_without_any_scan(self):
