@@ -979,6 +979,158 @@ def icbm_path_behind(points, cur_lat, cur_lon, cand_dist):
   return all(s < s_truck - ICBM_PATH_BEHIND_TOL_M for s in matched)
 
 
+# --- behindgate2pnw ------------------------------------------------------------------------------------------
+# ICBM may not START a curve slowdown for a map point the truck has already driven past. mapd publishes its current
+# way from the way's first node, so a curve just driven stays in the path, and ICBM's candidate distances are
+# unsigned. Weekend + 09-08 I-5 map/far starts located on OSM (the nodes mapd's path is built from): 25 were for a
+# point already passed. Sun 12:05:28 (set 60 -> 51 mph) and 13:55:51 are the curve-exit shape: in-curve holds every
+# start through the curve, and the moment it releases, the curve just driven starts a new episode.
+#
+# THE RULE: a point is passed only when two independent readings agree -- it lies more than ICBM_PASSED_TOL_M BEFORE
+# the truck ALONG mapd's path (the path is in travel order), AND it lies behind the truck's heading.
+# Measured on every moving 1 Hz tick, every path point within 500 m, against when the truck actually passed it
+# (drives/2026-09-12/central-oregon-weekend/behindgate, truck fix, 214,877 points still ahead):
+#   * heading alone called 3,879 of them passed (2,147 tight-curve points): switchbacks and loop ramps, where the road
+#     turns > 90 deg before reaching the point. Distance growing faster than 0.5 v -- the same test at 120 deg: 1,204.
+#   * this rule: 0 (device fix: 2, both 17-21 m BESIDE the truck at 8-11 m/s, 1.4-1.6 s before it passed them -- less
+#     than ICBM's own ~1.6 s position lag). With 10 % of paths reversed, along-path alone called 840 passed and
+#     along + heading 22; the reversed guard in icbm_passed_points makes it 0.
+ICBM_PASSED_TOL_M = 5.0        # m along the path. ICBM's position lags the truck by ~1.6-1.8 s (gpslag2pnw keep), so a
+                               # point read 5 m back is >= v*1.6 + 5 m (>= 13 m at the 5 m/s floor) physically behind.
+                               # The telemetry icbm_path_behind's 15 m missed Sat 12:47:21 (43 -> 28 mph): a way switch
+                               # put the curve 7.8 m back, with the truck 10 m off the way's centreline.
+ICBM_PASSED_MIN_V = 5.0        # m/s: slower, the GPS heading and that lag margin are not trusted -> cannot tell
+ICBM_PASSED_MAX_POINTS = 1024  # the polyline is untrusted input; the weekend's longest path had 643 points
+
+
+def icbm_passed_points(points, cur_lat, cur_lon, bearing, v_ego):
+  """behindgate2pnw: which of mapd's path points has the truck already driven past? -> (mask, why).
+
+  mask is a list of bools aligned with `points` (True = passed), or None when it cannot tell, and why names the reason:
+  "ok", "noPath", "slow", "noHeading", "tooMany", "offPath" (nearest segment > ICBM_PATH_MAX_PERP_M away), "reversed"
+  (the path runs against the heading where the truck is: mapd's order cannot be trusted here). None never gates.
+
+  The truck's position along the path is its projection onto the nearest segment. Another segment within
+  ICBM_PATH_AMBIG_M of that as close is a DIFFERENT part of the path (a loop, an overpass) only when the path between
+  the two projections is longer than the straight line through the truck allows; then the smaller along-path position
+  wins (toward ahead). icbm_path_behind resolves every such segment toward ahead, which also pulls the truck back to
+  the corner it has just passed when it drives beside the centreline -- the Sat 12:47:21 miss. Pure; never raises
+  on bad points (skipped, never passed)."""
+  if not points or cur_lat is None or cur_lon is None:
+    return None, "noPath"
+  if len(points) > ICBM_PASSED_MAX_POINTS:
+    return None, "tooMany"
+  try:
+    lat0, lon0, brg, v = float(cur_lat), float(cur_lon), float(bearing), float(v_ego)
+  except (TypeError, ValueError):
+    return None, "noHeading"
+  if not all(math.isfinite(x) for x in (lat0, lon0, brg, v)):
+    return None, "noHeading"
+  if v < ICBM_PASSED_MIN_V:
+    return None, "slow"
+  coslat = math.cos(math.radians(lat0))
+  valid = []                                 # (index, x east m, y north m), path order kept
+  for i, p in enumerate(points):
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if math.isfinite(la) and math.isfinite(lo):
+      valid.append((i, (lo - lon0) * 111320.0 * coslat, (la - lat0) * 111320.0))
+  along, segs = {}, []                       # segs: (perpendicular m, along m of the projection, unit dx, unit dy)
+  prev = None
+  for i, x, y in valid:
+    if prev is None:
+      along[i] = 0.0
+    else:
+      s_prev, px, py = prev
+      dx, dy = x - px, y - py
+      seg = math.hypot(dx, dy)
+      if seg > 1e-6:
+        t = min(max((-px * dx - py * dy) / (seg * seg), 0.0), 1.0)
+        segs.append((math.hypot(px + t * dx, py + t * dy), s_prev + t * seg, dx / seg, dy / seg))
+      along[i] = s_prev + seg
+    prev = (along[i], x, y)
+  if not segs:
+    return None, "noPath"
+  p0, s0, ux, uy = min(segs, key=lambda q: q[0])
+  if p0 > ICBM_PATH_MAX_PERP_M:
+    return None, "offPath"
+  hx, hy = math.sin(math.radians(brg)), math.cos(math.radians(brg))
+  if ux * hx + uy * hy < 0.0:
+    return None, "reversed"
+  s_truck = s0
+  for pp, ss, _, _ in segs:
+    if pp <= p0 + ICBM_PATH_AMBIG_M and abs(ss - s0) > p0 + pp + ICBM_PATH_AMBIG_M:
+      s_truck = min(s_truck, ss)
+  mask = [False] * len(points)
+  for i, x, y in valid:
+    mask[i] = along[i] < s_truck - ICBM_PASSED_TOL_M and x * hx + y * hy < 0.0
+  return mask, "ok"
+
+
+def _icbm_passed_log(ctl, state, **kw) -> None:
+  """behindgate2pnw (Rule 2): the gate's verdict on a pending START, logged when it CHANGES -- "passed" (it acted),
+  "clear" (the binding point is ahead), "unknown" (it could not tell, with why). A module function taking the
+  controller for the same reason as _curvelead_clear."""
+  key = (state, kw.get("why"), kw.get("started"))
+  if getattr(ctl, "_icbm_passed_state", None) != key:
+    ctl._icbm_passed_state = key
+    cloudlog.event("ces_icbm_passed", state=state, **kw)
+
+
+def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis):
+  """behindgate2pnw: the START gate. Called only when an episode would START from a map/far candidate. Returns
+  (target, sig, far_v, far_dist), updating ctl._icbm_src / _icbm_gate.
+
+  The binding point was passed exactly when that source's candidate CHANGES once the passed points are removed:
+  upcoming_curve keeps the first lowest point and icbm_far_map_candidate the lowest cap, so removing other points
+  cannot change a pick that was not itself removed. Then the start is re-decided on the points still ahead (another
+  curve may start it), with vision only where it may start. When the binding point is ahead, nothing here changes
+  the decision. A failure falls back to the ungated decision and says so (throttled)."""
+  src = ctl._icbm_src
+  try:
+    points = ctl._map_targets
+    mask, why = icbm_passed_points(points, plat, plon, getattr(ctl, "_cur_bearing", None), sig["v_ego"])
+    if mask is None:
+      _icbm_passed_log(ctl, "unknown", why=why, src=src)
+      return target, sig, far_v, far_dist
+    ahead = [p for p, gone in zip(points, mask, strict=True) if not gone]
+    near = (sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf")))
+    far = (far_v, far_dist)
+    veh = ctl._veh
+    if src == "map":
+      a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
+      if a_near == near:
+        _icbm_passed_log(ctl, "clear", src=src)
+        return target, sig, far_v, far_dist
+      a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
+                                     veh.icbm_map_scale, veh.icbm_firm_decel)
+    else:
+      a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
+                                     veh.icbm_map_scale, veh.icbm_firm_decel)
+      if a_far == far:
+        _icbm_passed_log(ctl, "clear", src=src)
+        return target, sig, far_v, far_dist
+      a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
+    new_sig = {**sig, "map_target_v": a_near[0], "map_target_dist": a_near[1]}
+    new_target, _, new_src = icbm_curve_target(
+      sig["v_ego"], sig["v_set"], a_near[0], a_near[1], None, icbm_map_eff_scale, vis[0], vis[1],
+      map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel, far_v=a_far[0], far_dist=a_far[1], track=True)
+  except Exception:
+    try:
+      if now - (getattr(ctl, "_icbm_passed_err", None) or -1e9) > ICBM_ERR_LOG_S:
+        ctl._icbm_passed_err = now
+        cloudlog.exception("behindgate2pnw: passed-point gate FAILED -- ICBM starts WITHOUT it (a passed curve can start a slowdown)")
+    except Exception:
+      pass                        # logging must not become the thing that raises
+    return target, sig, far_v, far_dist
+  ctl._icbm_gate = "mapPassed"
+  ctl._icbm_src = new_src
+  _icbm_passed_log(ctl, "passed", src=src, dist=round(float(near[1] if src == "map" else far[1]), 1),
+                   passed=sum(mask), started=new_src)
+  return new_target, new_sig, a_far[0], a_far[1]
+
 
 CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icbmKVis",
                        "icbmSaneT", "icbmSaneWhy", "icbmBehind")
@@ -3443,6 +3595,7 @@ class CESController:
         self._icbm_map_reach = None
         self._icbm_gps_age = None         # gpslag2pnw
         self._icbm_stale_hold = None      # gpsdrgate2pnw
+        self._icbm_passed_state = None    # behindgate2pnw: the next verdict after a Chill interlude logs again
         # curvefloor2pnw (Fable 2026-09-05, F5): reset the floor state too. Without this a stale
         # icbmFlrHit=True is published alongside icbmT=None, and _icbm_floor_lim survives a Chill
         # interlude -- so the debounce carries a limit from before the gap into the road after it.
@@ -3536,6 +3689,12 @@ class CESController:
             0.0, float("inf"),
             map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
             far_v=far_v, far_dist=far_dist, track=True)
+      # behindgate2pnw: a map/far point the truck has already driven past may not START an episode (see
+      # icbm_passed_points). START only, as specified: a running episode keeps the full candidate set.
+      if target is not None and starting and self._icbm_src in ("map", "far"):
+        target, sig, far_v, far_dist = _icbm_passed_gate(
+          self, now, target, sig, plat, plon, ref, far_v, far_dist,
+          (vis_v, vis_dist) if icbm_vision_may_start(vis_dist, ttc, map_reach) else (0.0, float("inf")))
       # gpsdrgate2pnw: whether the running cap episode was ever bound by the MAP (stale hold). Sticky within the
       # episode (Fable B1): on a real approach vision joins the map/far candidate for the same curve, and a
       # last-binder record let a vision tick erase the map provenance -> no hold -> restore 50 m before the curve.
