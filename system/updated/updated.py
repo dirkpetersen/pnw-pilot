@@ -512,10 +512,24 @@ def main() -> None:
           returncode=e.returncode
         )
         exception = f"command failed: {e.cmd}\n{e.output}"
-        OVERLAY_INIT.unlink(missing_ok=True)
+        # keepstaged2pnw: stock unlinked OVERLAY_INIT on EVERY failure, so the next pass's init_overlay() ran
+        # `rm -rf STAGING_ROOT`, deleting a finalized update that was waiting for the next reboot, and the device
+        # downloaded the git pack, the LFS objects and any AGNOS image again. `git ls-remote` fails when the link
+        # is offline or behind a captive portal. It is a read-only remote query that only check_for_update() runs,
+        # before fetch_update() writes anything, so the overlay and the finalized update are kept. Every other
+        # failure invalidates as stock: init_overlay, a `git config`/`rev-parse` error (a broken overlay, which the
+        # rebuild heals) and anything in fetch, AGNOS or finalize, where the overlay may be half-written. Keeping
+        # cannot mark a partial update consistent: only a completed finalize_update() creates .overlay_consistent,
+        # and fetch_update() removes it before it writes anything.
+        if e.cmd[:2] == ["git", "ls-remote"]:
+          cloudlog.event("updated: kept staged update after a check failure", cmd=e.cmd)
+        else:
+          cloudlog.event("updated: invalidated overlay after update failure", cmd=e.cmd, fetch_started=fetch_started)
+          OVERLAY_INIT.unlink(missing_ok=True)
       except Exception as e:
         cloudlog.exception("uncaught updated exception, shouldn't happen")
         exception = str(e)
+        cloudlog.event("updated: invalidated overlay after update failure", cmd=None, fetch_started=fetch_started)
         OVERLAY_INIT.unlink(missing_ok=True)
 
       try:
