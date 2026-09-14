@@ -1589,8 +1589,11 @@ def _gas_set_then_cruise_returns(got_ms, driver_btn_at=None, v=15.36):
   d = Drive()
   _red_light(d, 5.0)
   d.tick(300, gas_pressed=True, v_ego=v, **STEER_ONLY)
-  while not d.fired():
+  for _ in range(int(5.0 / DT)):                                       # bounded: a mutant must fail, not hang
+    if d.fired():
+      break
     d.tick(1, v_ego=v, **STEER_ONLY)
+  assert d.fired(), "precondition: the gas-set must fire within 5 s of lift-off"
   t_fire = d.offers[0][0]
   cancels, n_rec = [], len(d.records)
   engaged = dict(lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=got_ms, v_ego=v)
@@ -1669,8 +1672,49 @@ def test_a_driver_button_from_an_EARLIER_press_window_does_not_protect_a_later_o
   assert "noCruise" in [r["reason"] for r in d.records if r["phase"] == "verify"], "precondition"
   d.tick(20, brake_pressed=True, v_ego=15.0, **hold)                   # a fresh brake, then a gas-set
   d.tick(100, gas_pressed=True, v_ego=15.0, **hold)
-  while len({o[1] for o in d.offers}) < 2:
+  for _ in range(int(5.0 / DT)):                                       # bounded: a mutant must fail, not hang
+    if len({o[1] for o in d.offers}) >= 2:
+      break
     d.tick(1, v_ego=15.0, **hold)
+  assert len({o[1] for o in d.offers}) >= 2, "precondition: the second press (gas-set) must fire"
   outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
                         set_speed_ms=24.59, v_ego=15.0)) for k in range(3)]
   assert [o.cancel for o in outs] == [True, False, False], "a stale driver-button flag suppressed the cancel"
+
+
+@pytest.mark.parametrize("btn_before_fire_s", [0.15, 0.5, 0.95])
+def test_S3_a_driver_RES_just_before_our_gas_set_is_never_pressed_over_or_cancelled(btn_before_fire_s):
+  """Fable review B1, scenario S3: lift-off; the driver presses RES shortly before our SET- would fire (+1.0 s);
+  the PCM engages ~0.1-0.25 s after THEIR press, at the memory. Our press must not go out on top of theirs, and
+  nothing may be cancelled."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(300, gas_pressed=True, v_ego=15.0, **STEER_ONLY)
+  lift = d.t
+  t_btn = lift + M.GAS_SET_RELEASE_MIN_S - btn_before_fire_s
+  outs = []
+  for _ in range(int(3.0 / DT)):
+    btn = abs(d.t - t_btn) < DT / 2
+    engaged = d.t >= t_btn + 0.25
+    kw = dict(lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=18.78, v_ego=15.0) if engaged \
+      else dict(STEER_ONLY, v_ego=15.0)
+    o = d.b.update(mk(d.t, driver_cruise_button=btn, **kw))
+    outs.append(o)
+    d.records.extend(o.records)
+    d.t += DT
+  assert not any(o.offer for o in outs), "our SET- was offered on top of the driver's own RES"
+  assert not any(o.cancel for o in outs)
+  assert [r for r in d.records if r["phase"] == "refuse"][-1]["reason"] in ("ccOn", "latOff"), d.records[-2:]
+
+
+def test_a_driver_button_that_engaged_nothing_stops_holding_off_our_press_after_1s():
+  """The holdoff is bounded: a + in Standby that did nothing blocks our SET only for DRIVER_BTN_HOLDOFF_S."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(300, gas_pressed=True, v_ego=15.0, **STEER_ONLY)
+  lift = d.t
+  d.tick(int((M.GAS_SET_RELEASE_MIN_S - 0.3) / DT), v_ego=15.0, **STEER_ONLY)
+  d.tick(1, driver_cruise_button=True, v_ego=15.0, **STEER_ONLY)
+  d.tick(int(2.0 / DT), v_ego=15.0, **STEER_ONLY)
+  assert d.fired(), d.records[-3:]
+  assert d.offers[0][0] - lift >= M.GAS_SET_RELEASE_MIN_S - 0.3 + M.DRIVER_BTN_HOLDOFF_S - 1e-6

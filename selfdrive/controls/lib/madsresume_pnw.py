@@ -150,6 +150,13 @@ SET_MODE_TOL_MS = 1.0
 # button inside that window, because the driver is allowed to go faster. Unlike SET_MODE_TOL_MS this
 # ACTS, so it is well clear of mph rounding and the coast between our sample and the tap.
 SET_HIGH_CANCEL_MS = 3.0 * 0.44704
+# engagegoal2pnw (Fable review 2026-09-13, B1): no RES/SET offer while the DRIVER pressed a cruise button in the last
+# second -- they are already engaging it themselves. Without this, a driver RES ~0.15 s before our SET- fired was
+# invisible to the verify window (it opens at the fire), and the PCM engaging at the driver's memory read as our
+# overshoot: cancel, steering dropped. Refusing the press removes the race at its root (no press of ours, nothing to
+# verify or cancel) and keeps our SET- from landing on top of the driver's own engagement. 1.0 s covers the measured
+# 0.15-0.26 s PCM response with margin; past it, a button that engaged nothing no longer blocks our press.
+DRIVER_BTN_HOLDOFF_S = 1.0
 # The two wire values `ResumeDecision.mode` may take, and the exact set the executor's parser
 # accepts (opendbc icbm_pnw.RESUME_DIR / SET_DIR). Pinned by the wire-contract test: the brain and
 # the executor live in different repos with only a JSON mem-param between them, and a drift here
@@ -430,6 +437,8 @@ class MadsResumeBrain:
     self._verify_mode: str | None = None
     # engagegoal2pnw: a driver cruise button was seen between our press and its verify.
     self._verify_driver_btn = False
+    # engagegoal2pnw B1: when the driver last pressed a cruise button (None = not seen).
+    self._driver_btn_t: float | None = None
     # Edge detector. THREE-STATE: None = "never observed", which is NOT the same fact as
     # "observed False" (Gemini review 2026-09-06). With a plain False, the first tick after the
     # brain becomes active -- e.g. a selfdrived restart mid-drive
@@ -570,6 +579,7 @@ class MadsResumeBrain:
       self._decel = 0.0
       self._decel_from = 0.0
       self._fired_mode = None
+      self._driver_btn_t = None
       self._cc_prev = bool(i.cruise_enabled)
       self._set_ms = None
       self._set_t = None
@@ -600,6 +610,8 @@ class MadsResumeBrain:
         self._decel_from = self._v_ref_t
         self._v_ref, self._v_ref_t = v, i.now
 
+    if i.driver_cruise_button:
+      self._driver_btn_t = i.now
     cc_rising = bool(i.cruise_enabled) and self._cc_prev is False
     self._cc_prev = bool(i.cruise_enabled)
     if cc_rising:
@@ -988,6 +1000,8 @@ class MadsResumeBrain:
     # STEERING away. Fail-to-stock in direction, but caused by this feature and entirely avoidable.
     if not i.engageable:
       return "noEntry"
+    if self._driver_btn_t is not None and i.now - self._driver_btn_t <= DRIVER_BTN_HOLDOFF_S:
+      return "driverBtn"                               # B1: the driver is engaging it themselves
     # gasset2pnw: SET at the CURRENT speed commands no speed change at all, so every gate below --
     # `noSet`, `setRaised`, `setFar`, `staleContext` and the lead gate, all of which exist purely to
     # bound how much ACCELERATION a resume may ask stock ACC for -- is inapplicable by construction.

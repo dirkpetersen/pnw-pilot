@@ -315,6 +315,14 @@ class TestTheCorvallisOvershootCancel:
     assert any(en for t, en in log["en"] if t >= 33.5), "openpilot must engage with the driver's +"
     assert len(log["brain_cancels"]) == 1
 
+  def test_S3_a_driver_plus_just_before_our_press_is_neither_pressed_over_nor_cancelled(self):
+    """Fable B1 through the whole loop: lift-off at 26.8 s, the driver's + at 27.65 s (our SET- was due at 27.8 s),
+    the truck engages 0.2 s after THEIR press. No press of ours, no CANCEL, openpilot engaged."""
+    log = _drive_2116(driver_plus_at=27.65)
+    assert log["first_press"] is None, f"our SET- went out at {log['first_press']} on top of the driver's +"
+    assert log["brain_cancels"] == [] and not [t for t in log["cancel_frames"] if t > 27.0], log["cancel_frames"]
+    assert any(en for t, en in log["en"] if t >= 28.2), "openpilot must engage with the driver's own +"
+
   def test_a_driver_button_between_our_press_and_the_come_back_is_not_cancelled(self):
     log = _drive_2116(driver_btn_in_window=True)
     assert log["brain_cancels"] == [] and log["event_frames"] == [], log["brain_cancels"]
