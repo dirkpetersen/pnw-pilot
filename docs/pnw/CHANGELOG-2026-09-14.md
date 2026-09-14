@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `8678df74a6` (foldlog2pnw, pushed 08:50 PT, staging).
-**Installed on the truck:** `a8a923d8c5` (behindgate2pnw `365d287034` + docs, 08:40 PT).
+**Channel tip:** `origin/3devpnw` = `ec6dd71a6d` (coopsteerfix2pnw, pushed 08:56 PT, staging).
+**Installed on the truck:** `8678df74a6` (foldlog2pnw, 08:52 PT).
 
 ## Networking — arbiter logging
 
@@ -48,6 +48,7 @@ as each change ships.
 | Commit(s) | What changed | Notes |
 |---|---|---|
 | `da0741eb8a` **twistyr2pnw + policer2pnw** | The twisty-descent cap (`vtsc_controller.py`) and the police input read (`speedadjust_controller.py`) used `except Exception: pass`. They now log, with the exception type: the first failure at once, then at most once a minute with a count. The fallbacks are unchanged: no twisty trim; no police report, so no police cap. | Fable REJECTED the first version, which narrowed the excepts. plannerd is `restart_if_crash=False`, so any other error, e.g. `UnknownKeyName` from a params build mismatch, would have disengaged both cars with no re-engage. Fixed: both catch `Exception` again, and mutants that narrow them back are killed. 319 tests. Installed 08:31 PT (BootCount 201): no plannerd crash, no failure lines. Follow-ups: the twisty floor on failure while descending; briefly hold the last good police report. |
+| `8678df74a6` **foldlog2pnw** | The map-curve fold in `vtsc_controller.py` used `except Exception: return <no map curve>`, so when it failed, curve anticipation stopped with no trace. It now logs the same way as the twisty cap, and a new ces_events field `mapErr` holds the exception type on a failed tick (`""` otherwise). | Fable SHIP: nothing new can raise; `mapErr` resets every tick, so it never latches; the change is additive for the UI and scripts. 967 tests, 24/24 mutants; the Tesla is identical when the fold succeeds. Installed 08:52 PT (BootCount 203): `"mapErr": ""` in ces_events, no plannerd/selfdrived tracebacks. Fable's next 3 silent excepts are listed in PENDING-WORK. |
 
 ## ICBM — curves already passed
 
@@ -67,11 +68,9 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`coopsteerfix2pnw`** (`ff3980a17d`, Fable SHIP; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
+- **`coopsteerfix2pnw`** (Fable SHIP; `ec6dd71a6d` pushed 08:56 PT, installing; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
   an override on the same tick instead of waiting for the 50 ms-debounced `steeringPressed`. Replay: active ticks
   above 1 Nm 77 → 0, peak offset 11.5° → 10.1°.
-- **`foldlog2pnw`** (Fable SHIP; `8678df74a6` pushed 08:50 PT, installing): the map-curve fold's silent except now
-  logs with the exception type, and a new `mapErr` field reaches ces_events.
 - **`arbiterfu2pnw`** (`0a1bd865e7`, Fable SHIP with Fable's optional hardening applied, test + 2 mutants):
   - An unreadable verification read after a bring-up no longer blames that network. The judgement waits for the
     next good read, bounded by the unreadable hold, and an unverified blame past the bound is logged at ERROR.
