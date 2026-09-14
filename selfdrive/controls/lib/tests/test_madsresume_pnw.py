@@ -1275,7 +1275,37 @@ def test_the_accelerator_cannot_undo_the_double_tap_opt_out():
   assert not [r for r in d.records if r["phase"] == "arm" and r.get("reason") == "gas"]
   # Rule 2 (Fable F1): the refused accelerator press is on record, exactly once, like a refused brake press
   new = d.records[n:]
-  assert [(r["phase"], r["reason"], r["gas"]) for r in new] == [("refuse", "suppressed", True)], new
+  assert [(r["phase"], r["reason"], r["gas"], r["mode"]) for r in new] == [("refuse", "suppressed", True, "set")], new
+
+
+def test_the_accelerator_cannot_undo_the_post_resume_rejection_and_the_refusal_is_on_record():
+  """The post-resume variant (Fable re-review): RES fires, cruise comes back, the driver brakes 0.5 s later to
+  reject it. That brake suppresses on the SAME frame lateral-only rises, so the stretch never records that it
+  began with a brake arm -- and the accelerator's refusal used to write nothing at all."""
+  d = normal_brake_and_resume(post_ticks=60)
+  assert d.fired(), "precondition: RES fired"
+  d.tick(40, lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=SET)   # cruise is back
+  d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)          # rejection brake inside REJECT_AFTER_FIRE_S
+  assert "postResumeBrake" in d.reasons("suppress"), f"precondition: opted out; {d.phases()}"
+  d.tick(50, v_ego=20.0, **STEER_ONLY)
+  n_rec, n_off = len(d.records), len(d.offers)
+  _pull_away_and_lift(d, gas_s=2.0, v=20.0)
+  assert len(d.offers) == n_off, "the accelerator overrode the post-resume opt-out"
+  new = d.records[n_rec:]
+  assert [(r["phase"], r["reason"], r["gas"], r["mode"]) for r in new] == [("refuse", "suppressed", True, "set")], new
+
+
+def test_brake_and_accelerator_on_the_same_tick_while_suppressed_write_one_refusal():
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=15.0, **STEER_ONLY)
+  d.tick(30, v_ego=15.0, **STEER_ONLY)
+  d.tick(20, brake_pressed=True, v_ego=15.0, **STEER_ONLY)          # double-tap -> suppressed
+  d.tick(int((M.DOUBLE_BRAKE_S + 0.5) / DT), v_ego=15.0, **STEER_ONLY)   # past the double-tap window
+  n = len(d.records)
+  d.tick(1, brake_pressed=True, gas_pressed=True, v_ego=15.0, **STEER_ONLY)
+  new = d.records[n:]
+  assert [(r["phase"], r["reason"]) for r in new] == [("refuse", "suppressed")], new
 
 
 def test_a_mads_unavailable_tick_forgets_that_steering_only_began_with_a_brake():

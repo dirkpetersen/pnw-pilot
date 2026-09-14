@@ -686,10 +686,13 @@ class MadsResumeBrain:
     # (`_lat_braked`), the double-tap / post-resume opt-out (`_suppressed`), and every SET gate below.
     gas_start = (not start and gas_rising and self._lat_braked         # _lat_braked is cleared whenever not lat
                  and not self._armed and not self._suppressed)
-    if not start and gas_rising and self._lat_braked and not self._armed and self._suppressed:
+    if not start and gas_rising and lat and not self._armed and self._suppressed and not pedal_rising:
       # Rule 2 (Fable review 2026-09-13, F1): the accelerator is now an engage input, so a press the opt-out
       # refuses must say so exactly as a refused brake press does above -- `gas:true` in the snap tells them apart.
-      out.records.append(self._snap(i, {"phase": "refuse", "reason": "suppressed", "fired": False}))
+      # Gated on `lat`, NOT `_lat_braked` (Fable re-review): a post-resume rejection brake suppresses on the very
+      # frame lateral-only rises, so that stretch never sets `_lat_braked` and the refusal would be silent.
+      # `not pedal_rising`: a brake edge on the same tick has already written the refusal above.
+      out.records.append(self._snap(i, {"phase": "refuse", "reason": "suppressed", "fired": False, "mode": "set"}))
 
     if start or gas_start:
       if self._armed:
