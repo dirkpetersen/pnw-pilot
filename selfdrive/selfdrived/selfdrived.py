@@ -22,7 +22,8 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
 from openpilot.selfdrive.selfdrived.state import StateMachine
-from openpilot.selfdrive.selfdrived.mads_pnw import MadsPnw, has_blocking_event  # madsop2pnw: parallel lateral authority
+from openpilot.selfdrive.selfdrived.mads_pnw import MadsPnw, has_blocking_event, MADS_BRAKE_GRACE_FRAMES  # madsop2pnw: parallel lateral authority
+from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -147,6 +148,9 @@ class SelfdriveD:
     # every non-Lightning car) that bitfield is 0, so this is inert and every consumer falls back to
     # selfdriveState. It runs AFTER our own state machine and never removes an event from it.
     self.mads = MadsPnw(self.CP.alternativeExperience)
+    # madsquiet2pnw: which engagement chimes to silence while MADS keeps steering.
+    self.mads_quiet = MadsQuiet(MADS_BRAKE_GRACE_FRAMES)
+    self._chime = ChimeDecision()
 
     # madsresume2pnw: the bounded auto-resume brain. Pure + inert by construction -- it refuses to
     # do anything unless madsState.available is true, and it can only ARM on the rising edge of
@@ -683,6 +687,11 @@ class SelfdriveD:
     pers = LONGITUDINAL_PERSONALITY_MAP[self.personality]
     alerts = self.events.create_alerts(self.state_machine.current_alert_types, [self.CP, CS, self.sm, self.is_metric,
                                                                                 self.state_machine.soft_disable_timer, pers])
+    # madsquiet2pnw: silence engagement chimes only while MADS keeps steering (see madsquiet_pnw.py).
+    try:
+      alerts = apply_chime_decision(alerts, getattr(self, "_chime", ChimeDecision()))
+    except Exception:
+      cloudlog.exception("madsquiet: applying the chime decision failed -- stock chimes this frame")
     self.AM.add_many(self.sm.frame, alerts)
     self.AM.process_alerts(self.sm.frame, clear_event_types)
 
@@ -744,6 +753,15 @@ class SelfdriveD:
                    (self.sm.frame * DT_CTRL - self.off_request_t) <= OFF_REQUEST_HOLD_S)
     self.mads.update(self.enabled, self.active, CS.brakePressed or CS.regenBraking,
                      CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req)
+    # madsquiet2pnw: decide the engagement chimes from THIS frame's engagement and MADS state. It only
+    # ever changes a SOUND -- the state machine has already run and is never consulted or edited here.
+    # Any failure falls back to the stock chimes: silence is the thing that must never happen by accident.
+    try:
+      self._chime = self.mads_quiet.step(self.enabled, self.mads.lateral_only, self.mads.available,
+                                         self.mads.brake_grace_open)
+    except Exception:
+      cloudlog.exception("madsquiet: chime decision failed -- stock chimes this frame")
+      self._chime = ChimeDecision()
     # madsresume2pnw: decide (never act -- the tap itself is the ford carcontroller's job) whether
     # openpilot may hand back the speed the driver had already set. Runs AFTER mads.update so it
     # sees THIS frame's lateral_only, not the previous one -- the arm edge must not be a frame late.

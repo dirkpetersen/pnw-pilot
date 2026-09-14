@@ -173,6 +173,11 @@ class MadsPnw:
     # madsbrakerace2pnw: frames left in which a late `brakePressed` may still arm lateral-only.
     self._brake_grace = 0
 
+  @property
+  def brake_grace_open(self) -> bool:
+    """madsquiet2pnw: inside the brake-race window, i.e. MADS may still arm on a later frame. Read-only."""
+    return self._brake_grace > 0
+
   def update(self, op_enabled: bool, op_active: bool, braking: bool, cruise_enabled: bool,
              events: Events, cruise_available: bool = True, off_requested: bool = False) -> None:
     """Run once per frame, AFTER selfdrived's own state machine has already decided op_enabled.
