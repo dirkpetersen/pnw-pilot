@@ -2609,7 +2609,7 @@ class CESController:
     # self-clears them) -- but note they do NOT protect against an OLD mapd: capnp's default for
     # waySelectionType is ordinal 0, which is `current`, so a binary that never sets the field would
     # log a confident "current" rather than nothing. Only reachable with a pre-v2.0.0 binary behind
-    # /data/mapd/.override; the pin is v2.3.0 and mapd has set it unconditionally since v2.0.0.
+    # /data/mapd/.override; the pin is v2.3.1 and mapd has set it unconditionally since v2.0.0.
     try:
       ws = self.mem_params.get("MapWaySel", return_default=True)
       self._way_sel = str(ws) if ws not in (None, "", b"") else None
