@@ -330,7 +330,10 @@ class Updater:
     dt_uptime_onroad = (self.params.get("UptimeOnroad", return_default=True) - last_uptime_onroad) / (60*60)
     dt_route_count = self.params.get("RouteCount", return_default=True) - last_route_count
     build_metadata = get_build_metadata()
-    if failed_count > 15 and exception is not None and self.has_internet:
+    # updatebackoff2pnw (Fable review): stock alerted after 16 consecutive failures, which at the flat 5 min
+    # retry was 75 min. Under the fetch backoff the 16th failure comes ~17.6 h later, so a device that never
+    # stays up that long would never show the alert (Rule 2). The 5th failure lands at 5+10+20+40 = 75 min.
+    if failed_count > 4 and exception is not None and self.has_internet:
       if build_metadata.tested_channel:
         extra_text = "Ensure the software is correctly installed. Uninstall and re-install if this error persists."
       else:

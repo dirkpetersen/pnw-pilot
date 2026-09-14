@@ -148,3 +148,28 @@ def test_sighup_fetches_immediately_during_backoff(run_updater, where):
   assert timeline[i + 1:i + 4] == [("check", 4), ("fetch", 4), ("sleep", 5400)], timeline
   fetches = [c.kwargs for c in cloudlog.event.call_args_list if c.args and c.args[0] == FETCH_EVENT]
   assert fetches[4]["user_requested"] is (where == "sleep")  # a SIGHUP during the attempt is consumed by it
+
+
+def test_update_failed_alert_still_fires_at_stock_wall_time(mocker):
+  # Stock raised "Unable to download updates" after 16 consecutive failures = 75 min at the flat 5 min retry.
+  # Under the backoff, 16 failures take ~17.6 h of uptime, so the alert must key on the 5th failure instead,
+  # which lands after 300 + 600 + 1200 + 2400 s of backoff (test_repeated_fetch_failures_back_off_to_the_cap)
+  # = 75 min, the same wall time as stock. Exercises the REAL Updater.set_params alert logic.
+  alert = mocker.patch.object(updated, "set_offroad_alert")
+  mocker.patch.object(updated, "get_build_metadata", return_value=mocker.Mock(tested_channel=False))
+  mocker.patch.object(updated.Updater, "target_branch", new_callable=mocker.PropertyMock, return_value="3devpnw")
+  for prop in ("update_available", "update_ready"):
+    mocker.patch.object(updated.Updater, prop, new_callable=mocker.PropertyMock, return_value=False)
+  mocker.patch.object(updated, "parse_release_notes", return_value=b"")
+  real = updated.Updater()
+  real._has_internet = True
+
+  def failed_alert_raised(count: int) -> bool:
+    alert.reset_mock()
+    real.set_params(False, count, "command failed: git fetch")
+    return any(c.args[:2] == ("Offroad_UpdateFailed", True) for c in alert.call_args_list)
+
+  assert not failed_alert_raised(4)
+  assert failed_alert_raised(5)
+  real._has_internet = False
+  assert not failed_alert_raised(5)  # offline is the connectivity alerts' job, unchanged from stock
