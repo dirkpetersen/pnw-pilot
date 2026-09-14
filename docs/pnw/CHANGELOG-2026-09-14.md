@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `47be7e2175` (policeship2pnw). **Installed on the truck:** `83ac3eb172`
-(07:33 PT); `47be7e2175` installing.
+**Channel tip:** `origin/3devpnw` = `47be7e2175` (policeship2pnw). **Installed on the truck:** `47be7e2175`
+(07:37 PT; healthy: location_servicesd up, rest areas and chargers loaded, new `location_services_police_poll_state` log live).
 
 ## Networking — arbiter logging
 
