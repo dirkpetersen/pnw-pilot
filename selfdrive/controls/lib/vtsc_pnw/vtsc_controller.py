@@ -40,6 +40,7 @@ from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslo
 
 # twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
 # this many seconds (cap() runs at 20 Hz), each counting the failures since the previous line.
+# foldlog2pnw: the map-curve fold (_fold_map_curve) logs on the same interval, with its own first-failure/count state.
 TWISTY_ERR_LOG_S = 60.0
 
 
@@ -110,6 +111,9 @@ class VTSCController:
     self._engaged = False     # for engage/clear logging
     self._twisty_err_t = None  # twistyr2pnw: monotonic time of the last logged twisty-cap failure (None = never)
     self._twisty_err_n = 0     # twistyr2pnw: twisty-cap failures since that log line
+    self._fold_err_t = None    # foldlog2pnw: monotonic time of the last logged map-curve fold failure (None = never)
+    self._fold_err_n = 0       # foldlog2pnw: map-curve fold failures since that log line
+    self._tele_map_err = ""    # foldlog2pnw: exception type name when THIS tick's map-curve fold failed; "" = it did not
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -205,7 +209,23 @@ class VTSCController:
         self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
         C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
         self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0)
-    except Exception:
+    except Exception as e:
+      # foldlog2pnw (Rule 2): this was a bare `except Exception: return`, so a failure silently switched map-curve
+      # anticipation off and left only the vision cap. The fallback is unchanged -- no map curve, vision's picture
+      # passes through exactly as on a tick with no map curve -- but it is now logged in the twistyr2pnw style (first
+      # failure at once, then at most one line per TWISTY_ERR_LOG_S, counting the failures since the previous line)
+      # and named in the mapErr telemetry, which ces_pnw copies into ces_events. The helper skips bad points itself,
+      # so what escapes in practice is a TypeError (a non-list MapTargetVelocities) or an OverflowError (an integer
+      # too large for a float). Caught broadly for the reason twistyr2pnw's Fable review gave: plannerd is
+      # restart_if_crash=False, so an escaping exception would disengage both cars with no re-engage.
+      self._tele_map_err = type(e).__name__
+      self._fold_err_n += 1
+      now = time.monotonic()
+      if self._fold_err_t is None or now - self._fold_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: map-curve fold FAILED ({type(e).__name__}) -- map curve anticipation is OFF, only " +
+                           f"the vision curve cap can slow for curves ({self._fold_err_n} failure(s) since the last log)")
+        self._fold_err_t = now
+        self._fold_err_n = 0
       return k_apex, d_apex, v_curve, False
     self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
     self._tele_map_floored = bool(floored)
@@ -243,6 +263,7 @@ class VTSCController:
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
+    self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
@@ -537,6 +558,9 @@ class VTSCController:
         # publish is wrapped in a bare except, that would lose the WHOLE snapshot for the tick, not
         # just the one field. mapKV above already guards for the same reason.
         "curveWin": str(self._tele_curve_win),
+        # foldlog2pnw: "" normally; the exception type name on a tick whose map-curve fold failed (cloudlog has the
+        # traceback). curveWin still names the source that authored the cap, which on such a tick is never "map".
+        "mapErr": str(self._tele_map_err),
         "rsnMap": _fin(self._tele_rsn_map, 2),
         "rsnVis": _fin(self._tele_rsn_vis, 2),
         "apexCurvature": _fin(self.msg.get("apexCurvature", 0.0), 5),

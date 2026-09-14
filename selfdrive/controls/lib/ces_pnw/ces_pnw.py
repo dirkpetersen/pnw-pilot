@@ -55,7 +55,8 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
                   "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis",
-                  "timeToApex")
+                  "timeToApex",
+                  "mapErr")   # foldlog2pnw: VTSC's map-curve fold failed this tick ("" = it did not)
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation

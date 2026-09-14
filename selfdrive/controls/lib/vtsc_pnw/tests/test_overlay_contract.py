@@ -30,6 +30,7 @@ def _payload():
   c._tele_vis_k = c._tele_vis_d = c._tele_vis_v = 0.0
   c._tele_curve_win = "none"
   c._tele_rsn_map = c._tele_rsn_vis = -1.0
+  c._tele_map_err = ""
   return c.overlay_payload()
 
 
