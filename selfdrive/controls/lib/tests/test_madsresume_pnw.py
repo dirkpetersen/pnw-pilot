@@ -1188,3 +1188,169 @@ class TestOneToggleGoverns:
             continue          # a comment recording why it went is fine
           offenders.append(f"{f.relative_to(root)}:{i}: {st}")
     assert not offenders, "live MadsAutoResume reader(s) survived:\n" + "\n".join(offenders)
+
+
+# ---------------------------------------------------------------------------------------------
+# engagegoal2pnw -- owner goal 2026-09-13: "...I should be able to hit the gas pedal once and then it
+# should overwrite this and set the new speed." Analysis: docs/MADS-RESUME-TO-DRIVER-SPEED.md section 10
+# (workbench root). Real-data replays of the same brain: selfdrive/selfdrived/tests/test_engagegoal_pnw.py.
+# ---------------------------------------------------------------------------------------------
+
+STEER_ONLY = dict(lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0)
+# Measured 2026-09-11 22:07:11-14 (F2, cruise never came back): with no pedal the truck slowed at
+# 1.76-1.83 m/s^2 for 3 s -- regen. DECEL_REFUSE_MS2 is 1.0.
+REGEN_MS2 = 1.8
+
+
+def _red_light(d, stop_s):
+  """Cruising, brake to a stop, sit on the brake for `stop_s`, release the brake."""
+  d.tick(50)                                                         # cruise engaged, set captured
+  d.tick(int(stop_s / DT), brake_pressed=True, v_ego=0.0, standstill=True, **STEER_ONLY)
+  d.tick(30, v_ego=0.0, standstill=True, **STEER_ONLY)               # brake up, auto-hold
+
+
+def _pull_away_and_lift(d, gas_s, v=16.0, post_ticks=400):
+  d.tick(max(1, int(gas_s / DT)), gas_pressed=True, v_ego=v, **STEER_ONLY)
+  d.tick(post_ticks, v_ego=v, **STEER_ONLY)                           # coasting, decel ~0
+
+
+def test_the_accelerator_sets_the_speed_after_a_red_light_longer_than_the_arm_lifetime():
+  """THE GAP. An episode used to open only on a brake press and dies ARM_MAX_S after the last pedal
+  activity, so a light held on the brake for longer than that left the accelerator doing nothing."""
+  d = Drive()
+  _red_light(d, M.ARM_MAX_S + 10.0)
+  assert "armExpired" in d.reasons("refuse"), "precondition: the brake episode expired at the light"
+  _pull_away_and_lift(d, gas_s=8.0, v=16.0)
+  assert d.fired(), f"lifting off after a long light must set that speed; records={d.records[-4:]}"
+  fires = [r for r in d.records if r["phase"] == "fire"]
+  assert len(fires) == 1 and fires[0]["mode"] == "set"
+  assert d.offers[-1][2] == pytest.approx(16.0)
+  assert [r.get("reason") for r in d.records if r["phase"] == "arm"][-1] == "gas"
+
+
+@pytest.mark.parametrize("stop_s", [5.0, M.ARM_MAX_S + 10.0])
+@pytest.mark.parametrize("gas_s", [DT, 0.2])
+def test_one_short_accelerator_tap_sets_the_speed(stop_s, gas_s):
+  """"Hit the gas pedal once": there is no minimum hold and no speed-delta gate. A 10 ms or 200 ms tap
+  sets the speed at lift-off -- with an episode still open from the brake, and without one."""
+  d = Drive()
+  _red_light(d, stop_s)
+  _pull_away_and_lift(d, gas_s=gas_s, v=12.0)
+  assert d.fired(), f"a {gas_s}s tap after a {stop_s}s stop must set; records={d.records[-4:]}"
+  assert [r for r in d.records if r["phase"] == "fire"][-1]["mode"] == "set"
+
+
+def test_a_gas_opened_episode_can_never_offer_RESUME():
+  """The accelerator's own episode is SET mode from its first tick. A one-tick tap would otherwise fall
+  back to RESUME on the next tick -- and here RESUME's gates would all pass (captured 29 m/s, truck at
+  25 m/s, rolling max expired to 25), so the wrong button would be pressed."""
+  d = Drive()
+  d.tick(50)                                                         # capture SET = 29 m/s
+  d.tick(20, brake_pressed=True, v_ego=25.0, engageable=False, **STEER_ONLY)
+  # a standing NO_ENTRY refuses the brake episode's RESUME; it clears long after that episode expired
+  d.tick(int((M.ARM_MAX_S + 5.0) / DT), v_ego=25.0, engageable=False, **STEER_ONLY)
+  d.tick(int(M.V_MAX_WINDOW_S / DT), v_ego=25.0, **STEER_ONLY)
+  assert "noEntry" in d.reasons("refuse") and not d.fired() and not d.b._armed, "precondition"
+  d.tick(1, gas_pressed=True, v_ego=25.0, **STEER_ONLY)
+  d.tick(400, v_ego=25.0, **STEER_ONLY)
+  fires = [r for r in d.records if r["phase"] == "fire"]
+  assert fires, f"precondition: the tap must produce a press; records={d.records[-4:]}"
+  assert all(r["mode"] == "set" for r in fires), f"a gas-opened episode offered {[r['mode'] for r in fires]}"
+  assert d.offers[-1][2] == pytest.approx(25.0), "SET targets the current speed, never the remembered one"
+
+
+def test_the_accelerator_cannot_undo_the_double_tap_opt_out():
+  """Model item 4: double-tap the brake = stay off until the driver re-engages. The accelerator is not a
+  re-engagement."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=15.0, **STEER_ONLY)
+  d.tick(30, v_ego=15.0, **STEER_ONLY)
+  d.tick(20, brake_pressed=True, v_ego=15.0, **STEER_ONLY)          # second press inside DOUBLE_BRAKE_S
+  assert "doubleBrake" in d.reasons("suppress"), "precondition: opted out"
+  d.tick(300, v_ego=15.0, **STEER_ONLY)
+  n = len(d.records)
+  _pull_away_and_lift(d, gas_s=3.0, v=18.0)
+  assert not d.fired(), f"the accelerator overrode the opt-out; records={d.records[-4:]}"
+  assert not [r for r in d.records if r["phase"] == "arm" and r.get("reason") == "gas"]
+  # Rule 2 (Fable F1): the refused accelerator press is on record, exactly once, like a refused brake press
+  new = d.records[n:]
+  assert [(r["phase"], r["reason"], r["gas"]) for r in new] == [("refuse", "suppressed", True)], new
+
+
+def test_a_mads_unavailable_tick_forgets_that_steering_only_began_with_a_brake():
+  """Belt-and-braces for the inert branch (Fable F2): if MADS goes unavailable, the brain must not carry
+  `_lat_braked` into whatever steering-only state it sees next without a brake."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=15.0, **STEER_ONLY)         # a real brake arm -> _lat_braked
+  d.tick(int((M.ARM_MAX_S + 2.0) / DT), v_ego=15.0, engageable=False, **STEER_ONLY)   # RES refused, episode expires
+  assert "noEntry" in d.reasons("refuse") and not d.fired() and not d.b._armed and d.b._lat_braked, "precondition"
+  d.tick(1, mads_available=False, v_ego=15.0, **STEER_ONLY)
+  n = len(d.records)
+  _pull_away_and_lift(d, gas_s=2.0, v=18.0)
+  assert not d.fired() and d.records[n:] == [], f"records={d.records[n:]}"
+
+
+def test_the_accelerator_never_opens_an_episode_in_a_steering_only_state_not_seen_to_start_with_a_brake():
+  """The envelope rests on the steering-only state being brake-induced (the noBrake check). If MADS becomes
+  available while the truck is ALREADY steering-only, this brain never saw that start, so the accelerator
+  must not open an episode in it."""
+  d = Drive()
+  d.tick(50)
+  d.tick(200, mads_available=False, v_ego=15.0, **STEER_ONLY)
+  d.tick(100, v_ego=15.0, **STEER_ONLY)                              # MADS on, lateral-only already standing
+  _pull_away_and_lift(d, gas_s=2.0, v=18.0)
+  assert not d.fired() and d.records == [], f"records={d.records}"
+
+
+def test_a_gas_override_while_cruising_engaged_never_arms_or_offers():
+  """Normal cruising: ACC engaged, press the accelerator to overtake, lift. No brake, no steering-only
+  state: nothing may happen (the 09-13 request: "I normally do NOT want the cruise control to accept my
+  speed when I accelerate")."""
+  d = Drive()
+  d.tick(100)
+  d.tick(300, gas_pressed=True, v_ego=SET + 3.0)
+  d.tick(400, v_ego=SET + 2.0)
+  assert not d.fired() and d.records == [], f"records={d.records}"
+  # ...and the same after an earlier MADS brake whose RESUME brought cruise back: leaving steering-only must
+  # forget that it began with a brake, or the next overtake would open an episode while engaged.
+  d2 = normal_brake_and_resume()
+  d2.tick(100, lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=SET)
+  n_rec, n_off = len(d2.records), len(d2.offers)
+  d2.tick(300, gas_pressed=True, v_ego=SET + 3.0)
+  d2.tick(400, v_ego=SET + 2.0)
+  assert len(d2.offers) == n_off and d2.records[n_rec:] == [], f"records={d2.records[n_rec:]}"
+
+
+def test_a_liftoff_refused_by_slowing_then_regassed_leaves_a_lift_record():
+  """D1 (Rule 2). The driver lifts, the truck regens (measured 1.8 m/s^2), the window refuses `slowing`,
+  and the driver goes back on the power inside the window. The gate used to be overwritten by "gas" and
+  the refusal left no record. The record is NOT terminal: the arm still ends in exactly one fire."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)
+  d.tick(100, gas_pressed=True, v_ego=20.0, **STEER_ONLY)
+  v = 20.0
+  for _ in range(150):                                               # 1.5 s lift, regen
+    v -= REGEN_MS2 * DT
+    d.tick(1, v_ego=v, **STEER_ONLY)
+  assert not d.fired(), "precondition: refused while slowing"
+  d.tick(100, gas_pressed=True, v_ego=v, **STEER_ONLY)              # back on the power
+  lifts = [r for r in d.records if r["phase"] == "lift"]
+  assert len(lifts) == 1 and lifts[0]["reason"] == "slowing" and lifts[0]["fired"] is False, lifts
+  assert lifts[0]["liftS"] == pytest.approx(1.5, abs=0.02) and lifts[0]["mode"] == "set"
+  d.tick(400, v_ego=v, **STEER_ONLY)                                 # lift and coast
+  assert d.fired()
+  assert d.phases().count("fire") == 1 and d.phases().count("refuse") == 0, d.phases()
+
+
+def test_pedal_modulation_inside_the_settle_time_writes_no_lift_record():
+  """A lift shorter than RELEASE_MIN_S was never judged by a gate; recording it would only be noise."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)
+  for _ in range(10):
+    d.tick(50, gas_pressed=True, v_ego=20.0, **STEER_ONLY)
+    d.tick(int(0.3 / DT), v_ego=20.0, **STEER_ONLY)
+  assert not [r for r in d.records if r["phase"] == "lift"], [r for r in d.records if r["phase"] == "lift"]

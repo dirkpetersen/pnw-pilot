@@ -414,6 +414,13 @@ class MadsResumeBrain:
     # THREE-STATE like _lat_prev: None = never observed.
     self._pedal_prev = None
     self._pedal_off_t: float | None = None
+    # engagegoal2pnw: accelerator edge detector, THREE-STATE like _pedal_prev (None = never observed).
+    self._gas_prev = None
+    # engagegoal2pnw: this steering-only state was seen to START with the brake down (an arm that passed
+    # the noBrake check). Cleared the moment lateral-only ends. The accelerator may only open an episode
+    # of its own inside a state this brain watched begin with a brake -- the one precondition the whole
+    # envelope rests on (see the noBrake check in update()).
+    self._lat_braked = False
     # when our own resume last fired, for the post-resume rejection check
     self._fired_t: float | None = None
     # cruise_enabled edge detector, for clearing the opt-out. THREE-STATE like _lat_prev.
@@ -514,6 +521,8 @@ class MadsResumeBrain:
       self._suppressed = False
       self._pedal_prev = bool(i.brake_pressed)
       self._pedal_off_t = None
+      self._gas_prev = bool(i.gas_pressed)
+      self._lat_braked = False
       self._fired_t = None
       self._v_max = None
       self._v_max_t = 0.0
@@ -632,6 +641,10 @@ class MadsResumeBrain:
     if self._pedal_prev is not False and not pedal:
       self._pedal_off_t = i.now                 # pedal just came up (or first observation, released)
     self._pedal_prev = pedal
+    gas_rising = bool(i.gas_pressed) and self._gas_prev is False
+    self._gas_prev = bool(i.gas_pressed)
+    if not lat:
+      self._lat_braked = False
 
     # brakeretry2pnw: the opt-out. Evaluated on the brake EDGE, before arming, so a second press
     # suppresses rather than re-arms.
@@ -662,8 +675,23 @@ class MadsResumeBrain:
       out.records.append(self._snap(i, {"phase": "refuse", "reason": "suppressed", "fired": False}))
 
     start = (lat_rising or (lat and pedal_rising)) and not self._suppressed
+    # engagegoal2pnw (owner goal 2026-09-13): "If I want to resume longitudinal control and accelerate I
+    # can either push the + or I should be able to hit the gas pedal once and then it should ... set the
+    # new speed." An episode used to open ONLY on a brake press, and dies ARM_MAX_S after the last pedal
+    # activity -- so a red light held on the brake for more than 20 s, or any pedal-free stretch that long,
+    # left the accelerator doing nothing for the rest of the steering-only state. The accelerator now opens
+    # a SET-mode episode of its own whenever none is open. It can never offer RESUME (mode is fixed to SET
+    # at the arm), so ARM_MAX_S keeps its whole meaning for RESUME: no hand-back of a remembered speed
+    # minutes after the brake. Still inside the envelope: steering-only that began with a brake
+    # (`_lat_braked`), the double-tap / post-resume opt-out (`_suppressed`), and every SET gate below.
+    gas_start = (not start and gas_rising and self._lat_braked         # _lat_braked is cleared whenever not lat
+                 and not self._armed and not self._suppressed)
+    if not start and gas_rising and self._lat_braked and not self._armed and self._suppressed:
+      # Rule 2 (Fable review 2026-09-13, F1): the accelerator is now an engage input, so a press the opt-out
+      # refuses must say so exactly as a refused brake press does above -- `gas:true` in the snap tells them apart.
+      out.records.append(self._snap(i, {"phase": "refuse", "reason": "suppressed", "fired": False}))
 
-    if start:
+    if start or gas_start:
       if self._armed:
         # A previous episode is still open. _terminate() is a no-op if its terminal record was
         # already written, so this cannot double-report -- but an arm still inside its window has
@@ -684,6 +712,10 @@ class MadsResumeBrain:
       self._armed_set_age = age if math.isfinite(age) else -1.0
       self._armed_set = self._set_ms if (self._set_ms is not None and age <= SET_MAX_AGE_S) else None
       self._last_block = "armed"
+      if gas_start:
+        self._used_gas = True          # SET mode from the first tick: a one-tick tap must not fall back to RES
+        out.records.append(self._snap(i, {"phase": "arm", "reason": "gas", "fired": False}))
+        return out
       out.records.append(self._snap(i, {"phase": "arm", "reason": None, "fired": False}))
       if not (i.brake_pressed or i.regen_braking):
         # Fable A2: mads_pnw only ever raises lateral_only on a frame where `braking` is true (both
@@ -693,6 +725,7 @@ class MadsResumeBrain:
         self._done = True
         self._terminate(i, out, "noBrake")
         return out
+      self._lat_braked = True
       if self._armed_set is None and not i.cruise_available:
         # The ACC master is off: neither button can do anything, so end it now and name the real
         # cause rather than the `noSet` that the master being off just caused.
@@ -715,6 +748,16 @@ class MadsResumeBrain:
     # While it is down, this episode's target switches to "whatever speed they end up at", and the
     # release clock is held: it starts when BOTH pedals are up (gate 2 below).
     if i.gas_pressed:
+      # engagegoal2pnw / D1 (Rule 2): the driver went back on the power while a lift-off window was open
+      # and refusing. `_last_block` -- the gate that held it (`slowing`, `decelUnknown`, `slow`, a lead
+      # gate...) -- is about to be overwritten with "gas", and until now that refusal left no record at
+      # all (09-13 12:43:28 was visible only through a later record's `decel`). Non-terminal, like
+      # `offerEnd`: the arm stays open and still ends in exactly one fire/refuse. Only once the window
+      # has actually been judged by a gate (not still "settling"), so pedal modulation cannot flood the log.
+      if (self._released_t is not None and not self._done and self._offer_t is None
+          and self._last_block != "settling"):
+        out.records.append(self._snap(i, {"phase": "lift", "reason": self._last_block, "fired": False,
+                                          "liftS": round(i.now - self._released_t, 2)}))
       self._used_gas = True
       self._released_t = None
       self._last_block = "gas"
