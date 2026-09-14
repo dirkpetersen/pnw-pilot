@@ -12,6 +12,7 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
+from cereal import log
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid
@@ -30,6 +31,7 @@ OVERLAY_MERGED = os.path.join(STAGING_ROOT, "merged")
 FINALIZED = os.path.join(STAGING_ROOT, "finalized")
 
 OVERLAY_INIT = Path(os.path.join(BASEDIR, ".overlay_init"))
+NETWORK_TYPE_NAMES = {v: k for k, v in log.DeviceState.NetworkType.schema.enumerants.items()}
 
 # do not allow to engage after this many hours onroad and this many routes
 HOURS_NO_CONNECTIVITY_MAX = 27
@@ -481,14 +483,18 @@ def main() -> None:
         updater.check_for_update()
 
         # download update
-        last_fetch = params.get("UpdaterLastFetchTime")
-        timed_out = last_fetch is None or (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - last_fetch > datetime.timedelta(days=3))
+        # updatemetered2pnw: code updates go over ANY link, metered included (driver directive 2026-07-11,
+        # reaffirmed 2026-09-13). Stock skipped the automatic fetch whenever NetworkMetered was set and the
+        # last fetch was under 3 days old, so on its metered Starlink the truck sat on stale code for up to
+        # 3 days unless someone sent a SIGHUP. The metered gate is for drive-data uploads only (system/loggerd/uploader.py).
         user_requested_fetch = wait_helper.user_request == UserRequest.FETCH
-        if params.get_bool("NetworkMetered") and not timed_out and not user_requested_fetch:
-          cloudlog.info("skipping fetch, connection metered")
-        elif wait_helper.user_request == UserRequest.CHECK:
+        if wait_helper.user_request == UserRequest.CHECK:
           cloudlog.info("skipping fetch, only checking")
         else:
+          # Rule 2: say which link the fetch is spending, on every fetch, so "metered" is never a guess.
+          network_type = HARDWARE.get_network_type()
+          cloudlog.event("updated: fetching update", metered=params.get_bool("NetworkMetered"),
+                         network_type=NETWORK_TYPE_NAMES.get(network_type, network_type), user_requested=user_requested_fetch)
           updater.fetch_update()
           write_time_to_param(params, "UpdaterLastFetchTime")
         update_failed_count = 0
