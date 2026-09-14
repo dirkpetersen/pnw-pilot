@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `d1d2a87df6` (lcabort2pnw shadow, pushed 09:10 PT, staging).
-**Installed on the truck:** `f65fdbdaf9` (arbiterfu2pnw, 09:07 PT).
+**Channel tip / installed on the truck:** `8b08366eb1` (lcabort2pnw shadow `d1d2a87df6` + docs, installed
+09:13 PT, BootCount 206). 8 changes were installed today, each on its own reboot.
 
 ## Networking — arbiter logging
 
@@ -63,6 +63,12 @@ as each change ships.
 |---|---|---|
 | `ec6dd71a6d` **coopsteerfix2pnw** | The Tesla coop-steer shadow (it logs, never actuates) treats steering torque above 1.0 Nm as an override on the same tick. Before, it waited for the 50 ms-debounced `steeringPressed`, and for those 5 frames it computed the FULL 12° nudge exactly as the driver took over. The carstate debounce is untouched. | Fable SHIP: replay of route `00000105--0a36ee017d` reproduces exactly (active ticks above 1 Nm 77 → 0, peak offset 11.5° → 10.1°); 5/5 mutants; still shadow-only (the actuator command is final before the shadow runs). Keep strict `>`; no separate reason code needed. Installed 09:00 PT (BootCount 204), healthy. Still needed before this could ever actuate: a light-hand-steering drive. |
 
+## Lateral — lane-change override shadow
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `d1d2a87df6` **lcabort2pnw (1/2, shadow)** | Logs `lane_change_abort_shadow` (ERROR level, so it lands in qlogs) when the driver holds steering torque against an openpilot lane change for 0.3 s. It changes nothing the car does. | Fable SHIP. DesireHelper runs in modeld: the new attributes are read nowhere else, and NaN/−inf/never-received torque can't raise. It fires once per fight. The sign is right on both cars. Replays pin the on-car `laneChangeState` trace on all 171 ticks. Installed 09:13 PT (BootCount 206): modeld up, 0 tracebacks. **Finding:** ending the state would not stop the steering, because modeld feeds the desire as a rising-edge pulse and the model keeps changing lanes for about 4 s. The acting commit `653b9bc79a` is held for the owner: it would have ended 5 of 19 logged changes, 4 of them Lightning resting hands at ~1.8 Nm. |
+
 ## Location services — police misses
 
 | Commit(s) | What changed | Notes |
@@ -79,14 +85,12 @@ as each change ships.
   on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
   Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
   Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
-- **`lcabort2pnw`** (abort a lane change when the driver steers against it). **Finding:** ending the lane-change
-  state does NOT stop the steering. modeld feeds the desire as a rising-edge pulse, and the model keeps changing
-  lanes for about 4 s. No fork aborts on torque.
-  - Commit 1, SHADOW (`d1d2a87df6`, Fable SHIP, pushed 09:10 PT, installing): logs `lane_change_abort_shadow` after
-    0.3 s of torque against the change. Behaviour-neutral: replays match tick for tick.
-  - Commit 2, ACTS (`653b9bc79a`): **held for the owner.** In 1,390 local logs it would have ended 5 of 19 changes,
-    4 of them Lightning changes with about 1.8 Nm from hands resting on the wheel. Report:
-    `drives/2026-09-14/lane-change-override-corpus/`.
+- **`pscmlimlog2pnw`** (built; Fable reviewing): log the PSCM's own `LatCtlLim` changes to ces_events
+  (`{"ev":"pscmLim"}`, change-only, capped at 20/min). It reads the existing Ford parser in card and is never fed
+  to the clamp (a guard test proves the clamp stays inert).
+- **Building:** `silentexc2pnw` (the next 3 silent excepts on the speed path, `mapD` Infinity → null, and the stale
+  coop-steer test fake); `icbmband2pnw` (analysis first: can polyline curvature reject 46.5–58 m/s mapd garbage
+  without ever rejecting a real curve?).
 
 ## Deferred to the owner
 
