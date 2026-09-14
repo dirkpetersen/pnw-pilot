@@ -144,6 +144,12 @@ POLICE_GATE_MPH = 45                                       # arm the police poll
 POLICE_MIN_SPEED_MS = POLICE_GATE_MPH * 0.44704           # arm threshold (m/s)
 POLICE_RESUME_SPEED_MS = (POLICE_GATE_MPH - 2) * 0.44704  # disarm 2 mph below (hysteresis, avoids flapping)
 POLICE_SPEED_MAX_AGE_S = 10.0  # reject a LastGPSPosition speed older than this (GPS dropout -> fail-closed)
+# policemiss2pnw: while the gate is OFF, re-check it this often instead of once per POLICE_POLL_S. The gate
+# check is a local mem-param read; only an ARMED check makes a network call. Measured 2026-09-07..13: 52
+# highway entries (>=60 s below 45 mph, then above), first poll p50 38 s / p90 112 s after crossing. Polls
+# stay >= POLICE_POLL_S apart by construction: every poll is followed by a wait of `backoff` >= POLICE_POLL_S,
+# and the gated branch never polls.
+POLICE_GATE_RECHECK_S = 5.0
 # policenear2pnw (2026-08-18, driver report): with a real sighting <1 mi ahead AND another ~6 mi out,
 # the overlay ALTERNATED between them. Cause: selection ranks by geo.nearest_ahead's along-track
 # distance (projected onto the mapd path) while the driver sees live_mi (straight-line). Near an
@@ -645,7 +651,7 @@ class PoliceUpdater(threading.Thread):
           reason = _gate_reason(cur_speed)
           self._hold(reason)                                 # policemiss2pnw: was a wipe (alerts = [])
           self._log_poll_state("gated", reason)
-          self._stop.wait(POLICE_POLL_S)
+          self._stop.wait(POLICE_GATE_RECHECK_S)             # policemiss2pnw: was POLICE_POLL_S
           continue
         gps = self._cur_gps()
         if gps is None:
@@ -712,7 +718,8 @@ class PoliceUpdater(threading.Thread):
           # as retained/amber, and an empty hold is nodata + this reason (policemiss2pnw; was a blank).
           self._hold(emsg)
           denial = isinstance(e, urllib.error.HTTPError) and e.code in (402, 429)
-          backoff, consec_fails = next_police_backoff(backoff, consec_fails, denial)
+          backoff, consec_fails = next_police_backoff(backoff, consec_fails, denial,
+                                                      link_failure=emsg in ("net err", "timeout"))
           # Logged AFTER the decision so the interval printed is the one actually about to be waited,
           # and the streak explains WHY (a "consecutive 1/3" at 60s is a blip being tolerated, a
           # "consecutive 5/3" at 480s is a real outage).
@@ -756,7 +763,8 @@ def _read_mem(mem):
   return lat, lon, brg, path, ctx, wayref
 
 
-def next_police_backoff(cur_backoff: float, consec_fails: int, policy_denial: bool) -> tuple[float, int]:
+def next_police_backoff(cur_backoff: float, consec_fails: int, policy_denial: bool,
+                        link_failure: bool = False) -> tuple[float, int]:
   """policebackoff2pnw: pure escalation rule -> (next_backoff_s, next_consecutive_failure_count).
 
   Pure/static so it can be unit-tested without a daemon, matching _speed_gate's pattern.
@@ -772,6 +780,18 @@ def next_police_backoff(cur_backoff: float, consec_fails: int, policy_denial: bo
   doubling anchored even if the caller was sitting at a sub-normal interval."""
   if policy_denial:
     return float(POLICE_MAX_BACKOFF_S), POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF
+  if link_failure:
+    # policemiss2pnw: our own link failed ("net err" / "timeout": no HTTP response at all). Backing off
+    # cannot protect the proxy or the budget from a request that, almost always, never reached AWS, and
+    # it delays the first poll after the link returns. Measured 2026-09-13 PT: hotspot lost at 12:08:30,
+    # LTE back 12:13:34, but the 4th consecutive "net err" had pushed the next poll to 12:17:30 -- 3.9 min
+    # of highway at 59 mph with no fetch. A link failure therefore never STARTS an escalation (and does
+    # not count toward the streak); an escalation already earned by failures that reached the proxy, or a
+    # 402/429 park, is left exactly as it was. Worst case if a timed-out request did reach AWS: 1 call per
+    # POLICE_POLL_S, the same rate as a healthy drive.
+    if consec_fails < POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF:
+      return float(POLICE_POLL_S), consec_fails
+    return float(max(cur_backoff, POLICE_POLL_S)), consec_fails
   consec = consec_fails + 1
   if consec < POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF:
     return float(POLICE_POLL_S), consec

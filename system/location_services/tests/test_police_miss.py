@@ -164,3 +164,142 @@ class TestPollStateIsLogged:
     pu.run()
     assert len(events) == 1, "gate-off must log once, not once per check"
     assert events[0]["state"] == state and events[0]["reason"] == lsd._gate_reason(speed)
+
+
+class _Clock:
+  """Fake time for run(): wait(s) advances it; run() ends once it passes `end`."""
+  def __init__(self, end, start=0.0):
+    self.t, self.end, self.waits = start, end, []
+
+  def is_set(self):
+    return self.t >= self.end
+
+  def wait(self, s):
+    self.waits.append(s)
+    self.t += s
+
+  def set(self):
+    self.end = self.t
+
+
+def _clocked(end, speed_at, start=0.0):
+  pu = _updater()
+  pu._stop = _Clock(end, start)
+  pu._cur_speed = lambda: speed_at(pu._stop.t)
+  pu.polls = []
+  return pu
+
+
+# 2026-09-13 PT, OR-58 (qlog carState/gpsLocation + swaglog + comma-waze-proxy Lambda log). Last good poll
+# 12:07:24 (t=0). The hotspot dropped ~12:08:30; the device logged "net err" at 12:08:24, 12:09:44, 12:11:04
+# (-> 120 s) and 12:13:24 (-> 240 s); deviceState shows LTE back at 12:13:34 (t=370); the next poll that
+# reached AWS was 12:17:30 (t=606). Each failed attempt took ~20 s (80 s between the 60 s-cadence ones).
+LINK_DOWN_0913 = (55.0, 370.0)
+SPEED_0913_OR58 = 26.4                                   # 59 mph, armed throughout
+
+
+class TestLinkFailureDoesNotBackOff:
+  def _run(self):
+    pu = _clocked(900.0, lambda t: SPEED_0913_OR58)
+
+    def poll(cfg, lat, lon):
+      if LINK_DOWN_0913[0] <= pu._stop.t < LINK_DOWN_0913[1]:
+        pu._stop.t += 20.0
+        raise urllib.error.URLError(OSError(101, "Network is unreachable"))
+      pu.polls.append(pu._stop.t)
+      return []
+    pu._poll_proxy = poll
+    pu.run()
+    return pu
+
+  def test_the_real_0913_outage_resumes_within_one_cycle_of_the_link(self):
+    pu = self._run()
+    first_after = min(t for t in pu.polls if t >= LINK_DOWN_0913[1])
+    # old rule: 606 s here and 12:17:30 on the truck; one cycle + one in-flight attempt is the bound now
+    assert first_after <= LINK_DOWN_0913[1] + lsd.POLICE_POLL_S + 20.0, f"first poll after the link returned: t={first_after}"
+
+  def test_the_old_schedule_is_what_the_truck_did(self):
+    """Control: the simulation reproduces the truck's real 12:17:30 resume under the old rule."""
+    orig = lsd.next_police_backoff
+    try:
+      lsd.next_police_backoff = lambda cur, n, denial, link_failure=False: orig(cur, n, denial)
+      pu = self._run()
+    finally:
+      lsd.next_police_backoff = orig
+    first_after = min(t for t in pu.polls if t >= LINK_DOWN_0913[1])
+    assert abs(first_after - 606.0) <= 30.0
+
+  def test_pure_rule(self):
+    b, n = lsd.POLICE_POLL_S, 0
+    for _ in range(20):
+      b, n = lsd.next_police_backoff(b, n, False, link_failure=True)
+      assert (b, n) == (lsd.POLICE_POLL_S, 0), "a link failure escalated the interval"
+
+  def test_link_failure_keeps_an_earned_escalation(self):
+    b, n = lsd.POLICE_POLL_S, 0
+    for _ in range(5):                                  # upstream failures that reached the proxy
+      b, n = lsd.next_police_backoff(b, n, False)
+    earned = b
+    assert earned > lsd.POLICE_POLL_S
+    assert lsd.next_police_backoff(b, n, False, link_failure=True) == (earned, n)
+
+  def test_link_failure_keeps_a_policy_denial_parked(self):
+    b, n = lsd.next_police_backoff(lsd.POLICE_POLL_S, 0, True)
+    assert lsd.next_police_backoff(b, n, False, link_failure=True)[0] == lsd.POLICE_MAX_BACKOFF_S
+
+  def test_run_classifies_only_link_errors_as_link_failures(self):
+    """An upstream error the proxy reported (it reached AWS, and may have billed) must still escalate."""
+    pu = _clocked(1000.0, lambda t: SPEED_0913_OR58)
+
+    def poll(cfg, lat, lon):
+      pu.polls.append(pu._stop.t)
+      raise lsd._ProxyUpstreamErr("upstream TimeoutError")
+    pu._poll_proxy = poll
+    pu.run()
+    gaps = [b - a for a, b in zip(pu.polls, pu.polls[1:], strict=False)]
+    assert max(gaps) > lsd.POLICE_POLL_S, "a billable upstream failure no longer backs off"
+
+
+# 2026-09-13 PT 13:54:31 onward, gpsLocation speed (m/s) every 5 s: an on-ramp. 45 mph (20.1 m/s) is first
+# reached at 13:55:31; the first poll that reached AWS was 13:56:36.
+SPEED_0913_1354 = [0.6, 6.1, 16.5, 12.1, 11.1, 5.8, 7.9, 10.0, 6.4, 7.3, 13.0, 18.2, 23.2, 27.0, 28.1, 24.9,
+                   28.8, 27.0, 26.1, 25.2, 24.9, 24.7, 24.8, 24.1, 22.9, 21.9, 17.1, 14.7, 15.9, 17.7, 16.4]
+# 2026-09-12 PT 12:32:34 onward, gpsLocation speed every 5 s: the week's most threshold crossings (17 in
+# 3 min, 38-53 mph) -- the case that could turn a faster gate re-check into more than 1 poll/min.
+SPEED_0912_1232 = [20.2, 20.8, 19.8, 19.3, 20.0, 20.5, 20.9, 20.2, 20.5, 20.1, 20.4, 20.4, 20.3, 21.1, 20.4,
+                   18.8, 20.9, 23.6, 21.8, 20.6, 17.7, 20.3, 17.9, 23.2, 19.2, 20.1, 17.2, 21.8, 20.0, 20.7,
+                   18.7, 19.8, 18.9, 21.0, 22.4, 18.5, 21.2]
+
+
+def _trace(samples, offset=0.0):
+  return lambda t: samples[min(int((t + offset) / 5.0), len(samples) - 1)]
+
+
+class TestGateRecheck:
+  def _polls(self, samples, offset, end):
+    pu = _clocked(end, _trace(samples, offset))
+
+    def poll(cfg, lat, lon):
+      pu.polls.append(pu._stop.t + offset)
+      pu._stop.t += 2.4                                  # a proxy cache miss takes ~2.4 s (Lambda log)
+      return []
+    pu._poll_proxy = poll
+    pu.run()
+    return pu.polls
+
+  def test_the_real_0913_onramp_polls_within_one_recheck_of_45_mph(self):
+    crossing = 12 * 5.0                                   # 13:55:31
+    worst = 0.0
+    for offset in range(0, 60, 5):                        # every phase of the thread's own schedule
+      polls = self._polls(SPEED_0913_1354, float(offset), 140.0 - offset)
+      first = min(t for t in polls if t >= crossing)
+      worst = max(worst, first - crossing)
+    assert worst <= lsd.POLICE_GATE_RECHECK_S, f"first poll up to {worst:.0f} s after reaching 45 mph"
+
+  def test_polls_stay_a_full_interval_apart_on_the_flappiest_real_trace(self):
+    """Budget guard: the faster re-check must never produce more than one paid call per POLICE_POLL_S."""
+    for offset in range(0, 60, 5):
+      polls = self._polls(SPEED_0912_1232, float(offset), 180.0 - offset)
+      assert len(polls) >= 2, f"the trace is mostly above 45 mph; it must poll more than once, got {polls}"
+      gaps = [b - a for a, b in zip(polls, polls[1:], strict=False)]
+      assert all(g >= lsd.POLICE_POLL_S for g in gaps), f"polls {gaps} s apart at phase {offset}"
