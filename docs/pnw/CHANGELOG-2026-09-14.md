@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `f65fdbdaf9` (arbiterfu2pnw, pushed 09:03 PT, staging).
-**Installed on the truck:** `ed02e0a216` (coopsteerfix2pnw `ec6dd71a6d` + docs, 09:00 PT).
+**Channel tip:** `origin/3devpnw` = `d1d2a87df6` (lcabort2pnw shadow, pushed 09:10 PT, staging).
+**Installed on the truck:** `f65fdbdaf9` (arbiterfu2pnw, 09:07 PT).
 
 ## Networking — arbiter logging
 
@@ -16,6 +16,7 @@ as each change ships.
 |---|---|---|
 | `6ee95bac1f` **smallfix0914pnw** | The network arbiter logs every change of the active WiFi connection (`network_arbiter_active_changed from/to/by`), including changes it didn't make (`by=external`, e.g. NetworkManager autoconnecting KarlMoik after the iPhone hotspot drops) and bring-ups that didn't land (`by=not_as_requested`). A failed read is never logged as a change. Bring-up log lines now say what they leave (hotspot / a client connection / nothing / unreadable) instead of always "dropping hotspot". Logging only; no change to what the arbiter decides. | Fable APPROVE (change-only, no new nmcli call, 305/305 tests). Installed 01:14 PT; verified live: `KarlMoik → iPhone, by=arbiter` at boot. Motivated by the unlogged 2026-09-13 22:01 PT switch. |
 | `ff811dea0e`, `a0dd8097ee` **unreadhold2pnw** | A failed read of the active WiFi connection no longer makes the arbiter raise the hotspot (or re-`con up`) over a working link. Before, one nmcli hiccup plus the connected AP missing from that scan bounced a working link for 20–40 s. The hold applies only when there is something to hold (a link seen at the last good read, or our own bring-up in flight), so the first connection at boot is never delayed. It is bounded: after 120 s of consecutive failed reads the arbiter acts as before and logs an ERROR once. Hold and release are logged change-only. | Fable: first pass SHIP-with-gate (a boot delay of up to 120 s without it); the gate was applied exactly as Fable prototyped, with a boot test and 2 mutants killed; networkd 297/297. Installed 07:21 PT; healthy (no hold events at boot, on KarlMoik). |
+| `f65fdbdaf9` **arbiterfu2pnw** | (1) An unreadable verification read right after a bring-up no longer blames that network and puts it in backoff. The judgement waits for the next good read, bounded by the unreadable hold; past the bound it is made as before and logged at ERROR (`netcosttier_blamed_unverified`). (2) The fallback line no longer says "no priority network in range" when a priority network was in range but outranked: it lists each candidate and why it wasn't chosen. | Fable SHIP. Its optional hardening is applied: a deferral is gated on the same "something to hold" as the hold. In the double-fault probe the hotspot now comes up at 40 s instead of 160 s; test added, 2 mutants killed; networkd 319. Installed 09:07 PT (BootCount 205): still on KarlMoik, arbiter up, no arbiter tracebacks, nothing blamed or held. |
 
 ## Diagnostics — ACC dropout logging
 
@@ -74,19 +75,22 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`arbiterfu2pnw`** (Fable SHIP with Fable's optional hardening applied, test + 2 mutants; `f65fdbdaf9` pushed 09:03 PT, installing):
-  - An unreadable verification read after a bring-up no longer blames that network. The judgement waits for the
-    next good read, bounded by the unreadable hold, and an unverified blame past the bound is logged at ERROR.
-  - The fallback line says why each candidate was not chosen, instead of "no priority network in range".
 - **PSCM `LimitReached` (investigated):** the 09-08 19:44 PT event was the PSCM's own static limit on the I-5
   on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
   Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
   Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
-- **Building:** `lcabort2pnw` (abort a lane change when the driver steers against it).
+- **`lcabort2pnw`** (abort a lane change when the driver steers against it). **Finding:** ending the lane-change
+  state does NOT stop the steering. modeld feeds the desire as a rising-edge pulse, and the model keeps changing
+  lanes for about 4 s. No fork aborts on torque.
+  - Commit 1, SHADOW (`d1d2a87df6`, Fable SHIP, pushed 09:10 PT, installing): logs `lane_change_abort_shadow` after
+    0.3 s of torque against the change. Behaviour-neutral: replays match tick for tick.
+  - Commit 2, ACTS (`653b9bc79a`): **held for the owner.** In 1,390 local logs it would have ended 5 of 19 changes,
+    4 of them Lightning changes with about 1.8 Nm from hands resting on the wheel. Report:
+    `drives/2026-09-14/lane-change-override-corpus/`.
 
 ## Deferred to the owner
 
-Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; PSCM LimitReached: once logged, should a hands-off LimitReached raise Take Control at once, and tell Alan Polk the signal fires in angle mode?; RES restores the truck's memory vs the driver's set; stock
+Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; lane-change abort: per-car torque threshold (the Lightning's resting hands read ~1.8 Nm), same-direction abort, clearing the model's desire history; PSCM LimitReached: once logged, should a hands-off LimitReached raise Take Control at once, and tell Alan Polk the signal fires in angle mode?; RES restores the truck's memory vs the driver's set; stock
 dropout keeps steering (panda change); brake-release auto RES; the deleter policy when storage is full of
 un-uploaded drives; map downloads over metered links; the Fix B `coast_bias` default; `mapFlr` keep/drop;
 `curveoverride2pnw`; 12 V multimeter; relayMalfunction harness check; a driver-monitoring video check.
