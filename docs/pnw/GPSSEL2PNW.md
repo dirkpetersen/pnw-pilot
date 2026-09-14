@@ -262,3 +262,33 @@ Logged as `ces_icbm_stale_hold {hold | release, why, held_s}`. A declined hold i
 
 The closed-loop harness's stock set now follows the published caps, so a restore is observable. A positive
 control proves it, and the in-episode switch test (Fable, point b) uses it.
+
+## 5. truckdecode2pnw — the truck's own dead-reckoning flag, logged next to the inference
+
+**What.** opendbc now decodes `0x463 APIMGPS_Data_Nav_2_FD1.GPS_Actual_vs_Infer_pos` (1 = "Inferred_Position",
+0 = "Actual_Postition") into the `CarGps` blob as `dr`, with `drAge` = the Nav_2 frame's own age.
+`mapd_configd` reads it as `CarGpsSource.truck_dr` (None when absent, not 0/1, or `drAge` outside
+0..`CAR_GPS_MAX_AGE_S`). It is added to every `mapd_configd_gps_source` event as `truck_dr`, next to the inferred
+state (`car == "dr"`), and a change in the flag alone also logs a line. `ces_events` carries it inside `car_gps`.
+**It selects nothing.**
+
+**Evidence** (all 24 local Lightning rlog segments; `drives/2026-09-12/central-oregon-weekend/TRUCK_DECODE.md`):
+- 0x463 is on src 0, the bus the powertrain parser reads, at 1 Hz in every segment.
+- Flag 1 on all 243 frames of the Sat 06:24 PT cold start (HDOP 3.8–5.4, `GPS_dimension` 0/1); 0 on all 1,140
+  frames of 22 normal segments; one 1 → 0 transition (Sat 14:18:45 PT, parked, HDOP already 1.0 a frame earlier).
+- 1,345 publishes through the real opendbc carstate and the real `CarGpsSource`:
+
+  | truck flag | inferred DR | publishes |
+  |---|---|---|
+  | 0 | no | 1,102 |
+  | 1 | yes | 231 |
+  | 1 | no | 12 — 10 are the inference's 10 s entry at the cold start, 2 are the flag lagging HDOP's recovery |
+  | 0 | yes | **0** |
+
+**Why control stays on the inference.** No publish had the flag saying "actual" while the inference said DR, but
+the sample is one cold start and one recovery. The flag was never seen **entering** DR, and never in a tunnel
+(the SR 99 drive of 09-08 has no local rlog). The owner's rule — a dead-reckoned truck fix yields to a good comma
+fix — is unchanged. Re-evaluate after a drive through the SR 99 tunnel, comparing `truck_dr` with `car == "dr"`.
+
+**Tests**: `system/mapd/tests/test_gps_truck_dr_flag.py` (real `main()` loop; positions byte-identical whatever
+the flag says; a cross-repo seam test with real frames through the real publisher). 11 of 11 mutants killed.

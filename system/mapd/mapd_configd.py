@@ -113,7 +113,10 @@ CAR_GPS_DR_EXIT_S = 5.0
 #  - with a device fix that has been a steady `fix` for CAR_GPS_DR_ENTER_S. qcomgpsd publishes no accuracy
 #    (hasFix is only verticalAccuracy != 500), and the first hasFix samples after the Sat 06:28 cold start
 #    were 56-72 m off.
-# 0x463 GPS_Actual_vs_Infer_pos would say "inferred" directly, but the pinned opendbc never parses 0x463.
+# truckdecode2pnw: the truck's OWN dead-reckoning flag (0x463 GPS_Actual_vs_Infer_pos, CarGps `dr`/`drAge`) is
+# logged next to this inferred state and selects NOTHING. On the 24 local rlog segments it never read 0 while the
+# inference said DR, but it has been seen in one cold start and one recovery, never entering DR and never in a
+# tunnel -- not enough to take control from the inference (docs/pnw/GPSSEL2PNW.md s5).
 # gpslag2pnw: `fix_ts` = the monotonic time a written fix was VALID, so a consumer can project it to the
 # instant it decides on (ICBM, ces_pnw). Owner decision 2026-09-13: the device fix is its arrival here
 # minus the MEASURED qcomgpsd latency (GNSS time is wrong until the clock syncs after boot); the truck fix
@@ -151,6 +154,7 @@ class CarGpsSource:
     self._poor_since = None  # monotonic time of the first publish in the current HDOP >= DR run
     self._good_since = None  # while dr: monotonic time of the first publish in the current good run
     self._moving_at = None   # gpsdrgate2pnw: monotonic time of the last valid publish judged moving
+    self.truck_dr = None     # truckdecode2pnw: the truck's own flag, 1 inferred / 0 actual / None unknown (telemetry)
 
   @property
   def usable(self) -> bool:
@@ -167,19 +171,28 @@ class CarGpsSource:
 
   def update(self, cg, now: float, device_speed: float | None) -> dict | None:
     if cg is None:
+      self.truck_dr = None
       return self._bad("absent", "no CarGps published")
     try:
       ts = float(cg["ts"])
       lat, lon, hdg = float(cg["lat"]), float(cg["lon"]), float(cg["hdg"])
       spd_mph, age, hdop = float(cg["spd"]), float(cg["age"]), float(cg["hdop"])
     except (TypeError, KeyError, ValueError) as e:
+      self.truck_dr = None
       return self._bad("unreadable", f"CarGps unreadable: {type(e).__name__}")
     if ts != self._ts:
       self._ts, self._seen_at = ts, now
     else:
       if now - self._seen_at > CAR_GPS_SILENT_S:
+        self.truck_dr = None
         return self._bad("silent", f"no new CarGps publish for {now - self._seen_at:.1f} s")
       return None   # the same publish read again: nothing new to judge or write
+    # truckdecode2pnw: the truck's own flag, TELEMETRY ONLY. Optional keys (an older opendbc publishes neither), so
+    # they are read apart from the fields above and can never make a publish unreadable. A flag whose own Nav_2
+    # frame is older than CAR_GPS_MAX_AGE_S is unknown, never a stale "actual".
+    dr, dr_age = cg.get("dr"), cg.get("drAge")
+    self.truck_dr = (int(dr) if dr in (0, 1) and isinstance(dr_age, (int, float)) and 0.0 <= dr_age <= CAR_GPS_MAX_AGE_S
+                     else None)
     # DBC sentinels decode to out-of-range numbers (lat raw 255 -> 166 deg, heading 65535 -> 655.35,
     # speed 254/255 = Unknown/Invalid). 360.0 itself is valid: round(359.96, 1) is logged as 360.0.
     if not all(map(math.isfinite, (lat, lon, hdg, spd_mph, age, hdop))) or abs(lat) > 90.0 or abs(lon) > 180.0 \
@@ -426,7 +439,7 @@ def main():
   car_gps_capable = False        # gpssel2pnw: PnwVehicle(CarParams).car_gps, re-read every 5 s
   cp_bytes = None                # gpssel2pnw: the CarParams bytes car_gps_capable was judged from
   cp_checked_at = None           # gpssel2pnw: monotonic time of the last CarParams read
-  gps_source = None              # gpssel2pnw: last LOGGED (src, car kind)
+  gps_source = None              # gpssel2pnw: last LOGGED (src, car kind, truck DR flag)
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -500,11 +513,13 @@ def main():
       if car_gps_capable:
         # Rule 2: every source switch, and every change in WHY the car is not used, is logged once.
         src = "car" if use_car else ("device" if cur_fix_state == "fix" else "none")
-        if (src, car_gps.kind) != gps_source:
+        # truckdecode2pnw: the truck's own DR flag rides next to the inferred one (car == "dr"), and a change in it
+        # alone is logged too, so every disagreement between the two is on record.
+        if (src, car_gps.kind, car_gps.truck_dr) != gps_source:
           cloudlog.event("mapd_configd_gps_source", src=src, prev=gps_source[0] if gps_source else None,
                          car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
-                         device_fix_s=round(now_fix - fix_state_since, 1))
-          gps_source = (src, car_gps.kind)
+                         device_fix_s=round(now_fix - fix_state_since, 1), truck_dr=car_gps.truck_dr)
+          gps_source = (src, car_gps.kind, car_gps.truck_dr)
       if sm.alive['mapdOut']:
         mapd_out_down = 0
         mo = sm['mapdOut']
