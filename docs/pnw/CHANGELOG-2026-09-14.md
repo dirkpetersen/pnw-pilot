@@ -113,21 +113,22 @@ installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own 
     Fable's call: a false km/h is the dangerous direction, and BC signs could fool `IsaVLimUnit` alone.
   - Pin bump `7c76a608f4`: changes `cereal/*.capnp`, so the first boot does a wide C++ rebuild. No Ford platform's
     canValid changes: the new parser entries are ignore_alive, and a control test proves it.
-- **Building:** `silentexc3pnw`, Fable's next-ranked silent excepts: `read_ces_mode` → Off (CES and VTSC on both
-  cars), speedadjust `_read_speed_limit`, the VTSC freeway-floor inputs, and the RainMode push.
-- **ICBM 46.5–58 m/s "garbage band" (analysed, NOT built, no fix needed):**
-  `drives/2026-09-14/icbm-garbage-band/DRIVE_REPORT.md`, claims independently verified.
-  - In today's code a band read can never change an ICBM/CES decision: ICBM inflates it to ≥ 57.75 m/s, which is
-    always above the set speed. Over 11,954 band ticks, removing the value changed nothing.
-  - The "+6.1 s late" curve (07-19 06:29:44, Shilshole bend) had no band read: the 6.1 s was measured from the
-    10 s look-ahead marker, and against the steering ICBM started ~1 s early.
-  - A polyline rule can't separate real from bad reads: at best it catches 48/92 bad and rejects 290/811 real.
-  - The no-op holds while the Lightning `map_scale` ≥ ~0.63 (default 0.92).
-  - Earlier map anticipation is untouched: it is owner-controlled.
+- **`silentexc3pnw`**, 4 commits on top of silentexc2pnw, Fable SHIP on each; queued. Each logs a read that
+  silently fell back, with the fallback unchanged:
+  1. `ab0228eff8` `read_ces_mode`, per caller: CES, VTSC, and the UI overlay. 784 raise combinations never escape
+     into the UI.
+  2. `2d20a6124e` speedadjust `_read_speed_limit`.
+  3. `64f6cf60b3` VTSC freeway-floor inputs.
+  4. `472108b230` the RainMode push.
+  - Identity: VTSC/SA 240 and CES 69 scenarios identical, both normally and with every read forced to fail.
+  - Owner questions from this batch (Fable recommends, not built): hold the last good CES mode ~10 s on a read error
+    before Off + NO-SIGNAL; consult the legacy bool only when CESMode truly reads 0; remove the unreachable CES
+    except. Also flagged: VTSC has no GPS `fix_ts` staleness check. Fable rates it medium-low and suggests a 30 s
+    freshness check next.
 
 ## Deferred to the owner
 
-Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; lane-change abort: per-car torque threshold (the Lightning's resting hands read ~1.8 Nm), same-direction abort, clearing the model's desire history; PSCM LimitReached: once logged, should a hands-off LimitReached raise Take Control at once, and tell Alan Polk the signal fires in angle mode?; RES restores the truck's memory vs the driver's set; stock
+Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; CESMode read error: hold the last mode ~10 s, and legacy-bool fallback only on a true 0 (Fable recommends both); km/h gate: both signals (kept on Fable's advice); lane-change abort: per-car torque threshold (the Lightning's resting hands read ~1.8 Nm), same-direction abort, clearing the model's desire history; PSCM LimitReached: once logged, should a hands-off LimitReached raise Take Control at once, and tell Alan Polk the signal fires in angle mode?; RES restores the truck's memory vs the driver's set; stock
 dropout keeps steering (panda change); brake-release auto RES; the deleter policy when storage is full of
 un-uploaded drives; map downloads over metered links; the Fix B `coast_bias` default; `mapFlr` keep/drop;
 `curveoverride2pnw`; 12 V multimeter; relayMalfunction harness check; a driver-monitoring video check.
