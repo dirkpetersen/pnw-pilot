@@ -108,6 +108,22 @@ def override_shadows_pin(rel: dict | None = None) -> bool:
   return bool(expected) and _sha256(MAPD_BINARY) != expected
 
 
+def present_status() -> str:
+  """The line manager logs once mapd is present. mapdlogmgr2pnw: manager must log the ignored-pin warning
+  ITSELF. The installer subprocess's own cloudlog lines are dropped at boot: it exits in milliseconds, before
+  logmessaged is up, and swaglog's socket lingers only 10 ms. Measured on the truck 2026-09-13: override
+  active, pin ignored, zero warning lines in the post-boot swaglogs; only manager's "binary present"."""
+  try:
+    shadowed = override_shadows_pin()
+    version = load_release().get("version") if shadowed else None
+  except (OSError, ValueError) as e:
+    return f"mapd installer: binary present, but it could not be compared to the pin: {e}"
+  if shadowed:
+    return (f"mapd installer: WARNING {MAPD_OVERRIDE_FLAG} is active and the installed binary does NOT match the pinned "
+            + f"{version} -- the pin bump was IGNORED. Run `rm /data/mapd/.override` on the device to receive it.")
+  return "mapd installer: binary present"
+
+
 def is_installed(rel: dict | None = None) -> bool:
   if override_active():
     return True
@@ -135,7 +151,8 @@ def ensure_mapd(retries: int = 3) -> str:
       # (see manager.py's _install_mapd) and never reads that subprocess's stdout, so the only
       # cloudlog line manager ever emits for this case is "mapd installer: binary present", which is
       # true but hides that the pin bump was silently ignored. Emit the same warning through cloudlog
-      # too, so it reaches swaglog/logmessaged instead of only the tmux pane.
+      # too. At boot this subprocess exits before logmessaged is up, so that line is usually dropped; manager
+      # logs the same condition itself via present_status() (mapdlogmgr2pnw).
       installed_sha = _sha256(dest)
       warning = (
         f"mapd installer: WARNING /data/mapd/.override ({MAPD_OVERRIDE_FLAG}) is active and installed "

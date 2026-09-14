@@ -88,3 +88,27 @@ class TestOverrideShadowsPinCloudlogWarning:
     installer.ensure_mapd()
 
     mock_warning.assert_not_called()
+
+
+class TestPresentStatus:
+  """mapdlogmgr2pnw: manager logs present_status() itself, because the installer subprocess's cloudlog lines
+  are dropped at boot (measured on the truck). These drive the real override/sha comparison."""
+
+  def test_ignored_pin_is_named(self, tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, installed=b"old-binary-bytes", pinned=b"new-pinned-bytes", override=True)
+    msg = installer.present_status()
+    assert "IGNORED" in msg and "v2.3.1" in msg and installer.MAPD_OVERRIDE_FLAG in msg
+
+  def test_plain_when_pin_matches(self, tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, installed=b"same-bytes", pinned=b"same-bytes", override=True)
+    assert installer.present_status() == "mapd installer: binary present"
+
+  def test_plain_when_no_override(self, tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, installed=b"same-bytes", pinned=b"same-bytes", override=False)
+    assert installer.present_status() == "mapd installer: binary present"
+
+  def test_unreadable_release_is_said_not_swallowed(self, tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, installed=b"old-binary-bytes", pinned=b"new-pinned-bytes", override=True)
+    (tmp_path / "mapd_release.json").write_text("{not json")
+    msg = installer.present_status()
+    assert "could not be compared" in msg

@@ -144,7 +144,7 @@ def manager_init() -> None:
   # region's retry interval and measures it from the pull's END. The first pull for a region the
   # device has not seen is still immediate and unbounded in size -- that is the intended behaviour.
   def _install_mapd():
-    from openpilot.system.mapd.installer import is_installed
+    from openpilot.system.mapd.installer import is_installed, present_status
     backoff = 10
     while True:
       try:
@@ -158,7 +158,7 @@ def manager_init() -> None:
         rc = subprocess.run([sys.executable, "-m", "openpilot.system.mapd.installer"],
                             check=False, timeout=600).returncode
         if rc == 0 or is_installed():
-          cloudlog.warning("mapd installer: binary present")
+          cloudlog.warning(present_status())   # mapdlogmgr2pnw: includes an ignored-pin warning
           return
         cloudlog.warning(f"mapd installer: exited {rc}; retrying in {backoff}s")
       except Exception as e:
