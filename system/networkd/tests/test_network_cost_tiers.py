@@ -15,6 +15,12 @@ THE LADDER (the driver's own numbering):
     tier 2   other saved wifi in range, METERED     his mobile Starlink ("KarlMoik")
     tier 3   the comma's own hotspot + LTE          LAST RESORT
 
+netrank2pnw (2026-09-13) SUPERSEDED THE TIER NUMBERING ABOVE. Cost class now dominates membership for every
+saved network -- explicitly unmetered < default/unknown < explicitly metered -- and a configured entry is
+only a tiebreak inside its class. choose_wifi returns the COST CLASS (COST_UNMETERED/UNKNOWN/METERED), not
+a tier, and decide()'s up_priority/up_fallback name reports MEMBERSHIP, not cost. Tests below that
+changed say why in their docstrings.
+
 TWO RANKINGS THAT WERE REJECTED, and the tests that pin them out:
   * by LIST POSITION — the old priority list is ordered, so a phone-hotspot entry could outrank a
     cheaper network purely by sitting earlier in the JSON.
@@ -24,7 +30,7 @@ TWO RANKINGS THAT WERE REJECTED, and the tests that pin them out:
 """
 import pytest
 
-from openpilot.system.networkd.network_arbiter import (HOTSPOT_CONNECTION_ID, choose_wifi, decide,
+from openpilot.system.networkd.network_arbiter import (COST_UNKNOWN, COST_UNMETERED, HOTSPOT_CONNECTION_ID, choose_wifi, decide,
                                                        priority_connection_id, ssid_of)
 
 
@@ -49,8 +55,17 @@ class TestSsidOf:
 
 
 class TestTheLadder:
-  def test_tier0_priority_beats_everything(self):
-    assert choose_wifi(HOME, [HOME, PHONE, STARLINK], ALL_SAVED, {STARLINK}) == (0, HOME)
+  def test_a_priority_member_wins_WITHIN_its_cost_class(self):
+    """netrank2pnw (was test_tier0_priority_beats_everything): membership no longer beats everything,
+    it breaks ties inside a cost class. HOME and PHONE are both `unknown` here, so the configured HOME
+    wins; the returned class is COST_UNKNOWN, not the old tier 0."""
+    assert choose_wifi(HOME, [HOME, PHONE, STARLINK], ALL_SAVED, {STARLINK}) == (COST_UNKNOWN, HOME)
+
+  def test_an_explicitly_UNMETERED_network_beats_a_DEFAULT_priority_member(self):
+    """THE DRIVER'S RULE, netrank2pnw, verbatim: "if I clearly have an unmetered network and the other
+    network is set to either metered or default, then I made a conscious choice that this network is a
+    priority if it's available." HOME is configured but `unknown`; PHONE is not configured but `no`."""
+    assert choose_wifi(HOME, [HOME, PHONE], ALL_SAVED, set(), unmetered_ssids={PHONE}) == (COST_UNMETERED, PHONE)
 
   def test_tier1_unmetered_beats_tier2_metered(self):
     """THE CASE THE DRIVER DESCRIBED. No priority network in range; his unmetered iPhone and his
@@ -68,10 +83,11 @@ class TestTheLadder:
   def test_a_saved_network_that_is_not_in_range_is_not_chosen(self):
     assert choose_wifi("", ["SomeoneElsesWifi"], ALL_SAVED, set()) is None
 
-  def test_unknown_metered_state_counts_as_unmetered(self):
-    """NM reports `unknown` for a profile nobody marked — the normal state of a house WiFi. Treating
-    that as metered would demote exactly the networks the driver wants used."""
-    assert choose_wifi("", [PHONE], ALL_SAVED, set()) == (1, PHONE)
+  def test_unknown_metered_state_is_NOT_treated_as_metered(self):
+    """netrank2pnw rename (the old name said "counts as unmetered", which stopped being true when
+    unknown got its own class): NM reports `unknown` for a profile nobody marked. It is its own class,
+    between the two assertions -- never folded into metered, and never into unmetered."""
+    assert choose_wifi("", [PHONE], ALL_SAVED, set()) == (COST_UNKNOWN, PHONE)
 
   def test_the_choice_is_stable_between_equal_cost_networks(self):
     """An unstable pick would drop and re-raise the radio every cycle between two equal-cost
@@ -163,14 +179,14 @@ class TestUnknownIsNotUnmetered:
   with a "D". A ladder whose decisive input is the driver's choice of phone name is not a ladder."""
 
   def test_an_asserted_unmetered_network_beats_an_unknown_one(self):
-    assert choose_wifi("", [PHONE, STARLINK], ALL_SAVED, set(), unmetered_ssids={PHONE}) == (1, PHONE)
+    assert choose_wifi("", [PHONE, STARLINK], ALL_SAVED, set(), unmetered_ssids={PHONE}) == (COST_UNMETERED, PHONE)
 
   def test_and_it_still_wins_when_the_alphabet_is_against_it(self):
     """THE REGRESSION TEST. Rename the phone so it sorts AFTER the Starlink; the answer must not
     move. Under the old unknown==unmetered rule this returned KarlMoik."""
     zed = "Zed's iPhone"
     saved = [priority_connection_id(zed), ID_STAR]
-    assert choose_wifi("", [zed, STARLINK], saved, set(), unmetered_ssids={zed}) == (1, zed)
+    assert choose_wifi("", [zed, STARLINK], saved, set(), unmetered_ssids={zed}) == (COST_UNMETERED, zed)
 
   def test_an_unknown_network_still_beats_an_asserted_metered_one(self):
     """Unknown sits BETWEEN the two assertions -- it is not a synonym for either."""
@@ -184,7 +200,7 @@ class TestUnknownIsNotUnmetered:
   def test_a_failed_metered_read_is_recorded_as_unknown_not_as_cheap(self):
     """_metered_states puts an nmcli failure in NEITHER set. A read that failed tells us nothing and
     must not be laundered into an assertion -- so it ranks below anything actually vouched for."""
-    assert choose_wifi("", [PHONE, STARLINK], ALL_SAVED, set(), unmetered_ssids={PHONE}) == (1, PHONE)
+    assert choose_wifi("", [PHONE, STARLINK], ALL_SAVED, set(), unmetered_ssids={PHONE}) == (COST_UNMETERED, PHONE)
 
 
 class TestStickyActiveConnection:
@@ -273,17 +289,29 @@ class TestMeteredPriorityIsDemoted:
     assert (a, ssid) == ("up_fallback", PHONE)
 
   def test_but_it_is_demoted_not_excluded(self):
-    """Tier 2 still beats tier 3. A metered priority network is the right answer when it is the only
-    WiFi around."""
+    """A metered network still beats our own LTE. It is the right answer when it is the only WiFi.
+    netrank2pnw: the action is now `up_priority`, not `up_fallback` -- the action NAME reports whether the
+    winner is a configured entry (STARLINK is, here); the COST lives in its class. Both bring the network
+    up identically."""
     a, ssid = decide(True, STARLINK, [STARLINK], ALL_SAVED, None,
                      metered_ssids={STARLINK}, fallback_enabled=True)
-    assert (a, ssid) == ("up_fallback", STARLINK)
+    assert (a, ssid) == ("up_priority", STARLINK)
 
-  def test_an_unknown_priority_entry_is_NOT_demoted(self):
-    """The driver curated that list by hand, which says more about the network than an unset NM
-    field does. Only an explicit `metered=yes` contradicts tier 0."""
+  def test_an_unknown_priority_entry_is_still_chosen_when_it_is_the_best_there_is(self):
+    """netrank2pnw REVERSED the principle this test used to state ("an unknown priority entry is NOT
+    demoted -- only an explicit metered=yes contradicts tier 0"). Unknown IS now below explicitly
+    unmetered, for members and non-members alike -- see the test below. What survives: alone in range,
+    an unknown member is still chosen, and as a priority entry."""
     assert act(True, "Visitor", ["Visitor"], [priority_connection_id("Visitor")], None,
                fallback_enabled=True) == "up_priority"
+
+  def test_an_unknown_priority_entry_IS_outranked_by_an_explicitly_unmetered_network(self):
+    """THE REVERSAL, as a decision. Visitor is configured and `unknown`; the phone is `no`. The driver
+    marking a network unmetered is his conscious choice, so the phone wins even though it is not a
+    member of the list passed here."""
+    visitor = priority_connection_id("Visitor")
+    assert decide(True, "Visitor", ["Visitor", PHONE], [visitor, ID_PHONE], None,
+                  unmetered_ssids={PHONE}, fallback_enabled=True) == ("up_fallback", PHONE)
 
 
 class TestDecideReturnsWhatItRanked:
@@ -376,11 +404,36 @@ class TestCaseInsensitivity:
   bug for the same reason (users type "visitor", the AP advertises "Visitor")."""
 
   def test_a_priority_entry_still_wins_when_the_case_differs(self):
+    """Membership must match case-insensitively. netrank2pnw: the phone is no longer asserted unmetered
+    in this test -- under the generic rule an explicitly unmetered phone would (correctly) beat an unknown
+    Visitor on COST, which would stop this test being about case at all. Both are `unknown` now, so only
+    membership can decide, and it has to match "visitor" to "Visitor"."""
     a, ssid = decide(True, "visitor", ["Visitor", PHONE], [priority_connection_id("visitor"), ID_PHONE],
-                     None, unmetered_ssids={PHONE}, fallback_enabled=True)
+                     None, fallback_enabled=True)
     assert (a, ssid) == ("up_priority", "visitor")
 
   def test_and_the_saved_connection_match_is_case_insensitive_too(self):
     a, _ = decide(True, "Visitor", ["Visitor"], [priority_connection_id("visitor")], None,
                   fallback_enabled=True)
     assert a == "up_priority"
+
+
+class TestBinaryModeIsPreLadder:
+  """netrank2pnw: with fallback_enabled False (DisableNetworkCostLadder) decide() is the arbiter from
+  before cost existed -- the first reachable configured entry, or the hotspot -- plus the failure ledger."""
+
+  def test_it_ignores_cost_entirely(self):
+    assert decide(True, STARLINK, [STARLINK, PHONE], ALL_SAVED, None, metered_ssids={STARLINK},
+                  unmetered_ssids={PHONE}) == ("up_priority", STARLINK)
+
+  def test_it_still_honours_the_failure_ledger(self):
+    """The one retention: a dead-but-in-range router must not hold the device offline under the kill switch."""
+    assert decide(True, HOME, [HOME], ALL_SAVED, None, blocked_ssids={HOME.lower()}) == ("up_hotspot", "")
+
+  def test_it_brings_up_the_SAVED_PROFILE_spelling(self):
+    """`nmcli con up` matches ids case-sensitively: configured "visitor", profile "Visitor"."""
+    assert decide(True, "visitor", ["Visitor"], [priority_connection_id("Visitor")], None) == ("up_priority", "Visitor")
+
+  def test_an_active_priority_entry_absent_from_the_scan_stays_put(self):
+    """The geo-gate suppresses scanning on client WiFi; being ON the entry is reach enough."""
+    assert decide(True, HOME, [], ALL_SAVED, ID_HOME) == ("noop", HOME)

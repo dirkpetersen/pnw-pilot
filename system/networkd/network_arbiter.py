@@ -21,20 +21,23 @@ so the device fell straight to its own LTE — the most expensive link it has �
 in range. Driver, verbatim: "the tethering network should be the lowest priority if another wifi
 connection is available because the tethering network is the most expensive network".
 
-The ladder, cheapest first (driver's own numbering):
+netrank2pnw (2026-09-13, driver spec) — THE RANKING IS GENERIC. netcosttier2pnw's tier ladder (a configured entry
+= tier 0 unless explicitly metered) is SUPERSEDED. Driver, verbatim: "we need a generic solution where an
+unmetered network is always prioritized over a metered network or a default setting". Every saved network
+in range is ranked by one key:
 
-    tier 0   a configured PRIORITY network            (stationary, geo-gated; always unmetered)
-    tier 1   any other saved wifi in range, UNMETERED (e.g. the driver's iPhone hotspot)
-    tier 2   any other saved wifi in range, METERED   (e.g. mobile Starlink)
-    tier 3   the comma's OWN hotspot + LTE            LAST RESORT
+    1. cost class       explicitly unmetered (NM `no`) < default/unknown < explicitly metered (`yes`)
+    2. membership       a configured TetheringPriorityNetworks entry beats a non-member; members keep the
+                        driver's list order among themselves
+    3. ssid             stable tiebreak, so equal networks never flap
+    and last, the comma's OWN hotspot + LTE when nothing is usable.
 
-Two things this deliberately does NOT do:
-  * it does not rank by list position. The old priority list was ordered, so a phone-hotspot entry
-    could outrank a cheaper stationary network purely by sitting earlier in the JSON.
-  * it does not rank by the `mobile` flag. Mobile says "this network travels with the car", which is
-    about geofence learning, NOT about cost -- the driver's iPhone hotspot is mobile AND unmetered,
-    while his Starlink is stationary-ish AND metered. COST is the axis; `metered` is how the OS
-    reports it, and it self-maintains: mark a network metered and it demotes with no list to edit.
+What that means for the two rankings netcosttier2pnw rejected:
+  * LIST POSITION is still never a COST ranking -- it only orders members inside one cost class, where
+    the driver's own order is the only preference left to express.
+  * the `mobile` FLAG still does not rank anything. It does decide one thing now: a manual pick yields
+    to a STATIONARY, explicitly unmetered configured network in range (home_to_yield_to) -- a mobile
+    entry such as the iPhone never ends a pin.
 """
 from __future__ import annotations
 
@@ -72,7 +75,7 @@ class LinkVerdict(NamedTuple):
 PIN_JOIN_WINDOW_S = 90.0   # a pick that has not become the active network this long after the arbiter
                            # first saw it has failed to join (wrong password, AP gone). NM's DHCP timeout
                            # is 45 s; the UI's password path also deletes and re-adds the profile first.
-UPGRADE_SCAN_S = 120.0     # at most one cost-upgrade scan per this, on a non-tier-0 client link
+UPGRADE_SCAN_S = 120.0     # at most one cost-upgrade scan per this, on a client link not explicitly unmetered
 
 
 def parse_manual_pick(raw: object) -> tuple[tuple[str, float] | None, str]:
@@ -100,7 +103,8 @@ class PinVerdict(NamedTuple):
 
 
 def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid: str | None,
-              blamed_failed: bool, now: float, join_window_s: float = PIN_JOIN_WINDOW_S) -> PinVerdict:
+              blamed_failed: bool, now: float, join_window_s: float = PIN_JOIN_WINDOW_S,
+              home_ssid: str = "") -> PinVerdict:
   """Is the driver's manual pick still in force?
 
   A pin HOLDS the radio: while it is in force the arbiter takes no cost-driven action at all. That
@@ -113,6 +117,8 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
     * dropped       it WAS the active link and no longer is (out of range, or the driver joined
                     something else by a path that did not record a pick).
     * join_timeout  it never became the active link within join_window_s (wrong password, AP gone).
+    * home          netrank2pnw (Fable D2): a stationary, explicitly unmetered configured network is in
+                    range (home_ssid, from home_to_yield_to). The ladder then takes it.
     * superseded    a newer pick replaced it -- decided by the caller, which sees the new (ssid, ts).
     * reboot        WifiManualPick is CLEAR_ON_MANAGER_START.
 
@@ -125,6 +131,8 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
     return PinVerdict(pick_ssid, seen_active, "")
   if blamed_failed:
     return PinVerdict("", seen_active, "failed")
+  if home_ssid:
+    return PinVerdict("", seen_active, "home")
   if active_ssid.lower() == pick_ssid.lower():
     return PinVerdict(pick_ssid, True, "")
   if seen_active:
@@ -134,23 +142,94 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
   return PinVerdict(pick_ssid, False, "")
 
 
-def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, on_tier0: bool, pinned: bool,
-                     now: float, last_scan: float, interval_s: float = UPGRADE_SCAN_S) -> bool:
+def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bool, pinned: bool,
+                     link_settling: bool, now: float, last_scan: float, interval_s: float = UPGRADE_SCAN_S) -> bool:
   """Should the arbiter scan for a CHEAPER network although the geo-gate would not?
 
-  The geo-gate stops scanning once we are on client WiFi away from a learned location. That rule was
-  written when the only client WiFi the arbiter could be on was a PRIORITY network, i.e. already the
-  cheapest. The cost ladder broke the assumption: on a tier-1/2 link -- the driver's metered Starlink --
-  a cheaper network can come into range and can only be SEEN by scanning. Measured 2026-09-13: 66 min on
-  metered KarlMoik with the unmetered iPhone never considered, and NM 1.46 does not rescan on its own
-  while associated (LastScan unchanged across 75 s; the --rescan no cache pruned to the current AP).
+  The geo-gate stops scanning once we are on client WiFi away from a learned location -- a rule written
+  when the only client WiFi the arbiter could join was a priority network, i.e. already the cheapest.
+  Measured 2026-09-13: 66 min on metered Starlink with the unmetered iPhone never considered, and NM 1.46
+  does not rescan on its own while associated.
 
-  Not on tier 0 (nothing to gain), not while a manual pick holds the radio (the driver chose), not with
-  the ladder disabled (kill switch = pre-ladder behaviour), and at most once per interval, because a scan
-  takes the single radio off-channel. The gate's own worry -- disturbing tethered clients -- does not
-  arise on a client link: the comma's hotspot is down whenever wlan0 is a client."""
-  return (ladder_on and on_client_wifi and not on_tier0 and not pinned
+  netrank2pnw -- GENERIC: due whenever the active network is not EXPLICITLY UNMETERED. The first cut
+  (netscanpin2pnw) exempted every configured priority entry not known to be metered, which matched the one
+  measured case but not the driver's rule: "we don't want a solution where it just scans the Starlink
+  SSIDs that I have configured; we need a generic solution". Under the generic ranking a configured
+  `unknown` network can be beaten by an explicitly unmetered one, so being on it is not "done" either, and
+  only a scan can find the better network. On an explicitly unmetered link nothing can outrank it on cost,
+  so no scan.
+
+  Suppressed:
+    * ladder off         -- kill switch = pre-ladder behaviour
+    * not on client wifi -- off client wifi the geo-gate already lets scans through
+    * active unmetered   -- nothing is cheaper
+    * pinned             -- the driver chose this network
+    * link_settling      -- a bring-up is awaiting judgement, or the link appeared this tick. A scan takes
+                            the single radio off-channel, and the FIRST upgrade scan is immediate, so without
+                            this it could land inside the link's DHCP window (Fable, netscanpin2pnw review).
+    * throttled          -- at most one per interval_s
+  """
+  return (ladder_on and on_client_wifi and not active_unmetered and not pinned and not link_settling
           and now - last_scan >= interval_s)
+
+
+def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, saved_connections: list[str],
+                     unmetered_ssids: set[str] | None, blocked_ssids: set[str] | None, pinned_ssid: str) -> str:
+  """netrank2pnw (Fable D2): the home network a manual pick must give way to, or "" if none.
+
+  A pin used to hold until its network failed or dropped -- so a pick made on the road (the phone, say)
+  kept the truck off the home WiFi after arriving home, indefinitely. Proposed to the driver, no veto:
+  a pin holds UNTIL a network that is ALL of
+    * a configured priority entry that is STATIONARY (not `mobile`),
+    * EXPLICITLY UNMETERED (NM `no`, not merely unknown),
+    * in this tick's REAL scan (None = no scan ran = no evidence),
+    * a saved profile, and not serving a failure backoff (a dead home router must not end the pin),
+    * not the pinned network itself,
+  is in range. Then the pin ends and the ladder takes that network.
+
+  Mobile entries are NOT exempt from being pinned over, and they do not end a pin: the iPhone is a mobile
+  priority entry, and "any up_priority ends the pin" would reopen exactly the measured case of the driver
+  picking Starlink while his phone is in range.
+
+  The rule is literal as approved: a pick made while the home network is ALREADY visible ends at once.
+  See docs/NETCOST-STARLINK-TO-HOTSPOT.md 8.3 for that consequence and the alternative."""
+  if not scan_ssids:
+    return ""
+  scan = {x.lower() for x in scan_ssids}
+  saved = {ssid_of(c).lower() for c in saved_connections if ssid_of(c)}
+  unmetered = {u.lower() for u in (unmetered_ssids or set())}
+  blocked = {b.lower() for b in (blocked_ssids or set())}
+  pinned = (pinned_ssid or "").lower()
+  for ssid in stationary_ssids:
+    low = (ssid or "").strip().lower()
+    if low and low != pinned and low in scan and low in saved and low in unmetered and low not in blocked:
+      return ssid
+  return ""
+
+
+def on_priority_network(active_ssid: str, configured_ssids: list[str], active_metered: str | None) -> bool:
+  """The OnPriorityNetwork param, which the UPLOADER consumes as `at_home` (uploader.effective_metered):
+  on a qualifying network, a metered link may still carry drive files.
+
+  netrank2pnw DEFINITION: the active client network is a configured TetheringPriorityNetworks entry
+  (case-insensitive) AND its NM connection.metered is not EXPLICITLY `yes`.
+
+  Before: membership alone, exact case. That let a configured network the driver had explicitly marked
+  metered authorise 75 MB uploads over it -- the very shape of the 2026-09-10 incident (2,642 MB over
+  metered Starlink while it was a configured entry). Under the generic ranking an explicit `metered=yes` is
+  the driver's statement that the link costs money, and list membership does not override that for
+  uploads any more than it does for ranking. `unknown` still qualifies (unchanged for Visitor-like
+  networks), and so does a failed read with nothing cached (`active_metered` None): no evidence of cost
+  is not evidence of cost, and that was the previous behaviour.
+
+  Independent of DisableNetworkCostLadder, deliberately: the kill switch reverts RADIO SELECTION. It must
+  not re-open metered uploads as a side effect of someone reverting a radio problem."""
+  low = (active_ssid or "").strip().lower()
+  if not low:
+    return False
+  if not any((c or "").strip().lower() == low for c in configured_ssids):
+    return False
+  return (active_metered or "").strip().lower() != "yes"
 
 
 def pending_for_new_link(active_ssid: str, pending: tuple[str, float] | None,
@@ -246,95 +325,95 @@ def judge_link(active_ssid: str, usable: bool | None, pending: tuple[str, float]
   return LinkVerdict("", act, False, None)
 
 
-def choose_wifi(priority_ssid: str, scan_ssids: list[str], saved_connections: list[str],
+# netrank2pnw: cost CLASS dominates, for every saved network. Lower is cheaper.
+COST_UNMETERED = 0   # NM connection.metered = no   -- the driver (or the OS) asserted it is free
+COST_UNKNOWN = 1     # NM connection.metered = unknown -- the default; nobody ever said
+COST_METERED = 2     # NM connection.metered = yes  -- asserted expensive
+
+
+def cost_class(ssid: str, metered_ssids: set[str] | None, unmetered_ssids: set[str] | None) -> int:
+  """The cost class of one SSID from NM's three-state connection.metered. Case-insensitive. An SSID
+  in BOTH sets (impossible from NM) is treated as metered -- the conservative reading."""
+  low = (ssid or "").lower()
+  if low in {m.lower() for m in (metered_ssids or set())}:
+    return COST_METERED
+  if low in {u.lower() for u in (unmetered_ssids or set())}:
+    return COST_UNMETERED
+  return COST_UNKNOWN
+
+
+def choose_wifi(priority_ssids: str | list[str], scan_ssids: list[str], saved_connections: list[str],
                 metered_ssids: set[str] | None = None, active_ssid: str = "",
                 blocked_ssids: set[str] | None = None,
                 unmetered_ssids: set[str] | None = None) -> tuple[int, str] | None:
-  """Pick the cheapest usable WiFi. Returns (tier, ssid) or None if no saved wifi is usable.
+  """Pick the cheapest usable WiFi. Returns (cost_class, ssid) or None if no saved wifi is usable.
 
-  netcosttier2pnw. PURE. The cost signal is NetworkManager's `connection.metered` on the saved
-  profile, which has THREE values, not two:
+  netrank2pnw -- THE DRIVER'S GENERIC RULE (2026-09-13, verbatim): "we don't want a solution where it
+  just scans the Starlink SSIDs that I have configured; we need a generic solution where an unmetered
+  network is always prioritized over a metered network or a default setting ... if I clearly have an
+  unmetered network and the other network is set to either metered or default, then I made a conscious
+  choice that this network is a priority if it's available."
 
-      yes       somebody asserted this network costs money      -> tier 2
-      no        somebody asserted it does not                   -> tier 1
-      unknown   NOBODY EVER SAID                                -> between them (see below)
+  So the sort key, for EVERY saved client profile in range, is:
 
-  UNKNOWN IS NOT THE SAME AS UNMETERED, and the first cut of this file treated them as identical.
-  That was measured wrong on the truck 2026-09-10: of the four saved client profiles, only the
-  iPhone and the home WiFi carry an explicit `no`; the driver's mobile Starlink ("KarlMoik") and the
-  "Visitor" network are both `unknown`. Folding unknown into tier 1 put the Starlink -- the network
-  the driver NAMED as the metered one -- level with his unmetered iPhone, and the tie then fell to
-  the alphabetical tiebreak. The iPhone won by starting with a "D". Rename the phone and the ladder
-  silently inverts. A cost ladder whose decisive input is a coin flip is the Rule-2 failure mode
-  exactly: it looks like it is working.
+      1. cost class       COST_UNMETERED (no) < COST_UNKNOWN (default) < COST_METERED (yes)
+      2. priority member  a configured TetheringPriorityNetworks entry beats a non-member, and members
+                          keep the driver's own list order among themselves
+      3. ssid             so equal networks resolve STABLY and never flap
 
-  So `unknown` sorts BETWEEN the two assertions -- after everything known-cheap, before anything
-  known-expensive. Absence of evidence orders as absence of evidence, and no reading of an unset
-  field is invented in either direction. It stays inside the driver's tier 1 (it is still ordinary
-  WiFi, and still beats tier 3, our own LTE, which is the expensive thing this ladder exists to
-  avoid) -- it just never outranks a network somebody actually vouched for.
+  Cost dominates membership. This REVERSES netcosttier2pnw, where a configured entry was tier 0 unless
+  explicitly metered -- i.e. "unknown does not demote a priority entry". Under that rule an unknown
+  (default) configured network outranked a network the driver had explicitly marked unmetered, which is
+  exactly what he says is wrong: marking a network unmetered IS his conscious choice. Membership still
+  matters, but only between networks that cost the same.
 
-  `active_ssid` (Fable review) -- the SSID we are ASSOCIATED WITH right now. Seeded into the
-  candidate set even when this tick's scan does not list it, and never blocked. NM's association
-  state, not a scan, is the truth for "am I on this network": the geo-gate deliberately suppresses
-  scanning once we are on client WiFi, so without this the candidate set goes empty every tick away
-  from home and the arbiter tears down a working link to raise its own hotspot. Seeded at its TRUE
-  cost (not tier 0), so anything genuinely cheaper that does appear still wins.
+  UNKNOWN IS NOT UNMETERED (kept from netcosttier2pnw): measured on the 3X, most saved profiles carry
+  `unknown`. Folding it into unmetered once let an alphabetical tiebreak pick between the driver's
+  metered Starlink and his unmetered iPhone. Absence of evidence ranks as absence of evidence -- after
+  everything known-cheap, before everything known-expensive.
 
-  `blocked_ssids` (Fable review) -- SSIDs serving an association-failure backoff. Excluded so a
-  network that is in range but will not associate cannot hold the device offline forever. The ACTIVE
-  ssid is never excluded: it is demonstrably working.
+  `priority_ssids` -- the configured entries in list order (a bare str is accepted as a one-entry list).
+  Membership only; reachability is decided here like any other network: a saved profile that is in the
+  scan (or is the active link).
 
-  Case-insensitive throughout, matching select_available()'s reasoning: users type "visitor" while
-  the AP advertises "Visitor".
+  `active_ssid` -- the USABLE-active SSID (see judge_link). Seeded into the candidates even when this
+  tick's scan does not list it, and never blocked: the geo-gate suppresses scanning on client WiFi, and
+  without this the arbiter tore down a working link every tick away from home. It competes at its TRUE
+  cost, so anything cheaper that appears in a scan still wins.
+
+  `blocked_ssids` -- SSIDs serving an association-failure backoff; excluded so a network that is in
+  range but will not come up cannot hold the device offline.
+
+  The returned ssid is the SAVED PROFILE's own spelling (ssid_of), never the configured entry's -- `nmcli
+  con up` matches connection ids case-sensitively, so bringing up "openpilot connection visitor" when the
+  profile is "openpilot connection Visitor" would fail.
   """
-  metered = {s.lower() for s in (metered_ssids or set())}
-  unmetered = {s.lower() for s in (unmetered_ssids or set())}
-  blocked = {s.lower() for s in (blocked_ssids or set())}
-  scan = {s.lower() for s in scan_ssids}
-
+  members = [priority_ssids] if isinstance(priority_ssids, str) else list(priority_ssids or [])
+  member_rank: dict[str, int] = {}
+  for i, m in enumerate(members):
+    low = (m or "").strip().lower()
+    if low and low not in member_rank:
+      member_rank[low] = i
+  blocked = {b.lower() for b in (blocked_ssids or set())}
+  scan = {x.lower() for x in scan_ssids}
   active_ssid = (active_ssid or "").strip()
   if active_ssid:
-    scan.add(active_ssid.lower())          # sticky: associated beats "not in this tick's scan"
+    scan.add(active_ssid.lower())          # sticky: associated-and-usable beats "not in this tick's scan"
     blocked.discard(active_ssid.lower())   # ...and a VERIFIED-usable link is never in backoff
 
-  # tier 0 -- the configured priority network. Its availability is decided by the caller
-  # (priority_networks.select_available), which already applied the geo-gate and saved-connection check.
-  #
-  # EXCEPT when it is known METERED. The driver's own definition is "tier 0 is priority network,
-  # those are always unmetered" -- so a configured entry NM reports as metered is a contradiction, and
-  # resolving it by list position is the ranking this change exists to reject (his mobile Starlink
-  # outranking his unmetered iPhone purely by sitting earlier in the JSON). A metered priority entry
-  # is DEMOTED into the ladder below and competes at tier 2 -- still far ahead of tier 3, our own LTE.
-  # `unknown` does NOT demote a priority entry: the driver curated that list by hand, which is a
-  # stronger statement about it than an unset NM field is.
-  priority_ssid = (priority_ssid or "").strip()
-  if priority_ssid and priority_ssid.lower() not in metered and priority_ssid.lower() not in blocked:
-    return (0, priority_ssid)
-
-  # tiers 1 and 2 -- any OTHER saved client wifi in range (plus a demoted priority entry, which
-  # reaches here through its own saved connection). `rank` is the sort key; `tier` is the driver's
-  # own numbering, reported out for the log so a decision can be read back in his vocabulary.
   candidates = []
   for conn in saved_connections:
     ssid = ssid_of(conn)
     low = ssid.lower()
     if not ssid or low not in scan or low in blocked:
       continue
-    if low in metered:
-      rank, tier = 2, 2          # asserted expensive
-    elif low in unmetered:
-      rank, tier = 0, 1          # asserted cheap
-    else:
-      rank, tier = 1, 1          # nobody said -- between the two assertions
-    candidates.append((rank, ssid.lower(), tier, ssid))
+    candidates.append((cost_class(ssid, metered_ssids, unmetered_ssids),
+                       member_rank.get(low, len(members)), low, ssid))
   if not candidates:
     return None
-  # cheapest rank wins; ties broken by ssid so the choice is STABLE -- an unstable pick would drop and
-  # re-raise the radio every cycle between two genuinely equal-cost networks.
   candidates.sort()
-  _rank, _low, tier, ssid = candidates[0]
-  return (tier, ssid)
+  klass, _member, _low, ssid = candidates[0]
+  return (klass, ssid)
 
 
 def decide(
@@ -348,33 +427,38 @@ def decide(
   blocked_ssids: set[str] | None = None,
   unmetered_ssids: set[str] | None = None,
   active_ssid: str | None = None,
+  priority_ssids: list[str] | None = None,
 ) -> tuple[str, str]:
   """
   Decide the single nmcli action to take this tick, and which SSID it applies to.
 
   Args:
     tethering_enabled: value of the TetheringEnabled param.
-    priority_ssid: value of the TetheringPriorityWifi param (blank if unset). Only THIS ssid may
-                   interrupt the hotspot.
-    scan_ssids: SSIDs currently visible to NM (`nmcli -t -f SSID dev wifi list`). NM scans even
-                while in AP mode.
-    saved_connections: NM connection ids that exist (`nmcli -t -f NAME con show`). Used to confirm
-                       a saved client connection exists for the priority SSID before trying to
-                       bring it up.
-    current_active: NM connection id that is currently active on wlan0 (the Hotspot, an
-                    "openpilot connection <ssid>", or None). Used to stay idempotent — we never
-                    re-`up` what is already active — and, netcosttier2pnw2, as the STICKY signal:
-                    whatever we are associated with stays a candidate even when this tick's scan
-                    does not list it.
-    metered_ssids: SSIDs whose saved profile reports connection.metered = yes (the cost signal).
-    fallback_enabled: opt-in for tiers 1 and 2. Off = the old binary tier-0-or-hotspot behaviour.
+    priority_ssid: the FIRST reachable configured entry (priority_networks.select_available). Used by
+                   the binary mode only.
+    scan_ssids: SSIDs currently visible to NM.
+    saved_connections: NM connection ids that exist.
+    current_active: NM connection id currently active on wlan0 (the Hotspot, an "openpilot connection
+                    <ssid>", or None). Idempotence: we never re-`up` what is already active.
+    metered_ssids / unmetered_ssids: SSIDs whose saved profile reports connection.metered = yes / no.
+    fallback_enabled: the cost ladder. False = DisableNetworkCostLadder = the pre-ladder binary arbiter.
     blocked_ssids: SSIDs serving an association-failure backoff; never offered as a choice.
+    active_ssid: the usable-active SSID (judge_link); None derives it from current_active.
+    priority_ssids: every configured entry, in the driver's list order (netrank2pnw). Membership is a
+                    tiebreak inside a cost class. None falls back to [priority_ssid].
 
-  Returns (action, ssid). `ssid` is the network the action applies to, and is "" for the hotspot
-  actions and for noop. Returning it here rather than recomputing it in the caller is deliberate:
-  the daemon previously ran choose_wifi a SECOND time to work out what to bring up, and two
-  independently-argued calls can disagree -- which would `nmcli con up` a different network than the
-  one the ladder actually ranked.
+  Returns (action, ssid). `ssid` is "" for the hotspot actions and for noop-on-hotspot.
+
+  THE LADDER (fallback_enabled): every saved network in range is ranked by choose_wifi -- cost class
+  first, configured membership second. The action is `up_priority` when the winner is a configured entry
+  and `up_fallback` otherwise; that name is about MEMBERSHIP, not cost (both bring the network up the same
+  way). Nothing usable -> our own hotspot + LTE, the last resort.
+
+  THE BINARY MODE (not fallback_enabled): the arbiter as it was before the ladder existed -- the first
+  reachable configured entry, or the hotspot, and nothing in between. It has no notion of cost at all,
+  deliberately: that is what the kill switch is for. The ONE retention is the failure ledger (a blocked
+  entry is not reachable), because without it a dead-but-in-range router holds the device offline forever,
+  and a kill switch that can strand the device is not a safe kill switch.
   """
   # --- Tethering OFF: only ever ensure the hotspot is DOWN. Never touch client wifi. ---
   if not tethering_enabled:
@@ -382,53 +466,38 @@ def decide(
       return ("down_hotspot", "")
     return ("noop", "")
 
-  # --- Tethering ON ---
-  # netcosttier2pnw2: the USABLE-active network is sticky (see choose_wifi). The caller supplies it,
-  # because only the caller can tell "associated" from "carrying traffic" -- that needs an nmcli read
-  # and this function is pure. Passing None falls back to deriving it from current_active, which is
-  # what the pre-existing callers (and the tests) do; the daemon passes "" when the active link is
-  # associated but has no IPv4 address, so a dead link is neither sticky nor exempt from its backoff.
   if active_ssid is None:
     active_ssid = ssid_of(current_active or "")
+  blocked_low = {b.lower() for b in (blocked_ssids or set())}
+  if active_ssid:
+    blocked_low.discard(active_ssid.lower())
 
-  priority_ssid = (priority_ssid or "").strip()
-  priority_id = priority_connection_id(priority_ssid) if priority_ssid else None
-
-  # A named priority SSID is a TIER-0 CANDIDATE when it is reachable (in range, or the one we are
-  # already on) and has a saved connection. Whether it actually WINS is choose_wifi's decision, not
-  # ours -- it is the only place that knows about cost and about the failure ledger. Deciding it
-  # here as well is how the first cut ended up with the demotion rule written twice, in two functions
-  # that could drift apart; choose_wifi's copy was then dead code, because this function only ever
-  # called it with an empty priority_ssid.
-  # Case-INSENSITIVE, matching select_available and entry_for_ssid. A configured "visitor" against
-  # an AP advertising "Visitor" was selected as tier 0 by select_available and then rejected here,
-  # so it connected as an ordinary tier-1-unknown network and lost to anything explicitly unmetered
-  # (Fable review). The Peak 'Visitor' SSID is a real network in the driver's list and has already
-  # cost a captive-portal bug for exactly this reason.
-  scan_low = {x.lower() for x in scan_ssids}
-  saved_low = {c.lower() for c in saved_connections}
-  reachable = bool(
-    priority_ssid
-    and (priority_ssid.lower() in scan_low or priority_ssid.lower() == active_ssid.lower())
-    and priority_id and priority_id.lower() in saved_low
-  )
-
-  choice = choose_wifi(priority_ssid if reachable else "", scan_ssids, saved_connections,
-                       metered_ssids, active_ssid=active_ssid, blocked_ssids=blocked_ssids,
-                       unmetered_ssids=unmetered_ssids)
-
-  if choice is not None:
-    tier, ssid = choice
-    # `fallback_enabled` gates tiers 1 and 2 ONLY, so the pre-existing callers (and the deployed
-    # default, until the daemon turns it on) keep the exact old binary semantics: tier 0, or the
-    # hotspot, and nothing in between.
-    if tier == 0 or fallback_enabled:
-      conn_id = priority_connection_id(ssid)
-      if current_active == conn_id:
+  if fallback_enabled:
+    members = priority_ssids if priority_ssids is not None else ([priority_ssid] if priority_ssid else [])
+    choice = choose_wifi(members, scan_ssids, saved_connections, metered_ssids,
+                         active_ssid=active_ssid, blocked_ssids=blocked_ssids,
+                         unmetered_ssids=unmetered_ssids)
+    if choice is not None:
+      _klass, ssid = choice
+      if current_active == priority_connection_id(ssid):
         return ("noop", ssid)                    # already on it -- never re-`up` (idempotence)
-      return ("up_priority" if tier == 0 else "up_fallback", ssid)
+      is_member = ssid.lower() in {(m or "").strip().lower() for m in members}
+      return ("up_priority" if is_member else "up_fallback", ssid)
+  else:
+    # binary: the first reachable configured entry (the caller's select_available, which is in list order)
+    priority_ssid = (priority_ssid or "").strip()
+    if priority_ssid and priority_ssid.lower() not in blocked_low:
+      in_range = priority_ssid.lower() in {x.lower() for x in scan_ssids} or \
+        priority_ssid.lower() == (active_ssid or "").lower()
+      conn = next((c for c in saved_connections
+                   if c.lower() == priority_connection_id(priority_ssid).lower()), None)
+      if in_range and conn is not None:
+        ssid = ssid_of(conn)
+        if current_active == conn:
+          return ("noop", ssid)
+        return ("up_priority", ssid)
 
-  # Nothing cheaper is usable -> tier 3, our own hotspot + LTE.
+  # Nothing usable -> our own hotspot + LTE.
   if current_active == HOTSPOT_CONNECTION_ID:
     return ("noop", "")
   return ("up_hotspot", "")

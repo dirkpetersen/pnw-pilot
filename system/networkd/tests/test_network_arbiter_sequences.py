@@ -94,13 +94,17 @@ class FakeNM:
 
 
 def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,), ladder=True,
-             params=None):
+             params=None, mobile=(PHONE,)):
   """Drive main() for `ticks` polls. Returns the list of connections it brought up, in order.
 
   `params` (netscanpin2pnw): a dict consulted by the fake Params.get for any other key -- hooks may
   mutate it mid-run (the driver picking a network). A value that is an Exception instance is RAISED,
   to model a read failure such as UnknownKeyName."""
   params = {} if params is None else params
+  # netrank2pnw: `mobile` mirrors the truck's REAL TetheringPriorityNetworks, where the iPhone is
+  # "mobile": true and Hannelore/Visitor are stationary. The harness used to build every entry as
+  # stationary, which is harmless until stationarity MEANS something -- a pin now yields to a stationary,
+  # explicitly unmetered entry in range, and a stationary phone would wrongly qualify as "home".
   state = {"n": 0}
   monkeypatch.setattr(d, "_nmcli", nm.nmcli)
   monkeypatch.setattr(d, "_run", lambda args: subprocess.CompletedProcess(args, 0, "", ""))
@@ -108,10 +112,12 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
   monkeypatch.setattr(d, "_lte_throttled_recently", lambda: False)
   monkeypatch.setattr(d, "_lte_has_ip", lambda: False)
   monkeypatch.setattr(d, "_read_gps", lambda p, m: (47.0, -122.0))
-  monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home)
+  # netrank2pnw: near_home may be a callable, so a sequence can ARRIVE home mid-run
+  monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home() if callable(near_home) else near_home)
   monkeypatch.setattr(d, "_usable_cache", {})
 
-  nets = [{"label": "Home", "ssid": s, "lat": 47.0, "lon": -122.0} for s in priority]
+  nets = [{"label": s, "ssid": s, "lat": None if s in mobile else 47.0, "lon": None if s in mobile else -122.0,
+           "mobile": s in mobile} for s in priority]
 
   class P:
     def get_bool(self, k):
@@ -130,8 +136,8 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
     def put(self, *a):
       pass
 
-    def put_bool(self, *a):
-      pass
+    def put_bool(self, k, v):
+      params[k] = v          # netrank2pnw: record, so OnPriorityNetwork (the uploader's at_home) is assertable
 
   monkeypatch.setattr(d, "Params", lambda *a, **k: P())
 
@@ -486,7 +492,10 @@ class TestReleasingAPinByHand:
         params.pop("WifiManualPick")
     run_loop(monkeypatch, nm, ticks=14, near_home=False, hooks=[release], priority=(HOME, PHONE), params=params)
     assert ID_PHONE in nm.ups, f"a removed pick still held the radio: {nm.up_log}"
-    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "param_removed"}) in events
+    cleared = [kw for n, kw in events if n == "netcosttier_pin_cleared"]
+    assert cleared and cleared[0]["ssid"] == STAR and cleared[0]["reason"] == "param_removed"
+    # netrank2pnw: params_pyx returns None for an absent key AND for undecodable JSON, so the event says so
+    assert "not decodable" in cleared[0]["note"]
 
 
 class TestPinAbsenceOfEvidence:
@@ -532,3 +541,218 @@ class TestKillSwitchKeepsItsMeaning:
     assert nm.ups and nm.ups[0] == HOTSPOT, f"kill switch did not give the pre-ladder binary behaviour: {nm.ups}"
     assert "netcosttier_upgrade_scan" not in names(events)
     assert "netcosttier_pin_held" not in names(events)
+
+
+# ================================================================================================
+# netrank2pnw — the driver's GENERIC ranking rule, the pin yielding to home, and the hardening Fable
+# asked for after netscanpin2pnw.
+#
+# Driver, verbatim: "we don't want a solution where it just scans the Starlink SSIDs that I have
+# configured; we need a generic solution where an unmetered network is always prioritized over a metered
+# network or a default setting ... if I clearly have an unmetered network and the other network is set to
+# either metered or default, then I made a conscious choice that this network is a priority if it's
+# available."
+# ================================================================================================
+
+VISITOR, CAFE = "Visitor", "CafeFree"
+ID_VISITOR, ID_CAFE, ID_HOME = (d.priority_connection_id(x) for x in (VISITOR, CAFE, HOME))
+
+
+def _with(nm, *ssids):
+  for x in ssids:
+    cid = d.priority_connection_id(x)
+    if cid not in nm.saved:
+      nm.saved.append(cid)
+
+
+class TestGenericRanking:
+  def test_an_explicitly_unmetered_NON_member_beats_a_DEFAULT_configured_network(self, monkeypatch, events):
+    """THE DRIVER'S RULE at loop level. On Visitor (configured, stationary, `unknown`) away from home. His
+    phone -- NOT in the priority list in this scenario -- is explicitly unmetered and in range. The old
+    rule kept him on Visitor forever (a configured entry was tier 0, and no upgrade scan ran on it)."""
+    nm = FakeNM()
+    _with(nm, VISITOR)
+    nm.active, nm.ip[ID_VISITOR] = ID_VISITOR, "10.0.0.4"
+    nm.scan, nm.metered = [VISITOR, PHONE], {PHONE: "no"}
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, priority=(HOME, VISITOR), mobile=())
+    assert nm.ups[:1] == [ID_PHONE], f"stayed on a default network with an explicitly unmetered one in range: {nm.up_log}"
+    assert "netcosttier_upgrade_scan" in names(events), "no upgrade scan ran on an `unknown` configured network"
+
+  def test_membership_still_decides_WITHIN_a_cost_class(self, monkeypatch, events):
+    """Visitor (configured) and a cafe (not configured) are both `unknown`: the configured one wins."""
+    nm = FakeNM()
+    _with(nm, VISITOR, CAFE)
+    nm.active, nm.scan = HOTSPOT, [CAFE, VISITOR]
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME, VISITOR), mobile=())
+    assert nm.ups[:1] == [ID_VISITOR], f"membership did not break the tie: {nm.up_log}"
+
+  def test_list_order_breaks_a_tie_between_two_members_of_one_class(self, monkeypatch, events):
+    nm = FakeNM()
+    _with(nm, VISITOR)
+    nm.active, nm.scan = HOTSPOT, [VISITOR, HOME]
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(VISITOR, HOME), mobile=())
+    assert nm.ups[:1] == [ID_VISITOR], f"the driver's list order was not the tiebreak: {nm.up_log}"
+
+  def test_no_upgrade_scans_on_an_EXPLICITLY_unmetered_network_even_if_unconfigured(self, monkeypatch, events):
+    """The generic scan rule, from the other side: nothing can beat an explicitly unmetered link on cost,
+    configured or not."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.ip[ID_CAFE] = ID_CAFE, "10.0.0.5"
+    nm.scan, nm.metered = [CAFE, VISITOR], {CAFE: "no"}
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, priority=(HOME,), mobile=())
+    assert nm.ups == [] and nm.scans == 0, f"ups={nm.up_log} scans={nm.scan_times}"
+
+
+class TestOnPriorityNetworkMeaning:
+  """OnPriorityNetwork is the uploader's `at_home`: on it, a metered link may still carry drive files."""
+
+  def test_a_configured_but_EXPLICITLY_METERED_network_is_not_at_home(self, monkeypatch, events):
+    nm = FakeNM()
+    nm.active, nm.ip[ID_STAR] = ID_STAR, "10.0.0.3"
+    nm.scan, nm.metered = [STAR], {STAR: "yes"}
+    params = {}
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME, STAR), mobile=(), params=params)
+    assert params.get("OnPriorityNetwork") is False, "a configured metered link would authorise 75 MB uploads"
+
+  def test_a_configured_DEFAULT_network_still_is(self, monkeypatch, events):
+    nm = FakeNM()
+    _with(nm, VISITOR)
+    nm.active, nm.ip[ID_VISITOR] = ID_VISITOR, "10.0.0.4"
+    nm.scan = [VISITOR]
+    params = {}
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(VISITOR,), mobile=(), params=params)
+    assert params.get("OnPriorityNetwork") is True
+
+  def test_the_kill_switch_does_not_reopen_metered_uploads(self, monkeypatch, events):
+    """Deliberate: DisableNetworkCostLadder reverts RADIO selection. It must not quietly re-authorise
+    uploads over a link the driver marked metered."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_STAR] = ID_STAR, "10.0.0.3"
+    nm.scan, nm.metered = [STAR], {STAR: "yes"}
+    params = {}
+    run_loop(monkeypatch, nm, ticks=3, near_home=True, priority=(STAR,), mobile=(), ladder=False, params=params)
+    assert params.get("OnPriorityNetwork") is False
+
+
+class TestPinYieldsToHome:
+  """Fable D2, proposed to the driver, no veto: a pick holds until a STATIONARY configured network that is
+  EXPLICITLY UNMETERED is in range."""
+
+  def test_arriving_HOME_ends_a_pin_made_on_the_road_and_the_ladder_takes_home(self, monkeypatch, events):
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    nm.metered[HOME] = "no"
+    near = {"home": False}
+    def arrive(nm, tk):
+      if tk == 4:
+        near["home"] = True
+        nm.scan = [STAR, HOME]
+    run_loop(monkeypatch, nm, ticks=10, near_home=lambda: near["home"], hooks=[arrive], priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME in nm.ups, f"a road pin kept the truck off the home network: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "to": HOME}) in events
+
+  def test_the_MOBILE_phone_in_range_does_NOT_end_the_pin(self, monkeypatch, events):
+    """Scans running (near a learned location), the explicitly unmetered phone in range, Starlink pinned.
+    The phone is a mobile priority entry: exempting it would reopen the driver's measured case."""
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    run_loop(monkeypatch, nm, ticks=8, near_home=True, priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert nm.scans > 0, "precondition: scans must run for this test to mean anything"
+    assert ID_PHONE not in nm.ups, f"a mobile entry ended the pin: {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+  def test_a_DEFAULT_cost_stationary_network_does_NOT_end_the_pin(self, monkeypatch, events):
+    """Explicitly unmetered only. Visitor is configured, stationary, `unknown`."""
+    nm = FakeNM()
+    _with(nm, VISITOR)
+    _away(nm, ID_STAR, scan=(STAR, VISITOR))
+    run_loop(monkeypatch, nm, ticks=8, near_home=True, priority=(VISITOR, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert nm.scans > 0 and ID_VISITOR not in nm.ups, f"an unknown-cost network ended the pin: {nm.up_log}"
+
+
+class TestHoldSuppressesTheHotspotToo:
+  """Fable D3: mutating the hold to drop `up_hotspot` survived all 208 netscanpin2pnw tests. This is the
+  sequence that needs it."""
+
+  def test_a_HIDDEN_ssid_pick_is_not_trampled_by_the_hotspot_during_its_join(self, monkeypatch, events):
+    """A hidden network never appears in a scan. The driver enters it by name in Settings; the UI deletes
+    and re-adds the profile, so for a moment NOTHING is active and nothing is in range. With no candidate,
+    decide() returns up_hotspot -- and without the hold it would raise the comma's own AP over the join."""
+    nm = FakeNM()
+    hidden = "BackyardHidden"
+    _with(nm, hidden)
+    nm.active, nm.scan = None, []
+    params = {"WifiManualPick": _pick(hidden)}
+    def join_lands(nm, tk):
+      if tk == 3:
+        nm.active = d.priority_connection_id(hidden)
+        nm.ip[nm.active] = "10.0.0.9"
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, hooks=[join_lands], priority=(HOME,), mobile=(),
+             params=params)
+    assert HOTSPOT not in nm.ups, f"raised the hotspot over the driver's hidden-network join: {nm.up_log}"
+    assert any(n == "netcosttier_pin_held" and kw["suppressed"] == "up_hotspot" for n, kw in events)
+    assert nm.active == d.priority_connection_id(hidden)
+
+
+class TestNoScanInsideADhcpWindow:
+  def test_the_immediate_first_upgrade_scan_waits_for_a_new_link_to_settle(self, monkeypatch, events):
+    """Fable, netscanpin2pnw review: the first upgrade scan is immediate, so it could land inside the DHCP
+    window of a link just brought up, taking the single radio off-channel while it negotiates."""
+    nm = FakeNM()
+    nm.active, nm.scan, nm.metered = HOTSPOT, [STAR], {STAR: "yes"}
+    nm.behave[ID_STAR] = "no_dhcp"
+    hooks = [lambda nm, tk: nm.ip.__setitem__(ID_STAR, "10.0.0.3") if tk == 3 and nm.active == ID_STAR else None]
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, hooks=hooks, priority=(HOME,), mobile=())
+    raised = next(t for t, c in nm.up_log if c == ID_STAR)
+    usable_at = 3 * POLL
+    inside = [t for t in nm.scan_times if raised < t <= usable_at]
+    assert not inside, f"scanned at {inside} while the link raised at {raised} was still getting an address"
+    assert any(t > usable_at for t in nm.scan_times), "and the upgrade scan must still run once it settles"
+
+
+class TestKillSwitchIsPreLadderBinary:
+  def test_binary_mode_takes_the_first_configured_entry_and_ignores_cost(self, monkeypatch, events):
+    """DisableNetworkCostLadder = the arbiter before cost existed: the first reachable configured entry,
+    in list order -- even a default-cost one with an explicitly unmetered non-member in range."""
+    nm = FakeNM()
+    _with(nm, VISITOR, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [CAFE, VISITOR], {CAFE: "no"}
+    run_loop(monkeypatch, nm, ticks=3, near_home=True, priority=(VISITOR,), mobile=(), ladder=False)
+    assert nm.ups[:1] == [ID_VISITOR], f"the kill switch still ranked by cost: {nm.up_log}"
+    assert "netcosttier_upgrade_scan" not in names(events)
+
+  def test_binary_mode_takes_a_METERED_configured_entry_too(self, monkeypatch, events):
+    nm = FakeNM()
+    nm.active, nm.scan, nm.metered = HOTSPOT, [STAR], {STAR: "yes"}
+    run_loop(monkeypatch, nm, ticks=3, near_home=True, priority=(STAR,), mobile=(), ladder=False)
+    assert nm.ups[:1] == [ID_STAR], f"pre-ladder binary has no notion of cost: {nm.up_log}"
+
+
+class TestEveryMemberCountsNotJustTheFirstReachable:
+  def test_a_second_member_beats_a_non_member_of_the_same_class(self, monkeypatch, events):
+    """The daemon must pass EVERY configured entry to decide(). With only the first reachable one
+    (select_available), HOME would count as a non-member and lose the unknown-class tie to CafeFree on
+    ssid order -- the list would silently stop meaning anything past its first reachable entry."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    nm.active, nm.scan, nm.metered = HOTSPOT, [STAR, HOME, CAFE], {STAR: "yes"}
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(STAR, HOME), mobile=())
+    assert nm.ups[:1] == [ID_HOME], f"only the first reachable entry was treated as a member: {nm.up_log}"
+
+
+class TestTheActiveLinkCompetesAtItsTrueCost:
+  def test_on_metered_starlink_a_DEFAULT_network_later_in_the_alphabet_still_wins(self, monkeypatch, events):
+    """The active profile's cost is read at the top of the tick and excluded from the later bulk read, so
+    it must be MERGED back. Without the merge the active Starlink ranks as `unknown`, ties with ZedCafe,
+    and wins on ssid order -- a metered link kept over a default one."""
+    nm = FakeNM()
+    zed = "ZedCafe"
+    _with(nm, zed)
+    nm.active, nm.ip[ID_STAR] = ID_STAR, "10.0.0.3"
+    nm.scan, nm.metered = [STAR, zed], {STAR: "yes"}
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME,), mobile=())
+    assert nm.ups[:1] == [d.priority_connection_id(zed)], f"the active metered link was ranked as unknown: {nm.up_log}"
