@@ -43,6 +43,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from openpilot.system.networkd.geo_gate import HOME_GEOFENCE_M, haversine_m
+
 # NM connection ids. The Hotspot connection is always named "Hotspot"; saved client networks are
 # created by wifi_manager.connect_to_network as "openpilot connection <SSID>".
 HOTSPOT_CONNECTION_ID = "Hotspot"
@@ -173,8 +175,66 @@ def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bo
           and now - last_scan >= interval_s)
 
 
+PIN_HOME_ABSENT_SCANS = 3                  # consecutive REAL scans missing a home network = genuinely absent
+PIN_HOME_FAR_M = 2.0 * HOME_GEOFENCE_M      # confidently far from a home network's learned location
+
+
+def update_home_arrival(state: dict[str, tuple[int, bool]],
+                        stationary: list[tuple[str, float | None, float | None]],
+                        scan_ssids: list[str] | None,
+                        gps: tuple[float, float] | None) -> dict[str, tuple[int, bool]]:
+  """netrank2pnw (Fable D2): has each home network been GENUINELY ABSENT since the current pick was made?
+
+  Returns the new state, {ssid_lower: (consecutive_missing_real_scans, absent_since_pick)}. The caller
+  starts it empty when a pick is first seen and drops it when the pin ends. A pin may yield to a home
+  network only once that network has been established absent since the pick and then appears -- so a pick
+  made deliberately WHILE home is visible sticks, and a pick made on the road still gives way on arrival.
+  The case the driver approved: "pick Starlink, drive home, and the truck stays on paid Starlink in the
+  driveway" must not happen; a pick made at home must not revert on the next tick either.
+
+  ABSENCE IS ESTABLISHED ONLY BY EVIDENCE, two kinds:
+
+    * PIN_HOME_ABSENT_SCANS consecutive REAL scans that do not list it. A scan that did not run
+      (scan_ssids None) is no evidence and changes nothing. A single missing result is not absence --
+      APs drop out of scans -- and any scan that DOES list it resets the count, so flicker never adds up.
+
+    * GPS: the truck is more than PIN_HOME_FAR_M from that network's LEARNED location, on a tick where no
+      real scan listed it. This is how "not visible at pick time" is established when no scan ran around
+      the pick -- which is the NORMAL case on the road, where the geo-gate suppresses scanning on client
+      WiFi and the first real scan happens only on arriving near home. Without it, a road pick could
+      never yield. Twice the geofence, not the geofence itself: parked at home a truck can sit near the
+      edge of a location learned where it first connected, and GPS jitters.
+
+  Everything else is NOT evidence of absence and leaves a network visible-at-pick: no GPS fix, no
+  learned location (a stationary entry never connected to), a far GPS reading on a tick whose real scan
+  still lists the network (the scan wins -- the learned location may be stale). If neither kind of
+  evidence ever appears after the pick, the network counts as visible when the pick was made, and the pin
+  sticks. Once established, absence persists for the life of the pin: arriving home, the network is
+  present from then on, and it must still be allowed to end the pin (e.g. once a failure backoff expires).
+  """
+  scan = None if scan_ssids is None else {x.lower() for x in scan_ssids}
+  out = dict(state)
+  for ssid, lat, lon in stationary:
+    low = (ssid or "").strip().lower()
+    if not low:
+      continue
+    missing, absent = out.get(low, (0, False))
+    if absent:
+      continue
+    if scan is not None and low in scan:
+      out[low] = (0, False)              # seen: present now, and any run of misses is broken
+      continue
+    if scan is not None:
+      missing += 1
+    far = (gps is not None and lat is not None and lon is not None
+           and haversine_m(lat, lon, gps[0], gps[1]) > PIN_HOME_FAR_M)
+    out[low] = (missing, missing >= PIN_HOME_ABSENT_SCANS or far)
+  return out
+
+
 def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, saved_connections: list[str],
-                     unmetered_ssids: set[str] | None, blocked_ssids: set[str] | None, pinned_ssid: str) -> str:
+                     unmetered_ssids: set[str] | None, blocked_ssids: set[str] | None, pinned_ssid: str,
+                     arrived: set[str] | None = None) -> str:
   """netrank2pnw (Fable D2): the home network a manual pick must give way to, or "" if none.
 
   A pin used to hold until its network failed or dropped -- so a pick made on the road (the phone, say)
@@ -185,14 +245,18 @@ def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, 
     * in this tick's REAL scan (None = no scan ran = no evidence),
     * a saved profile, and not serving a failure backoff (a dead home router must not end the pin),
     * not the pinned network itself,
+    * ARRIVED: established genuinely absent since the pick (update_home_arrival), then back,
   is in range. Then the pin ends and the ladder takes that network.
 
   Mobile entries are NOT exempt from being pinned over, and they do not end a pin: the iPhone is a mobile
   priority entry, and "any up_priority ends the pin" would reopen exactly the measured case of the driver
   picking Starlink while his phone is in range.
 
-  The rule is literal as approved: a pick made while the home network is ALREADY visible ends at once.
-  See docs/NETCOST-STARLINK-TO-HOTSPOT.md 8.3 for that consequence and the alternative."""
+  A pick made while the home network is ALREADY visible sticks: `arrived` excludes it until it has been
+  genuinely absent. (The first cut of this function implemented the rule literally -- any qualifying home
+  in range ended the pin -- which made a manual pick at home revert on the next tick. The driver approved
+  the D2 fix for "pick Starlink, drive home, stay on paid Starlink in the driveway", not for that.)
+  `arrived` None means no arrival evidence at all, i.e. nothing qualifies."""
   if not scan_ssids:
     return ""
   scan = {x.lower() for x in scan_ssids}
@@ -200,9 +264,11 @@ def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, 
   unmetered = {u.lower() for u in (unmetered_ssids or set())}
   blocked = {b.lower() for b in (blocked_ssids or set())}
   pinned = (pinned_ssid or "").lower()
+  came = {a.lower() for a in (arrived or set())}
   for ssid in stationary_ssids:
     low = (ssid or "").strip().lower()
-    if low and low != pinned and low in scan and low in saved and low in unmetered and low not in blocked:
+    if (low and low != pinned and low in came and low in scan and low in saved and low in unmetered
+        and low not in blocked):
       return ssid
   return ""
 

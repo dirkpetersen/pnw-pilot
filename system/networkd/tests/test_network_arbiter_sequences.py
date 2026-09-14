@@ -94,7 +94,7 @@ class FakeNM:
 
 
 def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,), ladder=True,
-             params=None, mobile=(PHONE,)):
+             params=None, mobile=(PHONE,), gps=(47.0, -122.0)):
   """Drive main() for `ticks` polls. Returns the list of connections it brought up, in order.
 
   `params` (netscanpin2pnw): a dict consulted by the fake Params.get for any other key -- hooks may
@@ -111,7 +111,8 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
   monkeypatch.setattr(d, "_modem_index", lambda: None)
   monkeypatch.setattr(d, "_lte_throttled_recently", lambda: False)
   monkeypatch.setattr(d, "_lte_has_ip", lambda: False)
-  monkeypatch.setattr(d, "_read_gps", lambda p, m: (47.0, -122.0))
+  # netrank2pnw: gps may be a callable, so a sequence can DRIVE (a pin's arrival evidence reads it)
+  monkeypatch.setattr(d, "_read_gps", lambda p, m: gps() if callable(gps) else gps)
   # netrank2pnw: near_home may be a callable, so a sequence can ARRIVE home mid-run
   monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home() if callable(near_home) else near_home)
   monkeypatch.setattr(d, "_usable_cache", {})
@@ -643,12 +644,16 @@ class TestPinYieldsToHome:
     nm = FakeNM()
     _away(nm, ID_STAR, scan=(STAR,))
     nm.metered[HOME] = "no"
-    near = {"home": False}
+    # netrank2pnw: the truck must genuinely BE away when the pick is made. The first version of this test
+    # left GPS on the home location the whole time, which the corrected rule rightly reads as "home was
+    # visible at pick time" -- no scan ran and GPS said home -- so the pin stuck.
+    near = {"home": False, "gps": (47.05, -122.0)}          # ~5.6 km north of the learned home location
     def arrive(nm, tk):
       if tk == 4:
-        near["home"] = True
+        near["home"], near["gps"] = True, (47.0, -122.0)
         nm.scan = [STAR, HOME]
-    run_loop(monkeypatch, nm, ticks=10, near_home=lambda: near["home"], hooks=[arrive], priority=(HOME, PHONE),
+    run_loop(monkeypatch, nm, ticks=10, near_home=lambda: near["home"], gps=lambda: near["gps"],
+             hooks=[arrive], priority=(HOME, PHONE),
              params={"WifiManualPick": _pick(STAR)})
     assert ID_HOME in nm.ups, f"a road pin kept the truck off the home network: {nm.up_log}"
     assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "to": HOME}) in events
@@ -756,3 +761,91 @@ class TestTheActiveLinkCompetesAtItsTrueCost:
     nm.scan, nm.metered = [STAR, zed], {STAR: "yes"}
     run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME,), mobile=())
     assert nm.ups[:1] == [d.priority_connection_id(zed)], f"the active metered link was ranked as unknown: {nm.up_log}"
+
+
+class TestAMobileNetworkNeverEndsAPinEvenWhenItArrives:
+  def test_the_phone_going_away_and_coming_back_does_not_end_a_pin(self, monkeypatch, events):
+    """Found by mutation: once a pin could only yield to a network that ARRIVED, the earlier "mobile phone in
+    range does not end a pin" test stopped exercising the mobile exclusion -- the phone sat continuously in
+    range, so it never arrived, and treating mobile entries as homes survived. Here the explicitly unmetered
+    phone genuinely leaves (four real scans) and returns while Starlink is pinned. It is still not home."""
+    nm = FakeNM()
+    _away(nm, ID_STAR)
+    def phone_leaves_and_returns(nm, tk):
+      nm.scan = [STAR] if 2 <= tk < 6 else [STAR, PHONE]
+    run_loop(monkeypatch, nm, ticks=14, near_home=True, hooks=[phone_leaves_and_returns], priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert ID_PHONE not in nm.ups, f"a mobile entry ended the pin after 'arriving': {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+
+class TestAPickMadeAtHomeSticks:
+  """netrank2pnw D2 correction. The case approved was "pick Starlink, drive home, and the truck stays on
+  paid Starlink in the driveway". A pick made deliberately WHILE home is visible must stick -- otherwise a
+  manual pick at home reverts on the next tick and is useless there."""
+
+  @staticmethod
+  def _at_home(nm):
+    _away(nm, ID_STAR, scan=(STAR, HOME))
+    nm.metered[HOME] = "no"
+
+  def test_a_pick_made_while_home_is_visible_sticks_with_home_continuously_in_range(self, monkeypatch, events):
+    nm = FakeNM()
+    self._at_home(nm)
+    run_loop(monkeypatch, nm, ticks=25, near_home=True, priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert nm.scans >= 20, "precondition: home must be seen by real scans throughout"
+    assert ID_HOME not in nm.ups, f"a pick made at home reverted: {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+
+  def test_home_FLICKERING_in_scan_results_does_not_end_it(self, monkeypatch, events):
+    """Present, missing, present, missing ... and runs shorter than the absence threshold."""
+    nm = FakeNM()
+    self._at_home(nm)
+    pattern = [1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1]
+    def flicker(nm, tk):
+      nm.scan = [STAR, HOME] if pattern[tk % len(pattern)] else [STAR]
+    # concrete numbers, deliberately not the constant: runs of at most TWO missing scans. A test sized from
+    # PIN_HOME_ABSENT_SCANS would move with any mutation of it and pin nothing.
+    assert "000" not in "".join(map(str, pattern * 2)), "precondition: never three misses in a row"
+    run_loop(monkeypatch, nm, ticks=40, near_home=True, hooks=[flicker], priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME not in nm.ups, f"a flickering home network ended the pick: {nm.up_log}"
+
+  def test_but_a_home_that_is_GENUINELY_absent_and_then_returns_does_end_it(self, monkeypatch, events):
+    """The other side of the flicker rule: absence across enough REAL scans is genuine."""
+    nm = FakeNM()
+    self._at_home(nm)
+    def outage(nm, tk):
+      nm.scan = [STAR] if 2 <= tk < 6 else [STAR, HOME]     # FOUR consecutive real scans without home
+    run_loop(monkeypatch, nm, ticks=12, near_home=True, hooks=[outage], priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME in nm.ups, f"a genuinely returning home network did not end the pin: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "to": HOME}) in events
+
+  def test_SCANS_THAT_FAIL_at_home_are_not_absence(self, monkeypatch, events):
+    """nmcli failing to scan for several ticks says nothing about whether home left."""
+    nm = FakeNM()
+    self._at_home(nm)
+    hooks = [lambda nm, tk: nm.fail_reads.add("dev wifi list") if 2 <= tk < 8 else nm.fail_reads.discard("dev wifi list")]
+    run_loop(monkeypatch, nm, ticks=14, near_home=True, hooks=hooks, priority=(HOME, PHONE),
+             params={"WifiManualPick": _pick(STAR)})
+    assert ID_HOME not in nm.ups, f"failed scans were read as home leaving: {nm.up_log}"
+
+  def test_a_REPICK_at_home_after_a_road_pick_sticks(self, monkeypatch, events):
+    """Arrival evidence belongs to ONE pick. A road pick establishes that home was away; a NEW pick made
+    once home must start from nothing, or it would inherit that and revert."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR,))
+    nm.metered[HOME] = "no"
+    params = {"WifiManualPick": _pick(STAR, ts=1.0)}
+    where = {"gps": (47.05, -122.0), "near": False}
+    def trip(nm, tk):
+      if tk == 3:                                      # still away, while pinned: re-pick after arriving
+        where["gps"], where["near"] = (47.0, -122.0), True
+        nm.scan = [STAR, HOME]
+        params["WifiManualPick"] = _pick(STAR, ts=2.0)
+    # ordering matters: arrival and the new pick land on the same tick, so no tick sees the OLD pin at home
+    run_loop(monkeypatch, nm, ticks=16, near_home=lambda: where["near"], gps=lambda: where["gps"],
+             hooks=[trip], priority=(HOME, PHONE), params=params)
+    assert ID_HOME not in nm.ups, f"the new pick inherited the old pick's arrival evidence: {nm.up_log}"

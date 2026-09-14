@@ -46,6 +46,7 @@ from openpilot.system.networkd.network_arbiter import (
   UPGRADE_SCAN_S,
   decide,
   home_to_yield_to,
+  update_home_arrival,
   judge_link,
   judge_pin,
   on_priority_network,
@@ -652,6 +653,7 @@ def main() -> NoReturn:
   pin_ended_key: tuple[str, float] | None = None  # pin_key once it has ended (dropped/failed/...)
   pin_problem = ""                              # last logged pick-read problem (change-only log)
   pin_held_logged: tuple | None = None          # last logged hold (change-only log)
+  pin_home_state: dict[str, tuple[int, bool]] = {}  # netrank2pnw: home networks' absence since the pick
   last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
 
 
@@ -692,6 +694,7 @@ def main() -> NoReturn:
           if pin_key is not None and pin_key != pin_ended_key:
             cloudlog.event("netcosttier_pin_cleared", ssid=pin_key[0], reason="superseded", by=pick[0])
           pin_key, pin_first_seen, pin_seen_active, pin_ended_key = pick, time.monotonic(), False, None
+          pin_home_state = {}                   # netrank2pnw: arrival evidence belongs to ONE pick
           cloudlog.event("netcosttier_pin_set", ssid=pick[0])
         elif pick is None and pin_key is not None and pin_key != pin_ended_key:
           # present last tick, absent now: only a manager start (CLEAR_ON_MANAGER_START) or a hand removal
@@ -851,8 +854,17 @@ def main() -> NoReturn:
       # netrank2pnw: judged after the cost read and the ledger too, because a pin now also ends when a
       # stationary, explicitly unmetered configured network is in range (home_to_yield_to, Fable D2).
       pin_ssid = pin_key[0] if pin_in_force and pin_key else ""
-      home = home_to_yield_to([e["ssid"] for e in nets if not e.get("mobile")], scan_raw, saved,
-                              unmetered_ssids, blocked, pin_ssid) if pin_ssid else ""
+      home = ""
+      if pin_ssid:
+        # netrank2pnw: a pin gives way only to a home network that has ARRIVED since the pick -- genuinely
+        # absent (consecutive real scans, or GPS confidently far) and then back. A pick made while home is
+        # visible therefore sticks. See update_home_arrival for what counts as evidence.
+        stationary = [e for e in nets if not e.get("mobile")]
+        pin_home_state = update_home_arrival(pin_home_state,
+                                             [(e["ssid"], e.get("lat"), e.get("lon")) for e in stationary],
+                                             scan_raw, gps)
+        home = home_to_yield_to([e["ssid"] for e in stationary], scan_raw, saved, unmetered_ssids, blocked,
+                                pin_ssid, arrived={k for k, (_m, gone) in pin_home_state.items() if gone})
       pv = judge_pin(pin_ssid, pin_first_seen, pin_seen_active,
                      raw_active_ssid if active_read_ok else None,
                      bool(pin_ssid) and verdict.blame.lower() == pin_ssid.lower() and not verdict.blame_ok,

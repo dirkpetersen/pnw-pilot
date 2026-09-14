@@ -5,9 +5,11 @@ import math
 
 import pytest
 
-from openpilot.system.networkd.network_arbiter import (COST_METERED, COST_UNKNOWN, COST_UNMETERED, PIN_JOIN_WINDOW_S,
-                                                       UPGRADE_SCAN_S, cost_class, home_to_yield_to, judge_pin,
-                                                       on_priority_network, parse_manual_pick, upgrade_scan_due)
+from openpilot.system.networkd.geo_gate import HOME_GEOFENCE_M
+from openpilot.system.networkd.network_arbiter import (COST_METERED, COST_UNKNOWN, COST_UNMETERED,
+                                                       PIN_HOME_FAR_M, PIN_JOIN_WINDOW_S, UPGRADE_SCAN_S, cost_class,
+                                                       home_to_yield_to, judge_pin, on_priority_network,
+                                                       parse_manual_pick, update_home_arrival, upgrade_scan_due)
 
 STAR, PHONE = "KarlMoik", "Dirk’s iPhone 13"
 
@@ -121,33 +123,38 @@ class TestHomeToYieldTo:
   """Fable D2: a pin yields to a STATIONARY, EXPLICITLY UNMETERED configured network in range."""
   STAT = [HOME, "Visitor"]
 
-  def test_the_home_network_qualifies(self):
-    assert home_to_yield_to(self.STAT, [HOME, STAR], SAVED, {HOME}, set(), STAR) == HOME
+  def test_the_home_network_qualifies_once_it_has_ARRIVED(self):
+    """netrank2pnw correction: qualifying is not enough -- it must have been genuinely absent since the pick
+    (update_home_arrival). Without `arrived` nothing yields, so a pick made at home sticks."""
+    assert home_to_yield_to(self.STAT, [HOME, STAR], SAVED, {HOME}, set(), STAR, arrived={HOME.lower()}) == HOME
+    assert home_to_yield_to(self.STAT, [HOME, STAR], SAVED, {HOME}, set(), STAR) == ""
+    assert home_to_yield_to(self.STAT, [HOME, STAR], SAVED, {HOME}, set(), STAR, arrived=set()) == ""
 
   def test_unknown_cost_does_NOT_qualify(self):
     """Explicitly unmetered only. Visitor is `unknown`."""
-    assert home_to_yield_to(self.STAT, ["Visitor"], SAVED, set(), set(), STAR) == ""
+    assert home_to_yield_to(self.STAT, ["Visitor"], SAVED, set(), set(), STAR, arrived={"visitor"}) == ""
 
   def test_a_MOBILE_entry_is_never_home(self):
     """The phone is a mobile priority entry and explicitly unmetered. If it ended pins, picking Starlink
     with the phone in range -- the driver's own measured case -- could never stick."""
-    assert home_to_yield_to(self.STAT, [PHONE], SAVED, {PHONE}, set(), STAR) == ""
+    assert home_to_yield_to(self.STAT, [PHONE], SAVED, {PHONE}, set(), STAR, arrived={PHONE.lower()}) == ""
 
   def test_no_real_scan_is_no_evidence(self):
-    assert home_to_yield_to(self.STAT, None, SAVED, {HOME}, set(), STAR) == ""
+    assert home_to_yield_to(self.STAT, None, SAVED, {HOME}, set(), STAR, arrived={HOME.lower()}) == ""
 
   def test_a_BLOCKED_home_router_does_not_end_the_pin(self):
     """A dead home router in range must not end a working pin, only for the ladder to fail on it."""
-    assert home_to_yield_to(self.STAT, [HOME], SAVED, {HOME}, {HOME.lower()}, STAR) == ""
+    assert home_to_yield_to(self.STAT, [HOME], SAVED, {HOME}, {HOME.lower()}, STAR, arrived={HOME.lower()}) == ""
 
   def test_an_unsaved_home_does_not_qualify(self):
-    assert home_to_yield_to(self.STAT, [HOME], ["Hotspot"], {HOME}, set(), STAR) == ""
+    assert home_to_yield_to(self.STAT, [HOME], ["Hotspot"], {HOME}, set(), STAR, arrived={HOME.lower()}) == ""
 
   def test_the_pinned_network_does_not_yield_to_itself(self):
-    assert home_to_yield_to(self.STAT, [HOME], SAVED, {HOME}, set(), HOME) == ""
+    assert home_to_yield_to(self.STAT, [HOME], SAVED, {HOME}, set(), HOME, arrived={HOME.lower()}) == ""
 
   def test_it_is_case_insensitive(self):
-    assert home_to_yield_to(["hannelore"], ["HANNELORE"], SAVED, {"Hannelore"}, set(), STAR) == "hannelore"
+    assert home_to_yield_to(["hannelore"], ["HANNELORE"], SAVED, {"Hannelore"}, set(), STAR,
+                            arrived={"HanneLore"}) == "hannelore"
 
 
 class TestJudgePinYieldsToHome:
@@ -187,3 +194,67 @@ class TestOnPriorityNetwork:
 
   def test_nothing_active_is_not_a_priority_network(self):
     assert on_priority_network("", self.CONFIGURED, None) is False
+
+
+class TestUpdateHomeArrival:
+  """netrank2pnw (D2 correction): has a home network been GENUINELY absent since the pick?"""
+  LOC = (HOME, 47.0, -122.0)
+  AT_HOME, NEAR, FAR = (47.0, -122.0), (47.0036, -122.0), (47.0063, -122.0)   # 0 m, ~400 m, ~700 m
+
+  def step(self, state, scan, gps=AT_HOME):
+    return update_home_arrival(state, [self.LOC], scan, gps)
+
+  def gone(self, state):
+    return state.get(HOME.lower(), (0, False))[1]
+
+  def test_consecutive_REAL_scans_missing_it_establish_absence(self):
+    st = {}
+    for _ in range(2):                      # concrete: two misses are not absence, the third is
+      st = self.step(st, [STAR])
+    assert not self.gone(st), "two missing scans must not be absence"
+    st = self.step(st, [STAR])
+    assert self.gone(st)
+
+  def test_a_scan_that_LISTS_it_resets_the_count(self):
+    """Flicker never adds up."""
+    st = {}
+    for _ in range(10):
+      st = self.step(st, [STAR])            # missing
+      st = self.step(st, [STAR, HOME])      # present again
+    assert not self.gone(st)
+
+  def test_a_scan_that_did_not_RUN_is_no_evidence(self):
+    st = {}
+    for _ in range(20):
+      st = self.step(st, None)
+    assert st.get(HOME.lower(), (0, False)) == (0, False)
+
+  def test_GPS_confidently_far_establishes_absence_without_any_scan(self):
+    """How "not visible at pick time" is established on the road, where no scans run."""
+    assert self.gone(self.step({}, None, gps=self.FAR))
+
+  def test_GPS_inside_twice_the_geofence_does_NOT(self):
+    """The 2x margin: a truck parked near the edge of a learned location is not 'away'."""
+    assert HOME_GEOFENCE_M < 400 < PIN_HOME_FAR_M
+    assert not self.gone(self.step({}, None, gps=self.NEAR))
+
+  def test_no_GPS_or_no_learned_location_is_no_evidence(self):
+    assert not self.gone(self.step({}, None, gps=None))
+    assert not self.gone(update_home_arrival({}, [(HOME, None, None)], None, self.FAR))
+
+  def test_a_scan_that_LISTS_it_beats_a_far_GPS_reading(self):
+    """The learned location may be stale; the radio is the direct observation."""
+    assert not self.gone(self.step({}, [HOME], gps=self.FAR))
+
+  def test_absence_once_established_persists_through_presence(self):
+    """Arriving home, the network is present from then on -- it must still be able to end the pin, e.g.
+    once a failure backoff on it expires."""
+    st = self.step({}, None, gps=self.FAR)
+    for _ in range(5):
+      st = self.step(st, [HOME])
+    assert self.gone(st)
+
+  def test_it_is_pure(self):
+    st = {}
+    self.step(st, [STAR])
+    assert st == {}
