@@ -539,6 +539,12 @@ class TestTelemetryArrival:
     g._icbm_k_v = 0.0
     g._icbm_k_n = 0
     g._icbm_k_ahead = False
+    # icbmconsist2pnw added these to CES __init__ (and to the enabled record, as float()/int()); _Permissive predates
+    # them and answered None, so the record raised TypeError before ever reaching the cp* fields under test.
+    g._icbm_k_at = 0.0
+    g._icbm_k_at_d = 0.0
+    g._icbm_k_at_n = 0
+    g._icbm_k_at_gap = 0.0
     rec = _ces_cls()._event_record.__get__(g)("tick", {"vEgo": 11.0})
     assert rec["cpOff"] == pytest.approx(res.offset_deg, abs=1e-3) and rec["cpOff"] < 0
     assert rec["cpWhy"] == cs.REASON_ACTIVE and rec["cpTq"] == pytest.approx(-0.8)
