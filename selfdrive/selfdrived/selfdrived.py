@@ -873,8 +873,9 @@ class SelfdriveD:
       out = self.mads_resume.update(inputs)
       if out.cancel:
         self.set_high_cancel_pending = True
-        cloudlog.error("madsresume2pnw: stock set came back > 3 mph above what our own press wanted, no driver button -- CANCELLING cruise (records: %s)",
-                       out.records)
+        cloudlog.error("madsresume2pnw: stock set came back > 3 mph above what our own press wanted, no driver button -- CANCELLING cruise. "
+                       "Set values assume the cluster shows mph (Ford CANFD carstate hardcodes it); gotDisplayMph ~1.6x wantDisplayMph "
+                       "on every cancel means km/h. (records: %s)", out.records)
 
       # --- publish / withdraw the offer -------------------------------------------------------
       # Withdrawal is IMMEDIATE and unthrottled: the executor's freshness bound only limits how

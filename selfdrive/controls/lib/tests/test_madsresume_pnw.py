@@ -1617,6 +1617,8 @@ def test_the_2116_overshoot_cancels_at_once_on_the_verify_tick():
   assert cancels == [0.15], f"cancel ticks (s after fire): {cancels}"
   assert len(verify) == 1 and verify[0]["reason"] == "setHigher" and verify[0]["loud"] is True, verify
   assert verify[0]["cancel"] is True and verify[0]["driverBtn"] is False, verify
+  # the raw cluster values, so a km/h cluster (every set ~1.6x) is recognisable from the record alone
+  assert verify[0]["gotDisplayMph"] == 55.0 and verify[0]["wantDisplayMph"] == 34.4, verify
 
 
 def test_a_driver_button_in_the_verify_window_is_never_cancelled():

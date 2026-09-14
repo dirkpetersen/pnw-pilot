@@ -678,6 +678,10 @@ class MadsResumeBrain:
           # explicit, so it cannot fall back to whatever `_used_gas` happens to be now
           "mode": self._verify_mode or "res",
           "driverBtn": self._verify_driver_btn, "cancel": cancel,
+          # Fable review (a): the raw set as the cluster shows it. Ford CANFD carstate decodes Veh_V_DsplyCcSet as
+          # mph unconditionally (no units signal in CarState); a cluster in km/h would read every set ~60% high
+          # and this rule would cancel every press. Logged so that case is recognisable at a glance.
+          "gotDisplayMph": round(got / 0.44704, 1), "wantDisplayMph": round(want / 0.44704, 1),
         }))
         if reason != "ok":
           out.records[-1]["loud"] = True
