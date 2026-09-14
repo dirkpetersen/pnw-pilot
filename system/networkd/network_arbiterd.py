@@ -400,19 +400,49 @@ def _set_hotspot_nat(enabled: bool) -> None:
       _run([*base, "-I", chain, *rest])
 
 
-def _apply(action: str, ssid: str) -> None:
-  """Run the one action chosen by decide(). All failures are logged, never raised."""
+def _leaving(current_active: str | None, active_read_ok: bool) -> str:
+  """smallfix0914pnw: what a client bring-up takes the single radio away from, for its log line.
+
+  The line used to say "(dropping hotspot)" unconditionally, which was false whenever the device was on a
+  client WiFi -- e.g. leaving KarlMoik for the phone. An unreadable active connection is said as such, not
+  guessed."""
+  if not active_read_ok:
+    return "active connection unreadable"
+  if current_active == HOTSPOT_CONNECTION_ID:
+    return "dropping hotspot"
+  if current_active:
+    return f"leaving {current_active}"
+  return "nothing was active"
+
+
+def _expected_active(action: str, ssid: str) -> str | None:
+  """smallfix0914pnw: the wifi connection `action` should leave active ("" = none), or None for noop/unknown.
+  Mirrors the connection ids _apply brings up, so network_arbiter_active_changed can say whether a change
+  was the arbiter's own."""
+  if action in ("up_priority", "up_fallback") and ssid.strip():
+    return priority_connection_id(ssid.strip())
+  if action == "up_hotspot":
+    return HOTSPOT_CONNECTION_ID
+  if action == "down_hotspot":
+    return ""
+  return None
+
+
+def _apply(action: str, ssid: str, current_active: str | None = None, active_read_ok: bool = True) -> None:
+  """Run the one action chosen by decide(). All failures are logged, never raised.
+  `current_active`/`active_read_ok` are this tick's read, used only to say in the log what is being left."""
   if action == "noop":
     return
   if action == "up_priority":
     conn_id = priority_connection_id(ssid.strip())
-    cloudlog.info(f"network_arbiterd: priority wifi '{ssid}' in range -> {conn_id} (dropping hotspot)")
+    cloudlog.info(f"network_arbiterd: priority wifi '{ssid}' in range -> {conn_id} ({_leaving(current_active, active_read_ok)})")
     _set_hotspot_nat(False)                       # hotspot going away -> tear down its NAT
     _nmcli(["con", "up", conn_id])
   elif action == "up_fallback":
     # netcosttier2pnw: tier 1/2 -- some other saved wifi, cheaper than our own LTE.
     conn_id = priority_connection_id(ssid.strip())
-    cloudlog.info(f"network_arbiterd: no priority network in range; falling back to saved wifi '{ssid}' -> {conn_id} (cheaper than our own LTE)")
+    leaving = _leaving(current_active, active_read_ok)
+    cloudlog.info(f"network_arbiterd: no priority network in range; falling back to saved wifi '{ssid}' -> {conn_id} ({leaving})")
     _set_hotspot_nat(False)
     _nmcli(["con", "up", conn_id])
   elif action == "up_hotspot":
@@ -729,6 +759,8 @@ def main() -> NoReturn:
   last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
   last_fix: tuple[float, float, float] | None = None  # gpscarry2pnw: last fresh fix THIS PROCESS saw (never persisted)
   carrying_fix = False                          # gpscarry2pnw: last_fix is standing in for GPS (ignition off)
+  seen_active: str | None = None                # smallfix0914pnw: active wifi at the last SUCCESSFUL read ("" = none; None = no read yet)
+  requested_active: str | None = None           # smallfix0914pnw: what the arbiter's own action since then should leave active
 
   while True:
     try:
@@ -742,6 +774,23 @@ def main() -> NoReturn:
                       legacy_home_raw=params.get("TetheringHomeLocation"))
       net_ssids = pn.ssids(nets)
       current_active, active_read_ok = _active_wifi_read()
+      # smallfix0914pnw: log EVERY change of the active wifi connection, including the ones the arbiter did not
+      # make. Measured 2026-09-13 22:01 PT: the phone dropped, NetworkManager itself autoconnected KarlMoik
+      # (its profile has autoconnect=yes), and the arbiter logged nothing -- the switch was only visible as a
+      # local-IP change in the cloud log. LOG ONLY: NM's choice is not fought here; everything below already
+      # decides from this tick's read. An unreadable tick is no evidence of a change and moves nothing.
+      if active_read_ok:
+        now_active = current_active or ""
+        if seen_active is not None and now_active != seen_active:
+          if requested_active == now_active:
+            by, extra = "arbiter", {}
+          elif requested_active is not None:   # the arbiter asked for something else, e.g. a refused association
+            by, extra = "not_as_requested", {"arbiter_requested": requested_active or None}
+          else:
+            by, extra = "external", {}
+          cloudlog.event("network_arbiter_active_changed", **{"from": seen_active or None, "to": now_active or None},
+                         by=by, **extra)
+        seen_active, requested_active = now_active, None
       # netrank2pnw: the ACTIVE profile's connection.metered, read every tick while on client WiFi (one
       # nmcli). Both OnPriorityNetwork and the upgrade-scan decision depend on it, and both run before the
       # ladder's full cost read further down. A failed read reuses the last value (_metered_states); with
@@ -1000,7 +1049,10 @@ def main() -> NoReturn:
           cloudlog.event("netcosttier_pin_held", pinned=pv.pinned_ssid, suppressed=action, target=target_ssid)
           pin_held_logged = held
         action, target_ssid = "noop", ""
-      _apply(action, target_ssid)
+      _apply(action, target_ssid, current_active, active_read_ok)
+      expected = _expected_active(action, target_ssid)
+      if expected is not None:
+        requested_active = expected
       if action in ("up_priority", "up_fallback") and target_ssid:
         # Remember what we raised. A `con up` that fails outright leaves NOTHING active, so this is
         # the only way that failure is ever visible -- judging the active link alone cannot see it.

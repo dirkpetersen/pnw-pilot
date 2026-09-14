@@ -1111,3 +1111,102 @@ class TestAParkedDeviceKeepsItsLastFix:
              hooks=[_car(params, car, {3: (False, None)}), reach_home], params=params)
     assert _carry_events(events, "started"), "precondition: the fix was being carried"
     assert "TetheringPriorityNetworks" not in params, f"learned a carried fix: {params.get('TetheringPriorityNetworks')}"
+
+
+# ================================================================================================
+# smallfix0914pnw — every change of the active wifi connection is LOGGED, including ones the arbiter did
+# not make. Measured 2026-09-13 22:01 PT on the truck: the phone dropped, NetworkManager autoconnected
+# KarlMoik by itself (its profile has autoconnect=yes), and the arbiter's log said nothing at all -- the
+# switch was only visible as the local IP moving from 172.20.10.10 to 192.168.1.79 in the cloud log.
+# ================================================================================================
+
+@pytest.fixture
+def infos(monkeypatch):
+  got: list[str] = []
+  monkeypatch.setattr(d.cloudlog, "info", lambda msg, *a, **k: got.append(str(msg)))
+  return got
+
+
+def _changes(events):
+  return [kw for n, kw in events if n == "network_arbiter_active_changed"]
+
+
+class TestActiveConnectionChangesAreLogged:
+  @staticmethod
+  def _phone_drops_and_NM_joins_karlmoik(nm, tk):
+    if tk == 2:
+      nm.active, nm.ip[ID_STAR], nm.scan = ID_STAR, "10.0.0.3", [STAR]
+
+  def test_NM_moving_the_phone_to_KarlMoik_by_itself_is_logged_as_external(self, monkeypatch, events):
+    """THE 2026-09-13 22:01 PT CASE. Logged exactly once (change-only, and nothing at startup), the arbiter
+    does not fight NM's choice, and its next decisions are made from KarlMoik -- on a metered link it runs
+    an upgrade scan for something cheaper, and it does not treat the link as gone."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=(PHONE, STAR))
+    run_loop(monkeypatch, nm, ticks=9, near_home=False, hooks=[self._phone_drops_and_NM_joins_karlmoik],
+             priority=(HOME, PHONE))
+    assert _changes(events) == [{"from": ID_PHONE, "to": ID_STAR, "by": "external"}], _changes(events)
+    assert nm.ups == [], f"fought NetworkManager's own choice: {nm.up_log}"
+    scans = [kw for n, kw in events if n == "netcosttier_upgrade_scan"]
+    assert scans and scans[0]["active"] == ID_STAR, f"the next decisions did not see KarlMoik: {scans}"
+
+  def test_the_arbiters_own_switch_back_is_logged_as_the_arbiters_and_says_what_it_leaves(self, monkeypatch, events, infos):
+    """The phone comes back; the ladder (unchanged) moves off metered KarlMoik. The bring-up line used to
+    say '(dropping hotspot)' here although the device was leaving a client WiFi."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=(PHONE, STAR))
+    def phone_returns(nm, tk):
+      if tk == 6:
+        nm.scan = [STAR, PHONE]
+    run_loop(monkeypatch, nm, ticks=14, near_home=False, hooks=[self._phone_drops_and_NM_joins_karlmoik, phone_returns],
+             priority=(HOME, PHONE))
+    assert nm.ups == [ID_PHONE], nm.up_log
+    assert _changes(events) == [{"from": ID_PHONE, "to": ID_STAR, "by": "external"},
+                                {"from": ID_STAR, "to": ID_PHONE, "by": "arbiter"}], _changes(events)
+    ups = [m for m in infos if "in range ->" in m]
+    assert len(ups) == 1 and f"(leaving {ID_STAR})" in ups[0], ups
+
+  def test_leaving_the_hotspot_still_says_so(self, monkeypatch, events, infos):
+    nm = FakeNM()
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME, PHONE))
+    assert _changes(events) == [{"from": HOTSPOT, "to": ID_PHONE, "by": "arbiter"}], _changes(events)
+    ups = [m for m in infos if "in range ->" in m]
+    assert len(ups) == 1 and ups[0].endswith("(dropping hotspot)"), ups
+
+  def test_a_REFUSED_bring_up_is_not_blamed_on_someone_else(self, monkeypatch, events, infos):
+    """The arbiter asked for the phone and got nothing: that is its own request not landing, not an
+    external change -- the event says what it had asked for."""
+    nm = FakeNM()
+    nm.active, nm.scan, nm.metered = HOTSPOT, [PHONE], {PHONE: "no"}
+    nm.behave[ID_PHONE] = "refuse"
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=())
+    assert _changes(events)[:2] == [
+      {"from": HOTSPOT, "to": None, "by": "not_as_requested", "arbiter_requested": ID_PHONE},
+      {"from": None, "to": HOTSPOT, "by": "arbiter"},
+    ], _changes(events)
+    fallback = [m for m in infos if "falling back to saved wifi" in m]
+    assert fallback and fallback[0].endswith("(dropping hotspot)"), fallback
+
+  def test_an_UNREADABLE_active_read_is_not_a_change(self, monkeypatch, events, infos):
+    """An nmcli failure is no evidence the connection changed -- it must not log 'phone -> nothing' and then
+    'nothing -> phone' around one flaky call. The bring-up line says the read failed, not what was left."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=(PHONE,))
+    hooks = [lambda nm, tk: nm.fail_reads.add("--active") if tk == 2 else nm.fail_reads.discard("--active")]
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=hooks, priority=(HOME, PHONE))
+    assert _changes(events) == [], _changes(events)
+    assert nm.active == ID_PHONE
+    ups = [m for m in infos if "in range ->" in m]   # the unreadable tick re-raises the phone (it is in the scan)
+    assert len(ups) == 1 and ups[0].endswith("(active connection unreadable)"), ups
+
+  def test_an_EARLIER_arbiter_switch_does_not_colour_a_later_external_one(self, monkeypatch, events):
+    """Found by mutation: the arbiter raises the phone from the hotspot, then NM moves it to KarlMoik on its
+    own. A request that already landed must not make the later change read as the arbiter's (or as its
+    request failing)."""
+    nm = FakeNM()
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[self._phone_drops_and_NM_joins_karlmoik],
+             priority=(HOME, PHONE))
+    assert _changes(events) == [{"from": HOTSPOT, "to": ID_PHONE, "by": "arbiter"},
+                                {"from": ID_PHONE, "to": ID_STAR, "by": "external"}], _changes(events)
