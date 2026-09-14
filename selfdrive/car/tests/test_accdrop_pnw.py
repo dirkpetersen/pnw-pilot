@@ -95,7 +95,7 @@ class Bench:
     self.sm.data["onroadEvents"] = [SimpleNamespace(name=n) for n in names]
     self.sm.updated["onroadEvents"] = True
 
-  def run(self, seconds, sends=None):
+  def run(self, seconds, sends=None, every_tick=False):
     for _ in range(round(seconds * 100)):
       self.t += 0.01
       for p in self.parsers.values():
@@ -104,7 +104,8 @@ class Bench:
         self._stamp(bus, msg)
       self.log.update(self.cs, self.sm, sends or [], self.t)
       self.sm.updated = {"onroadEvents": False, "pandaStates": False}
-      sends = None
+      if not every_tick:
+        sends = None
 
   def steady_active(self, mph=57.9):
     self.cs.vEgo = mph * MPH
@@ -195,6 +196,53 @@ def test_every_state_change_emits_exactly_one_record_and_steady_state_none():
   assert len(b.records) == 5
 
 
+def _cancel_frames():
+  """What the carcontroller sends every tick while CC.cruiseControl.cancel holds: 0x083 on bus 2 AND bus 0."""
+  packer = CANPacker("ford_lincoln_base_pt")
+  stock = dict.fromkeys(packer.dbc.name_to_msg["Steering_Data_FD1"].sigs, 0)
+  return [fordcan.create_button_msg(packer, 2, stock, cancel=True), fordcan.create_button_msg(packer, 0, stock, cancel=True)]
+
+
+def test_tx083_covers_the_whole_window_during_a_100hz_cancel():
+  b = Bench()
+  b.steady_active()
+  b.run(4.0, sends=_cancel_frames(), every_tick=True)
+  b.cruise(3)
+  b.run(1.2, sends=_cancel_frames(), every_tick=True)
+  (rec,) = b.parsed()
+  tx = rec["tx083"]
+  assert tx[0]["t"] <= -2.99 and tx[-1]["t"] >= 0.99, (tx[0]["t"], tx[-1]["t"])
+  assert len(tx) >= 2 * 399 and all("CcAslButtnCnclPress" in f["bits"] for f in tx)
+  assert "tx083Why" not in rec
+
+
+def test_tx083_truncation_is_stated_not_silent(monkeypatch):
+  monkeypatch.setattr(adp, "TX_MAXLEN", 100)          # a buffer smaller than the window's frames
+  b = Bench()
+  b.steady_active()
+  b.run(4.0, sends=_cancel_frames(), every_tick=True)
+  b.cruise(3)
+  b.run(1.2, sends=_cancel_frames(), every_tick=True)
+  (rec,) = b.parsed()
+  assert rec["tx083"][0]["t"] > -3.0 and "truncated" in rec["tx083Why"], rec.get("tx083Why")
+
+
+def test_no_spurious_record_while_can_is_not_yet_valid():
+  """card's first ticks run before CAN decodes: CarState reads "off". Seeding the edge detector from that made
+  one off->active record per card start."""
+  b = Bench()
+  b.cs.canValid = False
+  b.cruise(0)
+  b.run(1.0)
+  b.cs.canValid = True
+  b.steady_active()
+  b.run(3.0)
+  assert b.records == []
+  b.cruise(3)                                          # a real edge afterwards is still recorded
+  b.run(1.5)
+  assert [r["edge"] for r in b.parsed()] == ["active->standby"]
+
+
 def test_tx083_names_the_bits_and_who_asked():
   class FakeCC:
     _icbm_cmd = IcbmCommand(target_ms=26.8, ceiling_ms=26.8, ts=1.0)
@@ -274,6 +322,13 @@ def test_route_lookup_nulls_carry_a_reason(tmp_path, mocker, monkeypatch):
   out = adp.current_route_segment(wall() + 5)
   assert out["route"] == "00000133--b4cc0b5efd" and out["seg"] == 348 and out["edgeInSegS"] >= 4
   assert out["segsToKeep"] == [348]
+  assert out["routeStale"] is False and "routeStaleWhy" not in out
+  # parked with loggerd stopped (parknorec2pnw): CurrentRoute still names the old route, no new segment appears
+  out = adp.current_route_segment(wall() + 120)
+  assert out["route"] == "00000133--b4cc0b5efd" and out["routeStale"] is True
+  assert "loggerd was not recording" in out["routeStaleWhy"]
+  out = adp.current_route_segment(wall() + adp.SEGMENT_S + 5)   # a segment about to roll is NOT stale
+  assert out["routeStale"] is False
   out = adp.current_route_segment(wall() + 1.2)       # Sun 14:05:46: edge 1.2 s into seg 348
   assert out["segsToKeep"] == [347, 348]
   mocker.patch("openpilot.system.hardware.hw.Paths.log_root", side_effect=OSError("gone"))

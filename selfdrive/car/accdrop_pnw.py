@@ -74,10 +74,11 @@ PRE_S = 3.0
 POST_S = 1.0
 TRACE_EVERY = 10              # card ticks per trace row: 100 Hz -> 10 Hz
 CHG_MAXLEN = 512              # changes kept per channel (a 50 Hz flicker still covers >5 s)
-TX_MAXLEN = 256
+TX_MAXLEN = 1024              # a cancel is 2 frames/tick at 100 Hz: 1024 covers 5.1 s, more than the 4 s window
 MAX_EVENTS_PER_MIN = 10       # a flapping CcStat must not rotate the whole ces_events log away
 BUTTON_ADDR = 0x083
 SEGMENT_S = 60.0              # loggerd segment length
+STALE_ROUTE_S = SEGMENT_S + 10.0   # newest segment older than this at the edge -> loggerd was not recording
 
 CS_COLS = ("ccEn", "ccAv", "accFault", "brake", "gas", "steerPressed", "standstill", "ccStandstill", "gear",
            "blinkL", "blinkR", "door", "belt", "espOff", "steerFaultTmp", "steerFaultPerm", "sensorsInvalid",
@@ -196,6 +197,14 @@ def current_route_segment(edge_wall: float) -> dict:
     if out["edgeInSegS"] + POST_S > SEGMENT_S:
       keep.add(n + 1)
     out["segsToKeep"] = sorted(keep)
+    # loggerd never clears CurrentRoute (loggerd.cc), so when it is stopped -- parknorec2pnw in Park, or anything
+    # else -- the param still names the last route. Recording creates a segment directory every SEGMENT_S, so a
+    # newest one that started longer ago than that means the edge is in NO rlog. Derived from the directories
+    # already read here: no subscription, no dependency on why loggerd stopped.
+    out["routeStale"] = out["edgeInSegS"] > STALE_ROUTE_S
+    if out["routeStale"]:
+      out["routeStaleWhy"] = (f"newest segment started {out['edgeInSegS']} s before the edge (> {STALE_ROUTE_S:.0f} s): " +
+                              "loggerd was not recording (parked?) -- this edge is probably in no rlog")
     if not before:
       out["segWhy"] = "every segment directory is newer than the edge (clock step?) -- seg is the oldest"
   except Exception as e:
@@ -317,6 +326,10 @@ class AccDropLogger:
                          _cmd_summary(self._cc_obj, "_resume_cmd")))
 
     st = acc_state(cs)
+    # Not seeded until CAN is valid: before the first decode every car reads "off", which made one spurious
+    # off->active record per card start (Fable). After seeding, every change counts.
+    if self._state is None and not cs.canValid:
+      st = None
     edge = self._state is not None and st != self._state
     if edge or self._frame % TRACE_EVERY == 0:
       cc = sm['carControl']
@@ -366,6 +379,7 @@ class AccDropLogger:
       "trace": list(self._trace),
       "chans": [(c.name, c.cols, list(c.dq), c.dq.maxlen) for c in chans],
       "tx": list(self._tx),
+      "txMaxlen": self._tx.maxlen,
       "notRegistered": dict(self.not_registered),   # copied HERE: the 1 Hz retry in update() may change it mid-write
     }
     if self._threaded:
@@ -446,6 +460,10 @@ class AccDropLogger:
       "notRegistered": snap["notRegistered"],
       "tx083": tx,
     }
+    if len(snap["tx"]) >= snap["txMaxlen"] and snap["tx"][0][0] > t0:
+      trunc = (f"truncated: the {snap['txMaxlen']}-frame buffer's oldest frame is {rel(snap['tx'][0][0])} s from " +
+               "the edge, so earlier frames in the window were dropped")
+      tx_why = f"{tx_why}; {trunc}" if tx_why else trunc
     if tx_why:
       rec["tx083Why"] = tx_why
     if p["suppressed"]:
