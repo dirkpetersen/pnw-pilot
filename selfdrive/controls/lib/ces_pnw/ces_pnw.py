@@ -254,6 +254,10 @@ ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the f
 
 
 ICBM_ERR_LOG_S = 30.0   # rule-2: throttle the _icbm_step failure log (it runs at ~4 Hz)
+# silentexc2pnw (Rule 2): the lead-pacing failure log (_curvelead_failed) -- the first failure at once, then at most one
+# line per this many seconds, naming the exception type and counting the failures since the previous line (the
+# twistyr2pnw / foldlog2pnw pattern). Its own interval: ICBM_ERR_LOG_S above keeps throttling _icbm_step's own log.
+CURVELEAD_ERR_LOG_S = 60.0
 # gpslag2pnw (owner 2026-09-13: "build it, keep curve timing"). ICBM re-derives its own ego position on
 # every ~4 Hz tick from the LastGPSPosition fix and its `fix_ts` (mapd_configd), instead of holding the
 # 1 Hz read. The position is projected along the bearing to (now - ICBM_GPS_LAG_KEEP_S), NOT to now:
@@ -1169,16 +1173,22 @@ def _curvelead_clear(ctl) -> None:
   ctl._icbm_kvis = ctl._icbm_sane_t = ctl._icbm_sane_why = ctl._icbm_behind = None
 
 
-def _curvelead_failed(ctl, now, own) -> None:
+def _curvelead_failed(ctl, now, own, e) -> None:
   """curvelead2pnw: lead pacing / sanity telemetry raised. ICBM has already fallen back to its own target;
-  mark the record (icbmLeadWhy "error") and log -- throttled, it would otherwise repeat at ~4 Hz."""
+  mark the record (icbmLeadWhy "error") and log -- throttled, it would otherwise repeat at ~4 Hz.
+  silentexc2pnw: the line names the exception type `e` and counts the failures since the previous line; the first
+  failure logs at once, then at most one line per CURVELEAD_ERR_LOG_S. getattr defaults, because the ICBM tests bind
+  _icbm_step onto bare stubs and this runs on the failure path."""
   try:
     ctl._icbm_own_t, ctl._icbm_lead_t, ctl._icbm_lead_why = own, None, "error"
     ctl._icbm_sane_t = ctl._icbm_sane_why = ctl._icbm_behind = None
     ctl._icbm_lead_log = (False, "error", now)
-    if now - (getattr(ctl, "_icbm_lead_fail_log", None) or -1e9) > ICBM_ERR_LOG_S:
-      ctl._icbm_lead_fail_log = now
-      cloudlog.exception("curvelead2pnw: lead pacing FAILED -- ICBM is using its own curve target (no lead pacing, no B telemetry)")
+    ctl._icbm_lead_fail_n = (getattr(ctl, "_icbm_lead_fail_n", 0) or 0) + 1
+    last = getattr(ctl, "_icbm_lead_fail_log", None)
+    if last is None or now - last >= CURVELEAD_ERR_LOG_S:
+      n, ctl._icbm_lead_fail_log, ctl._icbm_lead_fail_n = ctl._icbm_lead_fail_n, now, 0
+      cloudlog.exception(f"curvelead2pnw: lead pacing FAILED ({type(e).__name__}) -- ICBM is using its own curve " +
+                         f"target (no lead pacing, no B telemetry) ({n} failure(s) since the last log)")
   except Exception:
     pass                        # the fallback itself already happened in the caller; logging must not raise
 
@@ -3828,9 +3838,11 @@ class CESController:
                   if own_t is not None and self._icbm_src in ("map", "far") else None)
         _curvelead_note(self, now, own_t, pace, lead_pace_why, lead_s, sig.get("lead_vlead", 0.0), k_tight,
                         vis_k, sane_t, sane_why, behind)
-      except Exception:
+      except Exception as e:
+        # silentexc2pnw: caught broadly (a code defect must cost lead pacing, not the IcbmTarget publish). The log
+        # now names the exception type and counts failures; _curvelead_failed cannot raise (see there).
         target = own_t
-        _curvelead_failed(self, now, own_t)
+        _curvelead_failed(self, now, own_t, e)
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
