@@ -480,6 +480,43 @@ def _read_gps(params: Params, mem_params: Params | None) -> tuple[float, float] 
   return None
 
 
+def _carry_parked_fix(fresh: tuple[float, float] | None, onroad: bool,
+                      last_fix: tuple[float, float, float] | None, carrying: bool
+                      ) -> tuple[tuple[float, float] | None, tuple[float, float, float] | None, bool]:
+  """gpscarry2pnw (Fable, netrank2pnw re-review): while the ignition is off, keep using the last fresh fix.
+
+  qcomgpsd runs only while `started` (process_config.qcomgps), so with the ignition off nothing feeds the
+  mapd_configd bridge and _read_gps reads None 10 s later. Parked with the device awake that cost two
+  things: the GPS veto on a scan gap (an at-home pin ended by a 60 s home-AP gap), and the geo-gate, which
+  failed open and scanned every 20 s on client WiFi away from any learned location. A parked device does
+  not move.
+
+  `onroad` is the IsOnroad param, i.e. deviceState.started -- the SAME condition that schedules qcomgpsd,
+  so a fix is carried exactly while the GPS producer is not scheduled. A param, not a msgq subscription
+  (background-process rule). NOT the same as ignition: see the residual risks in the gpscarry2pnw doc.
+
+  Returns (gps for this tick's decisions, new last_fix, carrying). last_fix = (lat, lon, monotonic time it
+  was last read FRESH), and lives only in main()'s locals: a daemon restart or a reboot carries nothing,
+  and _read_gps's previous-boot check is untouched.
+    * a fresh fix is used as is, and becomes last_fix;
+    * onroad without a fresh fix: no GPS, and last_fix is DROPPED, not suspended -- a truck that drove with
+      GPS dead and parked again must not get its pre-drive position back;
+    * offroad without a fresh fix: last_fix, if this process saw one; otherwise no GPS, as before.
+  Logged once when a carry starts (with the fix's age) and once when it ends (with why). fix_age_s counts
+  from the last fresh read; the fix itself was up to GPS_MAX_AGE_S older than that."""
+  now = time.monotonic()
+  if fresh is None and not onroad and last_fix is not None:
+    if not carrying:
+      cloudlog.event("network_arbiterd_gps_carry_started", fix_age_s=round(now - last_fix[2], 1),
+                     reason="IsOnroad=0 and no fresh GPS: the device is parked, keep its last fresh fix",
+                     replaces="no GPS")
+    return (last_fix[0], last_fix[1]), last_fix, True
+  if carrying and last_fix is not None:
+    cloudlog.event("network_arbiterd_gps_carry_ended", fix_age_s=round(now - last_fix[2], 1),
+                   reason="IsOnroad=1: ignition on, the carried fix is dropped" if onroad else "fresh GPS fix")
+  return fresh, (None if fresh is None else (fresh[0], fresh[1], now)), False
+
+
 # NOTE: the single-home _read_home/_save_home helpers were removed when this daemon moved to the
 # multi-location model — per-entry locations now live in TetheringPriorityNetworks (priority_networks
 # .py), auto-learned inline in main(). The legacy TetheringHomeLocation param is still read (only) by
@@ -690,7 +727,8 @@ def main() -> NoReturn:
   pin_home_state: dict[str, tuple[int, bool]] = {}  # netrank2pnw: home networks' absence since the pick
   cost_unread_logged: tuple | None = None       # netrank2pnw: last logged hold for an unreadable active cost
   last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
-
+  last_fix: tuple[float, float, float] | None = None  # gpscarry2pnw: last fresh fix THIS PROCESS saw (never persisted)
+  carrying_fix = False                          # gpscarry2pnw: last_fix is standing in for GPS (ignition off)
 
   while True:
     try:
@@ -739,14 +777,18 @@ def main() -> NoReturn:
                          note="absent, or present but not decodable JSON (params_pyx returns None for both)")
           pin_ended_key = pin_key
       pin_in_force = pin_key is not None and pin_key != pin_ended_key
-      gps = _read_gps(params, mem_params)
+      gps_fresh = _read_gps(params, mem_params)
+      # gpscarry2pnw: the geo-gate and a pin's arrival evidence use `gps`, which is the last fresh fix while
+      # the ignition is off (see _carry_parked_fix). Learning below does NOT: it PERSISTS a location, so it
+      # stays on fresh GPS only -- a carried fix is an inference, and IsOnroad=0 is not proof of standing still.
+      gps, last_fix, carrying_fix = _carry_parked_fix(gps_fresh, params.get_bool("IsOnroad"), last_fix, carrying_fix)
 
       # auto-learn each network's location: if we're connected to one of OUR priority SSIDs right now,
       # this spot IS that network's geofence center -> update only that entry.
       # FLASH-WEAR GUARD: GPS jitters every read, so only WRITE the param when the fix has actually
       # moved meaningfully (> LEARN_MIN_MOVE_M) from the stored location, or it was never learned.
       # Otherwise this would params.put() a new JSON blob every 20 s forever, wearing the flash.
-      if gps is not None and current_active:
+      if gps_fresh is not None and current_active:
         for e in nets:
           # uploadgate2pnw2: never learn a location for a mobile (hotspot) entry — it travels with the
           # car, so every LEARN_MIN_MOVE_M of driving would trigger a param write.
@@ -755,9 +797,9 @@ def main() -> NoReturn:
           if current_active == priority_connection_id(e["ssid"]):
             old = (e.get("lat"), e.get("lon"))
             moved = old[0] is None or old[1] is None or \
-              haversine_m(old[0], old[1], gps[0], gps[1]) > LEARN_MIN_MOVE_M
+              haversine_m(old[0], old[1], gps_fresh[0], gps_fresh[1]) > LEARN_MIN_MOVE_M
             if moved:
-              e["lat"], e["lon"] = round(gps[0], 6), round(gps[1], 6)
+              e["lat"], e["lon"] = round(gps_fresh[0], 6), round(gps_fresh[1], 6)
               params.put("TetheringPriorityNetworks", pn.dumps(nets))
             break
 

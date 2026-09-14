@@ -114,7 +114,9 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
   # netrank2pnw: gps may be a callable, so a sequence can DRIVE (a pin's arrival evidence reads it)
   monkeypatch.setattr(d, "_read_gps", lambda p, m: gps() if callable(gps) else gps)
   # netrank2pnw: near_home may be a callable, so a sequence can ARRIVE home mid-run
-  monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home() if callable(near_home) else near_home)
+  # gpscarry2pnw: "real" keeps the real geo-gate, so a test can see which GPS reached it
+  if near_home != "real":
+    monkeypatch.setattr(d, "near_any_home", lambda locs, gps: near_home() if callable(near_home) else near_home)
   monkeypatch.setattr(d, "_usable_cache", {})
   # netrank2pnw: _metered_cache is a module global too. It was never reset here, so a value cached by one
   # test leaked into the next -- a "failed read with nothing cached" could not be reproduced reliably and
@@ -128,6 +130,8 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
     def get_bool(self, k):
       if k == "DisableNetworkCostLadder":
         return not ladder
+      if k == "IsOnroad":            # gpscarry2pnw: offroad unless a test says otherwise (hooks may flip it)
+        return bool(params.get("IsOnroad", False))
       return k == "TetheringEnabled"
 
     def get(self, k):
@@ -138,8 +142,8 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
         raise v
       return v
 
-    def put(self, *a):
-      pass
+    def put(self, k, v):
+      params[k] = v          # gpscarry2pnw: record, so a location write is assertable (get() above ignores it)
 
     def put_bool(self, k, v):
       params[k] = v          # netrank2pnw: record, so OnPriorityNetwork (the uploader's at_home) is assertable
@@ -969,3 +973,141 @@ class TestACostSwitchNeedsACostThatWasRead:
     nm.nmcli = lambda args: None if ("connection.metered" in " ".join(args) and args[-1] == ID_STAR) else orig(args)
     run_loop(monkeypatch, nm, ticks=3, near_home=False, priority=(HOME,), mobile=(), ladder=False)
     assert nm.ups[:1] == [HOTSPOT], f"the cost-unreadable hold leaked into binary mode: {nm.up_log}"
+
+
+# ================================================================================================
+# gpscarry2pnw — while the ignition is off, the last fresh fix stands in for GPS (Fable, netrank2pnw re-review).
+#
+# qcomgpsd runs only while `started`, so parked with the device awake _read_gps reads None 10 s after the
+# ignition goes off: the GPS veto on a scan gap disappeared (an at-home pin ended by a 60 s home-AP gap) and
+# the geo-gate failed open (a scan every 20 s on client WiFi away from any learned location). `gps` in this
+# harness is what _read_gps returns, i.e. a FRESH fix; the carry itself runs for real inside main().
+# ================================================================================================
+
+AT_HOME_FIX, FAR_FIX = (47.0, -122.0), (47.05, -122.0)   # the harness's learned home, and ~5.6 km north of it
+
+
+def _car(params, car, schedule):
+  """Hook: at tick tk in `schedule`, set (IsOnroad, the fresh fix _read_gps returns)."""
+  def hook(nm, tk):
+    if tk in schedule:
+      params["IsOnroad"], car["gps"] = schedule[tk]
+  return hook
+
+
+def _home_gap(first, last):
+  """Hook: home missing from the real scans for ticks first..last-1 (4 ticks = past the 3-scan threshold)."""
+  def hook(nm, tk):
+    nm.scan = [STAR] if first <= tk < last else [STAR, HOME]
+  return hook
+
+
+def _carry_events(events, which):
+  return [kw for n, kw in events if n == f"network_arbiterd_gps_carry_{which}"]
+
+
+class TestAParkedDeviceKeepsItsLastFix:
+  @staticmethod
+  def _at_home_pinned(nm):
+    _away(nm, ID_STAR, scan=(STAR, HOME))
+    nm.metered[HOME] = "no"
+
+  def test_ignition_off_at_home_then_10_MIN_then_a_scan_gap_does_not_end_the_pin(self, monkeypatch, events):
+    """Fable's (a): parked at home, device awake, Starlink picked by hand. Ten minutes after the ignition went
+    off, the home AP drops out of four scans. GPS said the truck never left before the ignition went off, and a
+    parked truck does not move, so the pick stands -- as it does with the ignition on."""
+    nm = FakeNM()
+    self._at_home_pinned(nm)
+    params, car = {"WifiManualPick": _pick(STAR), "IsOnroad": True}, {"gps": AT_HOME_FIX}
+    off = 3
+    gap = off + int(600 / POLL)                                  # 10 min after the ignition went off
+    run_loop(monkeypatch, nm, ticks=gap + 8, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, {off: (False, None)}), _home_gap(gap, gap + 4)], params=params)
+    assert nm.scans >= gap, "precondition: real scans must run throughout"
+    assert ID_HOME not in nm.ups, f"a scan gap ended an at-home pin while the truck was parked: {nm.up_log}"
+    assert not any(n == "netcosttier_pin_cleared" for n in names(events))
+    started = _carry_events(events, "started")
+    assert len(started) == 1, f"the carry must be logged ONCE when it starts: {started}"
+    assert 0 < started[0]["fix_age_s"] <= POLL, started
+    assert _carry_events(events, "ended") == []
+
+  def test_with_NO_fix_seen_this_boot_it_is_todays_behaviour(self, monkeypatch, events):
+    """Onroad without ever getting a fresh fix (no sky view), then the ignition goes off: nothing to carry, so
+    the same gap ends the pin exactly as it does today without GPS."""
+    nm = FakeNM()
+    self._at_home_pinned(nm)
+    params, car = {"WifiManualPick": _pick(STAR), "IsOnroad": True}, {"gps": None}
+    off, gap = 3, 33
+    run_loop(monkeypatch, nm, ticks=gap + 8, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, {off: (False, None)}), _home_gap(gap, gap + 4)], params=params)
+    assert ID_HOME in nm.ups, f"with no fix to carry, a genuine absence did not end the pin: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "trigger": HOME}) in events
+    assert _carry_events(events, "started") == [] and _carry_events(events, "ended") == []
+
+  def test_ignition_ON_without_fresh_GPS_drops_the_carried_fix_and_fails_open(self, monkeypatch, events):
+    """The carry ends the moment IsOnroad turns on, fresh GPS or not. From then today's rule applies: a truck
+    that drives away with GPS not (yet) fresh has no GPS, its scan misses count, and home ends the pin when it
+    comes back. Carrying on would reopen 'GPS frozen at home while the truck drives away'."""
+    nm = FakeNM()
+    self._at_home_pinned(nm)
+    params, car = {"WifiManualPick": _pick(STAR), "IsOnroad": True}, {"gps": AT_HOME_FIX}
+    run_loop(monkeypatch, nm, ticks=20, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, {3: (False, None), 10: (True, None)}), _home_gap(11, 15)], params=params)
+    ended = _carry_events(events, "ended")
+    assert len(ended) == 1 and ended[0]["reason"].startswith("IsOnroad=1"), ended
+    assert ID_HOME in nm.ups, f"the carried fix outlived the ignition turning on: {nm.up_log}"
+    assert ("netcosttier_pin_cleared", {"ssid": STAR, "reason": "home", "trigger": HOME}) in events
+
+  def test_the_fix_is_DROPPED_on_ignition_on_not_suspended(self, monkeypatch, events):
+    """On, drive with GPS dead, off again somewhere else: the pre-drive position must not come back."""
+    nm = FakeNM()
+    self._at_home_pinned(nm)
+    params, car = {"WifiManualPick": _pick(STAR), "IsOnroad": True}, {"gps": AT_HOME_FIX}
+    schedule = {3: (False, None), 10: (True, None), 14: (False, None)}
+    run_loop(monkeypatch, nm, ticks=25, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, schedule), _home_gap(16, 20)], params=params)
+    assert len(_carry_events(events, "started")) == 1, "the second ignition-off had no fresh fix to carry"
+    assert ID_HOME in nm.ups, f"a fix from before the drive came back after it: {nm.up_log}"
+
+  def test_a_DAEMON_RESTART_carries_nothing(self, monkeypatch, events):
+    """The carry lives in main()'s locals. A new process (a crash restart, a manager restart, a reboot -- or the
+    device carried to the other car) starts with no fix, even though the ignition is still off."""
+    nm = FakeNM()
+    self._at_home_pinned(nm)
+    params, car = {"WifiManualPick": _pick(STAR), "IsOnroad": True}, {"gps": AT_HOME_FIX}
+    run_loop(monkeypatch, nm, ticks=6, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, {3: (False, None)})], params=params)
+    assert len(_carry_events(events, "started")) == 1, "precondition: the first process was carrying"
+    seen = len(events)
+    run_loop(monkeypatch, nm, ticks=10, near_home=True, gps=None, priority=(HOME, PHONE),
+             hooks=[_home_gap(2, 6)], params=params)
+    assert _carry_events(events[seen:], "started") == [], "a restarted daemon carried a fix it never saw"
+    assert ID_HOME in nm.ups, f"the restarted daemon behaved as if it had GPS: {nm.up_log}"
+
+  def test_parked_AWAY_on_client_wifi_the_geo_gate_stays_shut(self, monkeypatch, events):
+    """Fable's (b): parked ~5.6 km from the only learned location, on the (explicitly unmetered) phone. With
+    the ignition off the geo-gate used to fail open and scan every 20 s (~2.8 s latency bump each)."""
+    def scans(gps_while_on):
+      nm = FakeNM()
+      nm.active, nm.ip[ID_PHONE], nm.scan, nm.metered = ID_PHONE, "10.0.0.2", [PHONE], {PHONE: "no"}
+      params, car = {"IsOnroad": True}, {"gps": gps_while_on}
+      run_loop(monkeypatch, nm, ticks=20, near_home="real", gps=lambda: car["gps"], priority=(HOME, PHONE),
+               hooks=[_car(params, car, {3: (False, None)})], params=params)
+      return nm.scans
+    assert scans(None) > 10, "precondition: with no fix the gate fails open and scans"
+    assert scans(FAR_FIX) == 0, "the parked device's last fix did not reach the geo-gate"
+
+  def test_a_carried_fix_is_never_LEARNED_as_a_location(self, monkeypatch, events):
+    """Learning persists a location, so it stays on fresh GPS. IsOnroad=0 is not proof the truck stands still
+    (startup blocked, thermal offroad): here it reaches home WiFi while still carrying a fix from 5.6 km away,
+    which must not overwrite home's learned location."""
+    nm = FakeNM()
+    nm.active, nm.ip[ID_PHONE], nm.scan, nm.metered = ID_PHONE, "10.0.0.2", [PHONE], {PHONE: "no", HOME: "no"}
+    params, car = {"IsOnroad": True}, {"gps": FAR_FIX}
+    def reach_home(nm, tk):
+      if tk == 6:
+        nm.active, nm.ip[ID_HOME], nm.scan = ID_HOME, "10.0.0.7", [HOME, PHONE]
+    run_loop(monkeypatch, nm, ticks=10, near_home=True, gps=lambda: car["gps"], priority=(HOME, PHONE),
+             hooks=[_car(params, car, {3: (False, None)}), reach_home], params=params)
+    assert _carry_events(events, "started"), "precondition: the fix was being carried"
+    assert "TetheringPriorityNetworks" not in params, f"learned a carried fix: {params.get('TetheringPriorityNetworks')}"
