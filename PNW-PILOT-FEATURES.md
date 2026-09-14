@@ -23,8 +23,10 @@ is never impaired by Ford work or vice-versa.
 > **"Updated" column = each feature's LAST-MODIFICATION date** (YYYY-MM-DD) — the most recent date its
 > code changed on the deployed `3devpnw` line, taken from git (the feature's merge/commit date, or the
 > primary source file's last-touch date for base infra with no isolated commit). Dates range
-> **2026-06-22 → 2026-07-13**. It is *not* the first-shipped date; a mature feature last touched weeks
-> ago keeps that older date.
+> **2026-06-22 → 2026-09-13**. It is *not* the first-shipped date; a mature feature last touched weeks
+> ago keeps that older date. Many rows between 2026-07-14 and 2026-09-12 were not individually dated
+> here as they shipped — see `docs/pnw/CHANGELOG-2026-09-13.md` and the other dated changelogs for the
+> gap.
 >
 > **Deploy model (since 2026-07-09):** the device runs `/data/openpilot` as a **git checkout of
 > `3devpnw` with auto-update enabled** — ship = push to `3devpnw`, the updater fetches and installs at
@@ -71,9 +73,13 @@ tuned against real I-5 / I-90 / I-82 drive logs.
 | **No disengage on brake** | Tapping the brake doesn't disengage. | Lets the driver dab the brake without dropping openpilot. | `NoDisengageOnBrake` | 🟡 | 2026-06-22 |
 | **Blind-spot gate (BSM)** | Tesla Raven blind-spot via `AutopilotStatus` 0x399, logged and available to block nudgeless lane changes into an occupied lane. | Groundwork toward safer automated lane changes on the Raven. | (reuses lane-change gate) | ✅ deployed (walk-by flip test pending) | 2026-07-10 |
 | **Ford highway follow (LongitudinalExt)** | BluePilot's follow-aware longitudinal shaping (gaining/pacing/trailing lead states) on the Lightning's op-long path. | Smoother highway following when Alpha Long is on; **inert** until then. City stop-and-go "hopping" was fixed by gating the BP acc-message builder on the algorithm actually being in charge. | (Alpha Longitudinal) | 🟡 | 2026-07-12 |
+| **ICBM curve-restore cap** | After ICBM slows for a curve, restoring the stock-ACC set speed afterward can no longer rise above **posted limit + 5 mph** — it holds at that cap and follows the limit back up if it rises during the hold, instead of unconditionally handing back the pre-curve set. | Live driver report: in a 25 mph zone, ICBM's restore walked the set to 60 mph over 13 seconds on a road that had changed under it. | (internal ICBM logic) | ✅ | 2026-09-13 |
+| **Speed-limit zone set-once, no auto-restore** | Entering a lower posted speed-limit zone sets the cruise speed **once** — the same percentage above the new limit the driver was running before — then stops managing it: no memory of the old set, no restore when the limit rises again. Curves **inside** the zone still restore to the zone-set speed, not the pre-zone speed. The one exception: a **police**-only slowdown still restores in full. | Driver directive: cruise should never creep back up after a limit-driven slowdown on its own; only a cleared police warning should give the speed back. | rides `AutoSpeedReduce` mode 2 (stock ACC) / op-long cap | ✅ | 2026-09-13 |
+| **ICBM follows a tracked lead through a curve** | When a lead vehicle has been tracked continuously through a curve, ICBM paces its target to the lead's speed — capped at what the truck itself can comfortably take, and never above the driver's own set — instead of always computing its own, more conservative curve target. Dec-only: can only raise ICBM's target, never lower it. | Driver: "why don't you just follow that instead of making up your own mind" — over-aggressive map-driven slowdowns on rural roads and ramps where a lead was already handling the curve fine. | `PnwVehicle.icbm_lead_lat_accel` capability (Lightning only), tunable in `/data/pnw/curve.json` | ✅ | 2026-09-13 |
 
 See `docs/CES.md`, `docs/VTSC.md`, `docs/pnw/SHARPCURVE2PNW.md`, `docs/pnw/CES_I90.md`, `docs/pnw/CURVESLOW2PNW.md`,
-`ICBM2PNW.md`, `docs/pnw/SPEEDADJUST-EXECUTOR.md`, `docs/pnw/FORDLONG2PNW.md`, `docs/AUTO2XNOR.md`, `docs/BSM2XNOR.md`.
+`ICBM2PNW.md`, `docs/pnw/SPEEDADJUST-EXECUTOR.md`, `docs/pnw/FORDLONG2PNW.md`, `docs/AUTO2XNOR.md`, `docs/BSM2XNOR.md`,
+`docs/pnw/CHANGELOG-2026-09-13.md`.
 
 ---
 
@@ -115,6 +121,7 @@ See `DM-CURRENT.md`, `GLARE.md`, `docs/pnw/DMROAD2PNW.md`, `docs/pnw/DM-VARIABLE
 | **EV charger refinements** | Compass direction on each charger; near-field roadside chargers show despite the cone geometry; a slow L2 is suppressed when a DC-fast is within 5 mi of it. | Make the charger hints actually useful on the freeway. | `EvIncludeLevel2` | ✅ | 2026-07-08 |
 | **Corridor rest-area data** | Stable 15 mi rest-area previews by corridor identity; added I-82 and US-12/US-95 data. | pfeifer mapd can't surface rest areas (POIs stripped at tile build), so they ship as curated corridor JSON. | — | ✅ | 2026-07-08 |
 | **Keyless Waze police source** | The police feed now defaults to a keyless caching **proxy** (AWS Lambda + DynamoDB TTL cache behind API Gateway), with automatic fallback to a device-local direct key. | The shared RapidAPI key kept hitting its monthly quota (429) and doesn't scale per-device; the proxy dedups the whole fleet onto one upstream call per cell per TTL window. Also: the key no longer ships in the repo — it lives only in `/data/pnw/location/police_proxy.json`. | — | ✅ | 2026-07-12 |
+| **mapd pin v2.3.1** | Stock mapd binary pin bumped v2.3.0 → v2.3.1 (upstream's own fix for the gomsgq shadow-reader panic, map-extraction and performance fixes). The truck's custom override build stays in place and is unaffected; the "pin bump was ignored because of the override" warning now reliably reaches the device's own logs (it used to be dropped before the log socket came up). | Keep pace with upstream mapd fixes while making the override-vs-pin state actually visible in the logs. | `MapdSettings` (mapd's own settings store); `/data/mapd/.override` controls which build wins | ✅ | 2026-09-13 |
 
 See `MAPD-SYSTEM.md`, `docs/pnw/LOCATION2PNW.md`, `REST_AREA_DATA.md`, `../comma-connect/WAZE-API.md`.
 
@@ -137,9 +144,17 @@ presigned PUTs — **not** comma connect.
 | **Perpetual tethering + priority-WiFi + geo-gate** | Device keeps its hotspot up; auto-joins known priority networks only near saved home location(s). | Reliable connectivity across home / hotspot / friends' WiFi without manual switching. | `TetheringEnabled`, `TetheringPriorityNetworks`, `TetheringPriorityWifi` | ✅ | 2026-07-13 |
 | **Captive-portal auto-accept** | Walks a MikroTik TOS portal (Peak "Visitor", OSU "osuvisitor" T-<MAC> variant) so uploads work behind it; never blocks LTE/tethering. | University/guest WiFi with a click-through was blocking uploads. | (per-network `portal`) | ✅ | 2026-07-08 |
 | **LTE throttle guard + NAT fix** | Recovers a throttled/stuck LTE PDN; iptables masquerade so tethered clients get internet. | Keep the pipe alive; tethered phones need a route. | — | ✅ | 2026-06-23 |
+| **WiFi cost ladder** | Ranks every saved WiFi network in range by cost (explicitly unmetered beats "default" beats explicitly metered) instead of a binary priority-network-or-hotspot choice; periodically scans for something cheaper while on a paid link; the uploader and the arbiter now agree on one definition of "metered" so a connection can't be blocked for small files while allowed for HD video. | Driver: "the tethering network should be the lowest priority if another WiFi connection is available, because the tethering network is the most expensive." Measured: the truck sat 66 min on metered Starlink with a cheaper, unmetered hotspot never even scanned for. | `DisableNetworkCostLadder` (default 0 = ladder ON) | ✅ | 2026-09-13 |
+| **Manual WiFi pick sticks** | A network chosen by hand in Settings now holds the radio instead of being silently reverted by the arbiter on the next tick; it only yields to a stationary, explicitly-unmetered home network that genuinely arrives after the pick. | Driver: "if you can identify that a hand-picked WiFi was selected, we want that to stick." | `WifiManualPick` (internal, CLEAR_ON_MANAGER_START) | ✅ | 2026-09-13 |
+| **Truck GPS as the position source (Lightning)** | While the truck's own CAN GPS is live, it supplies the position used for speed limits, police/rest-area alerts and WiFi location. Falls back to the comma's GPS if the truck feed is stale or frozen; every switch is logged. | About 2x more accurate (1.6 m vs 3.0 m median), covers the comma's cold starts and tunnels, stable heading at stops. mapd itself stays on the comma GPS. | `CarGps` (mem-param), `LastGPSPosition.src` | ✅ | 2026-09-13 |
+| **No-fix GPS positions are dropped (both cars)** | A GPS sample without a fix is never written as a position. | Stops km-off positions reaching speed limits, alerts and WiFi location. | — | ✅ | 2026-09-13 |
+| **GPS fix carried while parked** | Network logic (home-network detection, geo-gated scanning) keeps the device's last fresh GPS fix in memory while the ignition is off, instead of going blind the moment the GPS receiver itself stops. | Without it, a parked-at-home pin could be ended by a scan gap the device had no GPS to veto. Location *learning* is unaffected — it stays on fresh GPS only. | — | ✅ | 2026-09-13 |
+| **Code updates fetch over any link** | Software (and driving-model, and AGNOS) updates now download over metered connections too, not only unmetered WiFi — the metered gate still applies to video/drive-data uploads only. Failed fetches back off exponentially (5 min → 1.5 h cap) instead of retrying every 5 minutes forever, and one offline connectivity check can no longer discard a staged, ready-to-install update. | Driver, standing since 2026-07-11, reaffirmed 2026-09-13: "updating 515 lines over hotspot is absurd." | — (`DisableUpdates` / Pause Updates unaffected) | ✅ | 2026-09-13 |
+| **No recording while parked** | The device stops writing new route segments (rlog, qlog, video) once the shifter has read Park for 30 continuous seconds, on **both** cars, and resumes on the first tick it reads a non-Park gear (roughly 1-3 seconds later — the camera/model/car/control processes and video encoders never stop). | Driver requirement: never record while parked. A parked, charging Lightning was measured writing ~180 MB/h even with the existing parked-thinning toggles on. | `RecordWhileParked` (default 0 = gate ON) | ✅ | 2026-09-13 |
 
-Lives in `system/networkd/`, `system/loggerd/`. See `docs/NETWORK2XNOR.md`, `docs/CONNECT2XNOR.md`,
-`docs/DEFER_HD_UPLOAD.md`.
+Lives in `system/networkd/`, `system/loggerd/`, `system/updated/`. See `docs/NETWORK2XNOR.md`,
+`docs/CONNECT2XNOR.md`, `docs/DEFER_HD_UPLOAD.md`, `docs/pnw/PARKNOREC2PNW.md`,
+`docs/NETCOST-STARLINK-TO-HOTSPOT.md`, `docs/pnw/CHANGELOG-2026-09-13.md`.
 
 ---
 
