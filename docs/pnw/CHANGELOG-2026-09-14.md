@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `83ac3eb172` (leadlossr2pnw). **Installed on the truck:** `9f6ca9f0ea`
-(07:28 PT); `83ac3eb172` installing.
+**Channel tip:** `origin/3devpnw` = `47be7e2175` (policeship2pnw). **Installed on the truck:** `83ac3eb172`
+(07:33 PT); `47be7e2175` installing.
 
 ## Networking — arbiter logging
 
@@ -35,16 +35,20 @@ as each change ships.
 |---|---|---|
 | `83ac3eb172` **leadlossr2pnw** | The lead-loss-hold shadow detector's failures are logged (first immediately, then at most once a minute) instead of swallowed by `except Exception: pass`. Rule 2. No plan or actuator change; the detector stays log-only. | Fable SHIP. Analysis of 69 shadow events (`drives/2026-09-14/leadloss-shadow-review/`): 3 genuine close drop-outs, none while openpilot controlled speed. Recommendation: don't build the braking version; keep logging with 3 extra gates. |
 
+## Location services — police misses
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `9997c8e6ef` **policemiss2pnw** | A gated or failed police poll keeps showing the reports already fetched (amber, never able to slow the car) instead of wiping them. Measured last week: 57 min on freeways below 43 mph, 21 of them with reports within 15 mi. | Fable: BLOCK alone (the failure became invisible), fixed by `47be7e2175`. |
+| `20a98e2ffa` **policemiss2pnw** | The police poll resumes promptly: no backoff for failures of our own link, and the speed gate is re-checked every 5 s instead of 60 s (first poll after reaching 45 mph was a median 38 s late, 52 times). Proxy 402/429 still park. | Fable APPROVE: worst case 1334 polls/day with min gap 62.4 s, never above steady highway polling; budget +≤$0.26/week. |
+| `47be7e2175` **policeship2pnw** | A held report carries the failure reason and the overlay shows it (e.g. `Police 11.2 mi (2 min) - daily limit`). Held reports are re-checked against the 45 min TTL every tick. | Fable re-review SHIP: replay shows the reason in amber, no held path emits `cap`, empty list + error keeps the red path, TTL boundary exact, 169 tests. Report: `drives/2026-09-13/police-miss-week/DRIVE_REPORT.md`. |
+
+**Held for the owner:** `9ad5f391af` (show police on non-freeway roads at highway speed, display only; contradicts the design doc's "never off-freeway"; the siren would chirp off-freeway if `SIREN_ENABLED` were ever turned on). Also: lower the 45 mph gate (+$0.15–1.18/week); raise the proxy's 20-alert cap (hit on 12% of Seattle/Portland polls).
+
 ## In progress (not shipped yet)
 
 - **`behindgate2pnw`**: ICBM must not START a slowdown for a map curve the truck already passed (the 09-08
   69 → 44 mph phantom, the 09-05 freeway 40 mph target, the weekend 40 → 28 / 59 → 52 cuts).
-- **`policemiss2pnw`** (`cfa47c85c9`, `2607226b63`, `9ad5f391af`, in Fable review): the week's proxy logs show
-  the police line displays only on roads mapd tags "freeway" (209 of 460 min at ≥45 mph not displayable, 4
-  reports passed hidden). Reports already fetched vanished when polling was gated or failed. The speed gate
-  re-checked every 60 s (first poll p50 38 s late). Fixes 1–2 (keep fetched reports; 5 s gate re-check, no
-  backoff for our own link) ship after review. Fix 3 (display police off-freeway) contradicts the design doc
-  and waits for the owner. Report: `drives/2026-09-13/police-miss-week/DRIVE_REPORT.md`.
 - **`gearparkcan2pnw`**: capability-gated follow-on so the Lightning confirms Park on a quiet-CAN charging
   boot (GearPark set on the powertrain parser's validity, not global canValid). Closes parknorec2pnw's
   charging-recording gap without touching the 74 platforms that still decode Park from a silent bus.
