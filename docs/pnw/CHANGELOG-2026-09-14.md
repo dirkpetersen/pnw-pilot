@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `da0741eb8a` (twistyr2pnw + policer2pnw, pushed 08:31 PT, staging).
-**Installed on the truck:** `3a361964c7` (leadlossgate2pnw + docs, 08:27 PT).
+**Channel tip:** `origin/3devpnw` = `365d287034` (behindgate2pnw, pushed 08:37 PT, staging).
+**Installed on the truck:** `da0741eb8a` (twistyr2pnw + policer2pnw, 08:31 PT).
 
 ## Networking — arbiter logging
 
@@ -43,6 +43,12 @@ as each change ships.
 |---|---|---|
 | `db2cec0d7c` (upstream #38322), `81aba515a5`, `acb5a21fb7` **swaglogrot2pnw** | swaglog rotation deletes the OLDEST logs when the 2500-file cap is hit, not the newest. Before, every restart deleted the logs it had just written, which is why there were no device logs from 09-05 to 09-12. A log younger than 24 h that rotation deletes now raises a WARNING, and that age check cannot crash logmessaged if another handler removes the file first. | Fable SHIP; the concurrent-delete guard was applied as Fable asked (test + mutant). Installed 08:02 PT, BootCount 199: all 11 logs from before the reboot (24720–24730) survived, and the newest is 24734. No young-delete warnings. The one traceback is soundd's `assert stream.active` at 07:59:08 PT, as the install reboot shut the system down, so it is not a fault. It is visible now only because the pre-reboot logs are kept. Report: `drives/2026-09-14/swaglog-rotation/`. |
 
+## Speed control — Rule 2 on silent excepts
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `da0741eb8a` **twistyr2pnw + policer2pnw** | The twisty-descent cap (`vtsc_controller.py`) and the police input read (`speedadjust_controller.py`) used `except Exception: pass`. They now log, with the exception type: the first failure at once, then at most once a minute with a count. The fallbacks are unchanged: no twisty trim; no police report, so no police cap. | Fable REJECTED the first version, which narrowed the excepts. plannerd is `restart_if_crash=False`, so any other error, e.g. `UnknownKeyName` from a params build mismatch, would have disengaged both cars with no re-engage. Fixed: both catch `Exception` again, and mutants that narrow them back are killed. 319 tests. Installed 08:31 PT (BootCount 201): no plannerd crash, no failure lines. Follow-ups: the twisty floor on failure while descending; briefly hold the last good police report. |
+
 ## Location services — police misses
 
 | Commit(s) | What changed | Notes |
@@ -55,7 +61,7 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`behindgate2pnw`** (built, `d5c7367f24`; Fable reviewing): ICBM will not START a slowdown for a map curve the
+- **`behindgate2pnw`** (Fable SHIP; pushed as `365d287034` 08:37 PT, installing): ICBM will not START a slowdown for a map curve the
   truck has already passed. A point counts as passed when it is more than 5 m behind along mapd's path AND behind
   the heading. When that can't be determined, nothing is gated.
   - Tried on the logged truck fixes: 0 of 214,877 points still ahead were wrongly marked passed. Heading alone got
@@ -65,20 +71,6 @@ as each change ships.
   - It fixes Sun 12:05:28 (60 → 51 mph), Sun 13:55:51, Sat 12:47:21, 09-08 19:36:58, and Sun 12:43:54 / 13:18:37.
   - It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, so the item stays open.
   - Owner question: should a passed point also stop lowering a slowdown that is already running?
-- **`twistyr2pnw` + `policer2pnw`** (`da0741eb8a`, pushed 08:31 PT, installing): the twisty-descent cap and the police input
-  read log their failures (Rule 2) instead of `except Exception: pass`.
-  - Fable REJECTED the first version, which narrowed the excepts. plannerd is not restarted after a crash, so any
-    other error (e.g. `UnknownKeyName` from a params build mismatch) would have disengaged both cars with no
-    re-engage.
-  - Fixed: both catch `Exception` again, keep the fallback, and name the exception type in the rate-limited log.
-    Mutants that narrow either except back are killed; 319 tests pass.
-  - Follow-ups: the twisty floor on failure while descending; briefly hold the last good police report; the
-    still-silent except in `_fold_map_curve`.
-- **Pro Power (done, analysis only):** APIM `7D0-10-03` reads PPOOOVOS already **on** (partially confirmed; one
-  FORScan read-only look settles it). Nothing cleared Pro Power in a 66-min overnight watch. Report:
-  `drives/2026-09-14/propower-overnight-watch/DRIVE_REPORT.md`.
-
-- **`behindgate2pnw`**: Fable SHIP, rebased as `29379e9b5b`. It installs after twistyr2pnw.
 - **`coopsteerfix2pnw`** (`ff3980a17d`, Fable SHIP; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
   an override on the same tick instead of waiting for the 50 ms-debounced `steeringPressed`. Replay: active ticks
   above 1 Nm 77 → 0, peak offset 11.5° → 10.1°.
