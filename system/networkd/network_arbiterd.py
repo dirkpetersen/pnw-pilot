@@ -1076,7 +1076,10 @@ def main() -> NoReturn:
       # BOUNDED, unlike D1: D1 only holds a link whose usability was just READ as good, so it cannot hold a dead
       # one. Here nothing about the link could be read and it may genuinely be gone, so after
       # ACTIVE_UNREADABLE_HOLD_S of consecutive failed reads the action goes through as before, at ERROR level.
-      if unread_since is not None and action in ("up_priority", "up_fallback", "up_hotspot"):
+      # Fable (re-review): hold only if there IS something to hold onto -- a link seen active at the last good read,
+      # or our own unresolved bring-up. At boot (no read yet) or after a good read of "nothing active", an
+      # unreadable tick must not delay the first connection by up to ACTIVE_UNREADABLE_HOLD_S.
+      if unread_since is not None and (seen_active or requested_active) and action in ("up_priority", "up_fallback", "up_hotspot"):
         unread_s = round(now - unread_since, 1)
         if now - unread_since < ACTIVE_UNREADABLE_HOLD_S:
           held = (action, target_ssid)

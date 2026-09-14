@@ -1278,6 +1278,21 @@ class TestAnUnreadableActiveReadHoldsTheRadio:
       ups = [m for m in infos if "in range ->" in m]
       assert ups[:1] and ups[0].endswith("(active connection unreadable)"), ups
 
+  @pytest.mark.parametrize("scan, first_up", [((PHONE,), ID_PHONE), ((), HOTSPOT)])
+  def test_at_BOOT_with_nothing_to_hold_an_unreadable_read_does_not_delay_the_first_connection(self, monkeypatch, events,
+                                                                                               scan, first_up):
+    """Fable re-review: nothing active and `--active` failing from tick 0 (boot, nmcli slow under build-on-boot).
+    The hold has nothing to protect, so the first action must go through on tick 0 -- not at HOLD_S."""
+    nm = FakeNM()
+    _away(nm, None, scan=scan)
+    nm.fail_reads.add("--active")            # failing BEFORE the first tick's read, not only from the first hook on
+    run_loop(monkeypatch, nm, ticks=3, near_home=False, hooks=[_unreadable(range(0, 10**6))], priority=(HOME, PHONE))
+    assert nm.up_log[:1] == [(0.0, first_up)], f"boot connection delayed by the unreadable hold: {nm.up_log}"
+    # Once our own bring-up is requested, the next unreadable ticks DO hold (Fable's scenario-E protection):
+    # the link we just raised is not bounced while nobody can read it.
+    assert nm.up_log == [(0.0, first_up)], f"the fresh bring-up was bounced while unreadable: {nm.up_log}"
+    assert all(h["unreadable_s"] < HOLD_S for h in _holds(events)), _holds(events)
+
   def test_a_good_read_RESETS_the_bound_and_afterwards_the_arbiter_acts_normally(self, monkeypatch, events):
     """Two episodes of 5 unreadable ticks (80 s each) with one good read between them: neither reaches the bound,
     because the run restarts on a good read -- without the reset the second one would release at 160 s. Each is
