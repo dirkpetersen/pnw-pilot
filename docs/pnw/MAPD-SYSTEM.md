@@ -87,7 +87,7 @@ repo root pins `version` / `url` / `sha256` / `size` / `install_path`. `ensure_m
   (not re-downloaded)** to the persistent dir first — this is what lets the fix survive a boot with no
   network (`installer.py:93-108`). 3 retries; static temp name so a hard-kill leaves at most one stale
   temp, never accumulating 20 MB orphans.
-- `python3 -m openpilot.system.mapd.installer --check` reports status without downloading.
+- `PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo:/data/pnw/agnos19-compat/site-packages /usr/local/venv/bin/python3 -m openpilot.system.mapd.installer --check` reports status without downloading (the venv is required: the installer imports swaglog).
 
 **Who runs it:** gated in the manager by `mapd_running()` = `os.path.exists(MAPD_BINARY)`
 (`process_config.py:53-54`) — manager never execs a missing file. (Where `ensure_mapd()` is invoked on

@@ -14,8 +14,9 @@ automatically when the pin is bumped to a new sha256 -- UNLESS the
 `/data/mapd/.override` flag is set (see `override_active()` below), which
 intentionally freezes the installed binary across every future pin change.
 
-  python3 -m openpilot.system.mapd.installer            # ensure installed
-  python3 -m openpilot.system.mapd.installer --check     # report status, no download
+  # needs the venv + compat overlay (swaglog imports zmq/numpy; /usr/bin/python3 has neither):
+  PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo:/data/pnw/agnos19-compat/site-packages \
+    /usr/local/venv/bin/python3 -m openpilot.system.mapd.installer [--check]   # --check: status, no download
 
 This lives under system/ (which is symlinked into the `openpilot` package), so it
 imports as `openpilot.system.mapd.installer` with no extra package wiring — unlike
@@ -28,6 +29,8 @@ import json
 import os
 import shutil
 import urllib.request
+
+from openpilot.common.swaglog import cloudlog
 
 # Resolve paths from this file's REAL location, not BASEDIR. On the device, system/
 # is a symlink into the openpilot package, so BASEDIR points into the symlinked tree
@@ -128,11 +131,19 @@ def ensure_mapd(retries: int = 3) -> str:
 
   if is_installed(rel):
     if override_shadows_pin(rel):
-      print(
-        f"mapd installer: WARNING /data/mapd/.override is active and installed binary {_sha256(dest)[:12]}… "
-        + f"does NOT match pinned {rel.get('version')} ({str(expected)[:12]}…) -- the pin bump was IGNORED. "
-        + "Run `rm /data/mapd/.override` on the device to receive the pinned release."
+      # mapdlog2pnw: this used to go ONLY to print() -- manager runs ensure_mapd() in a subprocess
+      # (see manager.py's _install_mapd) and never reads that subprocess's stdout, so the only
+      # cloudlog line manager ever emits for this case is "mapd installer: binary present", which is
+      # true but hides that the pin bump was silently ignored. Emit the same warning through cloudlog
+      # too, so it reaches swaglog/logmessaged instead of only the tmux pane.
+      installed_sha = _sha256(dest)
+      warning = (
+        f"mapd installer: WARNING /data/mapd/.override ({MAPD_OVERRIDE_FLAG}) is active and installed "
+        + f"binary {installed_sha[:12]}… does NOT match pinned {rel.get('version')} ({str(expected)[:12]}…) "
+        + "-- the pin bump was IGNORED. Run `rm /data/mapd/.override` on the device to receive the pinned release."
       )
+      print(warning)
+      cloudlog.warning(warning)
     return dest
 
   os.makedirs(os.path.dirname(dest), exist_ok=True)
