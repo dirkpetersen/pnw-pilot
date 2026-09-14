@@ -10,6 +10,12 @@ import zmq
 from openpilot.common.logging_extra import SwagLogger, SwagFormatter, SwagLogFileFormatter
 from openpilot.system.hardware.hw import Paths
 
+# pnw (swaglogrot2pnw): say so, once per handler, when rotation deletes a log younger than this. Files roll
+# over at most once a minute unless one reaches max_bytes, so the 2500-file cap holds >= ~41 h of logging.
+# Deleting a file younger than 24 h means a log flood, or newest-first deletion again (the bug that silently
+# erased 2026-09-05..09-12 on the device).
+YOUNG_DELETE_WARN_S = 24 * 3600
+
 
 def get_file_handler():
   Path(Paths.swaglog_root()).mkdir(parents=True, exist_ok=True)
@@ -28,6 +34,7 @@ class SwaglogRotatingFileHandler(BaseRotatingHandler):
     log_indexes = [f.split(".")[-1] for f in self.log_files]
     self.last_file_idx = max([int(i) for i in log_indexes if i.isdigit()] or [-1])
     self.last_rollover = None
+    self.warned_young_delete = False
     self.doRollover()
 
   def _open(self):
@@ -62,7 +69,19 @@ class SwaglogRotatingFileHandler(BaseRotatingHandler):
       while len(self.log_files) > self.backup_count:
         to_delete = self.log_files.pop()
         if os.path.exists(to_delete): # just being safe, should always exist
+          self._warn_if_young(to_delete)
           os.remove(to_delete)
+
+  def _warn_if_young(self, path):
+    if self.warned_young_delete:
+      return
+    age_s = time.time() - os.path.getmtime(path)  # noqa: TID251 -- file mtimes are wall-clock time
+    # A negative age means the clock is behind the file's mtime (a boot before time sync), so the age is unknown.
+    if 0 <= age_s < YOUNG_DELETE_WARN_S:
+      self.warned_young_delete = True
+      window_h = YOUNG_DELETE_WARN_S // 3600
+      cloudlog.error(f"swaglog rotation deleted {os.path.basename(path)}, only {age_s / 3600:.1f} h old (cap {self.backup_count} files): " +
+                     f"swaglogs are not covering the last {window_h} h. Warning once per handler.")
 
 class UnixDomainSocketHandler(logging.Handler):
   def __init__(self, formatter):
