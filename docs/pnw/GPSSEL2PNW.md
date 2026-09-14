@@ -229,3 +229,36 @@ episode neither ends it nor turns it into a restore.
 - `CarGps` is never read; the ICBM projection is unreachable (`ces_shadow` False).
 
 **Tests**: `selfdrive/controls/lib/ces_pnw/tests/test_gpslag_icbm.py`; 16 of 16 mutants killed.
+
+**Stale fix mid-episode (gpsdrgate2pnw, Fable gpslag review).** If both receivers are gone for more than
+5 s while a **map/far** cap episode runs, the vanished candidates would read as "curve cleared". The result
+would be 3 s silent, then a **restore toward the curve the map had rated**: Fable's probe saw the publish
+empty 137 m before it.
+
+Unknown is not clear, so the running cap is **held** (`icbmSrc` `gpsHold`). It is held until the truck has
+driven past where its binding candidate was, plus `ICBM_MARGIN_M` (integrated from vEgo). Then the normal
+clear → apex-passed (1 s) → restore path takes over, with its in-curve pause.
+
+The hold ends early when:
+- the fix comes back (`gpsBack`),
+- a vision curve binds (`capBound`), or
+- `ICBM_GPS_STALE_HOLD_MAX_S` passes (60 s, `maxTime`).
+
+60 s is a judgement, not a measurement: a held lower set costs speed, not safety. A vision-sourced episode
+is never held, because stale GPS does not change what vision sees.
+
+Map provenance is sticky within an episode (Fable B1): vision co-binding the same curve must not cancel the
+hold. The provenance resets when a new episode starts.
+
+At `maxTime` the episode **ends without a restore** (Fable B2): the curve is still unlocated. The set stays
+where ICBM put it, for the driver to raise.
+
+During a hold ICBM behaves like a live cap:
+- a driver SET+ is tapped back down;
+- a pedal press, cruise off or the CES button end the hold, like any episode.
+
+Logged as `ces_icbm_stale_hold {hold | release, why, held_s}`. A declined hold is logged once per episode:
+`declined, why=notMap|noDistance|noCap`. Mutants 9/9 + 4/4 killed.
+
+The closed-loop harness's stock set now follows the published caps, so a restore is observable. A positive
+control proves it, and the in-episode switch test (Fable, point b) uses it.

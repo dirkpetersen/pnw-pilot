@@ -267,6 +267,14 @@ ICBM_GPS_LAG_KEEP_S = 1.59
 # A fix older than this is not projected: ICBM's map-curve lookups see NO GPS (no map/far candidate,
 # map reach 0 so vision may start). 126 s of frozen device GPS in the SR 99 tunnel is the case.
 ICBM_GPS_MAX_AGE_S = 5.0
+# gpsdrgate2pnw (Fable, gpslag2pnw review): if the fix goes stale while a MAP/FAR cap episode is running, the
+# episode would read the vanished candidates as "curve cleared" -> 3 s silent -> RESTORE toward the pre-curve
+# set while still approaching the curve the map had rated (Fable's probe: publish emptied 137 m before it).
+# Unknown is not clear, and a held lower set is the DEC-only direction, so the running cap is HELD until
+# the truck has driven past where its binding candidate was (+ ICBM_MARGIN_M, integrated from v_ego), then
+# the normal clear/apex-passed/restore path (with its in-curve pause) takes over. Bounded in time for a
+# stopped truck; the value is a judgement (a held low set costs speed, not safety), not a measurement.
+ICBM_GPS_STALE_HOLD_MAX_S = 60.0
 
 
 def icbm_project_position(lat, lon, bearing, fix_ts, v_ego, now,
@@ -3434,6 +3442,7 @@ class CESController:
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
         self._icbm_gps_age = None         # gpslag2pnw
+        self._icbm_stale_hold = None      # gpsdrgate2pnw
         # curvefloor2pnw (Fable 2026-09-05, F5): reset the floor state too. Without this a stale
         # icbmFlrHit=True is published alongside icbmT=None, and _icbm_floor_lim survives a Chill
         # interlude -- so the debounce carries a limit from before the gap into the road after it.
@@ -3527,6 +3536,11 @@ class CESController:
             0.0, float("inf"),
             map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
             far_v=far_v, far_dist=far_dist, track=True)
+      # gpsdrgate2pnw: whether the running cap episode was ever bound by the MAP (stale hold). Sticky within the
+      # episode (Fable B1): on a real approach vision joins the map/far candidate for the same curve, and a
+      # last-binder record let a vision tick erase the map provenance -> no hold -> restore 50 m before the curve.
+      if target is not None and (self._icbm_src in ("map", "far") or self._icbm_ep.phase != "cap"):
+        self._icbm_cap_src = self._icbm_src
       # curveslow-lightning: lower the chosen apex on the Lightning (weaker EPS -> enter curves slower).
       # Penalty is >= 0 (never a speed-up), only lowers -> still reduce-only vs the ceiling; floor 0.
       # icbmalign2pnw: ICBM now applies the SAME descent + left-curve multipliers as VTSC — literally
@@ -3660,10 +3674,46 @@ class CESController:
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
+      # gpsdrgate2pnw: STALE-GPS HOLD of a running map/far cap (ICBM_GPS_STALE_HOLD_MAX_S). Vision binding this
+      # tick (target set) or the fix coming back ends it at once; so does leaving the cap phase.
+      hold = getattr(self, "_icbm_stale_hold", None)
+      hold_left = None
+      if target is None and gps_state == "stale" and self._icbm_ep.phase == "cap":
+        if hold is None:
+          declined = ("notMap" if getattr(self, "_icbm_cap_src", None) not in ("map", "far") else
+                      "noDistance" if self._icbm_ep._last_cap_dist is None else
+                      "noCap" if self._icbm_ep._committed_target is None else None)
+          if declined is None:
+            hold = self._icbm_stale_hold = {"t0": now, "t": now, "left": self._icbm_ep._last_cap_dist + ICBM_MARGIN_M,
+                                            "on": True}
+            cloudlog.event("ces_icbm_stale_hold", state="hold", cap=round(self._icbm_ep._committed_target, 2),
+                           dist=round(self._icbm_ep._last_cap_dist, 1), age=self._icbm_gps_age)
+          else:                     # Rule 2: say why the cap was NOT held, once per episode (hold stays "off")
+            self._icbm_stale_hold = {"on": False}
+            cloudlog.event("ces_icbm_stale_hold", state="declined", why=declined, src=getattr(self, "_icbm_cap_src", None))
+        if hold is not None and hold["on"]:
+          hold["left"] -= max(float(sig["v_ego"]), 0.0) * (now - hold["t"])
+          hold["t"] = now
+          if hold["left"] > 0.0 and now - hold["t0"] <= ICBM_GPS_STALE_HOLD_MAX_S:
+            target, self._icbm_src = self._icbm_ep._committed_target, "gpsHold"
+            hold_left = max(hold["left"] - ICBM_MARGIN_M, 0.0)
+          else:
+            hold["on"] = False
+            why = "passed" if hold["left"] <= 0.0 else "maxTime"
+            cloudlog.event("ces_icbm_stale_hold", state="release", why=why, held_s=round(now - hold["t0"], 1))
+            if why == "maxTime":
+              # Fable B2: the curve is still unlocated, and "unknown is not clear" holds at the time bound too.
+              # End the episode WITHOUT a restore: the set stays where ICBM put it, for the driver to raise.
+              self._icbm_ep.reset()
+      elif hold is not None:
+        if hold["on"]:
+          cloudlog.event("ces_icbm_stale_hold", state="release", why="gpsBack" if gps_state != "stale" else
+                         ("capBound" if target is not None else "episodeEnded"), held_s=round(now - hold["t0"], 1))
+        self._icbm_stale_hold = None
       # icbmmapfirst2pnw: hand the episode the binding candidate's DISTANCE (apex-passage detection
       # for the early restore) and the in-curve flag (restore entry deferral / restore pause).
       src_dist = {"map": sig.get("map_target_dist", float("inf")),
-                  "vis": vis_dist, "far": far_dist}.get(self._icbm_src)
+                  "vis": vis_dist, "far": far_dist, "gpsHold": hold_left}.get(self._icbm_src)
       # icbmrestorecap2pnw: bound what a RESTORE may give back by the road the truck is on NOW.
       # Driver report 2026-09-13 15:46 PT: the curve cleared as the truck entered a 25 mph zone and
       # restore tapped the set 27 -> 60 there. Updated every tick (not only during restore) so the

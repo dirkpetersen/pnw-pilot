@@ -54,7 +54,7 @@ def _path(curve_len=400.0, after=0.0):
 
 
 def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_every=1.0, follow_set=False,
-              path=None, y_end=CURVE_AT, clear_at=None, events_out=None):
+              path=None, y_end=CURVE_AT, clear_at=None, events_out=None, vision_end=float("-inf"), init=None):
   """blob(t_read) -> None or (y_fix, x_fix, fix_ts or None, src): the LastGPSPosition ces_pnw's _read_map
   copies at t_read (1 Hz on the car). Returns (start (t, true distance to the curve, src) or None, published
   targets, logged gps events).
@@ -80,7 +80,7 @@ def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_ever
   for k, v in dict(_icbm_ceiling=None, _icbm_dir=None, _map_targets=[], _cur_lat=None, _cur_lon=None, _cur_bearing=0.0,
                    _gps_fix_ts=None, _gps_src=None, _icbm_floor_lim=0.0, _icbm_floor_pend=None, _icbm_floor_hit=False,
                    _icbm_k=0.0, _icbm_k_n=0, _icbm_k_ahead=True, _icbm_k_at=0.0, _icbm_k_at_d=0.0, _icbm_k_at_n=0,
-                   _icbm_k_at_gap=0.0, _stock_set=VSET, _stock_on=True, _icbm_last_pub=-1e9).items():
+                   _icbm_k_at_gap=0.0, _stock_set=VSET, _stock_on=True, _icbm_last_pub=-1e9, **(init or {})).items():
     setattr(c, k, v)
   step = cls._icbm_step.__get__(c)
   pts, start, t = (path if path is not None else _path()), None, 0.0
@@ -94,7 +94,7 @@ def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_ever
       if b is not None:
         (c._cur_lat, c._cur_lon), c._gps_fix_ts, c._gps_src = _ll(b[0], b[1]), b[2], b[3]
     mtv, mtd = m.upcoming_curve(c._map_targets, c._cur_lat, c._cur_lon, V, m.C.CURVE_MAP_LOOKAHEAD_S)   # the caller
-    vis = vision_at is not None and CURVE_AT - V * t <= vision_at
+    vis = vision_at is not None and vision_end < CURVE_AT - V * t <= vision_at
     sig = {"v_ego": V, "v_set": c._stock_set if follow_set else VSET, "map_target_v": mtv, "map_target_dist": mtd,
            "curve_lat_accel_vision": 4.0 if vis else 0.0, "time_to_curve": (CURVE_AT - V * t) / V if vis else 10.0,
            "lat_accel_now": 0.0, "has_lead": False, "lead_drel": 0.0, "lead_vlead": 0.0, "gas": False, "brake": False,
@@ -104,8 +104,12 @@ def _approach(monkeypatch, blob, t_end=40.0, vision_at=None, spy=None, read_ever
     tgt = pubs[-1][1].get("target") if pubs else None
     if start is None and tgt is not None:
       start = (t, CURVE_AT - V * t, c._icbm_src)
-    if follow_set and tgt is not None:                   # the executor: one tap's worth toward the target
-      c._stock_set += max(min(tgt - c._stock_set, 0.447), -0.447) if abs(tgt - c._stock_set) > 0.2 else 0.0
+    if follow_set and tgt is not None:                   # the executor: one tap per tick, dec only down, inc only up
+      d = pubs[-1][1].get("dir", "dec")
+      if d == "dec" and c._stock_set > tgt + 0.2:
+        c._stock_set -= min(c._stock_set - tgt, 0.447)
+      elif d == "inc" and c._stock_set < tgt - 0.2:
+        c._stock_set += min(tgt - c._stock_set, 0.447)
     t = round(t + 0.25, 6)
   if events_out is not None:
     events_out.extend(events)
@@ -300,6 +304,96 @@ class TestEveryIcbmLookupUsesTheProjectedPosition:
     assert seen and all(s == (0.0, float("inf")) for s in seen), seen
     assert not pubs or pubs[-1].get("target") is None
     assert {n for n, la, lo in calls if la is not None} == set(), "a lookup ran on a stale position"
+
+
+class TestStaleGpsHoldsTheRunningCap:
+  """gpsdrgate2pnw (Fable, gpslag2pnw review (a); probe fable_gpslag_stale_midepisode.py): both receivers gone for
+  more than ICBM_GPS_MAX_AGE_S in the MIDDLE of a map/far cap episode. Without a hold the vanished candidates read
+  as "curve cleared": the publish emptied 137 m before the curve and a restore could start toward it. The running
+  cap is held until the truck has driven past where its binding candidate was, then the normal path resumes."""
+
+  PATH = dict(curve_len=100.0, after=900.0)
+
+  def _frozen_after(self, t_freeze, resume=None):
+    def blob(t):
+      if t < t_freeze or (resume is not None and t >= resume):
+        return (V * (t - 0.5), 0.0, t - 0.5, "car")
+      return (V * (t_freeze - 0.5), 0.0, t_freeze - 0.5, "car")
+    return blob
+
+  def _run(self, monkeypatch, blob, **kw):
+    ev = []
+    start, pubs, gps = _approach(monkeypatch, blob, follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0,
+                                 t_end=80.0, events_out=ev, **kw)
+    return start, pubs, [k for n, k in ev if n == "ces_icbm_stale_hold"]
+
+  def test_the_cap_is_held_past_the_curve_then_released_and_only_then_restored(self, monkeypatch):
+    base = _approach(monkeypatch, _fresh(0.5), follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0)[0]
+    freeze = base[0] + 2.0
+    start, pubs, hold = self._run(monkeypatch, self._frozen_after(freeze))
+    assert start == base
+    passed_t = (CURVE_AT + m.ICBM_MARGIN_M) / V                  # the truck is past the curve start + margin
+    before = [(t, p) for t, p in pubs if start[0] <= t < passed_t]
+    assert before and all(p.get("target") is not None and p.get("dir", "dec") == "dec" for _, p in before), \
+      [(t, p) for t, p in before if p.get("target") is None or p.get("dir") == "inc"][:3]
+    assert [h["state"] for h in hold] == ["hold", "release"] and hold[1]["why"] == "passed", hold
+    stale_t = freeze + m.ICBM_GPS_MAX_AGE_S
+    held = {p["target"] for t, p in pubs if stale_t + 0.5 <= t < passed_t}
+    assert len(held) == 1, f"the held cap moved: {held}"
+    assert any(p.get("dir") == "inc" for t, p in pubs if t >= passed_t), "never restored after the curve was passed"
+    # released as PASSED, the episode takes the fast apex-passed restore path (the hold fed it the shrinking distance)
+    last_dec = max(t for t, p in pubs if p.get("target") is not None and p.get("dir", "dec") == "dec")
+    first_inc = min(t for t, p in pubs if p.get("dir") == "inc")
+    assert first_inc - last_dec <= m.ICBM_RESTORE_DELAY_FAST_S + 0.5, (last_dec, first_inc)
+
+  def test_the_hold_is_bounded_in_time(self, monkeypatch):
+    monkeypatch.setattr(m, "ICBM_GPS_STALE_HOLD_MAX_S", 2.0)
+    base = _approach(monkeypatch, _fresh(0.5), follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0)[0]
+    freeze = base[0] + 2.0
+    _, pubs, hold = self._run(monkeypatch, self._frozen_after(freeze))
+    assert [h["state"] for h in hold][:2] == ["hold", "release"] and hold[1]["why"] == "maxTime", hold
+    assert 2.0 <= hold[1]["held_s"] <= 2.5
+    # Fable B2: the curve is still unlocated at the time bound, so the episode ends WITHOUT a restore
+    released_t = freeze + m.ICBM_GPS_MAX_AGE_S + hold[1]["held_s"]
+    assert not [(t, p) for t, p in pubs if p.get("dir") == "inc"], "restored toward an unlocated curve after maxTime"
+    assert all(p.get("target") is None for t, p in pubs if t >= released_t + 0.5), "kept publishing after maxTime"
+
+  def test_vision_co_binding_does_not_erase_the_map_provenance(self, monkeypatch):
+    """Fable B1: far cap at ~306 m, the fix freezes 1 s later, vision joins 200 -> 130 m and drops. A last-binder
+    record saw a vision cap and declined the hold: restore published 50 m before the map-rated curve."""
+    base = _approach(monkeypatch, _fresh(0.5), follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0)[0]
+    freeze = base[0] + 1.0
+    start, pubs, hold = self._run(monkeypatch, self._frozen_after(freeze), vision_at=200.0, vision_end=130.0)
+    assert start == base
+    assert [h["state"] for h in hold][:1] == ["hold"], hold
+    inc_before = [round(V * t - CURVE_AT, 1) for t, p in pubs if p.get("dir") == "inc" and V * t < CURVE_AT + m.ICBM_MARGIN_M]
+    assert not inc_before, f"restore published this many m before the curve start: {inc_before}"
+
+  def test_the_fix_coming_back_ends_the_hold_and_the_map_takes_over(self, monkeypatch):
+    base = _approach(monkeypatch, _fresh(0.5), follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0)[0]
+    freeze = base[0] + 1.0
+    resume = freeze + m.ICBM_GPS_MAX_AGE_S + 3.0
+    start, pubs, hold = self._run(monkeypatch, self._frozen_after(freeze, resume=resume))
+    assert hold and hold[0]["state"] == "hold" and hold[1] == {**hold[1], "state": "release", "why": "gpsBack"}
+    assert all(p.get("target") is not None for t, p in pubs if start[0] <= t < CURVE_AT / V), "the cap dropped out"
+
+  def test_a_vision_sourced_episode_is_not_held(self, monkeypatch):
+    """GPS going stale does not change what VISION sees, so a vision cap that clears has really cleared."""
+    straight = [dict(p, velocity=0.0) for p in _path(**self.PATH)]            # the map rates nothing
+    ev = []
+    # seeded with a "far" provenance left over from an EARLIER episode: sticky within an episode, never across
+    start, pubs, _ = _approach(monkeypatch, self._frozen_after(5.0), follow_set=True, path=straight,
+                               y_end=CURVE_AT + 300.0, t_end=80.0, vision_at=150.0, vision_end=40.0, events_out=ev,
+                               init={"_icbm_cap_src": "far"})
+    assert start is not None and start[2] == "vis"
+    hold = [k for n, k in ev if n == "ces_icbm_stale_hold"]
+    assert [(h["state"], h["why"]) for h in hold] == [("declined", "notMap")], hold   # logged once, never held
+
+  def test_a_vision_curve_binding_ends_the_hold(self, monkeypatch):
+    base = _approach(monkeypatch, _fresh(0.5), follow_set=True, path=_path(**self.PATH), y_end=CURVE_AT + 700.0)[0]
+    freeze = base[0] + 1.0
+    _, pubs, hold = self._run(monkeypatch, self._frozen_after(freeze), vision_at=60.0)
+    assert [h["state"] for h in hold][:2] == ["hold", "release"] and hold[1]["why"] == "capBound", hold
 
 
 # --- telemetry, and the Tesla ----------------------------------------------------------------------------
