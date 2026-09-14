@@ -93,6 +93,10 @@ class VTSCController:
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._cur_lat = self._cur_lon = None
+    self._map_read_err_t = None  # silentexc2pnw: monotonic time of the last logged MapTargetVelocities read failure
+    self._map_read_err_n = 0     # silentexc2pnw: failed MapTargetVelocities reads since that log line
+    self._gps_err_t = None       # silentexc2pnw: ...the same for a LastGPSPosition read that FAILED (a missing fix is not one)
+    self._gps_err_n = 0
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
     # sharpcurve2pnw: per-cycle effective decels. Normal commanded decel is capped to EV regen authority
@@ -105,6 +109,8 @@ class VTSCController:
     self._last_t = None       # monotonic stamp of last cap() call (real dt)
     self._last_read = -1e9    # monotonic stamp of last param read
     self._tele_last = 0.0     # monotonic stamp of last overlay publish
+    self._overlay_err_t = None  # silentexc2pnw: monotonic time of the last logged VTSCStatus publish failure (None = never)
+    self._overlay_err_n = 0     # silentexc2pnw: failed VTSCStatus publishes since that log line
     # vtsctele2pnw: penalty components actually applied this cycle, for the VTSCStatus overlay feed
     # (-> ces_events tick). Display/logging only — never read back into control.
     self._tele_pen = 0.0      # Lightning curve penalty applied (m/s; 0.0 = none / non-Lightning)
@@ -184,21 +190,47 @@ class VTSCController:
     if self.mem_params is None:
       self._map_targets = []
       return
+    # silentexc2pnw (Rule 2): both reads below ended in a silent `except Exception:`, so a failure switched map-curve
+    # anticipation off with no trace. Fallbacks unchanged (no map points / no position -> no map curve, vision still
+    # works; retried by the ~1 Hz read); each failure is now logged in the twistyr2pnw style with its own state: first
+    # failure at once, then at most one line per TWISTY_ERR_LOG_S with the count since the previous line. Caught
+    # broadly: plannerd is restart_if_crash=False. A malformed JSON MapTargetVelocities does not raise here (Params
+    # returns None for it and warns itself); an UnknownKeyName from a params_keys.h / params_pyx.so mismatch does.
     try:
       self._map_targets = self.mem_params.get("MapTargetVelocities", return_default=True) or []
-    except Exception:
+    except Exception as e:
       self._map_targets = []
+      self._map_read_err_n += 1
+      now = time.monotonic()
+      if self._map_read_err_t is None or now - self._map_read_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: MapTargetVelocities read FAILED ({type(e).__name__}) -- NO map curves, only the " +
+                           f"vision curve cap can slow for curves ({self._map_read_err_n} failure(s) since the last log)")
+        self._map_read_err_t = now
+        self._map_read_err_n = 0
     try:
       pos = self.mem_params.get("LastGPSPosition", return_default=True)
-      if isinstance(pos, (bytes, str)):
-        pos = json.loads(pos)
-      self._cur_lat = float(pos["latitude"])
-      self._cur_lon = float(pos["longitude"])
-      brg = pos.get("bearing")
-      self._cur_bearing = float(brg) if brg is not None else None
-    except Exception:
+      if pos is None:
+        # No fix yet: NORMAL, not a failure -- mapd_configd writes LastGPSPosition only with a fix. Same no-position
+        # result as before (it used to arrive via a TypeError on None["latitude"]), and deliberately not logged.
+        self._cur_lat = self._cur_lon = None
+        self._cur_bearing = None
+      else:
+        if isinstance(pos, (bytes, str)):
+          pos = json.loads(pos)
+        self._cur_lat = float(pos["latitude"])
+        self._cur_lon = float(pos["longitude"])
+        brg = pos.get("bearing")
+        self._cur_bearing = float(brg) if brg is not None else None
+    except Exception as e:
       self._cur_lat = self._cur_lon = None
       self._cur_bearing = None
+      self._gps_err_n += 1
+      now = time.monotonic()
+      if self._gps_err_t is None or now - self._gps_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: LastGPSPosition unreadable ({type(e).__name__}) -- no position, NO map curves " +
+                           f"while this lasts ({self._gps_err_n} failure(s) since the last log)")
+        self._gps_err_t = now
+        self._gps_err_n = 0
 
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
@@ -535,8 +567,20 @@ class VTSCController:
     self._tele_last = now
     try:
       self.mem_params.put_nonblocking("VTSCStatus", self.overlay_payload())
-    except Exception:
-      pass
+    except Exception as e:
+      # silentexc2pnw (Rule 2): was `except Exception: pass`. Telemetry only -- the UI overlay and ces_pnw's telemetry
+      # columns are VTSCStatus's only readers -- but a failing publish left the overlay and every VTSC column in
+      # ces_events frozen at the last good snapshot (or empty), which reads as real data. Fallback unchanged (this
+      # snapshot is dropped, the next is tried ~0.2 s later); now logged in the twistyr2pnw style. No ces_events flag:
+      # the flag would have to ride on this very channel. What raises: the put (UnknownKeyName on a params_keys.h /
+      # params_pyx.so mismatch, a non-serialisable value) or overlay_payload() itself.
+      self._overlay_err_n += 1
+      if self._overlay_err_t is None or now - self._overlay_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: VTSCStatus publish FAILED ({type(e).__name__}) -- the overlay and the ces_events " +
+                           "VTSC columns are STALE or empty (telemetry only, control unaffected) " +
+                           f"({self._overlay_err_n} failure(s) since the last log)")
+        self._overlay_err_t = now
+        self._overlay_err_n = 0
 
   def overlay_payload(self) -> dict:
     """The VTSCStatus snapshot. Split out from _publish_overlay so a test can assert this dict's keys
