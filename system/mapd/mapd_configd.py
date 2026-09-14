@@ -105,6 +105,15 @@ CAR_CAPABILITY_RECHECK_S = 5.0
 CAR_GPS_DR_HDOP = 3.8
 CAR_GPS_DR_ENTER_S = 10.0
 CAR_GPS_DR_EXIT_S = 5.0
+# gpsdrgate2pnw (Fable, gpsdr2pnw review): the device may take a degraded truck's blob only
+#  - while MOVING (the owner's case is the tunnel). The one weekend firing was parked: Sat 14:12, HDOP 3.8
+#    for 381 s with the truck's position exactly right, while the device jittered 3.7 m mean / 8.7 m max
+#    with a wandering bearing. The preference is held CAR_GPS_DR_EXIT_S after the last moving publish, so
+#    crawling around 3 mph cannot swap receivers (~6 m apart) on every publish;
+#  - with a device fix that has been a steady `fix` for CAR_GPS_DR_ENTER_S. qcomgpsd publishes no accuracy
+#    (hasFix is only verticalAccuracy != 500), and the first hasFix samples after the Sat 06:28 cold start
+#    were 56-72 m off.
+# 0x463 GPS_Actual_vs_Infer_pos would say "inferred" directly, but the pinned opendbc never parses 0x463.
 # gpslag2pnw: `fix_ts` = the monotonic time a written fix was VALID, so a consumer can project it to the
 # instant it decides on (ICBM, ces_pnw). Owner decision 2026-09-13: the device fix is its arrival here
 # minus the MEASURED qcomgpsd latency (GNSS time is wrong until the clock syncs after boot); the truck fix
@@ -141,10 +150,15 @@ class CarGpsSource:
     self.dr = False        # gpsdr2pnw: degraded (HDOP) long enough that a fresh device fix is preferred
     self._poor_since = None  # monotonic time of the first publish in the current HDOP >= DR run
     self._good_since = None  # while dr: monotonic time of the first publish in the current good run
+    self._moving_at = None   # gpsdrgate2pnw: monotonic time of the last valid publish judged moving
 
   @property
   def usable(self) -> bool:
     return self._healthy >= CAR_GPS_REACQUIRE_PUBLISHES
+
+  def dr_yields(self, now: float) -> bool:
+    """gpsdrgate2pnw: degraded AND moving (or stopped less than CAR_GPS_DR_EXIT_S ago)."""
+    return self.dr and self._moving_at is not None and now - self._moving_at <= CAR_GPS_DR_EXIT_S
 
   def _bad(self, kind: str, detail: str) -> None:
     self._healthy = 0
@@ -168,7 +182,7 @@ class CarGpsSource:
       return None   # the same publish read again: nothing new to judge or write
     # DBC sentinels decode to out-of-range numbers (lat raw 255 -> 166 deg, heading 65535 -> 655.35,
     # speed 254/255 = Unknown/Invalid). 360.0 itself is valid: round(359.96, 1) is logged as 360.0.
-    if not all(map(math.isfinite, (lat, lon, hdg, spd_mph, age))) or abs(lat) > 90.0 or abs(lon) > 180.0 \
+    if not all(map(math.isfinite, (lat, lon, hdg, spd_mph, age, hdop))) or abs(lat) > 90.0 or abs(lon) > 180.0 \
        or not 0.0 <= hdg <= 360.0 or not 0.0 <= spd_mph < 254.0:
       return self._bad("invalid", f"out of range lat={lat} lon={lon} hdg={hdg} spd={spd_mph}")
     if not 0.0 <= age <= CAR_GPS_MAX_AGE_S:
@@ -185,6 +199,7 @@ class CarGpsSource:
         self.dr = now - self._good_since < CAR_GPS_DR_EXIT_S
     spd_ms = spd_mph * MPH_TO_MS
     moving = spd_ms > CAR_GPS_MOVING_MS or (device_speed is not None and device_speed > DEVICE_GPS_MOVING_MS)
+    self._moving_at = now if moving else self._moving_at
     key = (lat, lon, hdg)
     self._repeats = self._repeats + 1 if (moving and key == self._key) else 0
     self._key = key
@@ -199,7 +214,8 @@ class CarGpsSource:
     if self.dr:
       phase = (f">= {CAR_GPS_DR_HDOP} for {now - self._poor_since:.0f} s" if self._poor_since is not None
                else f"good for {now - self._good_since:.0f} of {CAR_GPS_DR_EXIT_S:.0f} s")
-      self.kind, self.detail = "dr", f"HDOP {hdop} ({phase}), CAN frame age {age:.2f} s"
+      still = "moving" if moving else ("never moved" if self._moving_at is None else f"stopped {now - self._moving_at:.0f} s")
+      self.kind, self.detail = "dr", f"HDOP {hdop} ({phase}), {still}, CAN frame age {age:.2f} s"
     else:
       self.kind, self.detail = "ok", f"CAN frame age {age:.2f} s, HDOP {hdop}"
     return {"latitude": lat, "longitude": lon, "bearing": hdg % 360.0, "speed": spd_ms}
@@ -458,7 +474,9 @@ def main():
         car_fix = car_gps.update(mem.get("CarGps", return_default=True), now_fix, dev_speed)
       # gpsdr2pnw: a degraded truck fix yields to a FRESH device fix (and takes over again the moment
       # the device fix is not fresh: a dead-reckoned truck beats no position at all).
-      use_car = car_gps_capable and car_gps.usable and not (car_gps.dr and cur_fix_state == "fix")
+      # gpsdrgate2pnw: only while moving, and only to a device fix steady for CAR_GPS_DR_ENTER_S.
+      device_steady = cur_fix_state == "fix" and now_fix - fix_state_since >= CAR_GPS_DR_ENTER_S
+      use_car = car_gps_capable and car_gps.usable and not (car_gps.dr_yields(now_fix) and device_steady)
       if sm.updated[gps_service]:
         g = sm[gps_service]
         if not g.hasFix:
@@ -484,7 +502,8 @@ def main():
         src = "car" if use_car else ("device" if cur_fix_state == "fix" else "none")
         if (src, car_gps.kind) != gps_source:
           cloudlog.event("mapd_configd_gps_source", src=src, prev=gps_source[0] if gps_source else None,
-                         car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state)
+                         car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
+                         device_fix_s=round(now_fix - fix_state_since, 1))
           gps_source = (src, car_gps.kind)
       if sm.alive['mapdOut']:
         mapd_out_down = 0

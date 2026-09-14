@@ -63,17 +63,67 @@ class TestDegradedTruckYields:
     res = _run(monkeypatch, 30.0, device, truck)
     assert _srcs(res, 0.0, 30.0) == {"car"}
 
+  def test_a_nan_hdop_is_not_a_fix(self, monkeypatch):
+    truck = _with_hdop(_straight(12), lambda i: float("nan") if i == 6 else 0.4)
+    res = _run(monkeypatch, 12.0, _device_track(12), truck)
+    assert not [d for t, d in R.positions(res) if d["src"] == "car" and t == _grid(truck[6][0])]
+    assert any(e["car"] == "invalid" for e in _source_events(res))
+
   def test_unknown_hdop_sentinel_counts_as_degraded(self, monkeypatch):
     truck = _with_hdop(_straight(30), lambda i: 6.2)                 # DBC 31 "Invalid" * 0.2
     res = _run(monkeypatch, 30.0, _device_track(30), truck)
     assert _srcs(res, _grid(truck[13][0]), 30.0) == {"device"}
 
-  def test_parked_after_boot_like_sat_1412(self, monkeypatch):
-    """Sat 2026-09-12 14:12:14 PT: 6 min parked, truck HDOP a constant 3.8, device fix updating."""
+  def test_parked_after_boot_like_sat_1412_keeps_the_truck(self, monkeypatch):
+    """gpsdrgate2pnw (Fable): Sat 2026-09-12 14:12:14 PT, parked, truck HDOP a constant 3.8 for 381 s with its
+    position exactly right, while the device jittered 3.7 m mean / 8.7 m max and its bearing wandered. The
+    device (speed noise up to 4.1 m/s, under DEVICE_GPS_MOVING_MS) must NOT take the blob."""
     truck = [(i + 0.3, 44.0, -121.3, 120.0, 0.0, 3.8, 0.3) for i in range(40)]
-    device = [(i + 0.6, 44.00001, -121.30001, 0.3, (i * 53) % 360, True) for i in range(40)]
+    device = [(i + 0.6, 44.00001 + (i % 3) * 3e-5, -121.30001, (0.3, 4.1, 1.2)[i % 3], (i * 53) % 360, True) for i in range(40)]
     res = _run(monkeypatch, 40.0, device, truck)
-    assert _srcs(res, _grid(truck[12][0]), 40.0) == {"device"}
+    assert _srcs(res, _grid(truck[3][0]), 40.0) == {"car"}
+    dr = [e for e in _source_events(res) if e["car"] == "dr"]
+    assert len(dr) == 1 and dr[0]["src"] == "car" and "never moved" in dr[0]["car_detail"]
+
+
+class TestDegradedYieldGates:
+  """gpsdrgate2pnw: the device takes a degraded truck's blob only while moving, and only once steady."""
+
+  def test_stopping_hands_back_to_the_truck_5_s_after_the_last_moving_publish(self, monkeypatch):
+    moving = _with_hdop(_straight(25), lambda i: 3.8)
+    last = moving[-1]
+    parked = [(last[0] + k, last[1], last[2], last[3], 0.0, 3.8, 0.4) for k in range(1, 16)]
+    device = _device_track(25) + [(25 + k + 0.6, 47.61, -122.30002, 0.2, 0.0, True) for k in range(15)]
+    res = _run(monkeypatch, 40.0, device, moving + parked)
+    assert _srcs(res, _grid(moving[15][0]), _grid(last[0]) + 0.05) == {"device"}
+    hand_back = last[0] + M.CAR_GPS_DR_EXIT_S
+    assert _srcs(res, _grid(last[0]) + 0.05, hand_back - 0.3) == {"device"}, "handed back before the 5 s hold-off"
+    assert _srcs(res, hand_back + 1.0, 40.0) == {"car"}, "the truck did not take back a parked blob"
+
+  def test_crawling_around_3_mph_does_not_swap_receivers_every_publish(self, monkeypatch):
+    base = _with_hdop(_straight(40, spd=4.0), lambda i: 3.8)
+    crawl = [r[:4] + ((4.0 if i % 2 else 2.0),) + r[5:] for i, r in enumerate(base)]   # moving every other publish
+    device = _device_track(40, speed=1.5)
+    res = _run(monkeypatch, 40.0, device, crawl)
+    assert _srcs(res, _grid(crawl[13][0]), 40.0) == {"device"}
+    ev = _source_events(res)
+    first_device = next(i for i, e in enumerate(ev) if e["src"] == "device" and e["prev"] == "car")
+    assert not [e for e in ev[first_device + 1:] if e["src"] != e["prev"]], ev[first_device:]
+
+  def test_a_device_fix_must_be_steady_for_10_s_before_it_takes_the_blob(self, monkeypatch):
+    truck = _with_hdop(_straight(45), lambda i: 3.8)                  # degraded from the start (dr at 11.3)
+    device = [r for r in _device_track(45) if r[0] >= 15.0]            # first device fix at 15.6
+    device = [r if abs(r[0] - 30.6) > 0.01 else r[:5] + (False,) for r in device]   # one no-fix at 30.6
+    res = _run(monkeypatch, 45.0, device, truck)
+    assert _srcs(res, 0.0, 25.6) == {"car"}, "a device fix less than 10 s old took the blob"
+    assert _srcs(res, 25.7, 30.6) == {"device"}
+    assert _srcs(res, 30.7, 41.5) == {"car"}, "one no-fix sample did not restart the steady clock"
+    assert _srcs(res, 41.7, 45.0) == {"device"}
+    sw = [e for e in _source_events(res) if e["src"] == "device" and e["prev"] == "car"]
+    assert sw and all(e["device_fix_s"] >= M.CAR_GPS_DR_ENTER_S for e in sw), sw
+    held = [e for e in _source_events(res) if e["src"] == "car" and e["car"] == "dr"]
+    assert held and held[0]["device_fix_s"] is not None
+
 
 
 def test_ok_detail_names_the_hdop(monkeypatch):

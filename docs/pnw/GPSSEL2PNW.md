@@ -148,6 +148,22 @@ there. No rule based on what `CarGps` carries distinguishes it.
 **Tesla**: same 52 s replay, all-writes sha256 `4aad6a81998d1349`, identical to gpssel2pnw.
 **Tests**: `system/mapd/tests/test_gps_dr_prefer_device.py`; 9 of 9 mutants killed.
 
+**gpsdrgate2pnw (Fable, gpsdr2pnw review).** The device may take a degraded truck's blob only:
+- **while moving**, and for `CAR_GPS_DR_EXIT_S` (5 s) after the last moving publish, so a crawl cannot
+  swap receivers every publish. Sat 14:12 was parked, with the truck exactly right and the device
+  jittering 3.7 m mean / 8.7 m max;
+- **with a device fix that has been a steady `fix` for `CAR_GPS_DR_ENTER_S`** (10 s). qcomgpsd publishes
+  no accuracy, and the first `hasFix` samples after the Sat 06:28 cold start were 56–72 m off.
+
+A NaN HDOP is `invalid`. Replayed on the weekend + I-5 logs, DR now switches **nowhere**:
+- Sat 14:12 no longer switches.
+- The SR 99 exit's 3 s device window is gone too: the device fix had just reacquired (under 10 s
+  steady) when the truck's HDOP recovered.
+
+`GPS_Actual_vs_Infer_pos` (0x463) cannot be forwarded without an opendbc change: the pinned opendbc
+(`78477c72`) registers only `APIMGPS_Data_Nav_1_FD1`/`_3_FD1`.
+Tesla writes identical (sha256 `e9045cfcb417f0d7`). Mutants 7/7 killed.
+
 ## 4. gpslag2pnw — ICBM projects the position to every tick, keeping today's curve timing
 
 Owner decision 2026-09-13: "Build it, keep curve timing". Lightning only: ICBM runs only under
