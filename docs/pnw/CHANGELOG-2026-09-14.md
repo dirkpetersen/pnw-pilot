@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `f93e876310` (gearparkcan2pnw). **Installed on the truck:** `f93e876310`
-(07:50 PT).
+**Channel tip:** `origin/3devpnw` = `df5733e6e5` (leadlossgate2pnw, pushed ~08:08 PT, waiting to install).
+**Installed on the truck:** `acb5a21fb7` (swaglogrot2pnw, 08:02 PT).
 
 ## Networking — arbiter logging
 
@@ -35,6 +35,13 @@ as each change ships.
 | Commit(s) | What changed | Notes |
 |---|---|---|
 | `83ac3eb172` **leadlossr2pnw** | The lead-loss-hold shadow detector's failures are logged (first immediately, then at most once a minute) instead of swallowed by `except Exception: pass`. Rule 2. No plan or actuator change; the detector stays log-only. | Fable SHIP. Analysis of 69 shadow events (`drives/2026-09-14/leadloss-shadow-review/`): 3 genuine close drop-outs, none while openpilot controlled speed. Recommendation: don't build the braking version; keep logging with 3 extra gates. |
+| `df5733e6e5` **leadlossgate2pnw** | The lead-loss shadow only considers a drop-out at ≥ 5 m/s, with TTC ≤ 8 s and carState valid, which are the review's 3 gates. Rejections are logged with the gates that fired, at most 1 line per 5 s plus a held-back count. Malformed lead fields are logged. Still log-only: it never brakes. | Fable APPROVE: the narrowed except adds no crash path, since the planner's own logged guard wraps it. The 69-event replay reproduces the report: 6/6 useful kept, 6/7 harmful dropped. 15 tests, 18/18 mutants. Pushed ~08:08 PT, not installed yet. |
+
+## Diagnostics — device logs
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `db2cec0d7c` (upstream #38322), `81aba515a5`, `acb5a21fb7` **swaglogrot2pnw** | swaglog rotation deletes the OLDEST logs when the 2500-file cap is hit, not the newest. Before, every restart deleted the logs it had just written, which is why there were no device logs from 09-05 to 09-12. A log younger than 24 h that rotation deletes now raises a WARNING, and that age check cannot crash logmessaged if another handler removes the file first. | Fable SHIP; the concurrent-delete guard was applied as Fable asked (test + mutant). Installed 08:02 PT, BootCount 199: all 11 logs from before the reboot (24720–24730) survived, and the newest is 24734. No young-delete warnings. The one traceback is soundd's `assert stream.active` at 07:59:08 PT, as the install reboot shut the system down, so it is not a fault. It is visible now only because the pre-reboot logs are kept. Report: `drives/2026-09-14/swaglog-rotation/`. |
 
 ## Location services — police misses
 
@@ -48,17 +55,32 @@ as each change ships.
 
 ## In progress (not shipped yet)
 
-- **`behindgate2pnw`**: ICBM must not START a slowdown for a map curve the truck already passed (the 09-08
-  69 → 44 mph phantom, the 09-05 freeway 40 mph target, the weekend 40 → 28 / 59 → 52 cuts).
+- **`behindgate2pnw`** (built, `d5c7367f24`; Fable reviewing): ICBM will not START a slowdown for a map curve the
+  truck has already passed. A point counts as passed when it is more than 5 m behind along mapd's path AND behind
+  the heading. When that can't be determined, nothing is gated.
+  - Tried on the logged truck fixes: 0 of 214,877 points still ahead were wrongly marked passed. Heading alone got
+    3,879 wrong.
+  - Of 25 starts that came from an already-passed point, all 25 were flagged: 21 suppressed, 2 changed, 2 not
+    reproducible. None of the 42 real starts were flagged.
+  - It fixes Sun 12:05:28 (60 → 51 mph), Sun 13:55:51, Sat 12:47:21, 09-08 19:36:58, and Sun 12:43:54 / 13:18:37.
+  - It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, so the item stays open.
+  - Owner question: should a passed point also stop lowering a slowdown that is already running?
+- **`twistyr2pnw` + `policer2pnw`** (`8a8f603ee0`, next to install): the twisty-descent cap and the police input
+  read log their failures (Rule 2) instead of `except Exception: pass`.
+  - Fable REJECTED the first version, which narrowed the excepts. plannerd is not restarted after a crash, so any
+    other error (e.g. `UnknownKeyName` from a params build mismatch) would have disengaged both cars with no
+    re-engage.
+  - Fixed: both catch `Exception` again, keep the fallback, and name the exception type in the rate-limited log.
+    Mutants that narrow either except back are killed; 319 tests pass.
+  - Follow-ups: the twisty floor on failure while descending; briefly hold the last good police report; the
+    still-silent except in `_fold_map_curve`.
 - **Pro Power (done, analysis only):** APIM `7D0-10-03` reads PPOOOVOS already **on** (partially confirmed; one
   FORScan read-only look settles it). Nothing cleared Pro Power in a 66-min overnight watch. Report:
   `drives/2026-09-14/propower-overnight-watch/DRIVE_REPORT.md`.
-- **`leadlossr2pnw`**: lead-loss-hold shadow review (49 events, 08-18 → 09-13), plus a Rule 2 fix for the bare
-  `except Exception: pass` around its logger in `longitudinal_planner.py`.
 
 ## Deferred to the owner
 
-Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; capability-gated canValid follow-on for the charging-recording gap; RES restores the truck's memory vs the driver's set; stock
+Tailgate chime FORScan session (tooling ready); Pro Power: FORScan read-only look at APIM `7D0-10-03`; police off-freeway display / off-freeway slowdown / lower the 45 mph gate / raise the proxy's 20-alert cap; behindgate: also gate a running slowdown?; RES restores the truck's memory vs the driver's set; stock
 dropout keeps steering (panda change); brake-release auto RES; the deleter policy when storage is full of
 un-uploaded drives; map downloads over metered links; the Fix B `coast_bias` default; `mapFlr` keep/drop;
 `curveoverride2pnw`; 12 V multimeter; relayMalfunction harness check; a driver-monitoring video check.
