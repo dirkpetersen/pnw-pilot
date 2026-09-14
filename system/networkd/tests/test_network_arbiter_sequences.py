@@ -1190,15 +1190,18 @@ class TestActiveConnectionChangesAreLogged:
 
   def test_an_UNREADABLE_active_read_is_not_a_change(self, monkeypatch, events, infos):
     """An nmcli failure is no evidence the connection changed -- it must not log 'phone -> nothing' and then
-    'nothing -> phone' around one flaky call. The bring-up line says the read failed, not what was left."""
+    'nothing -> phone' around one flaky call.
+    unreadhold2pnw: nor does it re-run `con up` on the phone, which is in the scan. Before the hold it did, and on
+    real NM that re-activates a working link (Fable). The '(active connection unreadable)' wording is still
+    reachable after the bound -- see TestAnUnreadableActiveReadHoldsTheRadio."""
     nm = FakeNM()
     _away(nm, ID_PHONE, scan=(PHONE,))
     hooks = [lambda nm, tk: nm.fail_reads.add("--active") if tk == 2 else nm.fail_reads.discard("--active")]
     run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=hooks, priority=(HOME, PHONE))
     assert _changes(events) == [], _changes(events)
     assert nm.active == ID_PHONE
-    ups = [m for m in infos if "in range ->" in m]   # the unreadable tick re-raises the phone (it is in the scan)
-    assert len(ups) == 1 and ups[0].endswith("(active connection unreadable)"), ups
+    assert nm.ups == [], f"re-upped the already-active link on an unreadable tick: {nm.up_log}"
+    assert [m for m in infos if "in range ->" in m] == []
 
   def test_an_EARLIER_arbiter_switch_does_not_colour_a_later_external_one(self, monkeypatch, events):
     """Found by mutation: the arbiter raises the phone from the hotspot, then NM moves it to KarlMoik on its
@@ -1210,3 +1213,82 @@ class TestActiveConnectionChangesAreLogged:
              priority=(HOME, PHONE))
     assert _changes(events) == [{"from": HOTSPOT, "to": ID_PHONE, "by": "arbiter"},
                                 {"from": ID_PHONE, "to": ID_STAR, "by": "external"}], _changes(events)
+
+
+# ================================================================================================
+# unreadhold2pnw — an UNREADABLE active connection does not move the radio, for a bounded time (Fable, confirmed).
+#
+# A failed `nmcli con show --active` reads as current_active None: on_client_wifi goes False, the sticky seeding
+# never runs, and the scan commonly omits the connected AP -- so decide() raised the hotspot on a working link.
+# Fable's loop harness, on the phone: [(40 s, Hotspot), (60 s, iPhone)] from ONE nmcli hiccup.
+# ================================================================================================
+
+HOLD_S = d.ACTIVE_UNREADABLE_HOLD_S
+
+
+def _unreadable(ticks, *, scan_then=None):
+  """Hook: `con show --active` fails on the ticks in `ticks`. `scan_then`, if given, is the scan on those ticks
+  (the scan on the others is [PHONE])."""
+  def hook(nm, tk):
+    bad = tk in ticks
+    (nm.fail_reads.add if bad else nm.fail_reads.discard)("--active")
+    if scan_then is not None:
+      nm.scan = list(scan_then) if bad else [PHONE]
+  return hook
+
+
+def _holds(events):
+  return [kw for n, kw in events if n == "network_arbiter_active_unreadable_hold"]
+
+
+def _releases(events):
+  return [kw for n, kw in events if n == "network_arbiter_active_unreadable_released"]
+
+
+class TestAnUnreadableActiveReadHoldsTheRadio:
+  def test_FABLES_SCENARIO_one_hiccup_with_the_AP_missing_from_the_scan_raises_no_hotspot(self, monkeypatch, events):
+    """On the phone; one tick where the active read fails AND the scan omits the phone. Before: [(40, Hotspot),
+    (60, iPhone)] -- a 20-40 s bounce on a working link plus hotspot NAT churn. The hold is logged, once."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[_unreadable({2}, scan_then=())], priority=(HOME, PHONE))
+    assert nm.up_log == [], f"one unreadable tick bounced a working link: {nm.up_log}"
+    assert _holds(events) == [{"suppressed": "up_hotspot", "target": "", "unreadable_s": 0.0, "hold_s": HOLD_S}], events
+    assert _releases(events) == []
+
+  @pytest.mark.parametrize("scan_then, first_up", [((), HOTSPOT), ((PHONE,), ID_PHONE)])
+  def test_a_PERSISTENT_failure_acts_as_before_once_the_bound_passes_and_says_so_loudly(self, monkeypatch, events, infos,
+                                                                                       scan_then, first_up):
+    """nmcli broken for minutes must not strand the device on a link nobody can see. The failure starts at 40 s;
+    the hold covers every tick while under HOLD_S, then today's action goes through. Logged change-only: one hold
+    event, one release at error level -- not one per tick."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=(PHONE,))
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=[_unreadable(range(2, 10**6), scan_then=scan_then)],
+             priority=(HOME, PHONE))
+    released_at = 2 * POLL + HOLD_S          # first tick whose unreadable run is >= HOLD_S old
+    assert [u for u in nm.up_log if u[0] < released_at] == [], f"acted inside the hold: {nm.up_log}"
+    assert nm.up_log[:1] == [(released_at, first_up)], f"did not fall back once the bound passed: {nm.up_log}"
+    assert len(_holds(events)) == 1, f"the hold must be logged change-only: {_holds(events)}"
+    rel = _releases(events)
+    assert len(rel) == 1 and rel[0]["unreadable_s"] == HOLD_S and rel[0]["action"] == ("up_hotspot" if first_up == HOTSPOT
+                                                                                      else "up_priority"), rel
+    assert "error" in rel[0], "the release must be logged at ERROR level (cloudlog.event error=)"
+    if first_up == ID_PHONE:
+      ups = [m for m in infos if "in range ->" in m]
+      assert ups[:1] and ups[0].endswith("(active connection unreadable)"), ups
+
+  def test_a_good_read_RESETS_the_bound_and_afterwards_the_arbiter_acts_normally(self, monkeypatch, events):
+    """Two episodes of 5 unreadable ticks (80 s each) with one good read between them: neither reaches the bound,
+    because the run restarts on a good read -- without the reset the second one would release at 160 s. Each is
+    logged. Then the phone genuinely goes away, read successfully, and the hotspot comes up on that very tick."""
+    nm = FakeNM()
+    _away(nm, ID_PHONE, scan=())
+    def phone_gone(nm, tk):
+      if tk == 14:
+        nm.active = None
+    run_loop(monkeypatch, nm, ticks=16, near_home=False,
+             hooks=[_unreadable(set(range(2, 7)) | set(range(8, 13))), phone_gone], priority=(HOME, PHONE))
+    assert nm.up_log == [(14 * POLL, HOTSPOT)], nm.up_log
+    assert len(_holds(events)) == 2, f"a new episode must be logged again: {_holds(events)}"
+    assert _releases(events) == []

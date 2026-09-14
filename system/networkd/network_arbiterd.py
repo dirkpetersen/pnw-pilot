@@ -239,6 +239,15 @@ FAIL_BACKOFF_S = (60.0, 300.0, 900.0)   # escalating, then held at the last valu
 # while exiling a network that has come back costs the driver an hour of LTE in his own driveway.
 # A rebooting router is also handled directly -- see _forget_on_reappearance.
 
+# unreadhold2pnw: how long a run of FAILED `nmcli con show --active` reads may hold the radio still (see the hold
+# in main()). In seconds, not ticks: a wedged NM makes nmcli calls run to NMCLI_TIMEOUT_S, which stretches a tick
+# well past POLL_INTERVAL_S, so a tick count would not bound the time. 120 s = 6 polls = twice DHCP_GRACE_S (the
+# longest the arbiter already waits on a link it cannot confirm), so an NM slow to answer at boot or mid-activation
+# (its own DHCP timeout is 45 s) is ridden out with margin. Past that the failure is persistent, the link may
+# genuinely be gone, and the hotspot must be allowed back as the recovery path. Worst case this adds the hold plus
+# one poll (plus nmcli timeouts) before the arbiter acts on a link that really did die during the failure.
+ACTIVE_UNREADABLE_HOLD_S = 120.0
+
 
 def _client_link_usable(conn_id: str, has_portal_handler: bool = False) -> bool | None:
   """TRI-STATE. True = has an IPv4 address, False = associated with none, None = COULD NOT TELL.
@@ -761,6 +770,9 @@ def main() -> NoReturn:
   carrying_fix = False                          # gpscarry2pnw: last_fix is standing in for GPS (ignition off)
   seen_active: str | None = None                # smallfix0914pnw: active wifi at the last SUCCESSFUL read ("" = none; None = no read yet)
   requested_active: str | None = None           # smallfix0914pnw: what the arbiter's own action since then should leave active
+  unread_since: float | None = None             # unreadhold2pnw: start of the current run of FAILED active reads (None = last read ok)
+  unread_hold_logged: tuple | None = None       # unreadhold2pnw: last logged hold (change-only log)
+  unread_release_logged = False                 # unreadhold2pnw: this run's release past the bound is logged
 
   while True:
     try:
@@ -774,6 +786,10 @@ def main() -> NoReturn:
                       legacy_home_raw=params.get("TetheringHomeLocation"))
       net_ssids = pn.ssids(nets)
       current_active, active_read_ok = _active_wifi_read()
+      if active_read_ok:                        # unreadhold2pnw: a good read ends the run (and re-arms its logs)
+        unread_since, unread_hold_logged, unread_release_logged = None, None, False
+      elif unread_since is None:
+        unread_since = time.monotonic()
       # smallfix0914pnw: log EVERY change of the active wifi connection, including the ones the arbiter did not
       # make. Measured 2026-09-13 22:01 PT: the phone dropped, NetworkManager itself autoconnected KarlMoik
       # (its profile has autoconnect=yes), and the arbiter logged nothing -- the switch was only visible as a
@@ -1049,6 +1065,31 @@ def main() -> NoReturn:
           cloudlog.event("netcosttier_pin_held", pinned=pv.pinned_ssid, suppressed=action, target=target_ssid)
           pin_held_logged = held
         action, target_ssid = "noop", ""
+
+      # unreadhold2pnw (Fable, confirmed): A FAILED READ OF THE ACTIVE CONNECTION NEVER MOVES THE RADIO -- the same
+      # rule as the cost hold above (D1), for the active read itself. A failed `con show --active` reads as
+      # current_active None, so on_client_wifi is False and the sticky seeding never runs; the scan commonly omits
+      # the connected AP, so decide() found nothing usable and raised the hotspot on a working link. Fable's loop
+      # harness, on the phone: [(40 s, Hotspot), (60 s, iPhone)] from one nmcli hiccup. With the AP in the scan it
+      # re-ran `con up` on the already-active link instead, which re-activates it on real NM. down_hotspot needs
+      # current_active == Hotspot, so it cannot fire on an unreadable tick and needs no guard.
+      # BOUNDED, unlike D1: D1 only holds a link whose usability was just READ as good, so it cannot hold a dead
+      # one. Here nothing about the link could be read and it may genuinely be gone, so after
+      # ACTIVE_UNREADABLE_HOLD_S of consecutive failed reads the action goes through as before, at ERROR level.
+      if unread_since is not None and action in ("up_priority", "up_fallback", "up_hotspot"):
+        unread_s = round(now - unread_since, 1)
+        if now - unread_since < ACTIVE_UNREADABLE_HOLD_S:
+          held = (action, target_ssid)
+          if held != unread_hold_logged:
+            cloudlog.event("network_arbiter_active_unreadable_hold", suppressed=action, target=target_ssid,
+                           unreadable_s=unread_s, hold_s=ACTIVE_UNREADABLE_HOLD_S)
+            unread_hold_logged = held
+          action, target_ssid = "noop", ""
+        elif not unread_release_logged:
+          cloudlog.event("network_arbiter_active_unreadable_released", action=action, target=target_ssid,
+                         unreadable_s=unread_s, hold_s=ACTIVE_UNREADABLE_HOLD_S,
+                         error="nmcli con show --active kept failing past the hold; acting without knowing the active link")
+          unread_release_logged = True
       _apply(action, target_ssid, current_active, active_read_ok)
       expected = _expected_active(action, target_ssid)
       if expected is not None:
