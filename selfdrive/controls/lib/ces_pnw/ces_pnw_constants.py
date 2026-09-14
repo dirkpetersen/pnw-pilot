@@ -296,20 +296,53 @@ def ces_is_gentle(mode: int) -> bool:
   return int(mode) == CES_MODE_LIGHT
 
 
-def read_ces_mode(params) -> int:
+# silentexc3pnw (Rule 2): read_ces_mode's two reads used to fall back silently. Each failure is now logged -- the first
+# at once, then at most one line per this many seconds, counting the failures since the previous line (the
+# twistyr2pnw / silentexc2pnw pattern) -- with its own state per caller (`who`) and per read, so one consumer's failure
+# can never hide another's first line.
+CES_MODE_READ_ERR_LOG_S = 60.0
+_ces_mode_read_err = {}   # (who, param key) -> [monotonic time of the last log line, or None; failures since it]
+
+
+def _ces_mode_read_failed(who, key, e, consequence) -> None:
+  """Log one failed read_ces_mode read (called from inside its except, so cloudlog.exception has the traceback).
+  Guarded: read_ces_mode never raised before and the UI overlay calls it with no try of its own, so a failing
+  logger must not change its result or make it raise."""
+  try:
+    st = _ces_mode_read_err.setdefault((who, key), [None, 0])
+    st[1] += 1
+    now = time.monotonic()
+    if st[0] is None or now - st[0] >= CES_MODE_READ_ERR_LOG_S:
+      n, st[0], st[1] = st[1], now, 0
+      cloudlog.exception(f"read_ces_mode ({who}): {key} unreadable ({type(e).__name__}) -- {consequence} " +
+                         f"({n} failure(s) since the last log)")
+  except Exception:
+    pass                          # the fallback already happened in read_ces_mode; logging must not raise
+
+
+def read_ces_mode(params, who="unnamed") -> int:
   """Read the CESMode INT param (source of truth). Back-compat: if CESMode is missing/0 but the old
   BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Defensive: any failure
-  => Off (0). Used by BOTH the CES and VTSC runtime readers so they always agree."""
+  => Off (0). Used by BOTH the CES and VTSC runtime readers so they always agree.
+  silentexc3pnw: `who` names the caller in the failure log (CES in selfdrived, VTSC in plannerd, the CES overlay in
+  the UI). An unset CESMode reads its "0" default and an unset legacy bool reads False: neither raises or logs."""
   try:
     mode = int(params.get("CESMode", return_default=True) or 0)
-  except Exception:
+  except Exception as e:
+    # silentexc3pnw: fallback unchanged (0, then the legacy bool below still applies). What raises here in practice
+    # is an UnknownKeyName from a params_keys.h / params_pyx.so mismatch (a malformed stored INT does not: Params
+    # returns the default for it and warns itself).
     mode = 0
+    _ces_mode_read_failed(who, "CESMode", e, f"{who} treats the CES master as Off (Standard if the legacy " +
+                          "ConditionalExperimentalSwitching bool is set) while this lasts")
   if mode == CES_MODE_OFF:
     try:
       if params.get_bool("ConditionalExperimentalSwitching"):
         mode = CES_MODE_STANDARD
-    except Exception:
-      pass
+    except Exception as e:
+      # silentexc3pnw: was `except Exception: pass`. Fallback unchanged (the back-compat is skipped, mode stays Off).
+      _ces_mode_read_failed(who, "ConditionalExperimentalSwitching", e,
+                            f"legacy back-compat skipped: {who} treats the CES master as Off while this lasts")
   return mode
 
 

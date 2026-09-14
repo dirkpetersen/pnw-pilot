@@ -160,10 +160,10 @@ def test_any_error_is_caught_logged_with_its_type_and_falls_back(clock, logs, mo
   """plannerd does not restart after a crash, so a code defect must degrade to the logged fallback, not escape."""
   real, failing = vc.CES.read_ces_mode, [True]
 
-  def _read(params):
+  def _read(params, **kw):             # silentexc3pnw: VTSC now passes who="VTSC"
     if failing[0]:
       raise exc
-    return real(params)
+    return real(params, **kw)
   monkeypatch.setattr(vc.CES, "read_ces_mode", _read)
   got = _drive(_Params())
   lines = logs.enable()

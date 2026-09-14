@@ -223,7 +223,9 @@ class CesStatusRenderer(Widget):
     self._last_poll = now
     # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
     # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
-    master_on = ces_enabled(read_ces_mode(ui_state.params))
+    # silentexc3pnw: read_ces_mode logs its own read failures (an unreadable CESMode hides this overlay AND the
+    # NO-SIGNAL dead-man below, exactly as before) and never raises.
+    master_on = ces_enabled(read_ces_mode(ui_state.params, who="CES overlay"))
     self._ces_enabled = master_on
     # ces2pnw (driver req 2026-07-10): "Hide CES debug information" toggle — default OFF (overlay
     # shows). Defensive read: on any params/UI mismatch (unregistered key) fall back to SHOWING —

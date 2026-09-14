@@ -2724,7 +2724,7 @@ class CESController:
   def _read_params(self):
     if self._frame % max(1, int(1.0 / DT_CTRL)) == 0:   # ~1 Hz (selfdrived steps at 100 Hz / DT_CTRL)
       try:
-        mode = C.read_ces_mode(self.params)
+        mode = C.read_ces_mode(self.params, who="CES")   # silentexc3pnw: logs its own read failures (never raises)
       except Exception:
         mode = C.CES_MODE_OFF
       self._set_mode(mode)
