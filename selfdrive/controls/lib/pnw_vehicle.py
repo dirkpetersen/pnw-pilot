@@ -344,6 +344,14 @@ class PnwVehicle:
       self.acc_drop_status_msgs = ()
       self.acc_drop_trace = ()
 
+    # pscmlimlog2pnw (LOGGING ONLY, selfdrive/car/pscmlim_pnw.py, run by card): where the steering rack reports its own
+    # lateral limit, as (CAN parser bus, DBC message, limit signal, capability signal). The Lightning's PSCM sends
+    # LimitClose/LimitReached in angle mode (drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md). The message
+    # must already be registered by opendbc carstate; the logger never registers one. () on every other car, and card
+    # then never builds the logger.
+    self.pscm_limit_report: tuple = (("pt", "Lane_Assist_Data3_FD1", "LatCtlLim_D_Stat", "LatCtlCpblty_D_Stat")
+                                     if fp == "FORD_F_150_LIGHTNING_MK1" else ())
+
     # CES runs in SHADOW (decisions/telemetry/overlay, planner never actuates) with ICBM as the
     # actuator — exactly when the car has ACC buttons to steer and openpilot does NOT own long.
     self.ces_shadow: bool = self.button_management

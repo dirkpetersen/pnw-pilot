@@ -256,6 +256,15 @@ worked around in our port.
    whether that's a real decoded signal or a permanently-absent one — this is fidelity-preserving
    either way, just flagging it since we couldn't independently verify which case it is.
 
+   **Resolved 2026-09-14 (pscmlimlog2pnw).** Nothing sets `lat_ctl_lim_stat` in his tree or ours (bp-7.0, bp-dev and
+   our Ford carstate), so `_pscm_lim` is always 0 and the PSCM branches of the blend collapse and the clamp are dead
+   code. His "does not fire" comment is wrong for the 2025 Lightning: its PSCM reported LimitClose, then LimitReached, in
+   angle mode on 2026-09-08 19:44 PT (`drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`). Feeding the
+   clamp as written would have frozen that command below what the truck was still delivering, so it stays unfed. card
+   now logs the signal to `ces_events` as `{"ev":"pscmLim"}` under a different name (`selfdrive/car/pscmlim_pnw.py`),
+   and `selfdrive/car/tests/test_pscmlim_pnw.py` fails if logging ever reaches the clamp. The two "does not fire"
+   comments in `lateral_angle_pnw.py` are corrected on pnw-opendbc branch `pscmlimlog2pnw` (comments only).
+
 None of these are bugs we introduced, and none of them are things we changed — they're reported as
 found in your shipping bp-7.0 source.
 

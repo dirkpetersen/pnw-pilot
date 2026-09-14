@@ -248,6 +248,10 @@ class Car:
     except Exception:
       cloudlog.exception("accdroplog2pnw: logger construction FAILED -- ACC dropouts on this drive will NOT be explained")
 
+    # pscmlimlog2pnw: LOGGING ONLY -- one ces_events record per change of the PSCM's lateral-limit report (pscmlim_pnw.py).
+    self._pscmlim = self._pscm_limit_logger()
+    self._pscmlim_err = 0
+
     # gearparkcan2pnw: on a car whose gear decodes `unknown` until its frame arrives, let GearPark confirm
     # Park from the gear message's own parser when another bus makes canValid False (selfdrive/car/gear_park.py).
     try:
@@ -564,6 +568,32 @@ class Car:
         if self._accdrop_err == 1 or self._accdrop_err % 6000 == 0:
           cloudlog.exception(f"accdroplog2pnw: update FAILED ({self._accdrop_err} ticks) -- ACC dropout logging is DARK")
       self._accdrop_sends = []
+
+    # pscmlimlog2pnw: also after sendcan. None on every car PnwVehicle names no message for (the Tesla).
+    if self._pscmlim is not None:
+      self._log_pscm_limit(CS)
+
+  def _pscm_limit_logger(self):
+    """pscmlimlog2pnw: the PSCM lateral-limit logger, or None where PnwVehicle names no message (every car but the
+    Lightning). A construction failure is logged and leaves the logger off; it never stops card."""
+    try:
+      report = PnwVehicle(self.CP).pscm_limit_report
+      if not report:
+        return None
+      from openpilot.selfdrive.car.pscmlim_pnw import PscmLimitLogger
+      return PscmLimitLogger(self.CI.can_parsers, report, self.CI.CC)
+    except Exception:
+      cloudlog.exception("pscmlimlog2pnw: logger construction FAILED -- PSCM lateral-limit reports on this drive will NOT be logged")
+      return None
+
+  def _log_pscm_limit(self, CS) -> None:
+    """pscmlimlog2pnw: one logger tick. An exception is logged (first, then every 6000 ticks) and never escapes into card."""
+    try:
+      self._pscmlim.update(CS, self.sm['carControl'], time.monotonic())
+    except Exception:
+      self._pscmlim_err += 1
+      if self._pscmlim_err == 1 or self._pscmlim_err % 6000 == 0:
+        cloudlog.exception(f"pscmlimlog2pnw: update FAILED ({self._pscmlim_err} ticks) -- PSCM lateral-limit logging is DARK")
 
   def params_thread(self, evt):
     while not evt.is_set():
