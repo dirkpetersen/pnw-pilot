@@ -92,8 +92,18 @@ installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own 
   on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
   Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
   Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
-- **Building:** `silentexc2pnw`. It covers the next 3 silent excepts on the speed path, plus the curvelead block in
-  `_icbm_step`, `mapD` Infinity → null, and the stale coop-steer test fake.
+- **`silentexc2pnw`**, 6 commits, Fable SHIP on each. They install one per reboot (the test-only 5/6 rides with 4/6):
+  1. `fe4bf3116e` VTSC `_read_enabled`: a read error turned VTSC off silently. **Pushed 10:05 PT, not installed:**
+     the truck stopped answering SSH and cloud check-ins at 09:53 PT, reason unknown.
+  2. `0efde79665` speedadjust AutoSpeedReduce read and SpeedAdjustTarget publishes.
+  3. `16d4afb75a` VTSC map-input/GPS reads and the VTSCStatus publish. A missing GPS fix is not logged.
+  4. `8e276bc561` VTSCStatus `mapD` is null instead of `Infinity`.
+  5. `961e16d7a5` test-only.
+  6. `da617deb16` the ICBM lead-pacing failure log names the exception type and counts failures.
+  - Identity when nothing fails: VTSC/speedadjust 168/168 and CES 36/36 scenarios identical. 1314 tests, 123/123
+    mutants.
+- **Building:** `silentexc3pnw`, Fable's next-ranked silent excepts: `read_ces_mode` → Off (CES and VTSC on both
+  cars), speedadjust `_read_speed_limit`, the VTSC freeway-floor inputs, and the RainMode push.
 - **ICBM 46.5–58 m/s "garbage band" (analysed, NOT built, no fix needed):**
   `drives/2026-09-14/icbm-garbage-band/DRIVE_REPORT.md`, claims independently verified.
   - In today's code a band read can never change an ICBM/CES decision: ICBM inflates it to ≥ 57.75 m/s, which is
