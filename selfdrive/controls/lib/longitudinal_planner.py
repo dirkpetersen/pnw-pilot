@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 import numpy as np
 
 import cereal.messaging as messaging
@@ -44,6 +45,10 @@ MIN_ALLOW_THROTTLE_SPEED = 2.5
 # emits suggestedSpeed > 0 when confident, but this floors out near-zero noise from capping cruise.
 MIN_MAPD_SUGGESTED_SPEED = 2.0
 
+# leadlossr2pnw (Rule 2): a failing lead-loss shadow detector is logged -- the first failure at once, then
+# at most one log line per this many seconds (plannerd runs at 20 Hz, so an unthrottled log would flood).
+LEADLOSS_ERR_LOG_S = 60.0
+
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
@@ -79,6 +84,8 @@ class LongitudinalPlanner:
     self.speedadjust = SpeedAdjustController(CP)   # speedadjust2pnw: limit-drop + police cruise cap, default OFF
     self.veh = PnwVehicle(CP)   # standstillsoft2pnw: Lightning gentle standstill-launch accel cap (Tesla -> inf)
     self.leadloss = LeadLossHoldShadow()   # leadloss2pnw: SHADOW-only lead-dropout detector (logs, never actuates)
+    self._leadloss_err_t = None   # leadlossr2pnw: monotonic time of the last logged detector failure (None = never)
+    self._leadloss_err_n = 0      # leadlossr2pnw: detector failures since that log line
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -110,6 +117,26 @@ class LongitudinalPlanner:
       throttle_prob = 1.0
     return x, v, a, j, throttle_prob
 
+  def _leadloss_shadow_step(self, sm, v_ego):
+    """leadloss2pnw: SHADOW lead-dropout detector -- logs a `lead_loss_hold_shadow` event when a close,
+    closing, confident lead suddenly vanishes (the radar-less-Lightning-in-a-curve dropout). Log-only, never
+    touches control, and must NEVER raise into the planner, even on a bad message.
+
+    leadlossr2pnw (Rule 2): the failure path used to be `except Exception: pass`, so a broken detector would
+    have silently stopped the very telemetry the lead-loss-hold decision is based on. It now logs: the first
+    failure immediately (with traceback), then at most one line per LEADLOSS_ERR_LOG_S, each carrying how many
+    failures happened since the previous line."""
+    try:
+      self.leadloss.update(sm['radarState'].leadOne, v_ego, sm['carState'].aEgo)
+    except Exception:
+      self._leadloss_err_n += 1
+      now = time.monotonic()
+      if self._leadloss_err_t is None or now - self._leadloss_err_t >= LEADLOSS_ERR_LOG_S:
+        cloudlog.exception("leadloss2pnw: shadow detector FAILED -- planner unaffected, but lead_loss_hold_shadow telemetry " +
+                           f"is NOT being recorded ({self._leadloss_err_n} failure(s) since the last log)")
+        self._leadloss_err_t = now
+        self._leadloss_err_n = 0
+
   def update(self, sm):
     if len(sm['carControl'].orientationNED) == 3:
       accel_coast = get_coast_accel(sm['carControl'].orientationNED[1])
@@ -118,13 +145,7 @@ class LongitudinalPlanner:
 
     v_ego = sm['carState'].vEgo
 
-    # leadloss2pnw: SHADOW lead-dropout detector — logs a `lead_loss_hold_shadow` event when a close,
-    # closing, confident lead suddenly vanishes (the radar-less-Lightning-in-a-curve dropout). Log-only,
-    # never touches control; wrapped so it can NEVER affect the planner even on a bad message.
-    try:
-      self.leadloss.update(sm['radarState'].leadOne, v_ego, sm['carState'].aEgo)
-    except Exception:
-      pass
+    self._leadloss_shadow_step(sm, v_ego)
 
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
