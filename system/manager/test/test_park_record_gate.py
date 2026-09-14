@@ -13,7 +13,7 @@ from cereal import car
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.gear_park import GearParkWriter
-from openpilot.selfdrive.car.tests.test_gear_park import lightning_gear, tesla_gear
+from openpilot.selfdrive.car.tests.test_gear_park import lightning_gear, lightning_quiet_can, tesla_gear
 import openpilot.system.manager.process_config as pc
 from openpilot.system.manager.park_record_gate import PARK_HOLD_S, ParkRecordGate
 from openpilot.system.manager.process import ensure_running
@@ -260,6 +260,31 @@ class TestEndToEndWithRealGearDecode:
     cs = lightning_gear(3, frames=0)                                # nothing received: unknown (gearunknown2pnw)
     assert cs.gearShifter == GearShifter.unknown
     self._drive(rig, cs, 3600, w)                                   # its own canValid: False
+    assert rig.loggerd_running and rig.stops == 0
+
+  def test_lightning_boots_into_quiet_can_charging_and_stops_recording(self, rig):
+    # gearparkcan2pnw: camera bus asleep from the first tick, powertrain bus alive, a real Park frame.
+    w = GearParkWriter()
+    rig.params.put_bool("GearPark", False)                          # card's startup seed
+    cs, CI = lightning_quiet_can(0)
+    w.attach_gear_source(CI.can_parsers["pt"])                      # card: PnwVehicle.gear_source_bus
+    assert cs.gearShifter == GearShifter.park and not cs.canValid
+    self._drive(rig, cs, PARK_HOLD_S - 1, w)
+    assert rig.loggerd_running
+    self._drive(rig, cs, 2, w)
+    assert not rig.loggerd_running and rig.stops == 1
+    self._drive(rig, cs, 3600, w)
+    assert not rig.loggerd_running and rig.stops == 1
+    t_shift = rig.t
+    drive, _ = lightning_quiet_can(3)
+    self._drive(rig, drive, 5, w)                                   # Drive, camera bus still asleep
+    assert rig.loggerd_running and rig.first_start_t[-1] - t_shift <= TICK
+
+  def test_lightning_park_with_a_dead_powertrain_parser_keeps_recording(self, rig):
+    w = GearParkWriter()
+    cs, CI = lightning_quiet_can(0, rest_of_pt=False)               # Park decoded, pt parser not valid
+    w.attach_gear_source(CI.can_parsers["pt"])
+    self._drive(rig, cs, 3600, w)
     assert rig.loggerd_running and rig.stops == 0
 
   def test_can_fault_across_park_to_drive_restarts_recording(self, rig):

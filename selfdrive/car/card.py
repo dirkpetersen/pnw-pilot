@@ -248,6 +248,15 @@ class Car:
     except Exception:
       cloudlog.exception("accdroplog2pnw: logger construction FAILED -- ACC dropouts on this drive will NOT be explained")
 
+    # gearparkcan2pnw: on a car whose gear decodes `unknown` until its frame arrives, let GearPark confirm
+    # Park from the gear message's own parser when another bus makes canValid False (selfdrive/car/gear_park.py).
+    try:
+      _veh = PnwVehicle(self.CP)
+      if _veh.gear_unknown_until_seen:
+        self._gear_park.attach_gear_source(self.CI.can_parsers[_veh.gear_source_bus])
+    except Exception:
+      cloudlog.exception("gearparkcan2pnw: gear source not attached -- Park needs valid CAN, so a quiet-CAN charge keeps recording")
+
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
@@ -501,8 +510,9 @@ class Car:
     # extra msgq readers in the uploader caused a commIssue cascade). ~2-4 writes per drive.
     # Car-agnostic (gearShifter is a standard CarState field on every brand).
     # parknorec2pnw: only a VALID read may SET it, but a decoded non-Park gear CLEARS it even on invalid
-    # CAN -- GearPark now stops loggerd, so it must never stay True into a drive. Rules + why in
-    # selfdrive/car/gear_park.py.
+    # CAN -- GearPark now stops loggerd, so it must never stay True into a drive. gearparkcan2pnw: on a
+    # gear_unknown_until_seen car a valid gear-source parser may stand in for canValid when setting it.
+    # Rules + why in selfdrive/car/gear_park.py.
     gear_park = self._gear_park.update(CS.gearShifter, CS.canValid, time.monotonic())
     if gear_park is not None:
       self.params.put_bool_nonblocking("GearPark", gear_park)

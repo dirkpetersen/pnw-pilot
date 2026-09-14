@@ -384,6 +384,16 @@ class PnwVehicle:
     # publisher already self-gates on the DBC carrying the messages).
     self.car_gps: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # gearparkcan2pnw: this car's carstate reports gearShifter == park ONLY from a gear frame that actually
+    # arrived -- a never-received gear message decodes `unknown` -- and gear_source_bus names the CANParser
+    # (card's CI.can_parsers key) that carries it. That lets selfdrive/car/gear_park.py confirm Park while
+    # another bus is asleep (the Lightning charging with its camera bus quiet). Verified through the pinned
+    # opendbc parser (selfdrive/car/tests/test_gear_park.py): the Lightning since pnw-opendbc gearunknown2pnw
+    # (PowertrainData_10 on "pt"); the Raven HW3 by its DBC (DI_torque2.DI_gear 0 = DI_GEAR_INVALID, on
+    # "chassis"). Every other car: False -- 74 platforms in that opendbc decode park from a silent bus.
+    self.gear_source_bus: str = {"FORD_F_150_LIGHTNING_MK1": "pt", "TESLA_MODEL_S_HW3": "chassis"}.get(fp, "")
+    self.gear_unknown_until_seen: bool = self.gear_source_bus != ""
+
     # coopsteer-shadow2pnw: Penduras "cooperative steering" sub-threshold torque nudge
     # (selfdrive/controls/lib/coopsteer_pnw.py), SHADOW-LOGGED ONLY this round -- controlsd computes
     # and publishes what it WOULD do; nothing reaches the actuators. Gated to the exact car the sign

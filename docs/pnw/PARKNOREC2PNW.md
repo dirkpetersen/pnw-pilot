@@ -50,7 +50,12 @@ CANParser starts every signal at 0, and `TrnRng_D_Rq` 0 means "Park". That is fi
 **74 other platforms in the pinned opendbc still read park from a silent bus** (Hyundai/Kia/Genesis, RAM,
 some Toyota/Subaru; measured 2026-09-14). The writer is car-agnostic, so only `canValid` can tell a real
 Park from that. The writer rules follow from that:
-1. **SET** GearPark only on valid CAN that reads Park. This rule is unchanged.
+1. **SET** GearPark only on valid CAN that reads Park. **Exception (gearparkcan2pnw):** on a car whose
+   `PnwVehicle.gear_unknown_until_seen` is true (the Lightning, gear on `"pt"`; the Raven HW3, gear on
+   `"chassis"`), a Park read also sets it while canValid is False, provided the parser carrying the gear
+   message is valid on that tick (every message alive, no counter failures, bus not timed out). Those cars
+   read `park` only from a received frame, and the parser check refuses a Park held from a gear message
+   that has gone quiet. Every other car keeps the rule as written.
 2. **CLEAR** it on any tick that decodes a **known** non-Park gear, **even when CAN is invalid.**
    Before, invalid ticks were ignored in both directions, so a CAN fault that spanned Park → Drive kept
    GearPark True for the whole drive. That now means an unrecorded drive. An `unknown` gear on
@@ -91,7 +96,8 @@ Caveats:
 | case | what happens | logged |
 |---|---|---|
 | car never writes GearPark / never decodes a gear | never holds | `gear_park_unconfirmed` (card) |
-| Lightning boots into a quiet-CAN charging session (canValid false from the start) | **never holds: known gap**, stays at today's ~180 MB/h. gearunknown2pnw makes a per-car fix possible but did not ship it (owner question in that commit) | `gear_park_unconfirmed` |
+| Lightning boots into a quiet-CAN charging session (camera bus asleep, powertrain bus alive) | **holds** after 30 s (gearparkcan2pnw). Replayed from a real parked rlog with the camera bus removed: GearPark set at 0.15 s, loggerd held from 31 s | `gear_park` gear_source_valid=True |
+| Lightning parked with its powertrain bus not fully alive (canValid false) | never holds, records | `gear_park_unconfirmed` gear_source_valid=False |
 | CAN fault spans Park → Drive | a decoded drive gear clears GearPark, and loggerd starts on the next tick | `gear_park` value=False |
 | card crashes while holding | releases on the next tick (card not alive) | `park_record_gate` hold=False reason=card_not_running (+ manager "Restarting card") |
 | card restarted with a stale True | the seed clears it; otherwise the full 30 s hold starts again | — |

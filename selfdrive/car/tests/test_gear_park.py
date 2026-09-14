@@ -22,7 +22,8 @@ from opendbc.car.car_helpers import interfaces
 from opendbc.car.tesla.values import CANBUS as TESLA_CANBUS
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.car.gear_park import GearParkWriter, UNCONFIRMED_LOG_S
+from openpilot.selfdrive.car.gear_park import GearParkWriter, UNCONFIRMED_LOG_S, parser_valid_now
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
 GearShifter = car.CarState.GearShifter
 TESLA = "TESLA_MODEL_S_HW3"
@@ -53,6 +54,25 @@ def decode_gear(fp, dbc, msg, values: dict, bus: int | None = None, fingerprint_
     addr, dat, b = packer.make_can_msg(msg, bus, vals)
     cs = CI.update([((i + 1) * 10_000_000, [CanData(addr, dat, b)])])
   return cs
+
+
+def lightning_quiet_can(trnrng, rest_of_pt=True, seconds=2.0, gear=True):
+  """The Lightning with its camera bus asleep: PowertrainData_10 (unless gear=False) plus, with rest_of_pt,
+  every other alive-checked powertrain message, at 100 Hz, and nothing on the camera bus.
+  Returns (last CarState, CarInterface) so a test can hand the real "pt" parser to the writer."""
+  CI = _interface(LIGHTNING, (0x5A,))
+  cs = CI.update([(0, [])])                                      # registers every message carstate reads
+  packer = CANPacker("ford_lincoln_base_pt")
+  pt = CI.can_parsers["pt"]
+  names = [st.name for st in pt.message_states.values() if not st.ignore_alive and st.name != "PowertrainData_10"]
+  for i in range(int(seconds * 100)):
+    frames = []
+    if gear:
+      frames.append(CanData(*packer.make_can_msg("PowertrainData_10", 0, {"TrnRng_D_Rq": trnrng})))
+    if rest_of_pt:
+      frames += [CanData(*packer.make_can_msg(n, 0, {})) for n in names]
+    cs = CI.update([((i + 1) * 10_000_000, frames)])
+  return cs, CI
 
 
 def tesla_gear(di_gear, frames=20):
@@ -89,6 +109,26 @@ class TestRealGearDecode:
     cs = lightning_gear(0, frames=0)
     assert cs.gearShifter == GearShifter.unknown
     assert not cs.canValid
+
+  def test_gear_source_capability_matches_the_decode(self):
+    # gearparkcan2pnw: PnwVehicle may only declare gear_unknown_until_seen for a car whose pinned decode reads
+    # unknown when the gear message never arrived, and gear_source_bus must name the parser that carries it.
+    for fp, fingerprint_addrs, gear_addr, silent in (
+        (LIGHTNING, (0x5A,), 0x176, lambda: lightning_gear(0, frames=0)),
+        (TESLA, (), None, lambda: tesla_gear(1, frames=0))):
+      CI = _interface(fp, fingerprint_addrs)
+      CI.update([(0, [])])
+      veh = PnwVehicle(CI.CP)
+      assert veh.gear_unknown_until_seen and veh.gear_source_bus
+      parser = CI.can_parsers[veh.gear_source_bus]
+      gear_addr = gear_addr if gear_addr is not None else parser.dbc.name_to_msg["DI_torque2"].address
+      assert gear_addr in parser.message_states
+      assert silent().gearShifter == GearShifter.unknown
+
+  def test_capability_is_off_for_cars_that_read_park_from_a_silent_bus(self):
+    veh = PnwVehicle(_interface("HYUNDAI_SONATA").CP)
+    assert not veh.gear_unknown_until_seen and veh.gear_source_bus == ""
+    assert not PnwVehicle(None).gear_unknown_until_seen
 
   def test_other_brands_still_read_park_from_a_silent_bus(self):
     # Why the writer still requires valid CAN to SET: measured 2026-09-14 on the pinned opendbc, 74 platforms
@@ -197,6 +237,123 @@ class TestGearParkWriter:
     assert [e for e in events if e[0].startswith("gear_park_unconfirmed")] == []
 
 
+# ---------------------------------------------------------------- gear source capability (gearparkcan2pnw)
+
+class TestGearSource:
+  def test_quiet_camera_bus_park_confirms(self, events):
+    # The charging case: powertrain bus alive, camera bus asleep -> canValid False for the whole session.
+    cs, CI = lightning_quiet_can(0)
+    assert cs.gearShifter == GearShifter.park and not cs.canValid
+    assert parser_valid_now(CI.can_parsers["pt"]) and not parser_valid_now(CI.can_parsers["cam"])
+    w = GearParkWriter()
+    w.attach_gear_source(CI.can_parsers["pt"])
+    assert run(w, cs.gearShifter, cs.canValid, 0, 3600, dt=0.5) == [True]
+    assert [e for e in events if e[0] == "gear_park_unconfirmed"] == []
+    assert [e[1]["gear_source_valid"] for e in events if e[0] == "gear_park"] == [True]
+
+  def test_without_the_capability_the_quiet_camera_bus_still_records(self, events):
+    cs, _ = lightning_quiet_can(0)
+    w = GearParkWriter()                                          # never attached: today's rule
+    assert run(w, cs.gearShifter, cs.canValid, 0, 3600, dt=0.5) == []
+    assert len([e for e in events if e[0] == "gear_park_unconfirmed"]) == 1
+
+  def test_park_with_the_rest_of_the_powertrain_bus_missing_does_not_set(self, events):
+    cs, CI = lightning_quiet_can(0, rest_of_pt=False)             # only the gear frame: pt parser invalid
+    assert cs.gearShifter == GearShifter.park and not parser_valid_now(CI.can_parsers["pt"])
+    w = GearParkWriter()
+    w.attach_gear_source(CI.can_parsers["pt"])
+    assert run(w, cs.gearShifter, cs.canValid, 0, 3600, dt=0.5) == []
+    unconfirmed = [e for e in events if e[0] == "gear_park_unconfirmed"]
+    assert len(unconfirmed) == 1 and unconfirmed[0][1]["gear_source_valid"] is False
+
+  def test_park_held_on_a_dead_powertrain_bus_does_not_set(self, events):
+    # Park arrived while the rest of the bus was missing (so it could not set), then the bus died: the parser
+    # keeps decoding that Park for as long as the truck stays asleep. It must never set GearPark.
+    cs, CI = lightning_quiet_can(0, rest_of_pt=False)
+    w = GearParkWriter()
+    w.attach_gear_source(CI.can_parsers["pt"])
+    t = cs_t = 2.0
+    for i in range(3600 * 10):                                    # an hour of empty batches at 10 Hz
+      cs = CI.update([(int((cs_t + i * 0.1) * 1e9), [])])
+      assert cs.gearShifter == GearShifter.park                   # the held decode
+      assert w.update(cs.gearShifter, cs.canValid, t + i * 0.1) is None
+    assert w.value is False
+
+  def test_gear_source_goes_invalid_within_the_bus_timeout_of_the_last_frame(self):
+    cs, CI = lightning_quiet_can(0)
+    pt = CI.can_parsers["pt"]
+    assert parser_valid_now(pt)
+    t_last = 2.0
+    for dt in (0.05, 0.11, 1.0, 60.0):
+      CI.update([(int((t_last + dt) * 1e9), [])])
+      assert parser_valid_now(pt) is (dt < 0.1), dt              # 100 Hz messages: 10 missed frames
+
+  def test_gear_source_is_invalid_on_a_silent_bus_before_rates_are_learned(self):
+    # 0.5 s of frames: no message rate learned yet, so each message alone counts as alive for 10 s.
+    cs, CI = lightning_quiet_can(0, seconds=0.5)
+    pt = CI.can_parsers["pt"]
+    assert parser_valid_now(pt)
+    CI.update([(int(2.0 * 1e9), [])])                             # 1.5 s of silence
+    assert all(st.valid(pt._last_update_nanos, False) for st in pt.message_states.values())
+    assert not parser_valid_now(pt)
+
+  def test_gear_source_is_invalid_with_a_failing_counter(self):
+    from opendbc.can.parser import MAX_BAD_COUNTER
+    cs, CI = lightning_quiet_can(0)
+    pt = CI.can_parsers["pt"]
+    st = next(iter(pt.message_states.values()))
+    st.counter_fail = MAX_BAD_COUNTER                               # what CANParser counts for a bad COUNTER signal
+    assert not parser_valid_now(pt)
+
+  def test_gear_source_read_does_not_touch_the_parser(self):
+    cs, CI = lightning_quiet_can(0, rest_of_pt=False)
+    pt = CI.can_parsers["pt"]
+    before = (pt.can_invalid_cnt, [st.counter_fail for st in pt.message_states.values()])
+    for _ in range(10):
+      parser_valid_now(pt)
+    assert (pt.can_invalid_cnt, [st.counter_fail for st in pt.message_states.values()]) == before
+
+  def test_drive_on_the_quiet_camera_bus_clears(self, events):
+    cs, CI = lightning_quiet_can(0)
+    w = GearParkWriter()
+    w.attach_gear_source(CI.can_parsers["pt"])
+    assert run(w, cs.gearShifter, cs.canValid, 0, 60) == [True]
+    cs, _ = lightning_quiet_can(3)
+    assert run(w, cs.gearShifter, cs.canValid, 60, 1) == [False]
+
+  def test_tesla_is_identical(self, events):
+    # The Tesla declares the capability. The attached writer differs from today's ONLY on a Park read with
+    # canValid False while its whole chassis parser is valid. Everywhere else it writes exactly the same:
+    # valid-CAN sessions, a never-received gear, SNA, and Park with the rest of the chassis bus missing.
+    CI = _interface(TESLA)
+    CI.update([(0, [])])
+    packer = CANPacker("tesla_can")
+    for i in range(200):                                          # DI_torque2 Park only, on the chassis bus
+      addr, dat, b = packer.make_can_msg("DI_torque2", TESLA_CANBUS.chassis, {"DI_gear": 1, "DI_torque2Counter": i % 16})
+      cs = CI.update([((i + 1) * 10_000_000, [CanData(addr, dat, b)])])
+    source = CI.can_parsers[PnwVehicle(CI.CP).gear_source_bus]
+    assert cs.gearShifter == GearShifter.park and not cs.canValid and not parser_valid_now(source)
+    for sequence in (((1, True), (4, True), (1, True), (7, False), (1, True)), ((1, False),), (("live", False),)):
+      plain, attached = GearParkWriter(), GearParkWriter()
+      attached.attach_gear_source(source)
+      writes_plain, writes_attached, t = [], [], 0.0
+      for di_gear, valid in sequence:
+        gear = cs.gearShifter if di_gear == "live" else tesla_gear(di_gear, frames=20 if valid else 0).gearShifter
+        writes_plain += run(plain, gear, valid, t, 30)
+        writes_attached += run(attached, gear, valid, t, 30)
+        t += 30
+      assert writes_plain == writes_attached
+
+  def test_a_broken_gear_source_falls_back_to_todays_rule_and_says_so(self, events, monkeypatch):
+    logged = []
+    monkeypatch.setattr(cloudlog, "exception", lambda msg, *a, **kw: logged.append(msg))
+    w = GearParkWriter()
+    w.attach_gear_source(object())                                # no parser attributes at all
+    assert run(w, GearShifter.park, False, 0, 600) == []
+    assert len(logged) == 1
+    assert run(w, GearShifter.park, True, 600, 1) == [True]
+
+
 # ---------------------------------------------------------------- card call site
 
 def _wait_param(params, key, expected, timeout=2.0):
@@ -208,13 +365,13 @@ def _wait_param(params, key, expected, timeout=2.0):
   return params.get_bool(key) == expected
 
 
-def _make_car():
+def _make_car(fp=TESLA, brand="tesla", can_parsers=None):
   from opendbc.car import structs
   from openpilot.selfdrive.car.card import Car
   cp = structs.CarParams.new_message()
-  cp.brand = "tesla"
-  cp.carFingerprint = TESLA
-  CI = SimpleNamespace(CP=cp, CC=None, CS=SimpleNamespace(secoc_key=None))
+  cp.brand = brand
+  cp.carFingerprint = fp
+  CI = SimpleNamespace(CP=cp, CC=None, CS=SimpleNamespace(secoc_key=None), can_parsers=can_parsers or {})
   c = Car(CI=CI, RI=SimpleNamespace())
   c.sm = SimpleNamespace(frame=1, all_checks=lambda _: True)   # skip the 50 s carParams publish
   c.rk = SimpleNamespace(remaining=0.0)
@@ -227,6 +384,12 @@ class TestCardCallSite:
     params.put_bool("GearPark", True)            # stale True from a previous card
     _make_car()
     assert _wait_param(params, "GearPark", False)
+
+  def test_card_attaches_the_capability_gear_source(self):
+    parsers = {"pt": object(), "cam": object(), "chassis": object()}
+    assert _make_car(LIGHTNING, "ford", parsers)._gear_park._gear_source is parsers["pt"]
+    assert _make_car(TESLA, "tesla", parsers)._gear_park._gear_source is parsers["chassis"]
+    assert _make_car("HYUNDAI_SONATA", "hyundai", parsers)._gear_park._gear_source is None
 
   def test_seed_precedes_can_wait_and_fingerprinting(self):
     # A card that hangs in "Waiting for CAN messages" or crash-loops in fingerprinting must already have
