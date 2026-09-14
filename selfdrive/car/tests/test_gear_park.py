@@ -3,8 +3,10 @@
 GearPark now stops loggerd (system/manager/park_record_gate.py), so these are the facts that decide
 whether a drive gets recorded:
   - the Tesla Raven reports Park through the real opendbc decode, on the chassis bus,
-  - a Lightning whose gear message was NEVER received also reads `park` (parser zero-init + TrnRng 0 =
-    "Park"), which is why only valid CAN may SET GearPark,
+  - a Lightning whose gear message was NEVER received reads `unknown` since pnw-opendbc gearunknown2pnw
+    (before it: parser zero-init + TrnRng 0 = "Park"),
+  - other brands still read `park` from a bus that delivered nothing (e.g. Hyundai), which is why only valid
+    CAN may SET GearPark -- this writer is car-agnostic and ships on the friends channel,
   - a CAN fault spanning Park -> Drive must not leave GearPark True.
 """
 import time
@@ -81,9 +83,20 @@ class TestRealGearDecode:
     assert lightning_gear(3).gearShifter == GearShifter.drive
     assert lightning_gear(14).gearShifter == GearShifter.unknown   # Unknown_Position (the DBC start value)
 
-  def test_lightning_never_received_reads_park(self):
-    # The trap: parser signals start at 0 and TrnRng_D_Rq 0 = "Park". A dead powertrain bus reads Park.
-    cs = lightning_gear(3, frames=0)
+  def test_lightning_never_received_is_unknown(self):
+    # The old trap: parser signals start at 0 and TrnRng_D_Rq 0 = "Park", so a dead powertrain bus read Park.
+    # pnw-opendbc gearunknown2pnw: unknown until PowertrainData_10 has arrived. Fails if the pin loses it.
+    cs = lightning_gear(0, frames=0)
+    assert cs.gearShifter == GearShifter.unknown
+    assert not cs.canValid
+
+  def test_other_brands_still_read_park_from_a_silent_bus(self):
+    # Why the writer still requires valid CAN to SET: measured 2026-09-14 on the pinned opendbc, 74 platforms
+    # (Hyundai/Kia/Genesis, RAM, some Toyota/Subaru) decode `park` from a bus that delivered nothing.
+    CI = _interface("HYUNDAI_SONATA")
+    cs = CI.update([(0, [])])
+    for i in range(300):
+      cs = CI.update([((i + 1) * 10_000_000, [])])
     assert cs.gearShifter == GearShifter.park
     assert not cs.canValid
 
@@ -115,11 +128,26 @@ class TestGearParkWriter:
     assert run(w, GearShifter.park, False, 0, 10) == []
     assert run(w, GearShifter.park, True, 10, 1) == [True]
 
-  def test_lightning_dead_bus_default_park_never_sets(self, events):
+  def test_lightning_dead_bus_never_sets(self, events):
     w = GearParkWriter()
-    gear = lightning_gear(3, frames=0).gearShifter              # real decode: reads park, nothing received
-    assert run(w, gear, False, 0, 3600, dt=0.5) == []
+    cs = lightning_gear(0, frames=0)                            # real decode: nothing received -> unknown
+    assert run(w, cs.gearShifter, cs.canValid, 0, 3600, dt=0.5) == []
     assert w.value is False
+    assert len([e for e in events if e[0] == "gear_park_unconfirmed"]) == 1
+
+  def test_silent_bus_park_of_other_brands_never_sets(self, events):
+    w = GearParkWriter()
+    assert run(w, GearShifter.park, False, 0, 3600, dt=0.5) == []   # e.g. HYUNDAI_SONATA, see TestRealGearDecode
+    assert w.value is False
+
+  def test_lightning_quiet_can_boot_still_cannot_confirm_park(self, events):
+    # KNOWN GAP, deliberately still open: a real Park frame with canValid False from the first tick (e.g. camera
+    # bus asleep) does not SET, and says so. Closing it needs the per-car rule in the gearunknown2pnw report.
+    w = GearParkWriter()
+    cs = lightning_gear(0)                                      # only the gear frame on the bus
+    assert cs.gearShifter == GearShifter.park and not cs.canValid
+    assert run(w, cs.gearShifter, cs.canValid, 0, 3600, dt=0.5) == []
+    assert len([e for e in events if e[0] == "gear_park_unconfirmed"]) == 1
 
   def test_can_fault_spanning_park_to_drive_clears(self, events):
     w = GearParkWriter()

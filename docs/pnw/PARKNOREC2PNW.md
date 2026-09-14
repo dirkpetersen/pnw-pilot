@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-13          # git-derived; bump when you edit this file
+updated: 2026-09-14          # git-derived; bump when you edit this file
 status: unreviewed     # current | drifted | superseded | unreviewed
 ---
 
@@ -43,11 +43,13 @@ by feeding real CAN frames through the pinned opendbc (`tests/test_gear_park.py`
 | car | message / bus | Park | Drive | SNA / unknown | **never received** |
 |---|---|---|---|---|---|
 | Tesla Raven HW3 | `DI_torque2.DI_gear`, chassis bus 1 | `1` → park | `4` → drive | `7`/`0` → unknown | **unknown** |
-| Lightning (automatic) | `PowertrainData_10.TrnRng_D_Rq`, bus 0 | `0` → park | `3` → drive | `14` → unknown | **park** ⚠️ |
+| Lightning (automatic) | `PowertrainData_10.TrnRng_D_Rq`, bus 0 | `0` → park | `3` → drive | `14` → unknown | **unknown** (since gearunknown2pnw) |
 
-The Lightning reads **park before its gear message has ever arrived**: CANParser starts every signal
-at 0, and `TrnRng_D_Rq` 0 means "Park". A dead powertrain bus therefore looks parked, and only
-`canValid` can tell the two apart. The writer rules follow from that:
+Before pnw-opendbc `gearunknown2pnw` the Lightning read **park before its gear message had ever arrived**:
+CANParser starts every signal at 0, and `TrnRng_D_Rq` 0 means "Park". That is fixed for the Lightning, but
+**74 other platforms in the pinned opendbc still read park from a silent bus** (Hyundai/Kia/Genesis, RAM,
+some Toyota/Subaru; measured 2026-09-14). The writer is car-agnostic, so only `canValid` can tell a real
+Park from that. The writer rules follow from that:
 1. **SET** GearPark only on valid CAN that reads Park. This rule is unchanged.
 2. **CLEAR** it on any tick that decodes a **known** non-Park gear, **even when CAN is invalid.**
    Before, invalid ticks were ignored in both directions, so a CAN fault that spanned Park → Drive kept
@@ -89,7 +91,7 @@ Caveats:
 | case | what happens | logged |
 |---|---|---|
 | car never writes GearPark / never decodes a gear | never holds | `gear_park_unconfirmed` (card) |
-| Lightning boots into a quiet-CAN charging session (canValid false from the start) | **never holds: known gap**, stays at today's ~180 MB/h | `gear_park_unconfirmed` |
+| Lightning boots into a quiet-CAN charging session (canValid false from the start) | **never holds: known gap**, stays at today's ~180 MB/h. gearunknown2pnw makes a per-car fix possible but did not ship it (owner question in that commit) | `gear_park_unconfirmed` |
 | CAN fault spans Park → Drive | a decoded drive gear clears GearPark, and loggerd starts on the next tick | `gear_park` value=False |
 | card crashes while holding | releases on the next tick (card not alive) | `park_record_gate` hold=False reason=card_not_running (+ manager "Restarting card") |
 | card restarted with a stale True | the seed clears it; otherwise the full 30 s hold starts again | — |
@@ -101,9 +103,10 @@ Caveats:
 - **`SkipVideoWhenParked` / `ThinRlogWhenParked`: not dead, kept.** They still shape the 30 s hold
   window and the quiet-CAN gap above.
 - **Pre-existing, NOT changed (Rule 5):** `loggerd.cc` sets `car_parked` from carState with no
-  `canValid` check. Its comment says a never-decoded gear reads `unknown`. **That is false on the
-  Lightning** (see the table), so a drive whose `PowertrainData_10` never arrives would skip video and
-  thin the rlog.
+  `canValid` check. Its comment says a never-decoded gear reads `unknown`. That was false on the
+  Lightning until gearunknown2pnw and is **still false on the 74 platforms above**, where a drive whose
+  gear message never arrives would skip video and thin the rlog (only with `SkipVideoWhenParked` /
+  `ThinRlogWhenParked` on; both default OFF).
 - **Uploader:** `pass2_allowed` stopped consulting `parked` in `uploadanywifi2pnw`, so it is unaffected.
 - **Deleter:** unchanged. Fewer new segments means the upload queue can finally drain.
 - **Bookmarks** (`userBookmark`) pressed during a hold are not preserved, because loggerd is not running.

@@ -255,11 +255,11 @@ class TestEndToEndWithRealGearDecode:
     self._drive(rig, lightning_gear(0), 3600, w, can_valid=False)   # charging: canValid false for hours
     assert not rig.loggerd_running and rig.stops == 1
 
-  def test_lightning_dead_bus_reads_park_but_keeps_recording(self, rig):
+  def test_lightning_dead_bus_reads_unknown_and_keeps_recording(self, rig):
     w = GearParkWriter()
-    cs = lightning_gear(3, frames=0)                                # nothing received: decodes 'park'
-    assert cs.gearShifter == GearShifter.park
-    self._drive(rig, cs, 3600, w, can_valid=False)
+    cs = lightning_gear(3, frames=0)                                # nothing received: unknown (gearunknown2pnw)
+    assert cs.gearShifter == GearShifter.unknown
+    self._drive(rig, cs, 3600, w)                                   # its own canValid: False
     assert rig.loggerd_running and rig.stops == 0
 
   def test_can_fault_across_park_to_drive_restarts_recording(self, rig):

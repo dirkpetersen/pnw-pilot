@@ -5,10 +5,11 @@ carState (CLAUDE.md Rule 3). Since parknorec2pnw it also STOPS loggerd (system/m
 so a wrong True now costs a drive's log, not just an upload decision. The rules below are asymmetric on
 purpose -- being wrong toward "not parked" only means recording as before:
 
-  SET True   only on a tick with valid CAN that reads Park. Required, not pedantic: the Ford parser
-             initialises every signal to 0 and TrnRng_D_Rq 0 is "Park", so a Lightning whose
-             PowertrainData_10 has NEVER been received reads gearShifter == park (measured through the
-             real opendbc decode, see tests/test_gear_park.py). Only canValid tells that apart.
+  SET True   only on a tick with valid CAN that reads Park. Required, not pedantic: CANParser initialises every
+             signal to 0, and on many brands 0 is "Park", so a gear message that has NEVER been received
+             reads gearShifter == park. The Lightning did too until pnw-opendbc gearunknown2pnw (now
+             unknown until PowertrainData_10 arrives); 74 other platforms in the pinned opendbc still do
+             (e.g. Hyundai; measured, see tests/test_gear_park.py). Only canValid tells that apart.
   CLEAR      on any tick that decodes a KNOWN non-Park gear, valid CAN or not. Before this, an invalid
              tick was ignored in both directions, so a CAN fault that spanned Park -> Drive left GearPark
              True for the whole drive -- which would now mean an unrecorded drive.
