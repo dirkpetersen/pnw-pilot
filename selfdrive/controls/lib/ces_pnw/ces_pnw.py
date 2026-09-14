@@ -687,7 +687,7 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
 # record as "sa<Key>". A module constant so a test can assert publisher keys == forwarded keys against
 # the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
 SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
-                "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst")
+                "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt")
 
 
 class IcbmEpisode:
@@ -710,6 +710,9 @@ class IcbmEpisode:
   cruise/override gates, RestoreGuard human-detection latch)."""
 
   def __init__(self, window_s: float = ICBM_RESTORE_WINDOW_S, clear_delay_s: float = ICBM_RESTORE_DELAY_S):
+    self.latch_limit = None             # sazoneset2pnw (also cleared in reset()): limit at ceiling latch
+    self.zone_cap = None                # sazoneset2pnw: STICKY stale-ceiling restore cap (m/s)
+    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / None
     self._window_s = window_s
     self._clear_delay_s = clear_delay_s
     self.phase = "idle"                 # idle | cap | restore
@@ -770,6 +773,9 @@ class IcbmEpisode:
     self._apex_passed = False
     self._late_tap_set = None
     self._rcap_hold_set = None          # icbmrestorecap2pnw: stock set when the posted-limit hold began
+    self.latch_limit = None             # sazoneset2pnw: debounced posted limit when the ceiling latched
+    self.zone_cap = None                # sazoneset2pnw: STICKY stale-ceiling restore cap (m/s), only lowered
+    self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / None
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -829,6 +835,17 @@ class IcbmEpisode:
       return confirmed, True
     return held, False
 
+  def note_limit(self, limit_now, proportional: bool) -> None:
+    """sazoneset2pnw: fold this tick's posted limit into the episode's STICKY zone cap. Call once per tick
+    BEFORE step(). Only lowers self.zone_cap and never touches self.ceiling: the ceiling is the reference a
+    curve's binding is judged against during the cap phase, and lowering it there could make a real curve
+    stop binding mid-approach. The cap only ever limits the RESTORE (step's restore_cap)."""
+    if self.phase not in ("cap", "restore") or self.ceiling is None:
+      return
+    cap, why = C.icbm_stale_zone_cap(self.ceiling, self.latch_limit, limit_now, proportional)
+    if cap is not None and (self.zone_cap is None or cap < self.zone_cap):
+      self.zone_cap, self.zone_why = cap, why
+
   def _restore_target(self, stock_set, restore_cap):
     """The restore's publish for this tick: (target, "inc"), or (None, None) to HOLD silently.
 
@@ -856,7 +873,7 @@ class IcbmEpisode:
     return target, "inc"
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
-           cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None):
+           cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -899,6 +916,11 @@ class IcbmEpisode:
         self.reset()
         self.phase = "cap"
         self.ceiling = float(v_set)
+        # sazoneset2pnw: remember which road this ceiling belongs to (None/0 = limit unknown at latch)
+        try:
+          self.latch_limit = float(limit_now) if limit_now is not None and float(limit_now) > 0.0 else None
+        except (TypeError, ValueError):
+          self.latch_limit = None
         self._engage_t0 = now             # icbmratchet2pnw: see the clear-debounce handling below
         # icbmratchet2pnw (Gemini review catch, round 2): run the engage tick through the SAME
         # confirmation bookkeeping as any later tick (baseline = v_set, nothing confirmed yet) so a
@@ -3062,11 +3084,22 @@ class CESController:
       # own except and silently skip ICBM for the tick -- same reason _icbm_err_last is read this way.
       rcap_lim, self._icbm_rcap_state = C.icbm_restore_limit(sig.get("spd_lim", 0.0),
                                                              getattr(self, "_icbm_rcap_state", None), now)
-      self._icbm_rcap = rcap_lim + C.ICBM_RESTORE_LIMIT_MARGIN_MS if rcap_lim > 0.0 else 0.0
+      # sazoneset2pnw (driver directive 2026-09-13): the restore goes back to the pre-curve set; it is capped
+      # ONLY when the limit dropped while this episode ran (see icbm_stale_zone_cap), and that cap is sticky.
+      # "Proportional" = the driver has zone speeds on (speedadjust AutoSpeedReduce >= 2), read from its
+      # forwarded status. A missing/unreadable mode is not evidence it is on: it falls back to limit + 5.
+      sa_mode = (getattr(self, "_sa_tele", None) or {}).get("saMode")
+      try:
+        proportional = sa_mode is not None and int(sa_mode) >= 2
+      except (TypeError, ValueError):
+        proportional = False
+      self._icbm_ep.note_limit(rcap_lim if rcap_lim > 0.0 else None, proportional)
+      self._icbm_rcap = float(self._icbm_ep.zone_cap) if self._icbm_ep.zone_cap is not None else 0.0
       pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
                                                  self._stock_set, self._stock_on, driver_pedal,
                                                  cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve,
-                                                 restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None)
+                                                 restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None,
+                                                 limit_now=rcap_lim if rcap_lim > 0.0 else None)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
@@ -3178,6 +3211,8 @@ class CESController:
       # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
       # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
       tele["icbmPhase"] = getattr(getattr(self, "_icbm_ep", None), "phase", None)
+      tele["icbmZoneWhy"] = getattr(getattr(self, "_icbm_ep", None), "zone_why", None)      # sazoneset2pnw
+      tele["icbmLatchLim"] = getattr(getattr(self, "_icbm_ep", None), "latch_limit", None)  # sazoneset2pnw
       tele["icbmFlrHit"] = bool(self._icbm_floor_hit)
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
       tele["icbmSet"] = self._stock_set
@@ -3343,6 +3378,8 @@ class CESController:
       "icbmFlr": round(float(self._icbm_floor_lim), 1), "icbmFlrHit": bool(self._icbm_floor_hit),
       "icbmRCap": round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1),   # icbmrestorecap2pnw: restore cap, 0 = none
       "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore
+      "icbmZoneWhy": getattr(getattr(self, "_icbm_ep", None), "zone_why", None),      # sazoneset2pnw: prop/limit5/None
+      "icbmLatchLim": getattr(getattr(self, "_icbm_ep", None), "latch_limit", None),  # sazoneset2pnw: limit at latch
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,
       # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether

@@ -162,6 +162,21 @@ SL_DROP_CONFIRM_S = 2.0                  # speedlimitconfirm2pnw: a LOWER posted
                                          # a transient 25 mph read on I-5 would command ~29 mph at 70.
                                          # Increases are still accepted immediately (release direction).
 SL_DROP_EPS = 0.1                        # m/s tolerance when matching the pending value across reads
+# sazoneset2pnw (Fable review of sanorestore2pnw, measured): the drop confirm above gated only a LOWER
+# reading, so a single HIGHER read passed straight through, re-anchored the baseline, and the return to
+# the real limit then CONFIRMED as a "drop" 2 s later -- set 66 in a 60, one 65 read, trimmed to 61 with
+# the police restore withheld. Under the zone model a confirmed drop is a PERMANENT set change (no
+# restore, ever), so a manufactured drop now costs the driver his speed until he taps back up. A higher
+# limit must therefore persist too. Same asymmetry and the same 3 s as icbm_restore_limit's rise hold
+# (ces_pnw_constants.ICBM_RESTORE_LIMIT_RISE_HOLD_S): flicker and a real 5 mph step are the same size,
+# only persistence separates them. Kept LOCAL, like the other mirrors in this file (no cross-feature import).
+SL_RISE_CONFIRM_S = 3.0
+# sazoneset2pnw (driver directive 2026-09-13): a limit-drop slowdown is a ONE-SHOT zone set. The episode
+# ends -- and this module goes silent -- once the truck's own reported set has reached the zone target.
+ZONE_SET_DONE_TOL = 0.6 * 1.0 * MPH_TO_MS      # == the executor's DEADBAND_MS (0.6 of a 1 mph tap)
+ZONE_SET_TIMEOUT_S = 60.0                # s of ACC-engaged, pedal-free time the zone set may take before it is
+                                         # ABANDONED (logged loudly). A 70 -> 38 mph zone set is ~15 s of slew
+                                         # plus taps; 60 s only ever trips on a genuine failure to actuate.
 CAP_SLEW = 1.0                           # m/s per s — emitted cap RAMPS toward its target, never steps
 RELEASE_S = 2.0                          # cap sources must stay clear this long before the cap releases
 # speedadjust-exec2pnw: the stock-ACC button-management publish (mem-param only; never touches the
@@ -228,6 +243,8 @@ class SpeedAdjustController:
     self._sl_valid_t = -1e9       # monotonic time of the last VALID limit read (for the dropout hold)
     self._sl_pending = 0.0        # a LOWER limit awaiting SL_DROP_CONFIRM_S confirmation (0 = none)
     self._sl_pending_t = 0.0      # monotonic stamp of when that pending value was first seen
+    self._sl_rise_pending = 0.0   # sazoneset2pnw: a HIGHER limit awaiting SL_RISE_CONFIRM_S (0 = none)
+    self._sl_rise_pending_t = 0.0
     self._sl_ref = 0.0            # baseline limit (the limit we were last uncapped at)
     self._ratio = 0.0            # ANCHORED over-limit ratio (v_set/limit) captured at the baseline —
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
@@ -271,6 +288,10 @@ class SpeedAdjustController:
     # involved one never restores (see the release branch in cap()). Reset at every episode engage.
     self._ep_limit_drop = False
     self._no_restore_why = None  # telemetry: why the last release did NOT open a restore (None = it did / n.a.)
+    # sazoneset2pnw: the zone target of the current limit-drop-only episode (m/s, None = none), and how long
+    # it has been actuatable without being reached (see ZONE_SET_TIMEOUT_S).
+    self._zone_target = None
+    self._zone_elapsed = 0.0
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
     self._min_pub_target = None  # restore-hardening #1: running MIN of _cap_out published this cap
                                   # episode — the "explainability floor" (mirrors ces_pnw's
@@ -307,16 +328,27 @@ class SpeedAdjustController:
       # is accepted at once. A pending value that stops matching (the reading moved on) is discarded
       # without ever having been acted on, which is exactly the mapd re-match transient we're after.
       if 0.0 < sl < self._sl:
+        self._sl_rise_pending = 0.0            # a lower reading ends any pending rise
         if abs(sl - self._sl_pending) > SL_DROP_EPS:
           self._sl_pending = sl
           self._sl_pending_t = now
         if now - self._sl_pending_t < SL_DROP_CONFIRM_S:
           return self._sl                      # unconfirmed drop → keep the previous limit
       self._sl_pending = 0.0
+      # sazoneset2pnw: a HIGHER limit must persist too (see SL_RISE_CONFIRM_S). A first reading after the
+      # limit was genuinely unknown (self._sl == 0) is not a "rise" and is taken at once.
+      if self._sl > 0.0 and sl > self._sl + SL_DROP_EPS:
+        if abs(sl - self._sl_rise_pending) > SL_DROP_EPS:
+          self._sl_rise_pending = sl
+          self._sl_rise_pending_t = now
+        if now - self._sl_rise_pending_t < SL_RISE_CONFIRM_S:
+          return self._sl                      # unconfirmed rise → keep the previous limit
+      self._sl_rise_pending = 0.0
       return sl
     # Unknown read: break any confirmation chain (a drop that flickers valid/unknown has not
     # "persisted"), then fall through to the existing brief-dropout hold.
     self._sl_pending = 0.0
+    self._sl_rise_pending = 0.0
     if now - self._sl_valid_t < SL_HOLD_S and self._sl > 0.0:
       return self._sl                        # brief dropout → hold the last valid limit
     return 0.0
@@ -486,7 +518,8 @@ class SpeedAdjustController:
       "polSupp": bool(self._police_suppressed),
       "polKey": self._police_latched_key,
       "epLim": bool(getattr(self, "_ep_limit_drop", False)),   # sanorestore2pnw
-      "noRst": getattr(self, "_no_restore_why", None),          # sanorestore2pnw
+      "noRst": getattr(self, "_no_restore_why", None),          # sanorestore2pnw (+ zoneSet / zoneAbandoned)
+      "zoneTgt": _r(getattr(self, "_zone_target", None)),       # sazoneset2pnw: zone target, None = no zone episode
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -579,6 +612,39 @@ class SpeedAdjustController:
       return abs(float(orz[0]) * float(vx[0])) >= SA_IN_CURVE_LAT_ACCEL
     except Exception:
       return False
+
+  def _end_zone(self, now: float, why: str, target: float, stock_now: float, v_cruise: float) -> float:
+    """sazoneset2pnw: end a limit-drop-only episode and FORGET it. `why` is "zoneSet" (the truck's set
+    reached the zone target) or "zoneAbandoned" (it could not get there within ZONE_SET_TIMEOUT_S of
+    actuatable time). Either way the higher baseline is dropped -- the zone limit becomes the reference --
+    so the same drop cannot re-trigger, and nothing is ever restored. Stock-ACC only; returns the neutral
+    v_cruise, as every stock-ACC path in cap() does."""
+    self._sl_ref = self._sl
+    self._cap_out = None
+    self._release_t = None
+    self._pub_ceiling = None
+    self._min_pub_target = None
+    self._restore_ceiling = None
+    self._restore_deadline = None
+    self._restore_last_stock = None
+    self._zone_target = None
+    elapsed, self._zone_elapsed = self._zone_elapsed, 0.0
+    # an in-flight SET- tap of our own can still land after this -- give the override detector its grace
+    self._last_actuation_transition_t = now
+    self._no_restore_why = why
+    self._engaged = False
+    if why == "zoneSet":
+      cloudlog.event("speedadjust_zone_set", limit=round(float(self._sl), 2), target=round(float(target), 2),
+                     stock=round(float(stock_now), 2), ratio=round(float(self._ratio), 3))
+    else:
+      # Rule 2: the zone speed was NOT applied. Loud, because the truck is still above the zone target.
+      msg = " ".join([f"speedadjust: zone set ABANDONED after {elapsed:.0f} s actuatable -- set {stock_now:.1f}",
+                      f"never reached {target:.1f} (limit {self._sl:.1f}); forgetting the zone, no further taps"])
+      cloudlog.error(msg)
+      cloudlog.event("speedadjust_zone_set_abandoned", limit=round(float(self._sl), 2),
+                     target=round(float(target), 2), stock=round(float(stock_now), 2), elapsed_s=round(elapsed, 1))
+    self._publish_target(None)
+    return v_cruise
 
   def _step_restore(self, now: float, sm) -> None:
     """Bookkeeping + publish for the bounded restore window (see module docstring). Called only from
@@ -737,6 +803,8 @@ class SpeedAdjustController:
       # speedadjustreset2pnw (F_uninit parity): the V_CRUISE_UNSET sentinel is not a real driver set —
       # forget it so the eventual uninitialized->initialized transition can't read as a "change".
       self._last_v_set = None
+      self._zone_target = None               # sazoneset2pnw
+      self._zone_elapsed = 0.0
       self._publish_target(None)
       return v_cruise
 
@@ -807,6 +875,8 @@ class SpeedAdjustController:
         # release any active emitted cap so speed resumes immediately (MPC/executor bounds the accel).
         self._cap_out = None
         self._release_t = None
+        self._zone_target = None             # sazoneset2pnw: the driver's own set ends any zone episode
+        self._zone_elapsed = 0.0
         # FIX E (telemetry only): mirror the normal release block's engaged-bookkeeping so the
         # "released" log actually fires and the next real engage's log isn't swallowed.
         if self._engaged:
@@ -829,6 +899,8 @@ class SpeedAdjustController:
       self._sl_ref = self._sl                # keep baseline current while idle (no stale drop on enable)
       # speedanchor2pnw (F2): anchor off the raw set, not a VTSC-curve-reduced v_cruise.
       self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
+      self._zone_target = None               # sazoneset2pnw
+      self._zone_elapsed = 0.0
       self._publish_target(None)
       return v_cruise
 
@@ -927,6 +999,8 @@ class SpeedAdjustController:
       self._release_t = None
       self._pub_ceiling = None
       self._min_pub_target = None
+      self._zone_target = None               # sazoneset2pnw
+      self._zone_elapsed = 0.0
       # FIX B: an in-flight SET- tap of our own may still land after this transition -- stamp it so
       # the set-change detector gives it a grace window instead of misreading it as an override.
       self._last_actuation_transition_t = now
@@ -973,6 +1047,38 @@ class SpeedAdjustController:
       self._no_restore_why = None             # ...and so does the reason (Fable: it stayed stale through the next cap)
     if lc is not None:
       self._ep_limit_drop = True              # sanorestore2pnw: sticky for the rest of the episode
+    # sazoneset2pnw (driver directive 2026-09-13): a LIMIT-DROP slowdown is a one-shot ZONE SET, not a cap
+    # held for the length of the zone. Driver, verbatim: "if I go down from 70 to 35 ... we need to set 35
+    # plus [the same percentage]. At that point there should be no memory anymore of what could resume,
+    # and then I am just driving that speed. Then comes a curve and you reduce for the curve, remember what
+    # the speed was before the curve, and go back to [it] after the curve."
+    #
+    # So once the truck's OWN reported set has reached the zone target the episode ENDS and this module
+    # goes silent: the higher baseline is forgotten (the zone limit becomes the new reference, and
+    # _update_baseline re-anchors the ratio to the set the truck is now at), no restore is ever offered,
+    # and SpeedAdjustTarget is cleared. That silence is also what un-starves a curve restore inside the
+    # zone: Fable measured that the continuous dec, re-published every 0.25 s for the whole zone, won every
+    # arbitrate() and blocked ICBM's inc -- a curve in a long trimmed zone left the set at 35 on a 60 road.
+    #
+    # Stock-ACC only: an op-long car (the Tesla) has no set to tap, and cap()'s return value keeps the
+    # continuous cap exactly as before. A police cap in the same episode keeps the old hold (mixed rule).
+    # "Reached" needs EVIDENCE: an unreadable stock set (0.0) never completes the zone -- it waits.
+    zone_only = lc is not None and pc is None and not self._long_ok
+    if zone_only:
+      self._zone_target = target
+      stock_now = self._read_stock_set(sm)
+      if stock_now > 0.0 and stock_now <= target + ZONE_SET_DONE_TOL:
+        return self._end_zone(now, "zoneSet", target, stock_now, v_cruise)
+      if stock_now > 0.0 and engaged and not intervening:
+        # Bounded, never a silent hold: only time in which our taps COULD land counts (ACC engaged, no
+        # pedal, set readable). While ACC is off the episode simply waits -- no press is possible then, and
+        # a RES back to the old set inside the zone should still be brought down to the zone speed.
+        self._zone_elapsed += dt
+        if self._zone_elapsed >= ZONE_SET_TIMEOUT_S:
+          return self._end_zone(now, "zoneAbandoned", target, stock_now, v_cruise)
+    else:
+      self._zone_target = None
+      self._zone_elapsed = 0.0
     if target < self._cap_out:
       self._cap_out = max(target, self._cap_out - CAP_SLEW * dt)
     else:

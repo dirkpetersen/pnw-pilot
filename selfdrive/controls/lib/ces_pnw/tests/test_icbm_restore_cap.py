@@ -306,18 +306,25 @@ class TestThroughTheControllerStep:
       setattr(c, k, v)
     return c, cls._icbm_step.__get__(c)
 
-  def _run(self, monkeypatch, spd_lim_mph, new_curve_at=None):
+  def _run(self, monkeypatch, lim_curve_mph, lim_after_mph=None, sa_mode=None, new_curve_at=None,
+           rise_at=None, lim_rise_mph=None):
     """Drive the controller through a curve and its restore. The simulated stock set RESPONDS to the
     controller's own commands at the executor's tap cadence -- the first version held the set fixed,
-    so the hold-at-cap branch never executed through the controller at all (Gemini review)."""
+    so the hold-at-cap branch never executed through the controller at all (Gemini review).
+
+    sazoneset2pnw: the limit during the curve and after it are separate, because whether the restore is
+    capped at all now depends on the limit DROPPING while the episode runs."""
     clock = [1000.0]
     c, step = self._controller(monkeypatch, clock)
+    if sa_mode is not None:
+      c._sa_tele = {"saMode": sa_mode}
+    lim_after_mph = lim_curve_mph if lim_after_mph is None else lim_after_mph
     set_mph = 60.0
-    # a SHARP curve, so the tapped-down set lands clearly below the 30 mph cap. (With a 27 mph map
+    # a SHARP curve, so the tapped-down set lands clearly below any cap under test. (With a 27 mph map
     # target the posted-limit floor held the set at 29.7 -- already at the cap -- and restore correctly
     # held silent, which made the first version of this test assert on nothing.)
     curve = {"v_ego": 45 * MPH, "v_set": set_mph * MPH, "map_target_v": 12 * MPH, "map_target_dist": 15.0,
-             "spd_lim": spd_lim_mph * MPH}
+             "spd_lim": lim_curve_mph * MPH}
     c._stock_set = set_mph * MPH
     for _ in range(6):                                   # curve binds: cap episode, ceiling 60
       step(curve, active=True)
@@ -327,10 +334,12 @@ class TestThroughTheControllerStep:
     assert tapped < 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS - 1.0, \
       f"set only tapped to {tapped / MPH:.1f} mph -- too close to the cap to test a restore"
     c._stock_set = tapped                                # the executor's taps landed
-    clear = dict(curve, map_target_v=0.0, map_target_dist=float("inf"))
+    clear = dict(curve, map_target_v=0.0, map_target_dist=float("inf"), spd_lim=lim_after_mph * MPH)
     incs, phases, published = [], [], []
     for i in range(40):                                  # curve clears -> restore
       sig = dict(clear, v_set=c._stock_set)
+      if rise_at is not None and i >= rise_at:
+        sig["spd_lim"] = lim_rise_mph * MPH
       if new_curve_at is not None and i == new_curve_at:
         sig.update(map_target_v=12 * MPH, map_target_dist=15.0)
       n_before = len(c.mem_params.log)
@@ -345,21 +354,61 @@ class TestThroughTheControllerStep:
       clock[0] += 0.5
     return c, incs, phases, published
 
-  def test_in_a_25_zone_the_published_restore_stops_at_limit_plus_margin(self, monkeypatch):
+  def test_a_curve_entirely_inside_a_zone_restores_to_the_pre_curve_set(self, monkeypatch):
+    """CHANGED by sazoneset2pnw. This was `test_in_a_25_zone_the_published_restore_stops_at_limit_plus_margin`,
+    which capped every restore in a 25 zone at 30. The driver's model (2026-09-13): a curve "remembers what
+    the speed was before the curve and goes back to [it]". A limit that did not change during the curve
+    means the pre-curve set already belongs to this road, so nothing is stale and the restore goes all the
+    way back. (With zone speeds on, that pre-curve set is the zone speed speedadjust already set.)"""
     c, incs, phases, _ = self._run(monkeypatch, 25)
     assert incs, "no restore was ever published -- the test proves nothing"
+    assert math.isclose(max(incs), 60 * MPH, abs_tol=0.05), f"restored to {max(incs) / MPH:.1f}, not the pre-curve 60"
+    assert c._icbm_ep.zone_cap is None
+
+  def test_a_limit_that_DROPS_during_the_curve_caps_the_restore_at_limit_plus_margin(self, monkeypatch):
+    """The 15:46 shape: latched on a 45 road, restoring in a 25 zone. Zone speeds off -> the backstop."""
+    c, incs, phases, _ = self._run(monkeypatch, 45, 25)
+    assert incs, "no restore was ever published -- the test proves nothing"
     assert max(incs) <= 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS + 1e-6, \
-      f"the controller published a restore to {max(incs) / MPH:.1f} mph in a 25 zone"
+      f"the controller published a restore to {max(incs) / MPH:.1f} mph after the limit dropped to 25"
     assert max(incs) > 25 * MPH + 1e-6, "the margin was not applied -- restore capped at the bare limit"
+
+  def test_with_zone_speeds_on_the_stale_cap_is_the_drivers_own_percentage(self, monkeypatch):
+    """AutoSpeedReduce >= 2: 60 on a 45 road is 33% over, so a 25 zone restores to 33.3, not limit + 5."""
+    c, incs, phases, _ = self._run(monkeypatch, 45, 25, sa_mode=2)
+    want = 25 * MPH * (60.0 / 45.0)
+    assert incs and math.isclose(max(incs), want, abs_tol=0.05), f"restored to {max(incs) / MPH:.2f}, want 33.33"
+    assert c._icbm_ep.zone_why == "prop"
+
+  def test_police_only_mode_is_not_zone_speeds(self, monkeypatch):
+    """AutoSpeedReduce 1 is police-only: the driver has not asked for zone speeds, so the backstop applies."""
+    c, incs, phases, _ = self._run(monkeypatch, 45, 25, sa_mode=1)
+    assert incs and max(incs) <= 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS + 1e-6
+    assert c._icbm_ep.zone_why == "limit5"
+
+  def test_an_unreadable_zone_mode_is_not_evidence_zone_speeds_are_on(self, monkeypatch):
+    c, incs, phases, _ = self._run(monkeypatch, 45, 25, sa_mode="garbage")
+    assert incs and max(incs) <= 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS + 1e-6
+    assert c._icbm_ep.zone_why == "limit5"
 
   def test_with_no_known_limit_it_restores_to_the_old_set_as_before(self, monkeypatch):
     c, incs, phases, _ = self._run(monkeypatch, 0)
     assert incs and math.isclose(max(incs), 60 * MPH, abs_tol=0.05)
 
+  def test_the_zone_cap_is_STICKY_when_the_limit_rises_again(self, monkeypatch):
+    """"No memory": once the limit dropped during this episode, a limit that rises back must not resume a
+    restore past the zone cap. (icbmrestorecap2pnw deliberately followed a rising limit back up; the
+    driver's zone model replaced that.)"""
+    c, incs, phases, _ = self._run(monkeypatch, 45, 25, rise_at=8, lim_rise_mph=45)
+    assert incs, "no restore was ever published -- the test proves nothing"
+    assert max(incs) <= 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS + 1e-6, \
+      f"a rising limit resumed the restore to {max(incs) / MPH:.1f} mph"
+
   def test_the_set_settles_AT_the_cap_and_the_episode_HOLDS_there(self, monkeypatch):
     """The hold branch, executed through the controller: the set reaches the cap, the controller goes
-    silent, and the episode stays alive in `restore` rather than ending."""
-    c, incs, phases, published = self._run(monkeypatch, 25)
+    silent, and the episode stays alive in `restore` rather than ending. (sazoneset2pnw: now driven by a
+    limit that drops during the curve -- a constant limit no longer caps anything.)"""
+    c, incs, phases, published = self._run(monkeypatch, 45, 25)
     cap = 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS
     assert c._stock_set >= cap - 0.3, f"the set never reached the cap ({c._stock_set / MPH:.1f} mph)"
     assert c._stock_set <= cap + 1e-6
@@ -370,7 +419,7 @@ class TestThroughTheControllerStep:
     """Review claimed a held restore would ignore a new curve and let the truck 'blow through' it.
     Refuted in the episode machine (DEC ALWAYS WINS during restore) -- pinned here through the
     controller, so it stays refuted."""
-    c, incs, phases, published = self._run(monkeypatch, 25, new_curve_at=30)
+    c, incs, phases, published = self._run(monkeypatch, 45, 25, new_curve_at=30)
     assert phases[29] == "restore", "the test did not reach the hold before the new curve"
     after = [p for p in published[30:34] if p]
     assert any(p.get("dir") != "inc" and p["target"] < 25 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS for p in after), \

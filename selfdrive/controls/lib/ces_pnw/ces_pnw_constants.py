@@ -449,6 +449,48 @@ def _icbm_restore_limit(spd_lim, state, now):
   return lim, (lim, now, pend, since)
 
 
+# sazoneset2pnw (driver directive 2026-09-13): a curve restore returns to the speed from BEFORE the curve --
+# unless the posted limit DROPPED while the curve episode was running, in which case the latched ceiling
+# belongs to a road the truck has left (the 15:46 incident: latched at 60 on a 45 road, restored to 60 in a
+# 25 zone). Only then is the restore capped, and the cap is the zone speed the driver would have got on
+# entering that zone: "the same percentage above the speed limit as I was driving before".
+ICBM_LIMIT_DROP_EPS_MS = 1.0     # m/s; a real limit step is 5 mph = 2.235 m/s, float/rounding noise is far below
+
+
+def icbm_stale_zone_cap(ceiling, latch_limit, limit_now, proportional: bool):
+  """(cap_ms, why) for a curve restore whose ceiling may be stale, or (None, None) when it is not.
+
+  NOT stale -- restore all the way to the pre-curve set, even if that is more than 5 mph over the limit --
+  when no limit is known now (no evidence of a new zone), or the limit now is the same as or higher than
+  the limit at latch.
+
+  STALE when the limit now is lower than at latch, or was unknown at latch and is known now:
+    * `proportional` (speedadjust AutoSpeedReduce >= 2, i.e. the driver has asked for zone speeds) and the
+      latch-time ratio ceiling/latch_limit is >= 1 -> limit_now x ratio, "prop". The ratio is taken from
+      the EPISODE's own latch, not speedadjust's live ratio: Fable measured that ICBM's own SET- taps are
+      read by speedadjust as driver overrides and re-anchor its ratio to the tapped-down set mid-curve.
+    * otherwise (proportional zone speeds off, latch limit unknown, or the driver was under the limit)
+      -> limit_now + ICBM_RESTORE_LIMIT_MARGIN_MS, "limit5" -- the icbmrestorecap2pnw backstop.
+  The caller keeps the result STICKY (only ever lowered) for the episode: a limit that later rises again
+  must not resume a restore past it -- "no memory", in the driver's words.
+
+  Pure and total: anything non-numeric is treated as unknown."""
+  def _num(x):
+    try:
+      v = float(x)
+    except (TypeError, ValueError):
+      return None
+    return v if (v == v and v != float("inf") and v > 0.0) else None
+  ceiling, latch_limit, limit_now = _num(ceiling), _num(latch_limit), _num(limit_now)
+  if ceiling is None or limit_now is None:
+    return None, None
+  if latch_limit is not None and limit_now >= latch_limit - ICBM_LIMIT_DROP_EPS_MS:
+    return None, None
+  if proportional and latch_limit is not None and ceiling / latch_limit >= 1.0:
+    return limit_now * (ceiling / latch_limit), "prop"
+  return limit_now + ICBM_RESTORE_LIMIT_MARGIN_MS, "limit5"
+
+
 def icbm_floor_limit(spd_lim: float, prev: float, now: float = 0.0, pending=None):
   """Debounced posted limit for the ICBM floor. Returns (floor, pending).
 

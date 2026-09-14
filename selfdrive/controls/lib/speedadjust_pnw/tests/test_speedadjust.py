@@ -10,9 +10,12 @@ VTSC or an unset cruise) keeps calling them unchanged; the new tests below pass 
 v_cruise_initialized explicitly to exercise the three speedanchor2pnw fixes."""
 import time
 
+import pytest
+
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
-  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S,
+  SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S, SL_RISE_CONFIRM_S,
+  ZONE_SET_TIMEOUT_S, ZONE_SET_DONE_TOL,
   _police_key)
 
 MPH = MPH_TO_MS
@@ -1184,11 +1187,18 @@ def test_a_different_lower_value_restarts_the_window():
   assert c._sl_pending_t > aged_t, "the confirmation window restarts on a new pending value"
 
 
-def test_rising_limit_is_accepted_immediately():
-  # the release direction is never gated -- a higher limit lifts the cap and must not be delayed
+def test_rising_limit_must_PERSIST_before_it_is_adopted():
+  """CHANGED by sazoneset2pnw. This test used to be `test_rising_limit_is_accepted_immediately` and
+  pinned "the release direction is never gated". Fable measured why that was wrong once a limit drop
+  became permanent: one stray HIGHER read re-anchored the baseline, the return to the real limit then
+  confirmed as a 'drop' 2 s later, and the set was trimmed with the police restore withheld. Under the
+  zone model that trim is never given back. A higher limit now has to persist SL_RISE_CONFIRM_S."""
   c = _sl_reader(V45, V60)
-  assert c._read_speed_limit() == V60
-  assert c._sl_pending == 0.0
+  assert c._read_speed_limit() == V45, "a single higher read was adopted at once"
+  assert c._sl_rise_pending == V60
+  c._sl_rise_pending_t -= (SL_RISE_CONFIRM_S + 0.1)
+  assert c._read_speed_limit() == V60, "a rise that persisted was not adopted"
+  assert c._sl_pending == 0.0 and c._sl_rise_pending == 0.0
 
 
 def test_unknown_read_breaks_the_confirmation_chain():
@@ -1514,3 +1524,161 @@ def test_a_limit_drop_SHADOWED_by_a_lower_police_cap_still_marks_the_episode():
   lc = c._limit_drop_cap()
   assert lc is not None and lc > c._cap_out, "the scenario is not shadowed -- the test proves nothing"
   assert c._ep_limit_drop is True
+
+
+# ---- sazoneset2pnw: a limit drop is a ONE-SHOT zone set, then speedadjust forgets it ----------------
+# Driver directive 2026-09-13: entering a lower zone sets "the same percentage above the speed limit as I
+# was driving before ... at that point there should be no memory anymore ... then I am just driving that
+# speed." These drive cap() with a stock set that FOLLOWS the published SpeedAdjustTarget one 1 mph tap per
+# 0.5 s tick, so "the truck's own reported set reached the zone target" is exercised the way the car does it.
+
+def _zone_ctrl(stock_mph=75, sl_ref=V60, sl=V45, mode=2, op_long=False):
+  c = _stock_ctrl(mode=mode, sl_ref=sl_ref, ratio=(stock_mph * MPH) / sl_ref, sl=sl) if not op_long else \
+      _ctrl(op_long=True, mode=mode, sl_ref=sl_ref, ratio=(stock_mph * MPH) / sl_ref, sl=sl)
+  if op_long:
+    c.mem_params = _FakeMemParams()
+  return c
+
+
+def _drive(c, stock, ticks, follow=True, cruise_enabled=True, gas=False, speed_readable=True):
+  """Tick cap() with the truck's set = `stock`; the fake executor follows a dec target by 1 mph per tick."""
+  if c._last_t is None:                                 # first call initialises the slew/publish clocks (as _settle_pub)
+    c.cap(_sm(speed=stock if speed_readable else 0.0, cruise_enabled=cruise_enabled, gas=gas), stock, stock, stock, True)
+  for _ in range(ticks):
+    sm = _sm(speed=stock if speed_readable else 0.0, cruise_enabled=cruise_enabled, gas=gas)
+    _tick(c, v_cruise=stock, v_ego=stock, v_cruise_set=stock, sm=sm)
+    last = c.mem_params.last
+    if follow and isinstance(last, dict) and "target" in last and last.get("dir") != "inc" \
+       and stock > last["target"] + ZONE_SET_DONE_TOL:
+      stock -= 1 * MPH
+  return stock
+
+
+def test_zone_entry_sets_the_drivers_percentage_ONCE_then_goes_silent():
+  """75 on a 60 (+25%) into a 45 zone -> 56.25; once the truck is there, speedadjust ends the episode, clears
+  SpeedAdjustTarget and publishes nothing further. Before this change it kept re-publishing its dec every
+  0.25 s for the whole zone -- which Fable measured starving every curve restore in arbitrate()."""
+  c = _zone_ctrl()
+  stock = _drive(c, 75 * MPH, 80)
+  assert abs(stock - 45 * MPH * 1.25) <= 1 * MPH, f"zone set landed at {stock / MPH:.1f}, want ~56.25"
+  assert c._cap_out is None and c._no_restore_why == "zoneSet"
+  assert c.mem_params.last == {}, "SpeedAdjustTarget was not cleared after the zone set"
+  assert abs(c._sl_ref - V45) < 1e-6, "the higher baseline was not forgotten"
+  n = len(c.mem_params.target_calls)
+  _drive(c, stock, 60)
+  assert len(c.mem_params.target_calls) == n, "speedadjust kept publishing after the zone set"
+
+
+def test_a_limit_RISE_after_the_zone_set_does_not_restore():
+  c = _zone_ctrl()
+  stock = _drive(c, 75 * MPH, 80)
+  c._sl = V60
+  after = _drive(c, stock, 60)
+  assert after == stock and not any(isinstance(p, dict) and p.get("dir") == "inc" for p in c.mem_params.target_calls)
+
+
+def test_a_further_drop_repeats_from_the_CURRENT_set():
+  """No memory of the 75: the second zone is relative to the set the truck is now driving."""
+  c = _zone_ctrl()
+  stock = _drive(c, 75 * MPH, 80)
+  c._sl = 35 * MPH
+  stock2 = _drive(c, stock, 80)
+  want = 35 * MPH * (stock / V45)
+  assert abs(stock2 - want) <= 1 * MPH, f"second zone landed at {stock2 / MPH:.1f}, want {want / MPH:.1f}"
+  assert c._no_restore_why == "zoneSet"
+
+
+def test_an_unreadable_truck_set_never_completes_the_zone():
+  """Absence of evidence: without the truck's reported set the zone is not 'reached' -- the old continuous
+  cap stays, and nothing times out either (no actuatable time can be counted)."""
+  c = _zone_ctrl()
+  _drive(c, 75 * MPH, 200, follow=False, speed_readable=False)
+  assert c._cap_out is not None and c._no_restore_why is None
+
+
+def test_a_zone_that_can_never_be_reached_is_ABANDONED_and_logged(monkeypatch):
+  """Taps not landing (executor blocked, a governor fault): bounded by ZONE_SET_TIMEOUT_S of actuatable
+  time, then the zone is forgotten LOUDLY -- never a silent indefinite hold."""
+  import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as m
+  events, errors = [], []
+  monkeypatch.setattr(m.cloudlog, "event", lambda name, **kw: events.append((name, kw)))
+  monkeypatch.setattr(m.cloudlog, "error", lambda msg, *a, **k: errors.append(msg))
+  c = _zone_ctrl()
+  _drive(c, 75 * MPH, int(ZONE_SET_TIMEOUT_S / 0.5) + 10, follow=False)
+  assert c._cap_out is None and c._no_restore_why == "zoneAbandoned"
+  assert any(n == "speedadjust_zone_set_abandoned" for n, _ in events) and errors
+  assert c.mem_params.last == {}
+
+
+@pytest.mark.parametrize("kw", [dict(cruise_enabled=False), dict(gas=True)])
+def test_the_timeout_only_counts_ACTUATABLE_time(kw):
+  """ACC off or a pedal held: no press can land, so waiting must not burn the timeout."""
+  c = _zone_ctrl()
+  _drive(c, 75 * MPH, int(ZONE_SET_TIMEOUT_S / 0.5) + 40, follow=False, **kw)
+  assert c._no_restore_why != "zoneAbandoned"
+  assert c._zone_elapsed == 0.0
+
+
+def test_a_police_cap_in_the_episode_keeps_the_OLD_hold():
+  """Mixed episode: no zone completion, and (sanorestore2pnw) no restore either."""
+  c = _zone_ctrl()
+  c._police = {"state": "alert", "dist_mi": 0.2}
+  stock = _drive(c, 75 * MPH, 80)
+  assert c._cap_out is not None, "a mixed police + limit-drop episode was ended as a zone set"
+  assert c._zone_target is None and stock < 75 * MPH
+  # a still-capping check alone cannot see a wrongly ended zone: the police cap re-engages on the very next
+  # tick (mutation A6 survived it). The zone must not have been completed or its baseline forgotten.
+  assert c._no_restore_why != "zoneSet", "the mixed episode was completed as a zone set"
+  assert abs(c._sl_ref - V60) < 1e-6, "the mixed episode forgot the higher baseline"
+
+
+def test_the_tesla_op_long_path_never_ends_a_zone_and_publishes_nothing():
+  """cap()'s return value on an op-long car keeps the continuous limit-drop cap for the whole zone."""
+  c = _zone_ctrl(op_long=True)
+  outs = [c.cap(_sm(speed=V75), V75, V75, V60, True)]
+  for _ in range(120):
+    outs.append(_tick(c, v_cruise=V75, v_ego=V60, v_cruise_set=V75, sm=_sm(speed=V75)))
+  assert c._cap_out is not None and c._no_restore_why is None
+  assert abs(outs[-1] - V45 * 1.25) < 0.05, "the op-long cap is no longer the continuous zone cap"
+  assert c.mem_params.target_calls == []
+
+
+def test_a_single_HIGHER_limit_read_cannot_manufacture_a_drop():
+  """Fable's measured failure, through the REAL _read_speed_limit: set 66 in a 60 with a police cap, one
+  65 read, back to 60. Before the rise hold the 65 re-anchored the baseline and the return to 60 confirmed
+  as a 7.7% drop 2 s later: the set was trimmed and the police restore withheld. Under the zone model that
+  trim would be permanent."""
+  c = SpeedAdjustController(_CP(False), params=_Params())
+  c._mode = 2
+  mem = _FakeMemParams()
+  reads = {"v": "26.8224"}                                # 60 mph
+  mem.get = lambda k, return_default=False: reads["v"] if k == "MapSpeedLimit" else None
+  c.mem_params = mem
+  c._sl = 60 * MPH
+  c._sl_ref = 60 * MPH
+  c._sl_valid_t = time.monotonic()
+  c._ratio = 66 / 60
+  for v in ("29.0576", "26.8224", "26.8224", "26.8224"):  # one 65 read, then 60 again
+    reads["v"] = v
+    c._read_inputs()
+    c._update_baseline(66 * MPH)
+    c._sl_pending_t -= SL_DROP_CONFIRM_S + 0.1           # let any pending drop confirm, if one existed
+  assert abs(c._sl - 60 * MPH) < 0.05 and abs(c._sl_ref - 60 * MPH) < 0.05, "the stray 65 was adopted"
+  assert c._limit_drop_cap() is None, "a stray higher read manufactured a limit drop"
+
+
+def test_the_zone_target_is_cleared_on_the_SAME_tick_the_zone_completes():
+  """The executor treats a dec command as fresh for STALE_LIMIT_S; clear it at the completion tick itself,
+  not a tick later via the idle path (mutation A9 survived a test that only looked much later)."""
+  c = _zone_ctrl()
+  stock = 75 * MPH
+  c.cap(_sm(speed=stock), stock, stock, stock, True)
+  for _ in range(200):
+    _tick(c, v_cruise=stock, v_ego=stock, v_cruise_set=stock, sm=_sm(speed=stock))
+    if c._no_restore_why == "zoneSet":
+      assert c.mem_params.last == {}, "SpeedAdjustTarget still held a dec on the tick the zone completed"
+      return
+    last = c.mem_params.last
+    if isinstance(last, dict) and "target" in last and stock > last["target"] + ZONE_SET_DONE_TOL:
+      stock -= 1 * MPH
+  raise AssertionError("the zone never completed -- the test proves nothing")
