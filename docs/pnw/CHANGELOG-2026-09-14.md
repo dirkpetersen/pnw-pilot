@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `a0dd8097ee` (unreadhold2pnw). **Installed on the truck:** `a0dd8097ee`
-(07:21 PT).
+**Channel tip:** `origin/3devpnw` = `83ac3eb172` (leadlossr2pnw). **Installed on the truck:** `9f6ca9f0ea`
+(07:28 PT); `83ac3eb172` installing.
 
 ## Networking — arbiter logging
 
@@ -23,6 +23,18 @@ as each change ships.
 |---|---|---|
 | `a568f3de9a` **smallfix0914pnw** | `accdrop_pnw.STALE_ROUTE_S` 70 → 75 s, clear of loggerd's 72 s fallback segment rotation, so a stalled-encoder segment no longer flags `routeStale` falsely. Logging only. | Fable APPROVE. Same install as above. |
 
+## Cars — Ford gear decode
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| pnw-opendbc `7163a85522` (master-pnw) + pin `9f6ca9f0ea` **gearunknown2pnw** | Ford carstate reports `gearShifter=unknown` until `PowertrainData_10` has actually been received, instead of decoding Park from the parser's zero-initialised values. That fixes loggerd's parked-video gate trusting a gear decoded from a silent bus, which could lose a drive's video. Once seen, the gear decodes exactly as before, and a mid-drive outage holds the last gear. One log line when the gear is first received (and one if it isn't within N s). | Fable SHIP both. All 11 Ford platforms read PowertrainData_10 on bus 0 (no friends'-channel risk). No new engagement delay; the Tesla is untouched. Ford suite 196 pass. Installed 07:28 PT; verified: "PowertrainData_10 first received 0.0 s", gear park, carState valid, loggerd stopped in Park. |
+
+## Diagnostics — lead-loss shadow
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `83ac3eb172` **leadlossr2pnw** | The lead-loss-hold shadow detector's failures are logged (first immediately, then at most once a minute) instead of swallowed by `except Exception: pass`. Rule 2. No plan or actuator change; the detector stays log-only. | Fable SHIP. Analysis of 69 shadow events (`drives/2026-09-14/leadloss-shadow-review/`): 3 genuine close drop-outs, none while openpilot controlled speed. Recommendation: don't build the braking version; keep logging with 3 extra gates. |
+
 ## In progress (not shipped yet)
 
 - **`behindgate2pnw`**: ICBM must not START a slowdown for a map curve the truck already passed (the 09-08
@@ -33,10 +45,9 @@ as each change ships.
   re-checked every 60 s (first poll p50 38 s late). Fixes 1–2 (keep fetched reports; 5 s gate re-check, no
   backoff for our own link) ship after review. Fix 3 (display police off-freeway) contradicts the design doc
   and waits for the owner. Report: `drives/2026-09-13/police-miss-week/DRIVE_REPORT.md`.
-- **`gearunknown2pnw`** (pnw-opendbc `7163a85522`, pin bump `6a31327623`, in Fable review): Ford carstate
-  reports `gearShifter=unknown` until `PowertrainData_10` is seen. It fixes loggerd's parked-video gate trusting
-  an invalid gear. The parknorec2pnw quiet-CAN charging gap needs a capability-gated canValid follow-on (74
-  other platforms would break with a global change), which is an owner question.
+- **`gearparkcan2pnw`**: capability-gated follow-on so the Lightning confirms Park on a quiet-CAN charging
+  boot (GearPark set on the powertrain parser's validity, not global canValid). Closes parknorec2pnw's
+  charging-recording gap without touching the 74 platforms that still decode Park from a silent bus.
 - **Pro Power (done, analysis only):** APIM `7D0-10-03` reads PPOOOVOS already **on** (partially confirmed; one
   FORScan read-only look settles it). Nothing cleared Pro Power in a 66-min overnight watch. Report:
   `drives/2026-09-14/propower-overnight-watch/DRIVE_REPORT.md`.
