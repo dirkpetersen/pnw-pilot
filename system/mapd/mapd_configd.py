@@ -94,6 +94,17 @@ CAR_GPS_MOVING_MS = 1.0
 DEVICE_GPS_MOVING_MS = 5.0
 # How often to re-read CarParams for the capability (it is rewritten once per drive by card).
 CAR_CAPABILITY_RECHECK_S = 5.0
+# gpsdr2pnw (owner 2026-09-13, "prefer the good comma fix"): the truck's fix is DEGRADED when its own
+# HDOP reads >= 3.8 -- on the weekend + I-5 data that happened only in the SR 99 tunnel (3.8-4.2,
+# presumably dead reckoning), at the Sat 06:24 cold start and for 6 min parked after the Sat 14:12
+# boot. HDOP is the only quality signal CarGps carries: `sats` is the DBC's constant Invalid value,
+# and the 0x463 fault/inferred-position flags are not decoded. HDOP's Unknown/Invalid sentinels
+# (6.0/6.2) are >= 3.8 too, so an unknown quality counts as degraded. Degraded for more than
+# CAR_GPS_DR_ENTER_S while the device has a fresh fix -> the device fix is used; the truck returns
+# after CAR_GPS_DR_EXIT_S of good HDOP (hysteresis: one good or bad publish changes nothing).
+CAR_GPS_DR_HDOP = 3.8
+CAR_GPS_DR_ENTER_S = 10.0
+CAR_GPS_DR_EXIT_S = 5.0
 
 
 class CarGpsSource:
@@ -101,8 +112,9 @@ class CarGpsSource:
 
   update() returns the fix to write when THIS read is a new, healthy publish and the car has been
   healthy for CAR_GPS_REACQUIRE_PUBLISHES publishes; otherwise None. `kind` names what the feed is
-  doing (ok / reacquiring / absent / unreadable / silent / invalid / stale_can / frozen) and `detail`
-  the numbers behind it, for the change-only source log.
+  doing (ok / dr / reacquiring / absent / unreadable / silent / invalid / stale_can / frozen) and
+  `detail` the numbers behind it, for the change-only source log. `dr` = usable but degraded (see
+  CAR_GPS_DR_HDOP); main() then prefers a fresh device fix.
 
   Freshness is judged on what THIS process observes (when a publish's `ts` first changed), never by
   comparing the publisher's wall-clock `ts` with ours: every boot runs on a bogus pre-sync wall clock
@@ -119,6 +131,9 @@ class CarGpsSource:
     self._key = None       # (lat, lon, hdg) of the last valid publish
     self._repeats = 0      # consecutive valid publishes, while moving, with an unchanged _key
     self._healthy = 0      # consecutive healthy publishes
+    self.dr = False        # gpsdr2pnw: degraded (HDOP) long enough that a fresh device fix is preferred
+    self._poor_since = None  # monotonic time of the first publish in the current HDOP >= DR run
+    self._good_since = None  # while dr: monotonic time of the first publish in the current good run
 
   @property
   def usable(self) -> bool:
@@ -135,7 +150,7 @@ class CarGpsSource:
     try:
       ts = float(cg["ts"])
       lat, lon, hdg = float(cg["lat"]), float(cg["lon"]), float(cg["hdg"])
-      spd_mph, age = float(cg["spd"]), float(cg["age"])
+      spd_mph, age, hdop = float(cg["spd"]), float(cg["age"]), float(cg["hdop"])
     except (TypeError, KeyError, ValueError) as e:
       return self._bad("unreadable", f"CarGps unreadable: {type(e).__name__}")
     if ts != self._ts:
@@ -151,6 +166,16 @@ class CarGpsSource:
       return self._bad("invalid", f"out of range lat={lat} lon={lon} hdg={hdg} spd={spd_mph}")
     if not 0.0 <= age <= CAR_GPS_MAX_AGE_S:
       return self._bad("stale_can", f"CAN frame age {age:.2f} s at publish")
+    # gpsdr2pnw: degraded-quality state, judged on every valid publish, independent of the checks below
+    if hdop >= CAR_GPS_DR_HDOP:
+      self._good_since = None
+      self._poor_since = now if self._poor_since is None else self._poor_since
+      self.dr = self.dr or now - self._poor_since > CAR_GPS_DR_ENTER_S
+    else:
+      self._poor_since = None
+      if self.dr:
+        self._good_since = now if self._good_since is None else self._good_since
+        self.dr = now - self._good_since < CAR_GPS_DR_EXIT_S
     spd_ms = spd_mph * MPH_TO_MS
     moving = spd_ms > CAR_GPS_MOVING_MS or (device_speed is not None and device_speed > DEVICE_GPS_MOVING_MS)
     key = (lat, lon, hdg)
@@ -163,7 +188,12 @@ class CarGpsSource:
     if not self.usable:
       self.kind, self.detail = "reacquiring", f"{self._healthy}/{CAR_GPS_REACQUIRE_PUBLISHES} healthy publishes"
       return None
-    self.kind, self.detail = "ok", f"CAN frame age {age:.2f} s"
+    if self.dr:
+      phase = (f">= {CAR_GPS_DR_HDOP} for {now - self._poor_since:.0f} s" if self._poor_since is not None
+               else f"good for {now - self._good_since:.0f} of {CAR_GPS_DR_EXIT_S:.0f} s")
+      self.kind, self.detail = "dr", f"HDOP {hdop} ({phase}), CAN frame age {age:.2f} s"
+    else:
+      self.kind, self.detail = "ok", f"CAN frame age {age:.2f} s, HDOP {hdop}"
     return {"latitude": lat, "longitude": lon, "bearing": hdg % 360.0, "speed": spd_ms}
 
 
@@ -418,7 +448,9 @@ def main():
       if car_gps_capable:
         dev_speed = float(sm[gps_service].speed) if cur_fix_state == "fix" else None
         car_fix = car_gps.update(mem.get("CarGps", return_default=True), now_fix, dev_speed)
-      use_car = car_gps_capable and car_gps.usable
+      # gpsdr2pnw: a degraded truck fix yields to a FRESH device fix (and takes over again the moment
+      # the device fix is not fresh: a dead-reckoned truck beats no position at all).
+      use_car = car_gps_capable and car_gps.usable and not (car_gps.dr and cur_fix_state == "fix")
       if sm.updated[gps_service]:
         g = sm[gps_service]
         if not g.hasFix:

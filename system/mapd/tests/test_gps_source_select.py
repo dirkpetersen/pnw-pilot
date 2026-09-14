@@ -155,7 +155,11 @@ class TestTunnelReplay:
     assert after and all(p is not None for _, p, _ in after)
     assert after[-1][2] == TUNNEL_TRUCK[-1][3]
     assert [e["src"] for e in _source_events(res)][-1] == "car"
-    assert sum(1 for e in _source_events(res) if e["src"] == "car") == 1, "the car was lost and re-selected"
+    assert sum(1 for e in _source_events(res) if e["src"] == "car" and e["prev"] != "car") == 1, "the car was lost and re-selected"
+    # gpsdr2pnw: HDOP 3.8 from 12.81 s is degraded after 10 s, but the device is dead in the tunnel, so the
+    # truck keeps the blob and the degraded state is still logged once
+    dr = [e for e in _source_events(res) if e["car"] == "dr"]
+    assert len(dr) == 1 and dr[0]["src"] == "car" and dr[0]["device"] == "silent"
 
   def test_without_the_capability_the_blob_goes_stale_in_the_tunnel_as_before(self, monkeypatch):
     res = _run(monkeypatch, 31.0, TUNNEL_DEVICE, TUNNEL_TRUCK, cp=TESLA_CP)

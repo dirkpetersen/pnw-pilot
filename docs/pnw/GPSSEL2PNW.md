@@ -115,3 +115,35 @@ classes, parked-and-charging, capability flips, Tesla identity) and
 `selfdrive/controls/lib/ces_pnw/tests/test_gpssel_telemetry.py` (blob → real `_read_map` → records).
 19 mutants killed; one equivalent (dropping `car_gps_capable and` from `use_car`: the source is only
 fed while capable and is replaced on every capability change).
+
+## 3. gpsdr2pnw — a degraded truck fix yields to a fresh device fix
+
+Owner decision 2026-09-13: "Yes, prefer the good comma fix".
+
+**Indicator.** `CarGps` carries one quality signal, `hdop`. `sats` is the DBC's constant Invalid value
+(31) and the 0x463 `Gps_B_Falt` / `GPS_Actual_vs_Infer_pos` / 0x464 `GPS_dimension` flags are not
+decoded. They are also unverified in a degraded state: all 420 frames in the 7 local rlogs read
+0 / 0 / 3D with HDOP < 3.8. HDOP's Unknown/Invalid sentinels (6.0/6.2) count as degraded.
+
+**Rule** (`CarGpsSource.dr`, `CAR_GPS_DR_HDOP = 3.8`, `CAR_GPS_DR_ENTER_S = 10`, `CAR_GPS_DR_EXIT_S = 5`):
+degraded after HDOP ≥ 3.8 on every publish for more than 10 s; recovered after HDOP < 3.8 on every
+publish for 5 s. One good or bad publish restarts the respective run, so a flapping HDOP never switches.
+While degraded, the device fix is used if it is fresh (`hasFix`, ≤ 3 s old); the moment it is not, the
+degraded truck fix takes the blob back. Log: `car=dr` (change-only, like every kind), and the `ok`
+detail now names the HDOP.
+
+**Weekend + I-5 replay** (68,181 ticks through the real `CarGpsSource` and `main()`'s selection rule;
+device "fresh" = the logged device position changed within 3 s, because these logs predate `gpsSrc`
+and the old bridge rewrote a stale fix for 10 s):
+
+| HDOP ≥ 3.8 run | duration | device fix | DR entered | switched to device |
+|---|---:|---|---|---|
+| SR 99 tunnel, Tue 09-08 19:29:23 PT | 120 s | dead | 19:29:34 | 19:31:26–19:31:29 only (tunnel exit, until the truck's HDOP had recovered for 5 s) |
+| Cold start, Sat 09-12 06:24:42 | 238 s | none | 06:24:52 | no |
+| Parked after boot, Sat 09-12 14:12:14 | 387 s | updating | 14:12:25 | 14:12:43–14:18:48 |
+
+**FR 6010 (Sun 10:44, truck 17 m off at 2.6 m/s) is not caught**: the truck's HDOP read 0.6–1.0
+there. No rule based on what `CarGps` carries distinguishes it.
+
+**Tesla**: same 52 s replay, all-writes sha256 `4aad6a81998d1349`, identical to gpssel2pnw.
+**Tests**: `system/mapd/tests/test_gps_dr_prefer_device.py`; 9 of 9 mutants killed.
