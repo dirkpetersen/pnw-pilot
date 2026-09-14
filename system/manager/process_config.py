@@ -6,6 +6,7 @@ from cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.system.manager.park_record_gate import ParkRecordGate
 from openpilot.system.mapd.installer import MAPD_BINARY
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
@@ -19,9 +20,18 @@ def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
 def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not CP.notCar
 
+def _card_alive() -> bool:
+  card = managed_processes["card"]
+  return card.proc is not None and card.proc.is_alive()
+
+# parknorec2pnw: no route segments while the shifter is in Park (system/manager/park_record_gate.py).
+# One instance for the manager's lifetime -- it carries the Park hysteresis timer between ticks.
+PARK_RECORD_GATE = ParkRecordGate(_card_alive)
+
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
-  return started and run
+  hold = PARK_RECORD_GATE.update(started, params)   # evaluated every tick, so the timer resets offroad
+  return started and run and not hold
 
 def ublox_available() -> bool:
   return os.path.exists('/dev/ttyHS0') and not os.path.exists('/persist/comma/use-quectel-gps')

@@ -212,6 +212,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // next driving segment's video -- see loggerd.cc). Rotation is time-based so nothing stalls.
     // Default OFF (no behaviour change); enable per-device, like its sibling above.
     {"ThinRlogWhenParked", {PERSISTENT, BOOL, "0"}},
+    // parknorec2pnw: KILL SWITCH for "the device never records while the shifter is in Park" (driver
+    // requirement 2026-09-05). Unset/0 = the gate is ON: once GearPark has read True for 30 s the
+    // manager stops loggerd, so no route segment is written until the shifter leaves Park. 1 = record
+    // in Park exactly as before (SkipVideoWhenParked / ThinRlogWhenParked still apply). Re-read every
+    // manager tick, so it takes effect within a second over SSH with no deploy or restart.
+    {"RecordWhileParked", {PERSISTENT, BOOL, "0"}},
     // cargps2pnw: the CAR's own GPS fix, published ~1 Hz by the ford carstate from the GWM's
     // APIMGPS messages on the camera bus (0x462/0x464) and logged as `car_gps` in ces_events
     // ALONGSIDE the device's own fix -- a side-by-side comparison channel, never a substitute.

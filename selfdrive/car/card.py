@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.gear_park import GearParkWriter
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 
 REPLAY = "REPLAY" in os.environ
@@ -121,6 +122,15 @@ class Car:
 
     self.params = Params()
 
+    # uploadgate2pnw: seed GearPark False at startup so a stale True from a previous session (e.g. hard
+    # power cut while parked) can't leave a gate open during a drive that never touches Park.
+    # parknorec2pnw: seeded HERE, before the CAN wait and fingerprinting, not after them. GearPark now
+    # stops loggerd, and a card that crash-loops or hangs in fingerprinting must not leave a stale True
+    # holding the recorder off for a whole drive. Ordering with later writes is safe: one Params
+    # instance, one FIFO async writer (common/params.cc putNonBlocking).
+    self._gear_park = GearParkWriter()
+    self.params.put_bool_nonblocking("GearPark", False)
+
     self.can_callbacks = can_comm_callbacks(self.can_sock, self.pm.sock['sendcan'])
 
     is_release = self.params.get_bool("IsReleaseBranch")
@@ -195,12 +205,6 @@ class Car:
     # on CarParams, so clearing the learned params here means they unblock and read the fresh (clean)
     # state with NO restart — race-free. Mirrors the manual Reset button exactly.
     self._maybe_reset_calibration_on_car_change()
-
-    # uploadgate2pnw: GearPark change-only publisher state. Seed the param False at startup so a
-    # stale True from a previous session (e.g. hard power cut while parked) can't leave the uploader
-    # gate open during a drive that never touches Park.
-    self._gear_park_last = False
-    self.params.put_bool_nonblocking("GearPark", False)
 
     # Write CarParams for controls and radard (current session — may be MOCK, which just runs passive)
     cp_bytes = self.CP.to_bytes()
@@ -481,14 +485,14 @@ class Car:
 
     # uploadgate2pnw: publish "gear is in Park" as a tiny CHANGE-ONLY param so background processes
     # (uploader) can gate on it WITHOUT subscribing to the 100 Hz carState stream (lesson 2026-07-13:
-    # extra msgq readers in the uploader caused a commIssue cascade). ~2-4 writes per drive. Only a
-    # VALID read may flip it; an invalid/no-CAN tick keeps the last known value (no flapping).
+    # extra msgq readers in the uploader caused a commIssue cascade). ~2-4 writes per drive.
     # Car-agnostic (gearShifter is a standard CarState field on every brand).
-    if CS.canValid:
-      parked = CS.gearShifter == car.CarState.GearShifter.park
-      if parked != self._gear_park_last:
-        self._gear_park_last = parked
-        self.params.put_bool_nonblocking("GearPark", parked)
+    # parknorec2pnw: only a VALID read may SET it, but a decoded non-Park gear CLEARS it even on invalid
+    # CAN -- GearPark now stops loggerd, so it must never stay True into a drive. Rules + why in
+    # selfdrive/car/gear_park.py.
+    gear_park = self._gear_park.update(CS.gearShifter, CS.canValid, time.monotonic())
+    if gear_park is not None:
+      self.params.put_bool_nonblocking("GearPark", gear_park)
 
     if RD is not None:
       tracks_msg = messaging.new_message('liveTracks')
