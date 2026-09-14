@@ -49,6 +49,21 @@ REGION_RESEND_INTERVAL_S = 60.0
 # retries forever at the cap: the owner would rather burn cellular than be stranded without maps.
 # A region CHANGE, coverage arriving, or "Refresh this location map" all reset the escalation.
 REGION_MAX_RESEND_INTERVAL_S = 1800.0   # 30 min
+# gpsfix2pnw: no GPS message for this long = the receiver is SILENT (qcomgpsd not running, a tunnel).
+# Only names the logged state; it gates nothing. gpsLocation is 1 Hz, so 3 s is two missed fixes.
+GPS_SILENT_S = 3.0
+
+
+def gps_fix_state(sm, service: str, now: float) -> str:
+  """gpsfix2pnw: 'fix' | 'nofix' | 'silent' for the device receiver, from the LAST message received.
+
+  'nofix' means messages are arriving but the receiver says it has no fix (`hasFix` False --
+  qcomgpsd sets it from verticalAccuracy != 500, ubloxd from NAV-PVT flags bit 0). Such a message
+  still carries a latitude/longitude: at the Sat 2026-09-12 06:28:57 PT cold start those were
+  2.18-2.42 km from the truck, and the bridge used to write them as the position."""
+  if not sm.seen[service] or now - sm.recv_time[service] > GPS_SILENT_S:
+    return "silent"
+  return "fix" if sm[service].hasFix else "nofix"
 
 
 def next_region_interval(attempts: int) -> float:
@@ -230,6 +245,9 @@ def main():
   waysel_warned = False          # waysel2pnw: one-shot guard so a broken bridge warns once, not at 20 Hz
   last_requested_region = None   # region of the pull we last asked for (used to hold its retry clock)
   retry = RegionRetry()          # mapdgate2pnw: per-region escalating backoff, survives coverage
+  fix_state = None               # gpsfix2pnw: last LOGGED device fix state (None = nothing logged yet)
+  fix_state_since = 0.0          # gpsfix2pnw: monotonic time fix_state was entered
+  nofix_dropped = 0              # gpsfix2pnw: no-fix samples NOT written since the last logged state
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -241,13 +259,37 @@ def main():
     # mem params so CES's map-curve trigger + the overlay "map" line come alive. Display/decision only;
     # actual map braking is the longitudinal_planner mapdOut.suggestedSpeed cap (separate, gated OFF).
     try:
-      if sm.alive[gps_service]:
+      # gpsfix2pnw: write a position ONCE, when a message ARRIVES, and only if it has a fix.
+      #  - hasFix: a no-fix message still carries lat/lon. Four of them, 2.18-2.42 km off, reached
+      #    every consumer at the 2026-09-12 06:28:57 PT cold start (GPS_TRUCK_VS_COMMA.md s1).
+      #  - on arrival, not while `alive`: this loop runs at mapdOut's 20 Hz, and `alive` stays True
+      #    for 10 s after the last gpsLocation. The old code rewrote that last message with a FRESH
+      #    `ts` for those 10 s, so `ts` said "now" about a fix up to 10 s old, and a no-fix sample
+      #    could never expire. `ts` is now the time this fix was received, which is what every
+      #    freshness check downstream (network_arbiterd, location_services) assumes it is.
+      # Rule 2: fix loss and recovery are LOGGED, change-only, with how many no-fix samples were
+      # withheld in the state being left. Without this a cold start or a tunnel is indistinguishable
+      # from a healthy receiver in every log: the consumers just see an ageing `ts`. Logged BEFORE
+      # this loop's sample is counted, so the count belongs to the state it describes.
+      now_fix = time.monotonic()
+      cur_fix_state = gps_fix_state(sm, gps_service, now_fix)
+      if cur_fix_state != fix_state:
+        cloudlog.event("mapd_configd_gps_fix", state=cur_fix_state, prev=fix_state, service=gps_service,
+                       prev_duration_s=round(now_fix - fix_state_since, 1), nofix_dropped=nofix_dropped)
+        fix_state, fix_state_since, nofix_dropped = cur_fix_state, now_fix, 0
+      if sm.updated[gps_service]:
         g = sm[gps_service]
-        mem.put_nonblocking("LastGPSPosition", json.dumps({
-          "latitude": float(g.latitude), "longitude": float(g.longitude),
-          "bearing": float(getattr(g, "bearingDeg", 0.0)),
-          "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
-          "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
+        if g.hasFix:
+          mem.put_nonblocking("LastGPSPosition", json.dumps({
+            "latitude": float(g.latitude), "longitude": float(g.longitude),
+            "bearing": float(getattr(g, "bearingDeg", 0.0)),
+            "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
+            # which receiver produced this fix. Always the device here; recorded now so a later
+            # source selector leaves this write byte-identical on a car that has no other source.
+            "src": "device",
+            "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
+        else:
+          nofix_dropped += 1
       if sm.alive['mapdOut']:
         mapd_out_down = 0
         mo = sm['mapdOut']
@@ -379,7 +421,9 @@ def main():
     # keyed per region and needs no "am I still in an uncovered episode" notion. Losing the GPS fix
     # now simply skips the request path (`uncovered` requires has_fix), which is what the old
     # "no fix counts as covered" wording was reaching for, without also wiping the backoff.
-    has_fix = sm.alive[gps_service]
+    # gpsfix2pnw: `has_fix` used to be only `alive`, so a no-fix message's lat/lon could pick the
+    # region to download or refresh. It now means what it says.
+    has_fix = sm.alive[gps_service] and sm[gps_service].hasFix
     tile_here = sm.alive['mapdOut'] and sm['mapdOut'].tileLoaded
     map_here = has_fix and tile_here
     if map_here != last_covered:
