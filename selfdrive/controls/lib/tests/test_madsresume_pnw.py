@@ -1353,10 +1353,11 @@ def test_a_gas_override_while_cruising_engaged_never_arms_or_offers():
   assert len(d2.offers) == n_off and d2.records[n_rec:] == [], f"records={d2.records[n_rec:]}"
 
 
-def test_a_liftoff_refused_by_slowing_then_regassed_leaves_a_lift_record():
-  """D1 (Rule 2). The driver lifts, the truck regens (measured 1.8 m/s^2), the window refuses `slowing`,
-  and the driver goes back on the power inside the window. The gate used to be overwritten by "gas" and
-  the refusal left no record. The record is NOT terminal: the arm still ends in exactly one fire."""
+def test_a_refused_first_press_is_spent_and_a_re_press_cannot_set():
+  """OWNER DECISION 2026-09-13, first press only -- and the choice made for a REFUSED first press: it is used
+  up too. The driver lifts, the truck regens (measured 1.8 m/s^2), the window refuses `slowing`, and the
+  driver goes back on the power. That re-press is a later press: it ends the episode with ONE record that
+  still names the gate that refused the first press (D1), and lifting off again sets nothing."""
   d = Drive()
   d.tick(50)
   d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)
@@ -1365,14 +1366,71 @@ def test_a_liftoff_refused_by_slowing_then_regassed_leaves_a_lift_record():
   for _ in range(150):                                               # 1.5 s lift, regen
     v -= REGEN_MS2 * DT
     d.tick(1, v_ego=v, **STEER_ONLY)
-  assert not d.fired(), "precondition: refused while slowing"
+  assert not d.fired() and d.b._gas_spent, "precondition: refused while slowing, first press used"
+  n = len(d.records)
   d.tick(100, gas_pressed=True, v_ego=v, **STEER_ONLY)              # back on the power
-  lifts = [r for r in d.records if r["phase"] == "lift"]
-  assert len(lifts) == 1 and lifts[0]["reason"] == "slowing" and lifts[0]["fired"] is False, lifts
-  assert lifts[0]["liftS"] == pytest.approx(1.5, abs=0.02) and lifts[0]["mode"] == "set"
-  d.tick(400, v_ego=v, **STEER_ONLY)                                 # lift and coast
-  assert d.fired()
-  assert d.phases().count("fire") == 1 and d.phases().count("refuse") == 0, d.phases()
+  d.tick(600, v_ego=v, **STEER_ONLY)                                 # lift and coast
+  assert not d.fired(), f"a second press set the speed; records={d.records[n:]}"
+  new = d.records[n:]
+  assert [(r["phase"], r["reason"], r["gate"], r["gasSpent"]) for r in new] == [("refuse", "gasSpent", "slowing", True)], new
+  assert new[0]["armS"] is not None, "this record is the arm's own terminal and must say so"
+  assert d.phases().count("refuse") == 1 and d.phases().count("fire") == 0, d.phases()
+
+
+def _set_ignored_by_the_pcm(d, v):
+  """The SET fired but stock cruise never came back, so the truck is still steering-only."""
+  d.tick(int((M.VERIFY_S + M.ARM_MAX_S + 1.0) / DT), v_ego=v, **STEER_ONLY)
+
+
+def test_first_press_only_red_light_then_overtake_then_brake_again():
+  """The owner's sequence. Brake held 45 s at a light -> release -> the first press sets at lift-off. Three
+  minutes later, same steering-only stretch (the SET did not take), an overtake -> no SET. Brake again ->
+  the first press after THAT brake sets again."""
+  d = Drive()
+  _red_light(d, 45.0)
+  _pull_away_and_lift(d, gas_s=8.0, v=16.0)
+  assert len({o[1] for o in d.offers}) == 1 and d.offers[-1][2] == pytest.approx(16.0), f"first press must set; {d.records[-4:]}"
+  first_eid = d.offers[-1][1]
+  _set_ignored_by_the_pcm(d, 16.0)
+  d.tick(int(180.0 / DT), v_ego=16.0, **STEER_ONLY)                   # three minutes later
+  n_rec, n_off = len(d.records), len(d.offers)
+  _pull_away_and_lift(d, gas_s=5.0, v=25.0)                          # overtake, lift
+  assert len(d.offers) == n_off, f"the overtake engaged cruise; records={d.records[n_rec:]}"
+  new = d.records[n_rec:]
+  assert [(r["phase"], r["reason"], r["gasSpent"]) for r in new] == [("refuse", "gasSpent", True)], new
+  d.tick(20, brake_pressed=True, v_ego=22.0, **STEER_ONLY)           # brake again
+  arm = d.records[-1]
+  assert arm["phase"] == "arm" and arm["gasSpent"] is False, arm
+  d.tick(20, v_ego=22.0, **STEER_ONLY)                               # release (< RELEASE_MIN_S: no RES)
+  _pull_away_and_lift(d, gas_s=3.0, v=22.0)
+  assert len(d.offers) > n_off and d.offers[-1][1] != first_eid, f"the first press after the new brake must set; {d.records[-4:]}"
+  assert d.offers[-1][2] == pytest.approx(22.0)
+  assert [r for r in d.records if r["phase"] == "fire"][-1]["mode"] == "set"
+
+
+def test_short_lifts_inside_the_settle_time_do_not_use_up_the_first_press():
+  """Pedal modulation while pulling away (lifts shorter than RELEASE_MIN_S, never judged) is still the first
+  press; the real lift-off afterwards sets."""
+  d = Drive()
+  _red_light(d, 5.0)
+  for _ in range(5):
+    d.tick(100, gas_pressed=True, v_ego=14.0, **STEER_ONLY)
+    d.tick(int(0.3 / DT), v_ego=14.0, **STEER_ONLY)
+  assert not d.b._gas_spent, "precondition: short lifts must not use up the press"
+  _pull_away_and_lift(d, gas_s=1.0, v=14.0)
+  assert d.fired() and d.offers[-1][2] == pytest.approx(14.0), d.records[-4:]
+
+
+def test_a_mads_unavailable_tick_forgets_that_the_first_press_was_used():
+  d = Drive()
+  _red_light(d, 5.0)
+  _pull_away_and_lift(d, gas_s=2.0, v=16.0)
+  assert d.fired() and d.b._gas_spent, "precondition"
+  _set_ignored_by_the_pcm(d, 16.0)
+  d.tick(1, mads_available=False, v_ego=16.0, **STEER_ONLY)
+  n = len(d.records)
+  _pull_away_and_lift(d, gas_s=2.0, v=18.0)
+  assert d.records[n:] == [], f"stale first-press state survived an inert tick: {d.records[n:]}"
 
 
 def test_pedal_modulation_inside_the_settle_time_writes_no_lift_record():

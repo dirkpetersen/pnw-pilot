@@ -421,6 +421,13 @@ class MadsResumeBrain:
     # of its own inside a state this brain watched begin with a brake -- the one precondition the whole
     # envelope rests on (see the noBrake check in update()).
     self._lat_braked = False
+    # engagegoal2pnw, OWNER DECISION 2026-09-13 ("first press only"): after a brake with steering still on
+    # there is no time limit, but ONLY THE FIRST accelerator press may set the speed at lift-off. True once
+    # that press has been used: its lift-off was judged by the SET gates (fired, or refused by a gate), i.e.
+    # both pedals stayed up for RELEASE_MIN_S. A shorter lift is pedal modulation inside the same press.
+    # Cleared ONLY by a new brake arm -- deliberately NOT by an episode ending (armExpired, a refusal), or
+    # an overtake minutes later would get a second attempt. Every record carries it (`gasSpent`).
+    self._gas_spent = False
     # when our own resume last fired, for the post-resume rejection check
     self._fired_t: float | None = None
     # cruise_enabled edge detector, for clearing the opt-out. THREE-STATE like _lat_prev.
@@ -479,6 +486,7 @@ class MadsResumeBrain:
       "decel": round(self._decel, 2),
       "decelAgeS": round(i.now - self._decel_from, 2) if self._decel_from else None,
       "sinceFireS": round(i.now - self._fired_t, 2) if self._fired_t is not None else None,
+      "gasSpent": bool(self._gas_spent),
     }
     if extra:
       rec.update(extra)
@@ -523,6 +531,7 @@ class MadsResumeBrain:
       self._pedal_off_t = None
       self._gas_prev = bool(i.gas_pressed)
       self._lat_braked = False
+      self._gas_spent = False
       self._fired_t = None
       self._v_max = None
       self._v_max_t = 0.0
@@ -680,12 +689,17 @@ class MadsResumeBrain:
     # new speed." An episode used to open ONLY on a brake press, and dies ARM_MAX_S after the last pedal
     # activity -- so a red light held on the brake for more than 20 s, or any pedal-free stretch that long,
     # left the accelerator doing nothing for the rest of the steering-only state. The accelerator now opens
-    # a SET-mode episode of its own whenever none is open. It can never offer RESUME (mode is fixed to SET
-    # at the arm), so ARM_MAX_S keeps its whole meaning for RESUME: no hand-back of a remembered speed
-    # minutes after the brake. Still inside the envelope: steering-only that began with a brake
-    # (`_lat_braked`), the double-tap / post-resume opt-out (`_suppressed`), and every SET gate below.
+    # a SET-mode episode of its own when none is open -- but only for the FIRST press after the brake
+    # (`_gas_spent`, owner decision 2026-09-13: no time limit, first press only). It can never offer RESUME
+    # (mode is fixed to SET at the arm), so ARM_MAX_S keeps its whole meaning for RESUME: no hand-back of a
+    # remembered speed minutes after the brake. Still inside the envelope: steering-only that began with a
+    # brake (`_lat_braked`), the double-tap / post-resume opt-out (`_suppressed`), and every SET gate below.
     gas_start = (not start and gas_rising and self._lat_braked         # _lat_braked is cleared whenever not lat
-                 and not self._armed and not self._suppressed)
+                 and not self._armed and not self._suppressed and not self._gas_spent)
+    if not start and gas_rising and lat and not self._armed and not self._suppressed and self._gas_spent:
+      # Rule 2: a later press the first-press rule ignores says so, exactly once per press.
+      out.records.append(self._snap(i, {"phase": "refuse", "reason": "gasSpent", "gate": None, "fired": False,
+                                        "mode": "set"}))
     if not start and gas_rising and lat and not self._armed and self._suppressed and not pedal_rising:
       # Rule 2 (Fable review 2026-09-13, F1): the accelerator is now an engage input, so a press the opt-out
       # refuses must say so exactly as a refused brake press does above -- `gas:true` in the snap tells them apart.
@@ -715,6 +729,8 @@ class MadsResumeBrain:
       self._armed_set_age = age if math.isfinite(age) else -1.0
       self._armed_set = self._set_ms if (self._set_ms is not None and age <= SET_MAX_AGE_S) else None
       self._last_block = "armed"
+      if start:
+        self._gas_spent = False        # a new brake press arms the first-press rule again
       if gas_start:
         self._used_gas = True          # SET mode from the first tick: a one-tick tap must not fall back to RES
         out.records.append(self._snap(i, {"phase": "arm", "reason": "gas", "fired": False}))
@@ -750,6 +766,19 @@ class MadsResumeBrain:
     # gasset2pnw: the accelerator is no longer an abort -- it is how the driver names the speed.
     # While it is down, this episode's target switches to "whatever speed they end up at", and the
     # release clock is held: it starts when BOTH pedals are up (gate 2 below).
+    if i.gas_pressed and self._gas_spent:
+      # engagegoal2pnw, first press only: the press that was allowed to name the speed has been used (its
+      # lift-off was judged), so this is a LATER press in the same steering-only stretch -- an overtake, or a
+      # re-press after a refused lift-off. It must never engage cruise. End the episode with one record:
+      # the arm's terminal if it had none yet (`gate` = what refused the first press), else a standalone one.
+      if self._offer_t is not None:
+        out.records.append(self._snap(i, {"phase": "offerEnd", "reason": "gasSpent", "fired": True}))
+        self._offer_t = None
+      gate = None if self._terminal else self._last_block
+      out.records.append(self._snap(i, {"phase": "refuse", "reason": "gasSpent", "gate": gate, "fired": False,
+                                        "mode": "set"}))
+      self._disarm()
+      return out
     if i.gas_pressed:
       # engagegoal2pnw / D1 (Rule 2): the driver went back on the power while a lift-off window was open
       # and refusing. `_last_block` -- the gate that held it (`slowing`, `decelUnknown`, `slow`, a lead
@@ -833,6 +862,8 @@ class MadsResumeBrain:
       return out
 
     since = i.now - self._released_t
+    if self._used_gas and since >= RELEASE_MIN_S:
+      self._gas_spent = True           # first press only: this press's lift-off is judged from here on
 
     # --- an offer already in flight: keep it alive only while every gate still holds ------------
     if self._offer_t is not None:
