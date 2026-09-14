@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `47be7e2175` (policeship2pnw). **Installed on the truck:** `47be7e2175`
-(07:37 PT; healthy: location_servicesd up, rest areas and chargers loaded, new `location_services_police_poll_state` log live).
+**Channel tip:** `origin/3devpnw` = `f93e876310` (gearparkcan2pnw). **Installed on the truck:** `f93e876310`
+(07:50 PT).
 
 ## Networking — arbiter logging
 
@@ -28,6 +28,7 @@ as each change ships.
 | Commit(s) | What changed | Notes |
 |---|---|---|
 | pnw-opendbc `7163a85522` (master-pnw) + pin `9f6ca9f0ea` **gearunknown2pnw** | Ford carstate reports `gearShifter=unknown` until `PowertrainData_10` has actually been received, instead of decoding Park from the parser's zero-initialised values. That fixes loggerd's parked-video gate trusting a gear decoded from a silent bus, which could lose a drive's video. Once seen, the gear decodes exactly as before, and a mid-drive outage holds the last gear. One log line when the gear is first received (and one if it isn't within N s). | Fable SHIP both. All 11 Ford platforms read PowertrainData_10 on bus 0 (no friends'-channel risk). No new engagement delay; the Tesla is untouched. Ford suite 196 pass. Installed 07:28 PT; verified: "PowertrainData_10 first received 0.0 s", gear park, carState valid, loggerd stopped in Park. |
+| `f93e876310` **gearparkcan2pnw** | On cars whose gear reads `unknown` until it's actually received (capability `gear_unknown_until_seen`: the Lightning via its powertrain parser, the Tesla via chassis), GearPark may be set from a Park decode while global canValid is False, as long as the gear's own parser is valid that tick. This closes parknorec2pnw's gap where a truck waking to charge with the camera bus asleep couldn't confirm Park and kept recording. The check is read-only and stricter than `can_valid`, so a dead powertrain bus can never set Park. Other platforms are unchanged. | Fable SHIP (0/2000 valid-when-invalid ticks; Tesla DI_gear on the chassis parser maps never-received to unknown; no SET/CLEAR race; other platforms truth-identical). Installed 07:50 PT; verified LIVE at boot: `gear_park value=true can_valid=false gear_source_valid=true`, loggerd stopped. |
 
 ## Diagnostics — lead-loss shadow
 
@@ -49,9 +50,6 @@ as each change ships.
 
 - **`behindgate2pnw`**: ICBM must not START a slowdown for a map curve the truck already passed (the 09-08
   69 → 44 mph phantom, the 09-05 freeway 40 mph target, the weekend 40 → 28 / 59 → 52 cuts).
-- **`gearparkcan2pnw`**: capability-gated follow-on so the Lightning confirms Park on a quiet-CAN charging
-  boot (GearPark set on the powertrain parser's validity, not global canValid). Closes parknorec2pnw's
-  charging-recording gap without touching the 74 platforms that still decode Park from a silent bus.
 - **Pro Power (done, analysis only):** APIM `7D0-10-03` reads PPOOOVOS already **on** (partially confirmed; one
   FORScan read-only look settles it). Nothing cleared Pro Power in a 66-min overnight watch. Report:
   `drives/2026-09-14/propower-overnight-watch/DRIVE_REPORT.md`.
