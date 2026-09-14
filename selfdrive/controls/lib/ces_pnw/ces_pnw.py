@@ -56,7 +56,8 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
                   "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis",
                   "timeToApex",
-                  "mapErr")   # foldlog2pnw: VTSC's map-curve fold failed this tick ("" = it did not)
+                  "mapErr",   # foldlog2pnw: VTSC's map-curve fold failed this tick ("" = it did not)
+                  "gpsAge")   # vtscgpsage2pnw: age (s) of the fix VTSC's map fold used; null = none (NOT icbmGpsAge)
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation

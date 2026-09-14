@@ -14,7 +14,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import VTSC_TELE_KEYS
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
 
 
-def _payload():
+def _payload(gps_age=None):
   """Build an overlay payload without constructing a real controller (no Params, no device)."""
   c = object.__new__(VTSCController)
   c.msg = dict(enabled=False, active=False, state="idle", vTarget=0.0, vCruise=0.0,
@@ -31,6 +31,7 @@ def _payload():
   c._tele_curve_win = "none"
   c._tele_rsn_map = c._tele_rsn_vis = -1.0
   c._tele_map_err = ""
+  c._tele_gps_age = gps_age   # vtscgpsage2pnw
   return c.overlay_payload()
 
 
@@ -60,3 +61,12 @@ class TestOverlayContract:
     published = set(_payload())
     for k in ("curveWin", "rsnMap", "rsnVis", "apexCurvature", "apexDist", "vCurveSafe", "timeToApex"):
       assert k in published, f"{k} missing from the VTSCStatus payload"
+
+  def test_gps_age_is_on_the_status_channel_and_on_the_lift_list(self):
+    """vtscgpsage2pnw: a future VTSC GPS freshness check is to be decided on this ces_events column. Named explicitly
+    so it cannot drop off either end of the contract, and checked with a value: rounded to 0.1 s, a plain JSON number,
+    and null -- not a missing key -- when there is no age."""
+    import json
+    assert "gpsAge" in VTSC_TELE_KEYS
+    assert "gpsAge" in _payload() and _payload()["gpsAge"] is None
+    assert json.loads(json.dumps(_payload(47.26)))["gpsAge"] == 47.3

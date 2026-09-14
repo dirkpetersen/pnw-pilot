@@ -101,6 +101,11 @@ class VTSCController:
     self._map_read_err_n = 0     # silentexc2pnw: failed MapTargetVelocities reads since that log line
     self._gps_err_t = None       # silentexc2pnw: ...the same for a LastGPSPosition read that FAILED (a missing fix is not one)
     self._gps_err_n = 0
+    # vtscgpsage2pnw: TELEMETRY ONLY -- nothing on the control path reads these three.
+    self._gps_fix_ts = None      # LastGPSPosition "fix_ts" of the position held (monotonic s); None = no position / no fix_ts
+    self._fix_ts_err_t = None    # monotonic time of the last logged unusable fix_ts (None = never)
+    self._fix_ts_err_n = 0       # unusable fix_ts reads since that log line
+    self._tele_gps_age = None    # gpsAge for this tick (s); None = the map fold uses no position with a fix time
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
     # sharpcurve2pnw: per-cycle effective decels. Normal commanded decel is capped to EV regen authority
@@ -236,6 +241,7 @@ class VTSCController:
                            f"vision curve cap can slow for curves ({self._map_read_err_n} failure(s) since the last log)")
         self._map_read_err_t = now
         self._map_read_err_n = 0
+    self._gps_fix_ts = None      # vtscgpsage2pnw: set below only with THIS read's position, so it never outlives it
     try:
       pos = self.mem_params.get("LastGPSPosition", return_default=True)
       if pos is None:
@@ -250,6 +256,27 @@ class VTSCController:
         self._cur_lon = float(pos["longitude"])
         brg = pos.get("bearing")
         self._cur_bearing = float(brg) if brg is not None else None
+        # vtscgpsage2pnw (TELEMETRY ONLY): the fix time behind gpsAge -- the same `fix_ts` ces_pnw reads for
+        # icbmGpsAge (mapd_configd: monotonic time the fix was valid). Absent = no fix time (as in ces_pnw), not
+        # logged. Its own try: a bad fix_ts must cost only the telemetry, never the position the fold uses (ces_pnw's
+        # single try would drop the position -- a behaviour change here). Caught broadly: plannerd is
+        # restart_if_crash=False. What raises: float() of a non-number, an integer too large for a float, NaN/Inf.
+        fts = pos.get("fix_ts")
+        if fts is not None:
+          try:
+            fts = float(fts)
+            if not math.isfinite(fts):
+              raise ValueError(f"non-finite fix_ts {fts}")
+            self._gps_fix_ts = fts
+          except Exception as e:
+            self._fix_ts_err_n += 1
+            now = time.monotonic()
+            if self._fix_ts_err_t is None or now - self._fix_ts_err_t >= TWISTY_ERR_LOG_S:
+              cloudlog.exception(f"VTSC: LastGPSPosition fix_ts unusable ({type(e).__name__}) -- gpsAge telemetry reads " +
+                                 "null while this lasts; the position is still used for map curves " +
+                                 f"({self._fix_ts_err_n} failure(s) since the last log)")
+              self._fix_ts_err_t = now
+              self._fix_ts_err_n = 0
     except Exception as e:
       self._cur_lat = self._cur_lon = None
       self._cur_bearing = None
@@ -340,6 +367,11 @@ class VTSCController:
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
+    # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
+    # LastGPSPosition "fix_ts", the clock and timestamp ces_pnw's icbm_project_position uses for icbmGpsAge. Negative
+    # (a fix_ts ahead of this clock) is reported as it is. None when the fold uses no position: map curves off or VTSC
+    # disabled (the held position is not refreshed then), no fix, or no usable fix_ts. Computed before the early returns.
+    self._tele_gps_age = (now - self._gps_fix_ts) if (self._map_curves and self._gps_fix_ts is not None) else None
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
@@ -652,6 +684,9 @@ class VTSCController:
         # foldlog2pnw: "" normally; the exception type name on a tick whose map-curve fold failed (cloudlog has the
         # traceback). curveWin still names the source that authored the cap, which on such a tick is never "map".
         "mapErr": str(self._tele_map_err),
+        # vtscgpsage2pnw: seconds since the fix time of the position the map fold used this tick, 0.1 s; null = no such
+        # position (see cap()). Measurement only -- the evidence for a future freshness check.
+        "gpsAge": round(self._tele_gps_age, 1) if self._tele_gps_age is not None else None,
         "rsnMap": _fin(self._tele_rsn_map, 2),
         "rsnVis": _fin(self._tele_rsn_vis, 2),
         "apexCurvature": _fin(self.msg.get("apexCurvature", 0.0), 5),
