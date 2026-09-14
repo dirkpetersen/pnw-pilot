@@ -7,8 +7,9 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip / installed on the truck:** `8b08366eb1` (lcabort2pnw shadow `d1d2a87df6` + docs, installed
-09:13 PT, BootCount 206). 8 changes were installed today, each on its own reboot.
+**Channel tip:** `origin/3devpnw` = `03ee7fc3db` (pscmlimlog2pnw pin bump, comments only; staging).
+**Installed on the truck:** `c1f3ffd1ab` (pscmlimlog2pnw, 09:07 PT, BootCount 207). 9 changes installed today, each
+on its own reboot.
 
 ## Networking — arbiter logging
 
@@ -69,6 +70,13 @@ as each change ships.
 |---|---|---|
 | `d1d2a87df6` **lcabort2pnw (1/2, shadow)** | Logs `lane_change_abort_shadow` (ERROR level, so it lands in qlogs) when the driver holds steering torque against an openpilot lane change for 0.3 s. It changes nothing the car does. | Fable SHIP. DesireHelper runs in modeld: the new attributes are read nowhere else, and NaN/−inf/never-received torque can't raise. It fires once per fight. The sign is right on both cars. Replays pin the on-car `laneChangeState` trace on all 171 ticks. Installed 09:13 PT (BootCount 206): modeld up, 0 tracebacks. **Finding:** ending the state would not stop the steering, because modeld feeds the desire as a rising-edge pulse and the model keeps changing lanes for about 4 s. The acting commit `653b9bc79a` is held for the owner: it would have ended 5 of 19 logged changes, 4 of them Lightning resting hands at ~1.8 Nm. |
 
+## Cars — Lightning PSCM limit telemetry
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `c1f3ffd1ab` **pscmlimlog2pnw** | card logs the Lightning PSCM's own lateral-limit report (`LatCtlLim`) to ces_events as `{"ev":"pscmLim"}`: one record per change plus one at the first frame of a drive, an error record if no frame arrives within 10 s, capped at 20/min. It reads the Ford carstate's existing CAN parser and sets nothing on CarState, so the dead PSCM clamp in `lateral_angle_pnw.py` stays inert. Telemetry only. | Motivation: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`. On 09-08 19:44 PT the PSCM hit its own static limit (−24° held for 2.1 s at 58→54 mph) with no software limit binding, and nothing recorded it. Feeding the signal into the clamp would have frozen the command below what the truck was still delivering. Fable SHIP: nothing escapes `step()` (card is `restart_if_crash=True`); 2000/2000 records with a concurrent rotating writer and 0 torn lines; the Tesla builds nothing; 0.23 µs per tick; 24 tests, 49/49 mutants. Installed 09:07 PT (BootCount 207): verified live, first record `to=0`, card 0 tracebacks. |
+| pnw-opendbc `97be35a7` (master-pnw) + pin `03ee7fc3db` | Comment-only: corrects the two "`LatCtlLim_D_Stat` does not fire" comments beside the dead clamp. | Fable: AST-identical, worth shipping. Installing. |
+
 ## Location services — police misses
 
 | Commit(s) | What changed | Notes |
@@ -85,9 +93,6 @@ as each change ships.
   on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
   Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
   Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
-- **`pscmlimlog2pnw`** (built; Fable reviewing): log the PSCM's own `LatCtlLim` changes to ces_events
-  (`{"ev":"pscmLim"}`, change-only, capped at 20/min). It reads the existing Ford parser in card and is never fed
-  to the clamp (a guard test proves the clamp stays inert).
 - **Building:** `silentexc2pnw` (the next 3 silent excepts on the speed path, `mapD` Infinity → null, and the stale
   coop-steer test fake); `icbmband2pnw` (analysis first: can polyline curvature reject 46.5–58 m/s mapd garbage
   without ever rejecting a real curve?).
