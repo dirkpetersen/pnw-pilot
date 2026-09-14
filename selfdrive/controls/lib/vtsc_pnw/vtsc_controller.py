@@ -38,6 +38,10 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
+# twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
+# this many seconds (cap() runs at 20 Hz), each counting the failures since the previous line.
+TWISTY_ERR_LOG_S = 60.0
+
 
 def _fin(x, nd: int, default: float = 0.0) -> float:
   """Round, substituting `default` for NaN/Inf. See the note at the call sites in overlay_payload()."""
@@ -104,6 +108,8 @@ class VTSCController:
     self._tele_pitch = None   # road pitch used (rad, carControl.orientationNED[1]; None = no reading)
     self._tele_dir = ""       # apex turn direction: "L" / "R" / "" (no real bend)
     self._engaged = False     # for engage/clear logging
+    self._twisty_err_t = None  # twistyr2pnw: monotonic time of the last logged twisty-cap failure (None = never)
+    self._twisty_err_n = 0     # twistyr2pnw: twisty-cap failures since that log line
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -307,11 +313,24 @@ class VTSCController:
       k_apex, d_apex, v_curve, sharp_map = self._fold_map_curve(k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m)
       # twisty-section base trim (descent-only): hold a LOWER base cruise through a winding DOWNHILL so we
       # don't re-accelerate to full set between blind curves. Only ever lowers the working cruise.
+      # twistyr2pnw (Rule 2): this was `except Exception: pass`, so a failure silently dropped the trim. The fallback is
+      # unchanged -- the working cruise stays untrimmed and the rest of cap() runs -- but it is now logged. Caught are
+      # the malformed-map-data errors. The helper already skips bad points itself (KeyError/TypeError/ValueError), so
+      # in practice what escapes is a TypeError (a non-list MapTargetVelocities) or an OverflowError (an out-of-range
+      # number); ValueError is caught as the same family.
+      # Fable: catch broadly. plannerd is restart_if_crash=False, so an escaping exception would end longitudinal
+      # planning (processNotRunning -> disengage, no re-engage) on both cars until a manager restart. The loud
+      # rate-limited log, with the exception type, is what keeps this from being silent.
       try:
         v_cruise = twisty_section_cap(self._map_targets, self._cur_lat, self._cur_lon,
                                       v_cruise, v_ego, horizon_m, pitch)
-      except Exception:
-        pass
+      except Exception as e:
+        self._twisty_err_n += 1
+        if self._twisty_err_t is None or now - self._twisty_err_t >= TWISTY_ERR_LOG_S:
+          cloudlog.exception(f"VTSC: twisty-descent cap FAILED ({type(e).__name__}) -- the base cruise is NOT being " +
+                             f"trimmed through winding descents ({self._twisty_err_n} failure(s) since the last log)")
+          self._twisty_err_t = now
+          self._twisty_err_n = 0
 
     # curveslow-lightning: per-car curve-speed penalty. v_curve is now the finalized curve-safe speed
     # (vision, or the more-binding map fold). On the Lightning, lower it (weaker EPS -> enter slower);

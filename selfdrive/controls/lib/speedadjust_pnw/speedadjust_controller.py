@@ -220,6 +220,9 @@ SA_ACTUATION_GRACE_S = 2.0                # s; stock-ACC only
 # a curve overlapping a zone entry left the truck at 75 in a 45 zone. We read the IcbmTarget mem-param the Ford
 # executor reads; a command older than the executor's STALE_LIMIT_S is not being executed. LOCAL mirror, as above.
 SA_ICBM_FRESH_S = 2.0
+# policer2pnw (Rule 2): an unreadable police input is logged -- the first failure at once, then at most one line per
+# this many seconds, each counting the failed reads since the previous line.
+POLICE_READ_ERR_LOG_S = 60.0
 
 
 def _police_key(rep):
@@ -258,6 +261,8 @@ class SpeedAdjustController:
     self._ratio = 0.0            # ANCHORED over-limit ratio (v_set/limit) captured at the baseline —
                                  #   NOT live v_cruise, so re-scrolling the set can't double-reduce
     self._police = None          # last LocationServices["police"] dict
+    self._police_err_t = None    # policer2pnw: monotonic time of the last logged police-read failure (None = never)
+    self._police_err_n = 0       # policer2pnw: failed police reads since that log line
     self._police_latched = False # once within the approach window, hold until the report clears
     # policelatch2pnw: WHICH report the latch belongs to. The latch means "I am approaching THIS
     # report"; it must not survive onto a different one. Without this the cap carried across reports:
@@ -386,8 +391,20 @@ class SpeedAdjustController:
       if isinstance(raw, dict):
         p = raw.get("police")
         return p if isinstance(p, dict) else None
-    except Exception:
-      pass
+    except Exception as e:
+      # policer2pnw (Rule 2): this was `except Exception: pass`. The fallback is unchanged -- no police report, so no
+      # police slowdown -- but it is now logged. The common causes are malformed payloads (ValueError covers a bad JSON
+      # string and a bad UTF-8 byte string).
+      # Fable: catch broadly. An UnknownKeyName from a params_pyx.so/params_keys.h mismatch is none of those, and
+      # plannerd is restart_if_crash=False: letting it escape would disengage both cars with no re-engage. The log
+      # names the exception type so a build defect still stands out.
+      self._police_err_n += 1
+      now = time.monotonic()
+      if self._police_err_t is None or now - self._police_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: LocationServices police input unreadable ({type(e).__name__}) -- NO police " +
+                           f"slowdown can engage while this lasts ({self._police_err_n} failed read(s) since the last log)")
+        self._police_err_t = now
+        self._police_err_n = 0
     return None
 
   def _read_inputs(self):
