@@ -222,6 +222,8 @@ SA_ACTUATION_GRACE_S = 2.0                # s; stock-ACC only
 SA_ICBM_FRESH_S = 2.0
 # policer2pnw (Rule 2): an unreadable police input is logged -- the first failure at once, then at most one line per
 # this many seconds, each counting the failed reads since the previous line.
+# silentexc2pnw: the AutoSpeedReduce read and the SpeedAdjustTarget publishes log on the same interval, each with its
+# own first-failure/count state.
 POLICE_READ_ERR_LOG_S = 60.0
 
 
@@ -250,6 +252,8 @@ class SpeedAdjustController:
       self.mem_params = None
     self._long_ok = bool(getattr(CP, "openpilotLongitudinalControl", False))
     self._mode = 0
+    self._mode_err_t = None      # silentexc2pnw: monotonic time of the last logged AutoSpeedReduce read failure (None = never)
+    self._mode_err_n = 0         # silentexc2pnw: failed AutoSpeedReduce reads since that log line
     self._sl = 0.0                # current posted limit (m/s); 0 = unknown
     self._sl_valid_t = -1e9       # monotonic time of the last VALID limit read (for the dropout hold)
     self._sl_pending = 0.0        # a LOWER limit awaiting SL_DROP_CONFIRM_S confirmation (0 = none)
@@ -331,6 +335,10 @@ class SpeedAdjustController:
     self._pub_last = -1e9        # publish throttle (monotonic)
     self._pub_active = False     # was the last SpeedAdjustTarget publish non-idle (need one more
                                   # publish to clear it to {} on the transition to idle)
+    self._pub_err_t = None       # silentexc2pnw: monotonic time of the last logged SpeedAdjustTarget target-publish failure
+    self._pub_err_n = 0          # silentexc2pnw: failed target publishes since that log line
+    self._clear_err_t = None     # silentexc2pnw: ...and the same for the {} clear publish
+    self._clear_err_n = 0
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -410,8 +418,20 @@ class SpeedAdjustController:
   def _read_inputs(self):
     try:
       self._mode = int(self.params.get("AutoSpeedReduce", return_default=True) or 0)
-    except Exception:
+    except Exception as e:
+      # silentexc2pnw (Rule 2): this was `except Exception: self._mode = 0`, so an unreadable selector silently
+      # switched police and limit slowdowns off on both cars. The fallback is unchanged (Off until a read succeeds,
+      # ~1 s later) but it is now logged in the policer2pnw style. A malformed stored value does not reach here
+      # (Params returns the default for it, with its own warning); an UnknownKeyName from a params_keys.h /
+      # params_pyx.so mismatch does. Caught broadly: plannerd is restart_if_crash=False.
       self._mode = 0
+      self._mode_err_n += 1
+      now = time.monotonic()
+      if self._mode_err_t is None or now - self._mode_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: AutoSpeedReduce unreadable ({type(e).__name__}) -- mode forced Off, NO police " +
+                           f"or limit slowdown while this lasts ({self._mode_err_n} failed read(s) since the last log)")
+        self._mode_err_t = now
+        self._mode_err_n = 0
     self._sl = self._read_speed_limit()
     self._police = self._read_police()
 
@@ -588,8 +608,18 @@ class SpeedAdjustController:
       if self._pub_active:
         try:
           self.mem_params.put_nonblocking("SpeedAdjustTarget", {})
-        except Exception:
-          pass
+        except Exception as e:
+          # silentexc2pnw (Rule 2): was `except Exception: pass`. Fallback unchanged: the clear is not retried, and
+          # the last target stays in the mem-param until the executor's staleness check (STALE_LIMIT_S, 2 s on its
+          # ts) stands it down. Logged like _read_police; own state, so a failing clear and a failing target
+          # publish each get their first line. Caught broadly: plannerd is restart_if_crash=False.
+          self._clear_err_n += 1
+          if self._clear_err_t is None or now - self._clear_err_t >= POLICE_READ_ERR_LOG_S:
+            cloudlog.exception(f"speedadjust: SpeedAdjustTarget clear FAILED ({type(e).__name__}) -- the stock-ACC " +
+                               "executor keeps the last target until it goes stale " +
+                               f"({self._clear_err_n} failure(s) since the last log)")
+            self._clear_err_t = now
+            self._clear_err_n = 0
         self._pub_active = False
         self._pub_last = now
       return
@@ -609,8 +639,18 @@ class SpeedAdjustController:
       if direction == "inc":
         payload["dir"] = "inc"
       self.mem_params.put_nonblocking("SpeedAdjustTarget", payload)
-    except Exception:
-      pass
+    except Exception as e:
+      # silentexc2pnw (Rule 2): was `except Exception: pass`. Fallback unchanged: this publish is dropped, so the
+      # stock-ACC executor gets no fresh police/limit target (or restore) and stands down once the last one is
+      # STALE_LIMIT_S old -- the truck is NOT slowed. Logged like _read_police. What can raise: the put itself (e.g.
+      # UnknownKeyName on a params_keys.h / params_pyx.so mismatch) or float() of a non-numeric target/ceiling.
+      self._pub_err_n += 1
+      if self._pub_err_t is None or now - self._pub_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: SpeedAdjustTarget publish FAILED ({type(e).__name__}) -- the stock-ACC " +
+                           "executor gets NO police/limit slowdown or restore target while this lasts " +
+                           f"({self._pub_err_n} failure(s) since the last log)")
+        self._pub_err_t = now
+        self._pub_err_n = 0
 
   @staticmethod
   def _driver_intervening(sm) -> bool:
