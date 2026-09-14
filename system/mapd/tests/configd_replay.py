@@ -78,9 +78,10 @@ def _build(service, fields):
   return messaging.log_from_bytes(msg.to_bytes())
 
 
-def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=None):
+def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=None, params_script=None):
   """Run main() over `steps`. `mem_script` = {t: {key: value}} applied to the mem store at the START
-  of the step with that t (how a test models another process publishing a mem-param, e.g. CarGps).
+  of the step with that t (how a test models another process publishing a mem-param, e.g. CarGps);
+  `params_script` does the same for the persistent store (e.g. card writing CarParams).
   `on_step(t, mem_store)` runs after each loop iteration has finished, i.e. what a consumer reading
   the mem store at that instant would see.
 
@@ -92,6 +93,7 @@ def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=
   log = FakeLog()
   script = list(steps)
   mem_script = dict(mem_script or {})
+  params_script = dict(params_script or {})
   holder = {"prev_t": None}
   sent = []
 
@@ -111,6 +113,8 @@ def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=
       clock.t = holder["prev_t"] = t
       for key, val in mem_script.pop(t, {}).items():
         memp.store[key] = val
+      for key, val in params_script.pop(t, {}).items():
+        params.store[key] = val
       sm.update_msgs(t, [_build(s, f) for s, f in msgs])
 
     sm.update = update

@@ -47,3 +47,71 @@ itself and is untouched by everything here.
 loop at 20 Hz, replaying the real cold-start qlog stream, with `network_arbiterd._read_gps` and
 `location_servicesd._read_mem` reading the blob after every iteration. Five mutants (no `hasFix`
 gate; write while `alive`; region `has_fix` = `alive`; no log; `nofix` reads as `fix`) all fail it.
+
+## 2. gpssel2pnw — select the truck's CAN GPS (Lightning only, by capability)
+
+**Rule.** `LastGPSPosition` carries the car's fix (`"src": "car"`) while the `CarGps` feed is provably
+live, and the device fix (`"src": "device"`, §1) otherwise. mapd itself stays on `gpsLocation`: once
+mapd sees `gpsLocationExternal` it never falls back, so a frozen truck feed would freeze mapd.
+
+**Capability, not fingerprint.** `PnwVehicle(CarParams).car_gps` (`selfdrive/controls/lib/pnw_vehicle.py`),
+re-read every 5 s from `CarParams` (cleared at every onroad transition, rewritten by card for the car
+actually attached). Not capable: `CarGps` is never read and every write is §1's, byte for byte. Not
+mirrored in `opendbc/car/pnw_vehicle.py`: nothing there consumes it.
+
+**Transport: the existing `CarGps` mem-param**, published by card (`opendbc ford/carstate.py
+_publish_car_gps`, every 100th CarState update, ~1 Hz) as `{lat, lon, hdg, spd MPH, sats, hdop, ts, age}`.
+No new writer, no msgq subscription in this background daemon (the 2026-07-13 commIssue rule).
+- Latency at the blob write (derived from the report's measurements, not re-measured on this code): the fix is ~0.2 s old at CAN receipt, plus the decimation phase
+  (`age` 0.00–1.03 s, median ~0.5), plus this loop (≤0.05 s while mapd publishes at 20 Hz, ≤1 s if
+  mapd is down): **~0.7 s median**. The device fix after §1 is **~0.6 s** (0.57 s modem, written on
+  arrival). So this transport buys accuracy, heading and coverage, **not latency**. Publishing on a new
+  CAN frame instead of every 100th update would remove ~0.46 s; that is an opendbc change, not built.
+
+**The car is used only while ALL hold** (`CarGpsSource`, one judgment per loop):
+
+| check | fails as | threshold and why |
+|---|---|---|
+| a publish exists and parses | `absent` / `unreadable` | — |
+| its `ts` changed recently (judged on THIS process's clock, never ours-vs-publisher wall clock: boots run on a bogus clock for 7–68 s) | `silent` | 2.5 s; publishes are ~1 s apart |
+| values in range (DBC sentinels: lat raw 255 → 166°, heading 65535 → 655.35, speed 254/255) | `invalid` | 360.0 is valid (`round(359.96, 1)`) |
+| CAN frame age at publish | `stale_can` | 2.0 s; 0.00–1.03 s on all 68,175 weekend publishes. The wrong-bus class. |
+| lat, lon and heading not identical on 3 consecutive publishes **while moving** | `frozen` | one repeat is normal decimation. Moving = truck ≥ 3 mph, or device fix speed > 5 m/s (device standstill noise reached 4.17 m/s) |
+| 3 consecutive healthy publishes | `reacquiring` | no flapping between receivers ~6 m apart |
+
+Residual, undetectable here: truck content frozen at 0 mph while the device has no fix either.
+
+**Weekend replay** (every `car_gps` read in both datasets, 68,176 publishes, through the real
+`CarGpsSource`): zero `frozen`, `stale_can`, `silent` or `invalid`; one acquisition per boot. The one
+`unreadable` is an analysis artifact (the loader nulls one pre-sync `age`).
+
+**Rule 2 logs** (both change-only): `mapd_configd_car_gps_capability {capable}`, and
+`mapd_configd_gps_source {src: car|device|none, prev, car: <kind above>, car_detail, device: fix|nofix|silent}`
+on every change of source or of why the car is not used. Expect ~4 lines per Lightning drive.
+
+**Consumers of `LastGPSPosition`** (line numbers on gpssel2pnw rebased onto 3devpnw `67011d2f53`). None needed a change; all read keys by
+name, so `src` is ignored except by the ces telemetry.
+
+| consumer | reads | effect of `src: car` |
+|---|---|---|
+| `ces_pnw.py:2567` `_read_map` → ICBM `icbm_far_map_candidate`/`icbm_map_reach`/`upcoming_curve`, `polyline_curvature(_at)` `:2590`/`:3556`, bearing history `:2809`, `gpsSrc` in records `:3078`/`:3829` | lat, lon, **bearing**, src (new, → `gpsSrc`) | better cross-track and heading; latency unchanged (see above) |
+| `vtsc_controller.py:167` | lat, lon, **bearing** | none: Tesla op-long, no capability |
+| `location_servicesd.py:703` `_read_mem` (cone/behind gate) · `:459` `_cur_gps` · `:485` `_cur_speed` (police ≥45 mph gate, 10 s ts) · `:1510` net log | lat, lon, **bearing**, speed, ts | heading stable at stops; speed is integer MPH × 0.44704, same factor as the gate |
+| `network_arbiterd.py:458` `_read_gps` (10 s ts; gpscarry) | lat, lon, ts | position at boot/tunnels |
+| `ui/widgets/network.py:365` geofence capture (no ts check, flagged) | lat, lon | none |
+
+Heading from the blob reaches: ces_pnw (ICBM polyline `ahead` checks, steer-event bearing history,
+`bearing`/`heading` telemetry), location_services (forward cone, behind gate, police direction), and
+VTSC on the Tesla (unchanged). While the truck is selected, `lat`/`lon` in ces_events equal `car_gps`, so
+the side-by-side comparison channel only exists on `gpsSrc: device` ticks (qlog `gpsLocation` keeps the
+device track).
+
+**Tesla byte-identity, measured**: the same 52 s replay (cold start + tunnel, with a stray `CarGps`
+feed) through gpsfix2pnw's and gpssel2pnw's real loops: 13,754 mem writes + 1 param write, all-writes
+sha256 `4aad6a81998d1349` on both, `CarGps` never read. The Lightning run without `CarGps` hashes the same.
+
+**Tests**: `system/mapd/tests/test_gps_source_select.py` (tunnel and cold-start replays, the freeze
+classes, parked-and-charging, capability flips, Tesla identity) and
+`selfdrive/controls/lib/ces_pnw/tests/test_gpssel_telemetry.py` (blob → real `_read_map` → records).
+19 mutants killed; one equivalent (dropping `car_gps_capable and` from `use_car`: the source is only
+fed while capable and is replaced on every capability change).

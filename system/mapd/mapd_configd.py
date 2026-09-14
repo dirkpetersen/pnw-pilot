@@ -24,9 +24,11 @@ import shutil
 import subprocess
 import time
 import cereal.messaging as messaging
+from cereal import car
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # gpssel2pnw: car_gps capability
 from openpilot.system.mapd.installer import MAPD_BINARY   # mapdheal2pnw: self-heal relaunch path
 from openpilot.system.mapd import coverage                # mapdstate2pnw: GPS -> region + download key
 
@@ -64,6 +66,124 @@ def gps_fix_state(sm, service: str, now: float) -> str:
   if not sm.seen[service] or now - sm.recv_time[service] > GPS_SILENT_S:
     return "silent"
   return "fix" if sm[service].hasFix else "nofix"
+
+
+# gpssel2pnw: select the CAR's own CAN GPS fix for LastGPSPosition while it is provably live
+# (docs/pnw/GPSSEL2PNW.md s2). Measured on the 2026-09-11..13 weekend + the 2026-09-08 I-5 evening:
+# the truck fix sat 1.6 m vs the device's 3.0 m median from the lane, was usable on 99.98% vs 98.6% of
+# moving ticks, and kept reporting through both cold starts and the SR 99 tunnel.
+MPH_TO_MS = 0.44704
+# The CarGps publisher (opendbc ford/carstate.py _publish_car_gps) publishes ~1 Hz from card. Its
+# `ts` changes on every publish; unchanged for this long = card or the publisher is gone.
+CAR_GPS_SILENT_S = 2.5
+# `age` = seconds since the CAN frame arrived, at publish. 0.00-1.03 s on every one of 68,175 weekend
+# publishes (it is the decimation phase); larger = frames stopped (the 2026-09-05 wrong-bus class).
+CAR_GPS_MAX_AGE_S = 2.0
+# The frame keeps arriving but its CONTENT is frozen: lat, lon and heading all unchanged on this many
+# consecutive publishes while moving. One repeat is normal (a decimated publish can land twice on one
+# frame); three identical publishes is not.
+CAR_GPS_FROZEN_PUBLISHES = 3
+# Healthy consecutive publishes before the car is (re)selected, so a borderline feed cannot flap the
+# position between two receivers ~6 m apart every second.
+CAR_GPS_REACQUIRE_PUBLISHES = 3
+# "Moving", for the freeze test. mapd_configd must not subscribe to carState (background-process
+# rule), so vEgo is not available; motion comes from the truck's own GPS speed (integer MPH, so this
+# is >= 3 mph) or from the DEVICE fix speed, whose threshold sits above its standstill noise: device
+# speed exceeded 1 m/s on 3.6% of 8,313 standstill fixes this weekend, maximum 4.17 m/s.
+CAR_GPS_MOVING_MS = 1.0
+DEVICE_GPS_MOVING_MS = 5.0
+# How often to re-read CarParams for the capability (it is rewritten once per drive by card).
+CAR_CAPABILITY_RECHECK_S = 5.0
+
+
+class CarGpsSource:
+  """Freshness judgment for the CarGps mem-param, one read per loop.
+
+  update() returns the fix to write when THIS read is a new, healthy publish and the car has been
+  healthy for CAR_GPS_REACQUIRE_PUBLISHES publishes; otherwise None. `kind` names what the feed is
+  doing (ok / reacquiring / absent / unreadable / silent / invalid / stale_can / frozen) and `detail`
+  the numbers behind it, for the change-only source log.
+
+  Freshness is judged on what THIS process observes (when a publish's `ts` first changed), never by
+  comparing the publisher's wall-clock `ts` with ours: every boot runs on a bogus pre-sync wall clock
+  for its first 7-68 s, and a sync jump would read as a dead feed.
+
+  Residual, not detectable here: content frozen at 0 mph while the device has no fix either. Nothing
+  in this process knows the truck is moving then (no carState, by rule)."""
+
+  def __init__(self) -> None:
+    self.kind = "absent"
+    self.detail = "no CarGps read yet"
+    self._ts = None        # CarGps `ts` of the last publish seen
+    self._seen_at = 0.0    # monotonic time that publish was first seen
+    self._key = None       # (lat, lon, hdg) of the last valid publish
+    self._repeats = 0      # consecutive valid publishes, while moving, with an unchanged _key
+    self._healthy = 0      # consecutive healthy publishes
+
+  @property
+  def usable(self) -> bool:
+    return self._healthy >= CAR_GPS_REACQUIRE_PUBLISHES
+
+  def _bad(self, kind: str, detail: str) -> None:
+    self._healthy = 0
+    self.kind, self.detail = kind, detail
+    return None
+
+  def update(self, cg, now: float, device_speed: float | None) -> dict | None:
+    if cg is None:
+      return self._bad("absent", "no CarGps published")
+    try:
+      ts = float(cg["ts"])
+      lat, lon, hdg = float(cg["lat"]), float(cg["lon"]), float(cg["hdg"])
+      spd_mph, age = float(cg["spd"]), float(cg["age"])
+    except (TypeError, KeyError, ValueError) as e:
+      return self._bad("unreadable", f"CarGps unreadable: {type(e).__name__}")
+    if ts != self._ts:
+      self._ts, self._seen_at = ts, now
+    else:
+      if now - self._seen_at > CAR_GPS_SILENT_S:
+        return self._bad("silent", f"no new CarGps publish for {now - self._seen_at:.1f} s")
+      return None   # the same publish read again: nothing new to judge or write
+    # DBC sentinels decode to out-of-range numbers (lat raw 255 -> 166 deg, heading 65535 -> 655.35,
+    # speed 254/255 = Unknown/Invalid). 360.0 itself is valid: round(359.96, 1) is logged as 360.0.
+    if not all(map(math.isfinite, (lat, lon, hdg, spd_mph, age))) or abs(lat) > 90.0 or abs(lon) > 180.0 \
+       or not 0.0 <= hdg <= 360.0 or not 0.0 <= spd_mph < 254.0:
+      return self._bad("invalid", f"out of range lat={lat} lon={lon} hdg={hdg} spd={spd_mph}")
+    if not 0.0 <= age <= CAR_GPS_MAX_AGE_S:
+      return self._bad("stale_can", f"CAN frame age {age:.2f} s at publish")
+    spd_ms = spd_mph * MPH_TO_MS
+    moving = spd_ms > CAR_GPS_MOVING_MS or (device_speed is not None and device_speed > DEVICE_GPS_MOVING_MS)
+    key = (lat, lon, hdg)
+    self._repeats = self._repeats + 1 if (moving and key == self._key) else 0
+    self._key = key
+    if self._repeats >= CAR_GPS_FROZEN_PUBLISHES - 1:
+      detail = f"lat/lon/hdg unchanged on {self._repeats + 1} publishes while moving"
+      return self._bad("frozen", detail + f" (car {spd_mph:.0f} mph, device {device_speed} m/s)")
+    self._healthy += 1
+    if not self.usable:
+      self.kind, self.detail = "reacquiring", f"{self._healthy}/{CAR_GPS_REACQUIRE_PUBLISHES} healthy publishes"
+      return None
+    self.kind, self.detail = "ok", f"CAN frame age {age:.2f} s"
+    return {"latitude": lat, "longitude": lon, "bearing": hdg % 360.0, "speed": spd_ms}
+
+
+def car_gps_capability(params, prev_bytes, prev_capable: bool) -> tuple[bool, bytes | None]:
+  """gpssel2pnw: PnwVehicle(CarParams).car_gps -> (capable, the CarParams bytes it was judged from).
+
+  `CarParams` (not CarParamsPersistent): it is cleared at every onroad transition and rewritten by
+  card for the car actually attached, so a device moved between the cars never inherits the other
+  car's capability. Absent (offroad, before card fingerprints) = not capable. Parsed only when the
+  bytes change; a parse failure is logged (once per distinct CarParams) and reads as not capable."""
+  b = params.get("CarParams")
+  if b is None:
+    return False, None
+  if b == prev_bytes:
+    return prev_capable, b
+  try:
+    return bool(PnwVehicle(messaging.log_from_bytes(b, car.CarParams)).car_gps), b
+  except Exception:
+    cloudlog.exception("mapd_configd: CarParams unreadable; car GPS selection OFF for this CarParams")
+    return False, b
 
 
 def next_region_interval(attempts: int) -> float:
@@ -248,6 +368,11 @@ def main():
   fix_state = None               # gpsfix2pnw: last LOGGED device fix state (None = nothing logged yet)
   fix_state_since = 0.0          # gpsfix2pnw: monotonic time fix_state was entered
   nofix_dropped = 0              # gpsfix2pnw: no-fix samples NOT written since the last logged state
+  car_gps = CarGpsSource()       # gpssel2pnw: freshness of the car's CAN GPS (CarGps mem-param)
+  car_gps_capable = False        # gpssel2pnw: PnwVehicle(CarParams).car_gps, re-read every 5 s
+  cp_bytes = None                # gpssel2pnw: the CarParams bytes car_gps_capable was judged from
+  cp_checked_at = None           # gpssel2pnw: monotonic time of the last CarParams read
+  gps_source = None              # gpssel2pnw: last LOGGED (src, car kind)
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -277,19 +402,47 @@ def main():
         cloudlog.event("mapd_configd_gps_fix", state=cur_fix_state, prev=fix_state, service=gps_service,
                        prev_duration_s=round(now_fix - fix_state_since, 1), nofix_dropped=nofix_dropped)
         fix_state, fix_state_since, nofix_dropped = cur_fix_state, now_fix, 0
+      # gpssel2pnw: SELECT the car's own CAN GPS while it is provably live, else the device fix above.
+      # Capability, never a fingerprint: PnwVehicle(CarParams).car_gps. Without it (the Tesla) the
+      # CarGps key is never even read, and every write below is the gpsfix2pnw device write, byte for
+      # byte. The transport is the CarGps mem-param card ALREADY publishes at ~1 Hz -- no msgq
+      # subscription (background-process rule) and no new writer.
+      if cp_checked_at is None or now_fix - cp_checked_at >= CAR_CAPABILITY_RECHECK_S:
+        cp_checked_at = now_fix
+        capable, cp_bytes = car_gps_capability(params, cp_bytes, car_gps_capable)
+        if capable != car_gps_capable:
+          cloudlog.event("mapd_configd_car_gps_capability", capable=capable)
+          # never carry feed state across cars; the next source state is logged afresh
+          car_gps_capable, car_gps, gps_source = capable, CarGpsSource(), None
+      car_fix = None
+      if car_gps_capable:
+        dev_speed = float(sm[gps_service].speed) if cur_fix_state == "fix" else None
+        car_fix = car_gps.update(mem.get("CarGps", return_default=True), now_fix, dev_speed)
+      use_car = car_gps_capable and car_gps.usable
       if sm.updated[gps_service]:
         g = sm[gps_service]
-        if g.hasFix:
+        if not g.hasFix:
+          nofix_dropped += 1
+        elif not use_car:
           mem.put_nonblocking("LastGPSPosition", json.dumps({
             "latitude": float(g.latitude), "longitude": float(g.longitude),
             "bearing": float(getattr(g, "bearingDeg", 0.0)),
             "speed": float(getattr(g, "speed", 0.0)),  # m/s, for the location-services >45mph police gate
-            # which receiver produced this fix. Always the device here; recorded now so a later
-            # source selector leaves this write byte-identical on a car that has no other source.
+            # which receiver produced this fix: "device" here, "car" below
             "src": "device",
             "ts": time.monotonic()}))  # system-wide monotonic clock: lets the police gate reject stale speed
-        else:
-          nofix_dropped += 1
+      if use_car and car_fix is not None:
+        # One write per NEW healthy publish (~1 Hz), stamped when this process first saw it; the fix
+        # itself is CAN-frame `age` older (0.0-1.03 s). bearing = the truck's heading, which held
+        # within 2.6 deg at every stop where the device's wandered >10 deg at 22 of 46.
+        mem.put_nonblocking("LastGPSPosition", json.dumps({**car_fix, "src": "car", "ts": now_fix}))
+      if car_gps_capable:
+        # Rule 2: every source switch, and every change in WHY the car is not used, is logged once.
+        src = "car" if use_car else ("device" if cur_fix_state == "fix" else "none")
+        if (src, car_gps.kind) != gps_source:
+          cloudlog.event("mapd_configd_gps_source", src=src, prev=gps_source[0] if gps_source else None,
+                         car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state)
+          gps_source = (src, car_gps.kind)
       if sm.alive['mapdOut']:
         mapd_out_down = 0
         mo = sm['mapdOut']

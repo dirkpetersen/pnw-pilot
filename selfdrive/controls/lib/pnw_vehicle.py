@@ -376,6 +376,14 @@ class PnwVehicle:
     # nudgeless (blinker-hold) lane change support — BSM-gated in DesireHelper
     self.nudgeless: bool = brand == "tesla" or fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # gpssel2pnw: the car broadcasts its own GPS fix on CAN (GWM APIMGPS 0x462/0x464, 1 Hz), which the
+    # opendbc ford carstate decodes into the /dev/shm CarGps mem-param; mapd_configd may then select
+    # it for LastGPSPosition. Verified only on our 2025 Lightning (2026-09-05 probe, 2026-09-12
+    # weekend comparison: 1.6 m vs 3.0 m median cross-track). The Tesla has no such broadcast.
+    # Not mirrored in opendbc/car/pnw_vehicle.py: nothing on the opendbc side consumes it (the
+    # publisher already self-gates on the DBC carrying the messages).
+    self.car_gps: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+
     # coopsteer-shadow2pnw: Penduras "cooperative steering" sub-threshold torque nudge
     # (selfdrive/controls/lib/coopsteer_pnw.py), SHADOW-LOGGED ONLY this round -- controlsd computes
     # and publishes what it WOULD do; nothing reaches the actuators. Gated to the exact car the sign

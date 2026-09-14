@@ -2335,6 +2335,7 @@ class CESController:
     self._icbm_k_ahead = True
     self._cur_lat = self._cur_lon = self._cur_bearing = None
     self._car_gps = None       # cargps2pnw: last CarGps dict from the ford carstate (None on Tesla)
+    self._gps_src = None       # gpssel2pnw: LastGPSPosition "src" -- which receiver lat/lon/bearing came from
     # steerpower2pnw I3 review fix: bounded (wall_time, bearing, gps_valid) history, appended once per
     # _read_map() refresh (~1 Hz) -- see _nearest_bearing() above. Lets a steerEvent record look up
     # the bearing at its actual saturation ONSET instead of the live value at emit time.
@@ -2568,8 +2569,10 @@ class CESController:
         pos = json.loads(pos)
       self._cur_lat = float(pos["latitude"]); self._cur_lon = float(pos["longitude"])
       self._cur_bearing = float(pos.get("bearing", 0.0))
+      self._gps_src = pos.get("src")   # gpssel2pnw: "car" | "device"; None = written before gpsfix2pnw
     except Exception:
       self._cur_lat = self._cur_lon = self._cur_bearing = None
+      self._gps_src = None
     # icbmcurv2pnw: measure the polyline geometry ICBM is about to act on. TELEMETRY ONLY -- no
     # control path reads these, and polyline_curvature() is pure and documented never to raise.
     # WHY IT LIVES HERE AND NOT IN VTSC: vtsc_controller.py:283 runs the same call, but its own
@@ -3072,6 +3075,7 @@ class CESController:
         # elsewhere in this record), never instead of it. None on the Tesla -- no Ford
         # carstate means nothing publishes CarGps, which is the intended "empty" case.
         "car_gps": self._car_gps,
+        "gpsSrc": self._gps_src,   # gpssel2pnw: when "car", lat/lon/bearing ARE the car_gps fix
         # VTSC applied cap + state (from VTSCStatus) — same fields as the enabled-path tick record.
         "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),
         **getattr(self, "_sa_tele", {}),
@@ -3822,6 +3826,7 @@ class CESController:
       "gps": tele.get("gps"), "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
       "spdLim": round(self._speed_limit, 1), "hwy": bool(hwy),
       "car_gps": self._car_gps,           # cargps2pnw: Ford only; None on the Tesla
+      "gpsSrc": self._gps_src,            # gpssel2pnw: when "car", lat/lon/bearing ARE the car_gps fix
       # VTSC applied cap + state (from the VTSCStatus mem param) — without this channel the 2026-07-06
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
       "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),

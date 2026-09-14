@@ -153,6 +153,7 @@ class _SteerLogHarness:
     self._cur_lat, self._cur_lon, self._cur_bearing = cur_lat, cur_lon, cur_bearing
     self._speed_limit = 0.0
     self._car_gps = None   # cargps2pnw: Ford-only CarGps dict; None is the Tesla/no-fix case
+    self._gps_src = None   # gpssel2pnw: LastGPSPosition "src"
     self._lc_spd_a = None  # lcramp2pnw: speed-authority multiplier (None when lane centering is idle)
     self._vtsc_cap = None
     self._vtsc_state = None
