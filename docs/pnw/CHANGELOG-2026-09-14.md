@@ -102,6 +102,17 @@ installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own 
   6. `da617deb16` the ICBM lead-pacing failure log names the exception type and counts failures.
   - Identity when nothing fails: VTSC/speedadjust 168/168 and CES 36/36 scenarios identical. 1314 tests, 123/123
     mutants.
+- **`truckdecode2pnw`** (Fable APPROVE on all 5 commits; queued behind silentexc2pnw). Evidence:
+  `drives/2026-09-12/central-oregon-weekend/TRUCK_DECODE.md`. Ship order: pnw-opendbc `4fd9826c` + `8f3548e5` →
+  master-pnw first, then pnw-pilot.
+  - (A) The truck's own dead-reckoning flag, 0x463 → CarGps `dr`/`drAge`, logged as `truck_dr` next to the inferred
+    DR (`e2b9a0dc28`). Telemetry only: it agrees with the inference but was never seen entering DR, and there is no
+    tunnel rlog.
+  - (B) `carState.cruiseState.speedClusterUnit` (`8f3548e5`, capnp ordinal @7 appended). The gas-set overshoot-cancel
+    rule converts from km/h only when BOTH `IsaVLimUnit_D_Rq` and `MetricActv_B_Actl` say km/h (`1a674e1cb1`).
+    Fable's call: a false km/h is the dangerous direction, and BC signs could fool `IsaVLimUnit` alone.
+  - Pin bump `7c76a608f4`: changes `cereal/*.capnp`, so the first boot does a wide C++ rebuild. No Ford platform's
+    canValid changes: the new parser entries are ignore_alive, and a control test proves it.
 - **Building:** `silentexc3pnw`, Fable's next-ranked silent excepts: `read_ces_mode` → Off (CES and VTSC on both
   cars), speedadjust `_read_speed_limit`, the VTSC freeway-floor inputs, and the RainMode push.
 - **ICBM 46.5–58 m/s "garbage band" (analysed, NOT built, no fix needed):**
