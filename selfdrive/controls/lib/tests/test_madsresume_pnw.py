@@ -839,22 +839,79 @@ def test_the_verify_record_names_the_button_that_was_ACTUALLY_pressed():
     f"verify for a RESUME must say 'res', got {verifies[0]['mode']!r} (reports an unpressed button)"
 
 
-def test_gasset_refuses_while_the_truck_is_still_slowing():
-  """Fable C. `regenBraking` is NEVER set on Ford, so on a truck with 1-Pedal Drive a lift-off to
-  SLOW DOWN is indistinguishable from a lift-off to cruise -- except by speed. Setting ACC there
-  would cancel exactly the deceleration the driver asked for."""
+def test_gasset_sets_while_regen_is_still_slowing_the_truck():
+  """OWNER DECISION 2026-09-13, "Ignore regen, set". This used to refuse `slowing` (Fable C, 2026-09-07).
+  The weekend measured 1.5-1.9 m/s^2 of regen within ~1 s of every steering-only gas lift-off, so the gate
+  refused half of them; a SET- to the current speed commands no acceleration. The first press now sets at
+  the speed the truck is doing when the tap is offered."""
   d = Drive()
   d.tick(50)
-  hold = dict(lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0)
-  d.tick(20, brake_pressed=True, v_ego=25.0, **hold)
-  d.tick(60, gas_pressed=True, v_ego=25.0, **hold)
-  # lift off, and keep decelerating hard (regen) -- 2 m/s^2 over the window
+  d.tick(20, brake_pressed=True, v_ego=25.0, **STEER_ONLY)
+  d.tick(60, gas_pressed=True, v_ego=25.0, **STEER_ONLY)
   v = 25.0
-  for _ in range(400):
-    v = max(12.0, v - 2.0 * DT)
-    d.tick(1, v_ego=v, **hold)
-  assert not d.fired(), f"must not set while still slowing; records={d.records[-3:]}"
-  assert "slowing" in d.reasons("refuse"), d.records[-3:]
+  speeds = []
+  for _ in range(400):                                               # lift off, measured regen
+    v = max(12.0, v - REGEN_MS2 * DT)
+    speeds.append((round(d.t, 3), v))
+    d.tick(1, v_ego=v, **STEER_ONLY)
+  assert d.fired(), f"regen must not refuse a gas-set; records={d.records[-3:]}"
+  fire = [r for r in d.records if r["phase"] == "fire"]
+  assert len(fire) == 1 and fire[0]["mode"] == "set" and fire[0]["decel"] > 1.5, fire
+  t0, target = d.offers[0][0], d.offers[0][2]
+  assert target == pytest.approx(dict(speeds)[t0]), "SET targets the speed at the moment of the offer"
+  assert "slowing" not in [r.get("reason") for r in d.records], d.records
+
+
+def test_regen_still_does_not_touch_the_RESUME_path():
+  """Scope of the owner decision: only the gas-set path. The RES path never had a decel gate, and still
+  has none -- D3 is undecided -- so a brake release under regen resumes exactly as before."""
+  d = normal_brake_and_resume(post_ticks=0)
+  v = SET
+  for _ in range(500):
+    v = max(20.0, v - 1.8 * DT)
+    d.tick(1, lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0, v_ego=v)
+  fires = [r for r in d.records if r["phase"] == "fire"]
+  assert len(fires) == 1 and fires[0]["mode"] == "res", d.records
+
+
+def test_lift_off_then_an_immediate_hard_brake_never_sets():
+  """The real braking case the old decel gate was also standing in front of: the driver lifts the
+  accelerator and brakes hard at once. With the gate gone, the brake itself must still win: the release
+  clock needs BOTH pedals up for RELEASE_MIN_S, and the brake edge re-arms a brake episode."""
+  for brake_after_s in (0.05, 0.2, M.RELEASE_MIN_S - 0.05):
+    d = Drive()
+    d.tick(50)
+    d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)
+    d.tick(200, gas_pressed=True, v_ego=20.0, **STEER_ONLY)
+    v = 20.0
+    for _ in range(int(brake_after_s / DT)):
+      v -= 1.8 * DT
+      d.tick(1, v_ego=v, **STEER_ONLY)
+    for _ in range(300):                                             # hard brake, 3 s at 4 m/s^2
+      v = max(0.0, v - 4.0 * DT)
+      d.tick(1, brake_pressed=True, v_ego=v, standstill=v < 0.1, **STEER_ONLY)
+    assert not d.offers, f"brake {brake_after_s}s after lift-off: offers={d.offers} records={d.records}"
+    assert "reBrake" in d.reasons("refuse"), f"the gas episode must end on the brake; {d.phases()}"
+
+
+def test_known_consequence_a_brake_later_than_the_settle_time_lands_after_the_set():
+  """Pins the consequence the weekend showed (Sat 2026-09-12 12:41:50 PT, qlog replay): the driver lifted
+  at ~21 mph, regen took it down, and he braked to a stop 0.69 s after lift-off. Under "Ignore regen, set"
+  the replay offered the SET at +0.6 s, first; the brake then reads as a rejection of it and latches the
+  opt-out for the rest of that steering-only stretch. Owner question Q-C5 (docs/MADS-RESUME-TO-DRIVER-SPEED.md
+  section 10). A brake between RELEASE_MIN_S and ~0.8 s may or may not beat the offer (it depends on the
+  decel estimator's phase); from 0.85 s on it never does, which is what this pins deterministically."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, v_ego=12.0, **STEER_ONLY)
+  d.tick(300, gas_pressed=True, v_ego=9.4, **STEER_ONLY)
+  v = 9.4
+  for _ in range(85):                                                # 0.85 s of regen
+    v -= REGEN_MS2 * DT
+    d.tick(1, v_ego=v, **STEER_ONLY)
+  assert d.fired(), "under the owner decision the SET is offered before a brake 0.85 s after lift-off"
+  d.tick(100, brake_pressed=True, v_ego=v, **STEER_ONLY)
+  assert "postResumeBrake" in d.reasons("suppress"), d.phases()
 
 
 def test_the_noCruise_verify_names_the_RESUME_that_was_pressed():
@@ -1198,7 +1255,7 @@ class TestOneToggleGoverns:
 
 STEER_ONLY = dict(lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0)
 # Measured 2026-09-11 22:07:11-14 (F2, cruise never came back): with no pedal the truck slowed at
-# 1.76-1.83 m/s^2 for 3 s -- regen. DECEL_REFUSE_MS2 is 1.0.
+# 1.76-1.83 m/s^2 for 3 s -- regen. (Since 2026-09-13 regen no longer refuses a gas-set.)
 REGEN_MS2 = 1.8
 
 
@@ -1354,25 +1411,22 @@ def test_a_gas_override_while_cruising_engaged_never_arms_or_offers():
 
 
 def test_a_refused_first_press_is_spent_and_a_re_press_cannot_set():
-  """OWNER DECISION 2026-09-13, first press only -- and the choice made for a REFUSED first press: it is used
-  up too. The driver lifts, the truck regens (measured 1.8 m/s^2), the window refuses `slowing`, and the
-  driver goes back on the power. That re-press is a later press: it ends the episode with ONE record that
-  still names the gate that refused the first press (D1), and lifting off again sets nothing."""
+  """OWNER DECISION 2026-09-13, first press only (and Q-C4 answered: a first press is used once judged).
+  The driver lifts with a car close ahead, the window refuses `leadClose`, and the driver goes back on the
+  power. That re-press is a later press: it ends the episode with ONE record that still names the gate that
+  refused the first press (D1), and lifting off again -- road now clear -- sets nothing."""
   d = Drive()
   d.tick(50)
   d.tick(20, brake_pressed=True, v_ego=20.0, **STEER_ONLY)
   d.tick(100, gas_pressed=True, v_ego=20.0, **STEER_ONLY)
-  v = 20.0
-  for _ in range(150):                                               # 1.5 s lift, regen
-    v -= REGEN_MS2 * DT
-    d.tick(1, v_ego=v, **STEER_ONLY)
-  assert not d.fired() and d.b._gas_spent, "precondition: refused while slowing, first press used"
+  d.tick(150, v_ego=20.0, has_lead=True, d_rel=12.0, v_lead=18.0, **STEER_ONLY)   # 1.5 s lift, lead close
+  assert not d.fired() and d.b._gas_spent, "precondition: refused on the lead, first press used"
   n = len(d.records)
-  d.tick(100, gas_pressed=True, v_ego=v, **STEER_ONLY)              # back on the power
-  d.tick(600, v_ego=v, **STEER_ONLY)                                 # lift and coast
+  d.tick(100, gas_pressed=True, v_ego=20.0, **STEER_ONLY)           # back on the power
+  d.tick(600, v_ego=20.0, **STEER_ONLY)                              # lift and coast, clear road
   assert not d.fired(), f"a second press set the speed; records={d.records[n:]}"
   new = d.records[n:]
-  assert [(r["phase"], r["reason"], r["gate"], r["gasSpent"]) for r in new] == [("refuse", "gasSpent", "slowing", True)], new
+  assert [(r["phase"], r["reason"], r["gate"], r["gasSpent"]) for r in new] == [("refuse", "gasSpent", "leadClose", True)], new
   assert new[0]["armS"] is not None, "this record is the arm's own terminal and must say so"
   assert d.phases().count("refuse") == 1 and d.phases().count("fire") == 0, d.phases()
 

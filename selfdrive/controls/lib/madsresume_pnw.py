@@ -28,7 +28,8 @@ the axioms of everything below:
   What replaces it, and why the owner's version is the safer one: a SET establishes the speed the
   truck is ALREADY DOING, so it commands no acceleration at all, where a RESUME hands speed back to
   ACC and lets it climb. The acceleration-bounding gates therefore do not apply to SET mode -- but
-  `slowing`, the speed floor, engageability, the lead distance floor and TTC all still do. Axiom 2
+  the speed floor, engageability, the lead distance floor and TTC all still do (`slowing` did too, until
+  the owner removed it on 2026-09-13: "Ignore regen, set"). Axiom 2
   is untouched and still carries the whole envelope.
 
   Read the two modes as separate features that share a state machine, not as one feature with a
@@ -228,7 +229,11 @@ REJECT_AFTER_FIRE_S = 2.0
 # observed. 0.5 would also have caught it, but sits closer to ordinary coasting than the evidence
 # justifies. n=7 is a SMALL SAMPLE from one drive -- the `decel`/`decelAgeS` telemetry fields exist
 # so this can be re-derived rather than re-argued.
-DECEL_REFUSE_MS2 = 1.0
+#
+# SUPERSEDED BY THE OWNER, 2026-09-13 ("Ignore regen, set"): the 2026-09-11..13 weekend measured
+# 1.5-1.9 m/s^2 of regen within ~1 s of every gas lift-off in steering-only, so this gate refused half
+# of them, and a SET- to the current speed commands no acceleration. The `slowing` refusal is gone from
+# the gas-set path; there is no longer a decel threshold. `decel`/`decelAgeS` stay in every record.
 # 0.4 s. NOTE, because the obvious reading is wrong and would invite deleting `decelUnknown` as
 # redundant: this being shorter than RELEASE_MIN_S (0.5) does NOT guarantee a fresh window by the
 # earliest fire. The estimator resamples on its own cadence, unaligned to the driver, so the first
@@ -781,7 +786,7 @@ class MadsResumeBrain:
       return out
     if i.gas_pressed:
       # engagegoal2pnw / D1 (Rule 2): the driver went back on the power while a lift-off window was open
-      # and refusing. `_last_block` -- the gate that held it (`slowing`, `decelUnknown`, `slow`, a lead
+      # and refusing. `_last_block` -- the gate that held it (`decelUnknown`, `slow`, `noEntry`, a lead
       # gate...) -- is about to be overwritten with "gas", and until now that refusal left no record at
       # all (09-13 12:43:28 was visible only through a later record's `decel`). Non-terminal, like
       # `offerEnd`: the arm stays open and still ends in exactly one fire/refuse. Only once the window
@@ -959,21 +964,17 @@ class MadsResumeBrain:
     # abort chain and again independently in the executor) that stock cruise is not already engaged,
     # since a SET tap while engaged would move the driver's set speed rather than establish it.
     if self._used_gas:
-      # The driver is still SLOWING. Because Ford never reports regenBraking (see DECEL_REFUSE_MS2),
-      # a lift-off to decelerate is indistinguishable from a lift-off to cruise except by speed --
-      # and setting ACC here would cancel exactly the deceleration they asked for. This is the one
-      # gate that exists because of what this car does NOT tell us.
-      # The measurement must be one taken ENTIRELY AFTER both pedals came up. The estimator
-      # resamples on its own 0.4 s cadence, unaligned to the driver, so at the earliest fire the
-      # most recent completed window can still be one that straddled the accelerator -- where the
-      # truck was speeding UP and `_decel` reads negative. That would wave through exactly the
-      # 1-Pedal lift-off this gate exists to catch (Gemini review 2026-09-07 round 3, finding B).
-      # An un-fresh measurement is a REFUSAL, not a pass: this is the gate standing in for a signal
-      # the car never sends, so it fails closed.
+      # engagegoal2pnw, OWNER DECISION 2026-09-13 ("Ignore regen, set"): regen after lifting off the
+      # accelerator (measured 1.5-1.9 m/s^2) no longer refuses a gas-set -- the `slowing` refusal is
+      # removed from THIS path only (the RES path never had it). A real brake still wins: gate 2 holds
+      # the release clock while the pedal is down, a brake edge re-arms (`reBrake`), and the executor
+      # refuses any press with a pedal down. KNOWN CONSEQUENCE, from the weekend (Sat 12:41:50): a
+      # driver who lifts to slow down and brakes ~0.7 s later can now get the SET first.
+      # `decelUnknown` is kept unchanged: it holds the tap until a decel window taken entirely after
+      # lift-off exists (at most ~0.3 s beyond RELEASE_MIN_S), so the fire record's `decel` is the
+      # post-lift regen this decision was made on, and fire timing is unchanged from before.
       if self._released_t is None or self._decel_from < self._released_t:
         return "decelUnknown"
-      if self._decel > DECEL_REFUSE_MS2:
-        return "slowing"
       # A SET-to-current commands no acceleration, so the gates that bound how much ACC may speed up
       # do not apply. But "commands no acceleration" is NOT "the road ahead is irrelevant": stock
       # ACC takes a moment to react on engagement. So the two sub-gates that ask whether something

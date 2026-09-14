@@ -72,6 +72,16 @@ have. The owner accepted that objection explicitly, on two conditions that are n
 
 ### `slowing` / `decelUnknown` — and which drive mode gasset2pnw is for
 
+> **SUPERSEDED 2026-09-13 — owner decision "Ignore regen, set" (engagegoal2pnw).** The `slowing`
+> refusal is **removed from the gas-set path**. The 2026-09-11..13 weekend measured 1.5–1.9 m/s² of
+> regen within ~1 s of every steering-only lift-off, so the gate refused half of them, and a SET− to the
+> current speed commands no acceleration. The RES path never had a decel gate and is unchanged (D3
+> undecided). `decelUnknown` is kept: it still holds the tap until a post-lift decel window exists, so
+> fire timing and the logged `decel` are unchanged. A real brake still wins: gate 2, the `reBrake`
+> re-arm, and the executor's pedal gate. **Known consequence:** a lift-off to slow down followed by a
+> brake more than ~0.5–0.8 s later can get the SET first (weekend: Sat 12:41:50). The text below is the
+> history of the gate.
+
 MEASURED on this truck, 2026-09-07, route `000000f9` — 7 gas-release events above 5 m/s, decel over
 the 0.4 s after lift-off: **median −0.06, p90 1.33, max 1.33, min −0.67 m/s²**. This Lightning
 **coasts** on lift-off in the mode the owner drives; it does not hard-regen. `DECEL_REFUSE_MS2` is
@@ -92,7 +102,7 @@ not taken entirely after both pedals came up is refused. Do not delete it on the
 
 | refusal | means |
 |---|---|
-| `slowing` | the truck is still decelerating past `DECEL_REFUSE_MS2` — the driver is slowing on purpose |
+| `slowing` | *(removed 2026-09-13, owner "Ignore regen, set"; no longer emitted)* the truck was still decelerating past `DECEL_REFUSE_MS2` |
 | `decelUnknown` | no deceleration measurement taken entirely after lift-off yet; fails **closed** |
 
 ### The honest limit of condition 1
