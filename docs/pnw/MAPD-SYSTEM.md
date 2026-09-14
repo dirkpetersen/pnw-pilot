@@ -6,7 +6,11 @@ status: unreviewed     # current | drifted | superseded | unreviewed
 # MAPD-SYSTEM.md — the AS-DEPLOYED mapd architecture (PNW production)
 
 > # 🟢 DEPLOYED — `mapdstate2pnw` branch (`~/gh/comma/pnw/pnw-pilot`)
-> Official **pfeiferj `mapd` v2.0.6** binary, downloaded-at-launch to a persistent path, publishing
+> **Updated 2026-09-13 (`mapdlog2pnw`/`mapddocs2pnw`): the stock pin bumped to v2.3.1** (`848f900403`,
+> `mapd_release.json`). **The truck runs a custom override build, sha `77bad867`** — upstream `main`
+> `f374b2b` (= v2.3.1 + FrogAi #101/#103/#105/#107/#116) plus our tile-validation commit `aa04ba4`,
+> held in place by `/data/mapd/.override` (see "Known gotchas" below — the installer silently ignores
+> a pin bump while that flag is set). Downloaded-at-launch to a persistent path, publishing
 > everything over **cereal** (`mapdOut` / `mapdExtendedOut`), with a `mapd_configd` bridge that
 > re-exports the legacy in-memory params CES/VTSC/overlays still read AND drives the map-DOWNLOAD
 > policy: GPS-driven, on-demand, whole-STATE. Speed-limit **display** works as soon as maps are on
@@ -36,7 +40,7 @@ Those docs describe an **obsolete** architecture and should not be trusted for t
 | Old (MAPD2XNOR / MAPD2PNW) | Now (this doc) |
 |---|---|
 | `sunnypilot/mapd/mapd_manager.py` bridge + `coverage.py`/`regions.json` | `system/mapd/mapd_configd.py` bridge; `system/mapd/coverage.py` + `regions.json` (re-ported, mapdstate2pnw) resolve GPS -> region + download key in openpilot; the binary still owns tile storage/download protocol and `tileLoaded` |
-| Bundled ~9.4 MB **v1** binary in `third_party/mapd_pfeiferj/mapd` (committed to git) | **v2.0.6** binary NOT in git; downloaded-at-launch, sha256-verified, pinned in `mapd_release.json` |
+| Bundled ~9.4 MB **v1** binary in `third_party/mapd_pfeiferj/mapd` (committed to git) | **v2 binary** (stock pin **v2.3.1**; device runs override build `77bad867`) NOT in git; downloaded-at-launch, sha256-verified, pinned in `mapd_release.json` |
 | Wrote `liveMapDataSP` (cereal `CustomReserved8 → LiveMapDataSP`) | Publishes `mapdOut` / `mapdExtendedOut`; **legacy `liveMapDataSP` removed** (`cereal/services.py:109`) |
 | Path: `sunnypilot/mapd/` | Path: `system/mapd/` (symlinked into the `openpilot` package on-device) |
 | Sunnypilot coverage writer computed map coverage in Python | `mapdOut.tileLoaded` still tells `mapd_configd` whether the current fix is covered; `mapd_configd` now ALSO decides (in Python, via `coverage.py`) which state/nation to request or delete when it isn't |
@@ -89,7 +93,7 @@ repo root pins `version` / `url` / `sha256` / `size` / `install_path`. `ensure_m
 (`process_config.py:53-54`) — manager never execs a missing file. (Where `ensure_mapd()` is invoked on
 boot was not re-verified here; the design intent per the module docstring is download-at-launch.)
 
-### 2. The binary — pfeiferj `mapd` v2.0.6
+### 2. The binary — pfeiferj `mapd` (stock pin v2.3.1; device runs override build `77bad867`)
 
 Registered as a `NativeProcess` (`process_config.py:121`):
 
@@ -155,7 +159,7 @@ A small `always_run` daemon (`process_config.py:122`, TICI-only) that does three
 | `WayRef` | STRING | mapd road ref (e.g. `"I 5"`) bridged to mem (`params_keys.h:86`) |
 | `RoadContext` | STRING | Road class `'freeway'`/`'city'`/`'unknown'` — freeway-gates location lookups (`params_keys.h:87`). NB: `mapd_configd` writes `str(mo.roadContext)`, i.e. the enum's numeric value, not the name — see gotcha |
 | `MapDownloadStatus` | STRING, CLEAR_ON_MANAGER_START | Live OSM DB download state for the debug overlay (`params_keys.h:88`) |
-| `OsmStateName` | STRING, **`"WA,OR,ID"`** | **Dead param** — leftover from the pre-v2.0.6 `mapd_manager` era; nothing in the current tree reads it. Coverage is now decided per-fix by `coverage.region_and_key_for_gps()`, not by a configured default list |
+| `OsmStateName` | STRING, **`"WA,OR,ID"`** | **Dead param** — leftover from the pre-v2 `mapd_manager` era; nothing in the current tree reads it. Coverage is now decided per-fix by `coverage.region_and_key_for_gps()`, not by a configured default list |
 | `OSMDownloadLocations` | JSON | Requested OSM download locations (`params_keys.h:95`) |
 | `ShowSpeedLimit` | BOOL, **`"0"`** | Speed-limit display toggle; default OFF (`params_keys.h:99`) |
 | `RefreshLocationMap` | BOOL, **`"0"`** | "Refresh this location map" — ON deletes the current region's downloaded tiles so the auto-download re-fetches it. Repurposed from the old "Get map for this location" (`params_keys.h:113`) |

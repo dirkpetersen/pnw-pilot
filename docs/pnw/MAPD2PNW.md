@@ -9,7 +9,8 @@ status: unreviewed     # current | drifted | superseded | unreviewed
 > Everything below is a **historical record** of the original `mapd2pnw` branch (v0.11.2 lineage,
 > never deployed): the bundled v1 binary, the `sunnypilot/mapd/mapd_manager.py` bridge, its fixed
 > `OsmStateName="WA,OR,ID"` default, and its Priority-WiFi-gated download. **None of that ships
-> today.** The deployed system is the v2.0.6 binary + `system/mapd/mapd_configd.py` (see
+> today.** The deployed system is a v2 pfeiferj binary (stock pin **v2.3.1**; device runs a custom
+> override build `77bad867` behind `/data/mapd/.override`) + `system/mapd/mapd_configd.py` (see
 > `MAPD-SYSTEM.md`), and as of `mapdstate2pnw` the download policy itself has also changed: coverage
 > is no longer a fixed default state list — `mapd_configd` downloads whichever state (or, outside the
 > US, nation) the car's GPS fix is currently uncovered in, on any network, every time it detects a new
