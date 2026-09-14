@@ -235,6 +235,19 @@ class Car:
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
+    # accdroplog2pnw: LOGGING ONLY -- one ces_events record per stock-ACC state change (accdrop_pnw.py).
+    # Built only where PnwVehicle lists messages to watch (today the Lightning; the Tesla gets None).
+    self._accdrop = None
+    self._accdrop_sends: list = []
+    self._accdrop_err = 0
+    try:
+      _veh = PnwVehicle(self.CP)
+      if _veh.acc_drop_status_msgs:
+        from openpilot.selfdrive.car.accdrop_pnw import AccDropLogger
+        self._accdrop = AccDropLogger(self.CI.can_parsers, _veh.acc_drop_status_msgs, _veh.acc_drop_trace, self.CI.CC)
+    except Exception:
+      cloudlog.exception("accdroplog2pnw: logger construction FAILED -- ACC dropouts on this drive will NOT be explained")
+
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
@@ -515,6 +528,7 @@ class Car:
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
+      self._accdrop_sends = can_sends  # accdroplog2pnw: read (never modified) by the logger in step()
 
       self.CC_prev = CC
 
@@ -530,6 +544,16 @@ class Car:
 
     self.initialized_prev = initialized
     self.CS_prev = CS
+
+    # accdroplog2pnw: after sendcan went out, so logging can never delay actuation this tick
+    if self._accdrop is not None:
+      try:
+        self._accdrop.update(CS, self.sm, self._accdrop_sends, time.monotonic())
+      except Exception:
+        self._accdrop_err += 1
+        if self._accdrop_err == 1 or self._accdrop_err % 6000 == 0:
+          cloudlog.exception(f"accdroplog2pnw: update FAILED ({self._accdrop_err} ticks) -- ACC dropout logging is DARK")
+      self._accdrop_sends = []
 
   def params_thread(self, evt):
     while not evt.is_set():

@@ -302,6 +302,48 @@ class PnwVehicle:
     # that does.
     self.button_management: bool = self.stock_acc_buttons and not self.op_long
 
+    # accdroplog2pnw (LOGGING ONLY, selfdrive/car/accdrop_pnw.py, run by card): the CAN messages whose
+    # every <=4-bit status signal is recorded around each stock-ACC state change, as (parser bus, DBC
+    # message name), plus continuous (bus, message, signal) trace values. Empty on every other car,
+    # which makes card skip the logger entirely (the Tesla is untouched). The second group is NOT
+    # registered by opendbc's Ford carstate today; it is listed on purpose so every record names it
+    # under "notRegistered" instead of silently leaving it out, and so the logger picks it up with no
+    # openpilot change once an opendbc pin bump registers it. Evidence for each:
+    # drives/2026-09-12/central-oregon-weekend/DRIVE_REPORT.md (4 no-input Active->Standby drops).
+    if self.stock_acc_buttons:
+      self.acc_drop_status_msgs: tuple = (
+        # registered by carstate today -> decoded every frame, recorded now
+        ("pt", "EngBrakeData"),            # 0x165 PCM: CcStat/CcMde/CcOvrrdActv/AccEngStat/PrplTqMnSat/brake applied
+        ("pt", "DesiredTorqBrk"),          # 0x213 ABS: CcDis_B_Cmd (cruise disable cmd), AccBrkDeny/Dis, TCS/ABS/ESC active
+        ("pt", "BrakeSysFeatures"),        # 0x415 ABS: VehStab_D_Stat, speed quality
+        ("pt", "Cluster_Info1_FD1"),       # 0x430 IPC: AccDeny_B_RqIpc, AccEnbl_B_RqDrv, ManRgen_D_Rq, slip-control mode
+        ("pt", "EPAS_INFO"),               # 0x082 PSCM: EPAS_Failure, SteMdule_D_Stat
+        ("pt", "Lane_Assist_Data3_FD1"),   # 0x3CC PSCM: LatCtlSte/Cpblty/Lim, LaHandsOff, LaActDeny, hands-on confidence
+        ("pt", "Steering_Data_FD1"),       # 0x083 SCCM: every driver button bit, turn stalk
+        ("cam", "ACCDATA"),                # 0x186 IPMA: AccCancl/AccDeny/CmbbDeny/AccResumEnbl (only without op-long)
+        ("cam", "ACCDATA_2"),              # 0x187 IPMA: CMbB brake requests
+        ("cam", "ACCDATA_3"),              # 0x18A IPMA: Tja_D_Stat, AccMsgTxt, AccWarn, radar blocked / misaligned
+        ("cam", "IPMA_Data"),              # 0x3D8 IPMA: LaActvStats, LaDenyStats, LaHandsOff, camera status
+        # NOT registered by carstate today -> reported as notRegistered until opendbc decodes them
+        ("pt", "BrakeSysFeatures_2"),      # 0x416 ABS: BpedMove_D_Actl, Abs_B_Falt, TCMode, slip-control indicator
+        ("pt", "BrakeSnData_5"),           # 0x076 ABS: StopLamp_B_RqBrk
+        ("pt", "DesiredTorqBrk_2"),        # 0x214 ABS: RgenTqFalt_B_Actl (regen torque fault)
+        ("pt", "VehicleOperatingModes"),   # 0x167 PCM: PwPckTq_D_Stat, ElPw_D_Stat
+        ("pt", "HEV_Powertrain_Data2"),    # 0x25B PCM: PrplTqMnRgen_B_Actl
+        ("pt", "TorqueDataEngFlags"),      # 0x200 PCM: PtDrvMde_D_Stat (drive mode)
+        ("pt", "Powertrain_Data_4"),       # 0x424 PCM: SelDrvMdePt_D_Stat, BpedDrvMsgTxt_B_Dsply
+        ("pt", "SelectDriveModeData"),     # 0x420 ABS: SelDrvMde_D_Stat
+        ("pt", "Low_Voltage_Power_Data_FD1"),  # 0x43D PCM: 12 V source fault/disconnect (the rail reads ~11.5 V)
+      )
+      self.acc_drop_trace: tuple = (
+        ("pt", "EngVehicleSpThrottle", "ApedPos_Pc_ActlArb"),   # accelerator %, registered
+        ("cam", "ACCDATA", "AccPrpl_A_Rq"),                     # IPMA's ACC accel request, registered
+        ("cam", "ACCDATA", "AccBrkTot_A_Rq"),                   # IPMA's ACC brake request, registered
+      )
+    else:
+      self.acc_drop_status_msgs = ()
+      self.acc_drop_trace = ()
+
     # CES runs in SHADOW (decisions/telemetry/overlay, planner never actuates) with ICBM as the
     # actuator — exactly when the car has ACC buttons to steer and openpilot does NOT own long.
     self.ces_shadow: bool = self.button_management
