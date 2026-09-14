@@ -224,6 +224,7 @@ SA_ICBM_FRESH_S = 2.0
 # this many seconds, each counting the failed reads since the previous line.
 # silentexc2pnw: the AutoSpeedReduce read and the SpeedAdjustTarget publishes log on the same interval, each with its
 # own first-failure/count state.
+# silentexc3pnw: so does the MapSpeedLimit read in _read_speed_limit.
 POLICE_READ_ERR_LOG_S = 60.0
 
 
@@ -255,6 +256,8 @@ class SpeedAdjustController:
     self._mode_err_t = None      # silentexc2pnw: monotonic time of the last logged AutoSpeedReduce read failure (None = never)
     self._mode_err_n = 0         # silentexc2pnw: failed AutoSpeedReduce reads since that log line
     self._sl = 0.0                # current posted limit (m/s); 0 = unknown
+    self._sl_err_t = None         # silentexc3pnw: monotonic time of the last logged MapSpeedLimit read failure (None = never)
+    self._sl_err_n = 0            # silentexc3pnw: failed MapSpeedLimit reads since that log line
     self._sl_valid_t = -1e9       # monotonic time of the last VALID limit read (for the dropout hold)
     self._sl_pending = 0.0        # a LOWER limit awaiting SL_DROP_CONFIRM_S confirmation (0 = none)
     self._sl_pending_t = 0.0      # monotonic stamp of when that pending value was first seen
@@ -351,8 +354,22 @@ class SpeedAdjustController:
         raw = self.mem_params.get("MapSpeedLimit", return_default=True)
         raw = raw.decode() if isinstance(raw, bytes) else raw
         sl = float(raw) if raw else 0.0
-      except Exception:
+      except Exception as e:
+        # silentexc3pnw (Rule 2): was `except Exception: sl = 0.0` with no log. Fallback unchanged: the limit reads as
+        # unknown, so the last valid limit is held for SL_HOLD_S and then BOTH slowdowns stop (the limit-drop cap and
+        # the police cap each need a posted limit), on both cars. An unset key is not a failure (None -> 0.0 above,
+        # no exception). What raises: UnknownKeyName on a params_keys.h / params_pyx.so mismatch, or float() of a
+        # non-numeric string. Logged in the policer2pnw style, own state. Caught broadly: plannerd is
+        # restart_if_crash=False.
         sl = 0.0
+        self._sl_err_n += 1
+        now = time.monotonic()
+        if self._sl_err_t is None or now - self._sl_err_t >= POLICE_READ_ERR_LOG_S:
+          cloudlog.exception(f"speedadjust: MapSpeedLimit unreadable ({type(e).__name__}) -- the limit reads as unknown: " +
+                             f"the last one is held up to {SL_HOLD_S:.0f} s, then NO limit or police slowdown while this " +
+                             f"lasts ({self._sl_err_n} failed read(s) since the last log)")
+          self._sl_err_t = now
+          self._sl_err_n = 0
       if not math.isfinite(sl) or sl <= 0.0 or sl > SANE_MAX_SL:   # reject unknown / NaN / garbage-high
         sl = 0.0
     now = time.monotonic()
