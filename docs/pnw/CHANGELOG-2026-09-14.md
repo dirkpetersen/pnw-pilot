@@ -7,8 +7,8 @@ reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, 
 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked. This file is updated
 as each change ships.
 
-**Channel tip:** `origin/3devpnw` = `df5733e6e5` (leadlossgate2pnw, pushed ~08:08 PT, waiting to install).
-**Installed on the truck:** `acb5a21fb7` (swaglogrot2pnw, 08:02 PT).
+**Channel tip:** `origin/3devpnw` = `da0741eb8a` (twistyr2pnw + policer2pnw, pushed 08:31 PT, staging).
+**Installed on the truck:** `3a361964c7` (leadlossgate2pnw + docs, 08:27 PT).
 
 ## Networking — arbiter logging
 
@@ -35,7 +35,7 @@ as each change ships.
 | Commit(s) | What changed | Notes |
 |---|---|---|
 | `83ac3eb172` **leadlossr2pnw** | The lead-loss-hold shadow detector's failures are logged (first immediately, then at most once a minute) instead of swallowed by `except Exception: pass`. Rule 2. No plan or actuator change; the detector stays log-only. | Fable SHIP. Analysis of 69 shadow events (`drives/2026-09-14/leadloss-shadow-review/`): 3 genuine close drop-outs, none while openpilot controlled speed. Recommendation: don't build the braking version; keep logging with 3 extra gates. |
-| `df5733e6e5` **leadlossgate2pnw** | The lead-loss shadow only considers a drop-out at ≥ 5 m/s, with TTC ≤ 8 s and carState valid, which are the review's 3 gates. Rejections are logged with the gates that fired, at most 1 line per 5 s plus a held-back count. Malformed lead fields are logged. Still log-only: it never brakes. | Fable APPROVE: the narrowed except adds no crash path, since the planner's own logged guard wraps it. The 69-event replay reproduces the report: 6/6 useful kept, 6/7 harmful dropped. 15 tests, 18/18 mutants. Pushed ~08:08 PT, not installed yet. |
+| `df5733e6e5` **leadlossgate2pnw** | The lead-loss shadow only considers a drop-out at ≥ 5 m/s, with TTC ≤ 8 s and carState valid, which are the review's 3 gates. Rejections are logged with the gates that fired, at most 1 line per 5 s plus a held-back count. Malformed lead fields are logged. Still log-only: it never brakes. | Fable APPROVE: the narrowed except adds no crash path, since the planner's own logged guard wraps it. The 69-event replay reproduces the report: 6/6 useful kept, 6/7 harmful dropped. 15 tests, 18/18 mutants. Installed 08:27 PT (BootCount 200), healthy: control processes up, no tracebacks. |
 
 ## Diagnostics — device logs
 
@@ -65,7 +65,7 @@ as each change ships.
   - It fixes Sun 12:05:28 (60 → 51 mph), Sun 13:55:51, Sat 12:47:21, 09-08 19:36:58, and Sun 12:43:54 / 13:18:37.
   - It does NOT fix 09-08 20:28:51: that curve was 332 m ahead, so the item stays open.
   - Owner question: should a passed point also stop lowering a slowdown that is already running?
-- **`twistyr2pnw` + `policer2pnw`** (`8a8f603ee0`, next to install): the twisty-descent cap and the police input
+- **`twistyr2pnw` + `policer2pnw`** (`da0741eb8a`, pushed 08:31 PT, installing): the twisty-descent cap and the police input
   read log their failures (Rule 2) instead of `except Exception: pass`.
   - Fable REJECTED the first version, which narrowed the excepts. plannerd is not restarted after a crash, so any
     other error (e.g. `UnknownKeyName` from a params build mismatch) would have disengaged both cars with no
@@ -77,6 +77,15 @@ as each change ships.
 - **Pro Power (done, analysis only):** APIM `7D0-10-03` reads PPOOOVOS already **on** (partially confirmed; one
   FORScan read-only look settles it). Nothing cleared Pro Power in a 66-min overnight watch. Report:
   `drives/2026-09-14/propower-overnight-watch/DRIVE_REPORT.md`.
+
+- **`behindgate2pnw`**: Fable SHIP, rebased as `29379e9b5b`. It installs after twistyr2pnw.
+- **`coopsteerfix2pnw`** (`ff3980a17d`, Fable SHIP; Tesla coop-steer, shadow-only): torque above 1.0 Nm counts as
+  an override on the same tick instead of waiting for the 50 ms-debounced `steeringPressed`. Replay: active ticks
+  above 1 Nm 77 → 0, peak offset 11.5° → 10.1°.
+- **`foldlog2pnw`** (`a3be3e9ab6`, Fable reviewing): the map-curve fold's silent except now logs with the
+  exception type, and a new `mapErr` field reaches ces_events.
+- **Building:** `lcabort2pnw` (abort a lane change when the driver steers against it), `arbiterfu2pnw` (two
+  arbiter follow-ups), and a PSCM `LimitReached` investigation.
 
 ## Deferred to the owner
 
