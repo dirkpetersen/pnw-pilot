@@ -150,6 +150,11 @@ SET_MODE_TOL_MS = 1.0
 # button inside that window, because the driver is allowed to go faster. Unlike SET_MODE_TOL_MS this
 # ACTS, so it is well clear of mph rounding and the coast between our sample and the tap.
 SET_HIGH_CANCEL_MS = 3.0 * 0.44704
+# truckdecode2pnw: `set_speed_ms` is the cluster's own number x MPH_TO_MS -- Ford CAN FD carstate decodes
+# Veh_V_DsplyCcSet as mph unconditionally. When carState.cruiseState.speedClusterUnit says the cluster is in km/h, the
+# verify converts that number (and a RESUME's want, captured from the same field) to true m/s by this factor before
+# the rules above compare it with v_ego. Unknown keeps the mph assumption and says so in the record.
+KPH_OVER_MPH = (1.0 / 3.6) / 0.44704       # 0.621: a km/h number read as mph is 1.609x too high
 # engagegoal2pnw (Fable review 2026-09-13, B1): no RES/SET offer while the DRIVER pressed a cruise button in the last
 # second -- they are already engaging it themselves. Without this, a driver RES ~0.15 s before our SET- fired was
 # invisible to the verify window (it opens at the fire), and the PCM engaging at the driver's memory read as our
@@ -323,6 +328,9 @@ class ResumeInputs:
   has_lead: bool | None
   d_rel: float | None = None
   v_lead: float | None = None
+  # truckdecode2pnw: the cluster's set-speed unit, "mph" | "kph" | "unknown" (speed_unit_name() of
+  # carState.cruiseState.speedClusterUnit). Anything but "kph" leaves set_speed_ms as today's mph reading.
+  set_speed_unit: str = "unknown"
   # onetoggle2pnw: the separate MadsAutoResume toggle is GONE -- "Disengage on brake" governs both
   # halves of the behaviour. This is not a loosening: the arm gate below requires the rising edge of
   # `lateral_only`, and mads_pnw sets
@@ -348,6 +356,23 @@ class ResumeDecision:
   # SET_HIGH_CANCEL_MS). True on exactly one tick per press; the caller turns it into a disengage.
   cancel: bool = False
   records: list = field(default_factory=list)   # telemetry records to append (usually empty)
+
+
+def speed_unit_name(unit) -> str:
+  """truckdecode2pnw: carState.cruiseState.speedClusterUnit -> "mph" | "kph" | "unknown".
+
+  Compares the capnp ENUM, never its str() (a builder enum stringifies as a bare int, a reader as the bare name: the
+  capnp enum str trap). None -- a carState whose schema has no such field -- and a cereal without SpeedUnit are
+  "unknown", so a pin mismatch degrades to today's mph assumption instead of raising in selfdrived."""
+  from cereal import car
+  SpeedUnit = getattr(car.CarState.CruiseState, "SpeedUnit", None)
+  if unit is None or SpeedUnit is None:
+    return "unknown"
+  if unit == SpeedUnit.mph:
+    return "mph"
+  if unit == SpeedUnit.kph:
+    return "kph"
+  return "unknown"
 
 
 def _finite(x) -> bool:
@@ -653,8 +678,15 @@ class MadsResumeBrain:
                                           "mode": self._verify_mode or "res"}))
         self._verify_until = None
       elif i.cruise_enabled and _finite(i.set_speed_ms) and float(i.set_speed_ms) > 0.0:
-        got = float(i.set_speed_ms)
-        want = self._verify_set if self._verify_set is not None else 0.0
+        # truckdecode2pnw: compare in TRUE m/s. set_speed_ms (and a RESUME's want, captured from it) is the cluster's
+        # number x MPH_TO_MS; on a km/h cluster that is 1.609x high, and a gas-set's want is v_ego, so every gas-set
+        # would cancel. Only a "kph" unit converts; "mph" and "unknown" compare exactly as before (logged by the caller).
+        unit = i.set_speed_unit if i.set_speed_unit in ("mph", "kph") else "unknown"
+        k = KPH_OVER_MPH if unit == "kph" else 1.0
+        got_raw = float(i.set_speed_ms)
+        want_raw = self._verify_set if self._verify_set is not None else 0.0
+        got = got_raw * k
+        want = want_raw if self._verify_mode == "set" else want_raw * k
         # Fable B1: the axiom is "the speed the driver ALREADY SET", which is violated by a
         # DIFFERENT speed in either direction -- a come-back well BELOW the capture means the PCM
         # did not restore its remembered set, so something set a new speed. That is not dangerous
@@ -679,9 +711,11 @@ class MadsResumeBrain:
           "mode": self._verify_mode or "res",
           "driverBtn": self._verify_driver_btn, "cancel": cancel,
           # Fable review (a): the raw set as the cluster shows it. Ford CANFD carstate decodes Veh_V_DsplyCcSet as
-          # mph unconditionally (no units signal in CarState); a cluster in km/h would read every set ~60% high
-          # and this rule would cancel every press. Logged so that case is recognisable at a glance.
-          "gotDisplayMph": round(got / 0.44704, 1), "wantDisplayMph": round(want / 0.44704, 1),
+          # mph unconditionally; a km/h cluster reads every set ~60% high. The comparison above now converts when the
+          # unit is known to be kph; these stay the RAW numbers so an unknown-unit km/h cluster is still recognisable.
+          "gotDisplayMph": round(got_raw / 0.44704, 1), "wantDisplayMph": round(want_raw / 0.44704, 1),
+          # truckdecode2pnw: the unit gotMs/wantMs were converted with ("kph"), or that they were not ("mph"/"unknown")
+          "unit": unit,
         }))
         if reason != "ok":
           out.records[-1]["loud"] = True
