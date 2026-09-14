@@ -92,9 +92,17 @@ installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own 
   on-ramp, not a software clip. Nothing decodes the signal, so the clamp in `lateral_angle_pnw.py` is dead code.
   Wiring the signal into that clamp would have frozen the command below what the truck was still delivering.
   Building telemetry only (`pscmlimlog2pnw`). Report: `drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md`.
-- **Building:** `silentexc2pnw` (the next 3 silent excepts on the speed path, `mapD` Infinity → null, and the stale
-  coop-steer test fake); `icbmband2pnw` (analysis first: can polyline curvature reject 46.5–58 m/s mapd garbage
-  without ever rejecting a real curve?).
+- **Building:** `silentexc2pnw`. It covers the next 3 silent excepts on the speed path, plus the curvelead block in
+  `_icbm_step`, `mapD` Infinity → null, and the stale coop-steer test fake.
+- **ICBM 46.5–58 m/s "garbage band" (analysed, NOT built, no fix needed):**
+  `drives/2026-09-14/icbm-garbage-band/DRIVE_REPORT.md`, claims independently verified.
+  - In today's code a band read can never change an ICBM/CES decision: ICBM inflates it to ≥ 57.75 m/s, which is
+    always above the set speed. Over 11,954 band ticks, removing the value changed nothing.
+  - The "+6.1 s late" curve (07-19 06:29:44, Shilshole bend) had no band read: the 6.1 s was measured from the
+    10 s look-ahead marker, and against the steering ICBM started ~1 s early.
+  - A polyline rule can't separate real from bad reads: at best it catches 48/92 bad and rejects 290/811 real.
+  - The no-op holds while the Lightning `map_scale` ≥ ~0.63 (default 0.92).
+  - Earlier map anticipation is untouched: it is owner-controlled.
 
 ## Deferred to the owner
 
