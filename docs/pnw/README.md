@@ -39,6 +39,7 @@ the deeper per-feature design/rationale docs.
 | [CHANGELOG-2026-07-01.md](CHANGELOG-2026-07-01.md) | PNW changelog 06-29→07-06 |
 | [CHANGELOG-2026-07-12.md](CHANGELOG-2026-07-12.md) | PNW changelog 07-11→07-12 (the "Ford weekend") |
 | [CHANGELOG-2026-07-18.md](CHANGELOG-2026-07-18.md) | PNW changelog 07-12(eve)→07-18 (red-light-lurch arc, commIssue cascade, speedadjust, tightfollow arc + revert) |
+| [CHANGELOG-2026-09-14.md](CHANGELOG-2026-09-14.md) | PNW changelog 09-14 overnight (arbiter active-change logging, accdrop STALE_ROUTE_S; in progress: unreadable-read hold, behind-curve gate, police misses, Ford gear unknown, lead-loss review) — updated as items ship |
 | [CHANGELOG-2026-09-13.md](CHANGELOG-2026-09-13.md) | PNW changelog 09-13 (ICBM restore cap, speed-limit zone no-restore, curve-with-lead, MADS quiet chimes, WiFi cost ladder + manual pick, metered updates + backoff + keep-staged, no recording in Park, mapd pin 2.3.1 + logging, ACC dropout diagnostics, lat-accel cap 5.0<50mph) |
 | [op-long-features.md](op-long-features.md) | **Capability matrix**: every feature x Tesla / Lightning+AlphaLong-ON / Lightning+AlphaLong-OFF, per-car pros/cons, which-mode-to-drive guidance (Fable-written 2026-07-18) |
 | [PNWTEST3-OVERNIGHT-2026-06-22.md](PNWTEST3-OVERNIGHT-2026-06-22.md) | Historical: network2xnor rebuilt as 4 increments on pnwtest3 |
