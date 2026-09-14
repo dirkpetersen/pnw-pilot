@@ -634,6 +634,401 @@ def _icbm_track_apex(v_ego, ref, eff, dist):
   return None
 
 
+# --- curvelead2pnw (driver request #5, drives/2026-09-12/central-oregon-weekend/DRIVE_REPORT.md) -----
+# A. LEAD-PACED RELAXATION. "If there's a lead car that takes a curve at a certain speed, why don't you
+#    just follow that instead of making up your own mind." Stock ACC already follows the lead; what ICBM
+#    must stop doing is tapping the SET below the lead's speed. So ICBM's cap may rise toward the lead's
+#    speed -- never above what the truck can take on the TIGHTER of map geometry and vision, never above
+#    the driver's set -- and falls back to ICBM's own target the tick the lead is not tracked.
+#
+#    The safety argument is NOT "the lead is not suicidal". It is: the relaxed set is min(lead speed,
+#    truck bound), so if the lead vanishes mid-curve the stock ACC resumes at about the lead's last speed,
+#    and that speed was already checked against this truck's bound on measured curvature.
+#
+#    THE CASE THE GATES EXIST FOR -- Sun 2026-09-13 13:57:00-09 PT, stock ACC on: a lead tracked for 24+ s
+#    toward an R~36 m ramp ICBM had correctly rated 18-24 mph; the polyline read that ramp as R 1-10 km
+#    (point-match 56-125 m off mapd's point) and the model still predicted a straight road at 165 m; the
+#    lead vanished at 13:57:09 as the ramp began. Replay (drives/.../curvelead_replay.py): each of the
+#    three gates ICBM_LEAD_MIN_OWN_MS, ICBM_KAT_GAP_MAX_M and ICBM_VIS_TRUST_S refuses it ON ITS OWN;
+#    with all three removed, lead pacing raises 13:57:00/01/03 to 39/36/34 mph, which the truck measured at
+#    5.7-6.5 m/s^2 on that ramp. With them, 0 of the 14 raised ticks exceed 3.0 m/s^2.
+#
+# B. MAP-CLAIM SANITY. TELEMETRY ONLY -- see icbm_map_sanity / icbm_path_behind for why neither is wired.
+ICBM_LEAD_CONT_S = 3.0      # s of UNINTERRUPTED tracking before a lead may pace ICBM. Weekend corpus:
+                            #   57 of 118 lead runs lasted <= 2 s (flicker / brief acquisitions) but they
+                            #   hold only 72 of 2,586 lead ticks (2.8%) -- 3 s drops half the runs for <3%
+                            #   of real tracking time.
+ICBM_LEAD_MAX_GAP_S = 1.0   # s between brain ticks (~0.25 s nominal) beyond which nobody was watching
+ICBM_LEAD_JUMP_M = 8.0      # m of dRel change per brain tick that the lead's own relative speed cannot
+                            #   explain = a different car (cut-in, or re-acquisition after a loss in a curve).
+                            #   PnwVehicle's tight-follow gate calls a raw 8 m dRel step at the planner rate
+                            #   a different car; this one is prediction-compensated over the ~0.25 s tick.
+ICBM_LEAD_MIN_OWN_MS = 25.0 * CV.MPH_TO_MS   # never relax a curve ICBM itself rates below 25 mph. Tight,
+                            #   slow curves are where the lead gets lost (tracked through 1 of 4 close-lead
+                            #   tight curves in the weekend corpus) and where a raised set cannot be walked
+                            #   back down in time (13:57, above).
+ICBM_KAT_GAP_MAX_M = 30.0   # map geometry counts as MEASURED at the candidate only if the nearest
+                            #   spacing-gated triplet sits within this of mapd's point (13:57: 56-125 m).
+ICBM_VIS_TRUST_S = 8.0      # s of model horizon inside which vision counts as having MEASURED the curve --
+                            #   the horizon VTSC already trusts the model path to (vtsc_constants
+                            #   LOOKAHEAD_MAX_S), kept as its own constant so a VTSC retune cannot move an
+                            #   ICBM safety gate. Model reach alone is not enough: at 13:57:00 it reached
+                            #   166 m, covered the 165 m candidate (10 s out), and predicted a straight road.
+ICBM_VIS_VX_MIN = 1.0       # m/s floor under the model's planned speed in |yaw rate| / speed
+ICBM_LEAD_LOG_S = 5.0       # rule-2: throttle refusal-reason logs; engage/disengage edges always log
+ICBM_SANE_DROP_MS = 10.0 * CV.MPH_TO_MS   # B: "a large map-driven drop"
+ICBM_SANE_RATIO = 1.5       # B: geometry+vision allow >= 1.5x ICBM's speed = "much gentler"
+ICBM_PATH_MAX_PERP_M = 40.0  # B-behind: farther than this from mapd's path -> the path is not our road
+ICBM_PATH_AMBIG_M = 10.0     # B-behind: segments within this of the nearest are equally plausible positions
+ICBM_PATH_BEHIND_TOL_M = 15.0  # B-behind: a point counts as behind only this far back along the path
+ICBM_PATH_MATCH_TOL_M = 0.5    # B-behind: candidate distances are the same haversine on the same points
+_ICBM_PATH_MAX_POINTS = 256    # B-behind: bound the scan; the polyline is untrusted input (as in vtsc_pnw)
+
+
+def _round_or_none(x, nd):
+  """Telemetry: round a number, pass None/garbage through as None (never raises)."""
+  try:
+    return None if x is None else round(float(x), nd)
+  except (TypeError, ValueError):
+    return None
+
+
+class IcbmLeadTrack:
+  """curvelead2pnw: is ONE lead car being tracked without interruption? Fed once per ICBM brain tick.
+  The clock restarts on: no lead; a gap between ticks longer than ICBM_LEAD_MAX_GAP_S (ICBM was silent,
+  so nobody was watching); or a dRel jump the lead's own relative speed cannot explain (a different car).
+  Pure; never raises."""
+
+  def __init__(self):
+    self._t0 = None
+    self._prev = None
+
+  def reset(self) -> None:
+    self._t0 = None
+    self._prev = None
+
+  def update(self, now, has_lead, d_rel, v_lead, v_ego) -> tuple:
+    """Returns (seconds tracked continuously, why): why is "ok", or the reason the clock just restarted
+    ("noLead" / "gap" / "jump")."""
+    try:
+      now, d, vl, ve = float(now), float(d_rel), float(v_lead), float(v_ego)
+    except (TypeError, ValueError):
+      self.reset()
+      return 0.0, "noLead"
+    if not has_lead or not all(math.isfinite(x) for x in (now, d, vl, ve)) or d <= 0.0:
+      self.reset()
+      return 0.0, "noLead"
+    why = "ok"
+    if self._prev is not None:
+      t_p, d_p, vl_p, ve_p = self._prev
+      dt = now - t_p
+      if dt <= 0.0 or dt > ICBM_LEAD_MAX_GAP_S:
+        self._t0, why = None, "gap"
+      elif abs(d - (d_p + (vl_p - ve_p) * dt)) > ICBM_LEAD_JUMP_M:
+        self._t0, why = None, "jump"
+    if self._t0 is None:
+      self._t0 = now
+    self._prev = (now, d, vl, ve)
+    return now - self._t0, why
+
+
+def icbm_vision_curvature(orientation_rate_z, velocity_x, position_x):
+  """curvelead2pnw: the TIGHTEST curvature the driving model predicts anywhere on its horizon, and how far
+  that horizon reaches. curvature_i = |yaw rate_i| / planned speed_i, the per-point measure
+  vtsc_pnw.curvatures_from_model uses -- NOT predicted lateral accel / v_ego^2: the model slows for the
+  curve it sees, so dividing by the CURRENT speed under-reads exactly the curves that matter.
+  Returns (k 1/m, reach m), or (None, 0.0) when unusable. None means NO relaxation, never "straight".
+  Pure; never raises."""
+  try:
+    n = min(len(orientation_rate_z), len(velocity_x), len(position_x))
+    if n < 2:
+      return None, 0.0
+    k = 0.0
+    for i in range(n):
+      z, v = float(orientation_rate_z[i]), float(velocity_x[i])
+      if not (math.isfinite(z) and math.isfinite(v)):
+        return None, 0.0
+      k = max(k, abs(z) / max(v, ICBM_VIS_VX_MIN))
+    reach = float(position_x[n - 1])
+    if not math.isfinite(reach) or reach <= 0.0:
+      return None, 0.0
+    return k, reach
+  except (TypeError, ValueError):
+    return None, 0.0
+
+
+def icbm_lead_pace(own, ref, v_ego, src, cand_dist, lead_v, lead_cont_s, lead_why,
+                   k_max, k_max_n, k_at, k_at_n, k_at_gap, vis_k, vis_reach, a_lat, rain_ms=0.0):
+  """curvelead2pnw (A): the cap ICBM may raise its own curve target `own` to because a tracked lead is
+  taking the curve. Returns (target or None, why, k_tight). target is always > own and <= ref; None keeps
+  ICBM's own target. why names the gate that decided ("ok" when relaxed).
+
+    pace = min(lead speed, sqrt(a_lat / k_tight) - rain, ref)
+    k_tight = max(map polyline horizon max, point-matched map curvature, vision curvature)
+
+  Every input that is missing, unmeasurable or implausible REFUSES (None) -- the conservative direction
+  is ICBM's own target. Gates, in order: a_lat > 0 (capability) / lead tracked >= ICBM_LEAD_CONT_S /
+  own >= ICBM_LEAD_MIN_OWN_MS / polyline measurable / map candidates point-matched within
+  ICBM_KAT_GAP_MAX_M / vision present and the candidate inside ICBM_VIS_TRUST_S of model horizon / the
+  pace actually above own. Pure; never raises."""
+  if own is None:
+    return None, "noTarget", None
+  # No `x or 0.0` defaults anywhere below: a missing curvature is not a straight road and a missing gap is not
+  # a perfect match. Each missing input refuses under its own name (the first version read k_max=None as 0).
+  try:
+    own, ref, v_ego, a_lat = float(own), float(ref), float(v_ego), float(a_lat)
+    lead_v, lead_cont_s, cand_dist, rain_ms = float(lead_v), float(lead_cont_s), float(cand_dist), float(rain_ms)
+  except (TypeError, ValueError):
+    return None, "badInput", None
+  if not all(math.isfinite(x) for x in (own, ref, v_ego, a_lat, lead_v, lead_cont_s, cand_dist, rain_ms)):
+    return None, "badInput", None
+  if not (a_lat > 0.0):
+    return None, "off", None
+  if lead_cont_s < ICBM_LEAD_CONT_S:
+    return None, (lead_why if lead_why in ("noLead", "gap", "jump") else "cont"), None
+  if own < ICBM_LEAD_MIN_OWN_MS:
+    return None, "tight", None
+  try:
+    k_map, k_max_n = float(k_max), int(k_max_n)
+  except (TypeError, ValueError):
+    return None, "noGeom", None
+  if k_max_n <= 0 or not math.isfinite(k_map):
+    return None, "noGeom", None
+  if src in ("map", "far"):
+    try:
+      k_at, k_at_n, k_at_gap = float(k_at), int(k_at_n), float(k_at_gap)
+    except (TypeError, ValueError):
+      return None, "gap", None
+    if k_at_n <= 0 or not (k_at_gap <= ICBM_KAT_GAP_MAX_M) or not math.isfinite(k_at):
+      return None, "gap", None
+    k_map = max(k_map, k_at)
+  try:
+    vis_k, vis_reach = float(vis_k), float(vis_reach)
+  except (TypeError, ValueError):
+    return None, "noVis", None
+  if not (math.isfinite(vis_k) and math.isfinite(vis_reach)):
+    return None, "noVis", None
+  if cand_dist > min(vis_reach, v_ego * ICBM_VIS_TRUST_S):
+    return None, "visReach", None
+  k_tight = max(k_map, vis_k)                    # the TIGHTER reading -- never the looser
+  v_bound = math.sqrt(a_lat / k_tight) if k_tight > 1e-9 else float("inf")
+  pace = min(lead_v, v_bound - rain_ms, ref)
+  if not (pace > own + 1e-3):
+    return None, "slower", k_tight
+  return pace, "ok", k_tight
+
+
+def icbm_map_sanity(own, ref, v_ego, src, cand_dist, k_at, k_at_n, k_at_gap, vis_k, vis_reach, a_lat):
+  """curvelead2pnw (B) -- TELEMETRY ONLY; nothing publishes this. The requested rule: stop mapd's velocity
+  alone from driving a LARGE drop when mapd's own point-matched geometry AND vision both say the curve is
+  much gentler. Returns (the target it would publish or None, why).
+
+  WHY IT IS NOT WIRED (drives/2026-09-12/central-oregon-weekend/curvelead_replay.py: every map/far ICBM tick
+  of the weekend, the raised target judged against the curvature the truck itself measured when it got
+  there): the rule raises 86 ticks. On seven the truck measured more than 3.0 m/s^2 at the raised speed on
+  real curves -- Sat 15:00:15-16 (29 -> 56/50 mph, 4.1/4.0), 15:01:06 (26 -> 59, 4.4), 15:01:31-32 (39 -> 59,
+  3.4/4.5), 15:04:13-14 (37 -> 59, 5.2/5.3) -- plus three at Sat 14:51:44-46 that are a low-speed turn
+  artifact of the method. Adding the polyline horizon maximum to the tighter-of still leaves Sat 15:00:15-16,
+  where point-matched geometry, horizon max and vision ALL under-read the same curve ~1.6x. And the two
+  cases the rule was required never to suppress are not defended by it: 12:43:54 reads gentle on both
+  inputs and is spared only because mapd's point sat beyond the vision-trust horizon; 2026-09-08 19:37:47
+  predates the point-matched telemetry, so there is nothing to evaluate. (Both carry the behind-the-truck
+  signature of icbm_path_behind, i.e. they may not be curves ahead at all -- unproven.)
+  Geometry + vision is not a safe veto on this truck. Pure; never raises."""
+  if own is None or src not in ("map", "far"):
+    return None, None
+  try:
+    own, ref, v_ego, a_lat, cand_dist = float(own), float(ref), float(v_ego), float(a_lat), float(cand_dist)
+  except (TypeError, ValueError):
+    return None, "badInput"
+  if not all(math.isfinite(x) for x in (own, ref, v_ego, a_lat, cand_dist)):
+    return None, "badInput"
+  if not (a_lat > 0.0):
+    return None, "off"
+  if ref - own < ICBM_SANE_DROP_MS:
+    return None, "small"
+  try:
+    k_at, k_at_n, k_at_gap = float(k_at), int(k_at_n), float(k_at_gap)
+  except (TypeError, ValueError):
+    return None, "gap"
+  if k_at_n <= 0 or not (k_at_gap <= ICBM_KAT_GAP_MAX_M) or not math.isfinite(k_at):
+    return None, "gap"
+  try:
+    vis_k, vis_reach = float(vis_k), float(vis_reach)
+  except (TypeError, ValueError):
+    return None, "noVis"
+  if not (math.isfinite(vis_k) and math.isfinite(vis_reach)):
+    return None, "noVis"
+  if cand_dist > min(vis_reach, v_ego * ICBM_VIS_TRUST_S):
+    return None, "visReach"
+  k = max(k_at, vis_k)
+  v_geo = math.sqrt(a_lat / k) if k > 1e-9 else float("inf")
+  if v_geo < ICBM_SANE_RATIO * own:
+    return None, "consistent"
+  return min(ref, v_geo), "gentler"
+
+
+def icbm_path_behind(points, cur_lat, cur_lon, cand_dist):
+  """curvelead2pnw (B-behind) -- TELEMETRY ONLY. Is the map candidate at `cand_dist` BEHIND the truck along
+  mapd's own path? True / False / None (cannot tell).
+
+  WHY THIS EXISTS -- found while replaying B, and it may be the larger defect. mapd publishes its CURRENT
+  WAY from the way's first node (pfeiferj/mapd extended_state.go setPath: every node of the current way,
+  then the next ways), so points the truck has already passed stay in MapTargetVelocities, and every
+  candidate distance here is an unsigned haversine. upcoming_curve and icbm_far_map_candidate can therefore
+  keep offering a curve the truck has just driven. The signature is in the log: mapDist GROWING at v_ego
+  while mapd's velocity stays put. Weekend corpus, map-sourced ICBM ticks: 428 receding vs 411 approaching;
+  with stock ACC on, 34 receding vs 57 -- and three real tap-downs were for a curve already behind the truck (Sat 12:47:22-27 set 40 -> 28, Sun
+  12:05:28-31 59 -> 52, Sun 13:55:51-52 64 -> 62). The report's 12:43:54 and 13:18:37 ramp targets, and
+  the 2026-09-08 19:37:47 one, carry the same signature: mapDist rose 24 -> 135 m, 5 -> 44 m, 4 -> 22 m.
+
+  Measured ALONG the path (projection onto the polyline, in the path's own order), not by bearing: a
+  bearing test calls the far side of a loop ramp or hairpin "behind" when it is ahead. Ambiguity resolves
+  toward AHEAD (the smallest plausible along-track position of the truck), and a point must sit
+  ICBM_PATH_BEHIND_TOL_M back to count. Not wired: the corpus has no polylines to validate this on, so it
+  ships beside mapDist, whose growth rate is the independent check. Pure. Bad points are skipped; anything
+  else unexpected raises into _icbm_step's curvelead guard, which logs it and keeps ICBM's own target."""
+  if not points or cur_lat is None or cur_lon is None:
+    return None
+  lat0, lon0, cd = float(cur_lat), float(cur_lon), float(cand_dist)
+  if not all(math.isfinite(x) for x in (lat0, lon0, cd)):
+    return None
+  coslat = math.cos(math.radians(lat0))
+  pts = []                                   # (x east m, y north m, haversine m), path order kept
+  for p in points[:_ICBM_PATH_MAX_POINTS]:
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if not (math.isfinite(la) and math.isfinite(lo)):
+      continue
+    pts.append(((lo - lon0) * 111320.0 * coslat, (la - lat0) * 111320.0, _haversine_m(lat0, lon0, la, lo)))
+  if len(pts) < 2:
+    return None
+  along = [0.0]
+  for i in range(1, len(pts)):
+    along.append(along[-1] + math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]))
+  proj = []                                  # (perpendicular m, along-track m) of the truck per segment
+  for i in range(len(pts) - 1):
+    ax, ay = pts[i][0], pts[i][1]
+    dx, dy = pts[i + 1][0] - ax, pts[i + 1][1] - ay
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 1e-9:
+      continue
+    t = min(max((-ax * dx - ay * dy) / seg2, 0.0), 1.0)
+    proj.append((math.hypot(ax + t * dx, ay + t * dy), along[i] + t * math.sqrt(seg2)))
+  if not proj:
+    return None
+  min_perp = min(pp for pp, _ in proj)
+  if min_perp > ICBM_PATH_MAX_PERP_M:
+    return None                              # the path does not describe the road we are on
+  s_truck = min(s for pp, s in proj if pp <= min_perp + ICBM_PATH_AMBIG_M)
+  matched = [along[i] for i, q in enumerate(pts) if abs(q[2] - cd) <= ICBM_PATH_MATCH_TOL_M]
+  if not matched:
+    return None
+  return all(s < s_truck - ICBM_PATH_BEHIND_TOL_M for s in matched)
+
+
+
+CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icbmKVis",
+                       "icbmSaneT", "icbmSaneWhy", "icbmBehind")
+
+
+def _curvelead_tele(ctl) -> dict:
+  """curvelead2pnw: the telemetry fragment for BOTH the CESStatus overlay feed and the ces_events record
+  (one builder, so the two cannot drift). Every key in CURVELEAD_TELE_KEYS, always present; a missing or
+  never-set attribute reads None. Never raises."""
+  g = lambda n: getattr(ctl, n, None)   # noqa: E731
+  behind = g("_icbm_behind")
+  why = g("_icbm_lead_why")
+  sane_why = g("_icbm_sane_why")
+  return {
+    "icbmOwnT": _round_or_none(g("_icbm_own_t"), 2),
+    "icbmLeadT": _round_or_none(g("_icbm_lead_t"), 2),
+    "icbmLeadWhy": why if isinstance(why, str) else None,
+    "icbmLeadS": _round_or_none(g("_icbm_lead_s"), 1),
+    "icbmKVis": _round_or_none(g("_icbm_kvis"), 5),
+    "icbmSaneT": _round_or_none(g("_icbm_sane_t"), 2),
+    "icbmSaneWhy": sane_why if isinstance(sane_why, str) else None,
+    "icbmBehind": behind if isinstance(behind, bool) else None,
+  }
+
+
+def _curvelead_clear(ctl) -> None:
+  """curvelead2pnw: ICBM inactive (forced Chill / no data) -> no stale telemetry, and the lead clock
+  restarts. A module function taking the controller, not a method: the per-attribute controller stubs in
+  the ICBM tests bind _icbm_step onto a bare object, and a missing method there would be swallowed by
+  _icbm_step's except as a silent ICBM outage."""
+  trk = getattr(ctl, "_icbm_lead_trk", None)
+  if trk is not None:
+    trk.reset()
+  ctl._icbm_own_t = ctl._icbm_lead_t = ctl._icbm_lead_why = ctl._icbm_lead_s = None
+  ctl._icbm_kvis = ctl._icbm_sane_t = ctl._icbm_sane_why = ctl._icbm_behind = None
+
+
+def _curvelead_failed(ctl, now, own) -> None:
+  """curvelead2pnw: lead pacing / sanity telemetry raised. ICBM has already fallen back to its own target;
+  mark the record (icbmLeadWhy "error") and log -- throttled, it would otherwise repeat at ~4 Hz."""
+  try:
+    ctl._icbm_own_t, ctl._icbm_lead_t, ctl._icbm_lead_why = own, None, "error"
+    ctl._icbm_sane_t = ctl._icbm_sane_why = ctl._icbm_behind = None
+    ctl._icbm_lead_log = (False, "error", now)
+    if now - (getattr(ctl, "_icbm_lead_fail_log", None) or -1e9) > ICBM_ERR_LOG_S:
+      ctl._icbm_lead_fail_log = now
+      cloudlog.exception("curvelead2pnw: lead pacing FAILED -- ICBM is using its own curve target (no lead pacing, no B telemetry)")
+  except Exception:
+    pass                        # the fallback itself already happened in the caller; logging must not raise
+
+
+def _curvelead_note(ctl, now, own, pace, why, lead_s, lead_v, k_tight, vis_k, sane_t, sane_why, behind) -> None:
+  """curvelead2pnw: store this tick's lead-pace / sanity telemetry on the controller and LOG the moments
+  that matter (rule 2): lead pacing engaging and ending always; a change in WHY it is refused while ICBM has
+  a target, throttled to ICBM_LEAD_LOG_S; and the two telemetry-only B verdicts turning on or off. Never
+  raises -- logging must not become the thing that breaks ICBM."""
+  ctl._icbm_own_t = own
+  ctl._icbm_lead_t = pace
+  ctl._icbm_lead_why = None if own is None else why
+  ctl._icbm_lead_s = lead_s
+  ctl._icbm_kvis = vis_k
+  ctl._icbm_sane_t = sane_t
+  ctl._icbm_sane_why = sane_why
+  ctl._icbm_behind = behind
+  mph = CV.MS_TO_MPH
+  try:
+    engaged = pace is not None
+    was, last_why, last_t = getattr(ctl, "_icbm_lead_log", None) or (False, None, -1e9)
+    if engaged != was:
+      if engaged:
+        cloudlog.info("curvelead2pnw: lead pacing ENGAGED -- ICBM curve target %.1f -> %.1f mph " +
+                      "(lead %.1f mph, tracked %.1f s, tightest curvature %.5f 1/m)",
+                      own * mph, pace * mph, float(lead_v) * mph, float(lead_s), float(k_tight))
+      else:
+        cloudlog.info("curvelead2pnw: lead pacing ENDED (%s) -- ICBM back to its own target %s",
+                      why, "none" if own is None else f"{own * mph:.1f} mph")
+      ctl._icbm_lead_log = (engaged, why, now)
+    elif not engaged and own is not None and why != last_why and now - last_t >= ICBM_LEAD_LOG_S:
+      cloudlog.info("curvelead2pnw: lead pacing refused (%s) -- ICBM target %.1f mph stands", why, own * mph)
+      ctl._icbm_lead_log = (engaged, why, now)
+    b_now = (sane_t is not None, behind is True)
+    if b_now != (getattr(ctl, "_icbm_b_log", None) or (False, False)):
+      if b_now[0]:
+        cloudlog.info("curvelead2pnw: map-claim sanity WOULD raise ICBM %.1f -> %.1f mph -- TELEMETRY ONLY, not applied",
+                      own * mph, sane_t * mph)
+      if b_now[1]:
+        cloudlog.info("curvelead2pnw: ICBM curve target %.1f mph is for a map point BEHIND the truck -- TELEMETRY ONLY, not applied",
+                      own * mph)
+      ctl._icbm_b_log = b_now
+  except Exception:
+    # a failed log line must never take ICBM down with it -- but a logger that ALWAYS fails would leave
+    # these edges invisible for the whole drive, so say so (throttled, it runs at ~4 Hz).
+    try:
+      if now - (getattr(ctl, "_icbm_lead_log_err", None) or -1e9) > ICBM_ERR_LOG_S:
+        ctl._icbm_lead_log_err = now
+        cloudlog.exception("curvelead2pnw: telemetry logging FAILED -- lead-pace / sanity edges are not being logged")
+    except Exception:
+      pass
+
+
 # --- icbmratchet2pnw (root-cause fix, field event 2026-08-10: computed ~31 mph target / ~13.86 m/s,
 # ~15 mph delivered) --------------------------------------------------------------------------------
 # ROOT CAUSE: IcbmEpisode._min_target only ever ratchets DOWN for the life of a cap episode
@@ -2069,6 +2464,9 @@ class CESController:
     # the mapd-liveness evidence for the field logs). Display/log only — never gates control here.
     self._icbm_gate = None
     self._icbm_map_reach = None
+    # curvelead2pnw: lead-continuity clock + this tick's lead-pace / map-claim telemetry (_curvelead_note).
+    self._icbm_lead_trk = IcbmLeadTrack()
+    _curvelead_clear(self)
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -2443,6 +2841,15 @@ class CESController:
       # Experimental for curves on the truck — removes the chill<->experimental planner-mode flapping.
       toggles = {**self._toggles, "curves": False} if self._gentle else self._toggles
       sig = _signals_from(car_state, lead, model, toggles, mtv, mtd, self._speed_limit)
+      # curvelead2pnw: the model's tightest predicted curvature + horizon reach, for ICBM's lead pacing. Only
+      # where ICBM runs (ces_shadow) -- no other car computes or reads it. Own try: a model hiccup must cost
+      # lead pacing (None -> refused as "noVis"), not the whole signals dict.
+      if self._shadow:
+        try:
+          sig["vis_k_max"], sig["vis_reach"] = icbm_vision_curvature(
+            model.orientationRate.z, model.velocity.x, model.position.x)
+        except Exception:
+          sig["vis_k_max"], sig["vis_reach"] = None, 0.0
       # icbmalign2pnw: road pitch for the ICBM descent guard — the SAME message/field VTSC reads
       # (carControl.orientationNED[1], rad, < 0 = downhill; selfdrived's SubMaster subscribes
       # carControl). Own inner try: a carControl hiccup must not cost the whole signals dict.
@@ -2968,9 +3375,17 @@ class CESController:
         self._icbm_k_at_d = 0.0
         self._icbm_k_at_n = 0
         self._icbm_k_at_gap = 0.0
+        _curvelead_clear(self)          # curvelead2pnw: no stale lead-pace / sanity telemetry; lead clock restarts
         self._icbm_ep.reset()           # icbmrestore2pnw: forced Chill / no data ends any episode
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
+      # curvelead2pnw: advance the lead-continuity clock on EVERY active tick, not only while a curve binds
+      # -- "tracked through the approach" has to be measured before the curve asks for it.
+      trk = getattr(self, "_icbm_lead_trk", None)
+      if trk is None:
+        trk = self._icbm_lead_trk = IcbmLeadTrack()
+      lead_s, lead_why = trk.update(now, sig.get("has_lead", False), sig.get("lead_drel", 0.0),
+                                    sig.get("lead_vlead", 0.0), sig["v_ego"])
       # curveslow-lightning: vision curve candidate (the 493-curve gap: ICBM was MAP-ONLY and blind to
       # camera-seen curves). icbm_curve_target picks the more-binding of map / vision / far-map.
       vis_v, vis_dist = icbm_vision_apex(sig["v_ego"], sig.get("curve_lat_accel_vision", 0.0),
@@ -3119,6 +3534,42 @@ class CESController:
             self._icbm_k_at_gap = float(katgap)
         except (TypeError, ValueError):
           pass                # measurement only; a bad map_target_dist must not disturb control
+      # curvelead2pnw (A): LEAD-PACED RELAXATION -- see icbm_lead_pace. After every reduction (penalties,
+      # rain) and the posted-limit floor, so it can only RAISE the finished cap, capped at `ref` (the
+      # driver's own set / the episode ceiling): ICBM stays DEC-only. When any gate fails -- including the
+      # tick the lead stops being tracked -- `target` is simply ICBM's own, unchanged.
+      # Known limit, deliberately not "fixed" here: IcbmEpisode's outlier ratchet holds a revert larger
+      # than ICBM_RATCHET_OUTLIER_DROP_MS at the last published (relaxed) value for ICBM_RATCHET_CONFIRM_S
+      # before publishing it -- the brain reverts the same tick, the PUBLISHED target ~0.6 s later. That
+      # value was checked against the truck's bound one tick earlier; the ratchet is out of scope here.
+      # Pinned in test_curvelead2pnw.py (closed loop through the Ford executor).
+      # A bug anywhere in this block must cost lead pacing, never ICBM's own slowdown: it falls back to `own_t`
+      # and says so (_curvelead_failed), instead of escaping into this method's except, where the whole
+      # IcbmTarget publish would be lost and the executor would stale-stop.
+      own_t = target
+      try:
+        cand_dist = {"map": sig.get("map_target_dist", float("inf")), "vis": vis_dist,
+                     "far": far_dist}.get(self._icbm_src, float("inf"))
+        vis_k, vis_reach = sig.get("vis_k_max"), sig.get("vis_reach", 0.0)
+        a_lead = self._veh.icbm_lead_lat_accel
+        pace, lead_pace_why, k_tight = icbm_lead_pace(
+          own_t, ref, sig["v_ego"], self._icbm_src, cand_dist, sig.get("lead_vlead", 0.0), lead_s, lead_why,
+          self._icbm_k, self._icbm_k_n, self._icbm_k_at, self._icbm_k_at_n, self._icbm_k_at_gap,
+          vis_k, vis_reach, a_lead, self._veh.rain_penalty_ms())
+        if pace is not None:
+          target = pace
+        # curvelead2pnw (B) -- TELEMETRY ONLY. What the geometry+vision sanity rule and the behind-the-truck
+        # test WOULD do. Neither value is read by anything below; see icbm_map_sanity / icbm_path_behind.
+        sane_t, sane_why = icbm_map_sanity(own_t, ref, sig["v_ego"], self._icbm_src, cand_dist,
+                                           self._icbm_k_at, self._icbm_k_at_n, self._icbm_k_at_gap,
+                                           vis_k, vis_reach, a_lead)
+        behind = (icbm_path_behind(self._map_targets, self._cur_lat, self._cur_lon, cand_dist)
+                  if own_t is not None and self._icbm_src in ("map", "far") else None)
+        _curvelead_note(self, now, own_t, pace, lead_pace_why, lead_s, sig.get("lead_vlead", 0.0), k_tight,
+                        vis_k, sane_t, sane_why, behind)
+      except Exception:
+        target = own_t
+        _curvelead_failed(self, now, own_t)
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
@@ -3231,6 +3682,7 @@ class CESController:
     if self._shadow:
       tele["icbmT"] = self._icbm_last_target
       tele["icbmSrc"] = self._icbm_src           # curveslow-lightning: "map"/"vis"/"restore" source
+      tele.update(_curvelead_tele(self))         # curvelead2pnw: lead pacing (A) + sanity telemetry (B)
       # curvefloor2pnw: the posted-limit floor. icbmFlr = the debounced limit backing it (0 = no
       # floor active), icbmFlrHit = the floor actually raised the target on this tick. Without both
       # on the drive log there is no way to tell "the floor never applied" from "the floor applied
@@ -3407,6 +3859,11 @@ class CESController:
       # ceiling, the truck's reported stock set speed + engagement. icbmT stepping the stockSet down
       # in consecutive ticks = executor taps landing.
       "icbmT": self._icbm_last_target, "icbmC": self._icbm_ceiling, "icbmSrc": self._icbm_src,
+      # curvelead2pnw: icbmOwnT = ICBM's own curve target, icbmLeadT = the lead-paced cap that replaced it
+      # (None = not relaxed), icbmLeadWhy = the gate that decided, icbmLeadS = seconds the lead has been
+      # tracked, icbmKVis = the model's tightest curvature; icbmSaneT/icbmSaneWhy and icbmBehind are the
+      # TELEMETRY-ONLY map-claim verdicts (B). Listed in CURVELEAD_TELE_KEYS -- pinned by a test.
+      **_curvelead_tele(self),
       # icbmcurv2pnw: the map polyline's OWN geometry, beside the mapV/icbmT mapd asserted. NOT a
       # verdict: `icbmKN > 0 and icbmK ~= 0` does NOT mean "no curve" -- a real 90-degree corner
       # drawn with two 350 m legs among dense straight nodes reports exactly that, because only the

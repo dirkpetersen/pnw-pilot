@@ -95,6 +95,10 @@ _CURVE_DEFAULTS = {
                                 #   generous for the Lightning.
   "icbm_firm_decel": 1.4,       # m/s^2 assumed approach decel for LARGE speed drops (stock ACC does
                                 #   the actual braking; this only shapes the tap-start envelope)
+  # curvelead2pnw: the lateral load ICBM may let a tracked lead car pace the truck to through a curve
+  # (v <= sqrt(this / curvature), curvature = the TIGHTER of map geometry and vision). 2.5 is what the
+  # driver himself chose on the 2026-09-13 ramps (2.32 / 2.96 m/s^2 measured). 0.0 turns lead pacing off.
+  "icbm_lead_lat_accel": 2.5,
   # standstillsoft2pnw (2026-07-14): gentle standstill LAUNCH accel ramp — the red-light follow-launch
   # "lurch" fix. Cap the accel out of a dead stop to launch_accel, ramping to the normal envelope by
   # launch_v. (Root cause: a lead crept forward at a red, op-long launched to follow at ~2.0 m/s^2.)
@@ -122,6 +126,9 @@ _CURVE_BOUNDS = {
   "overspeed_margin_mph": (0.5, 10.0),
   "map_scale": (0.5, 1.0),
   "icbm_firm_decel": (0.8, 1.5),
+  # curvelead2pnw: [0, 3.0] -- 0 disables lead pacing; the ceiling sits at the driver's own p90 on country
+  # roads (2.96 m/s^2): a bad config can never let a lead pace the truck above his own p90.
+  "icbm_lead_lat_accel": (0.0, 3.0),
   # launch_accel in [0.2, 2.0]: never so low the truck can't move, never above the stock ~2.0 max ->
   # this cap can only ever SOFTEN a launch, never make it harsher. launch_v [3, 25] mph.
   "launch_accel": (0.2, 2.0),
@@ -479,6 +486,14 @@ class PnwVehicle:
     """Assumed approach decel (m/s^2) ICBM may plan with for LARGE speed drops (stock ACC does the
     actual braking). 0.0 on non-Lightning -> callers fall back to the base comfort decel."""
     return self._curve_cfg["icbm_firm_decel"] if self.lightning_curve_slow else 0.0
+
+  @property
+  def icbm_lead_lat_accel(self) -> float:
+    """curvelead2pnw: the lateral accel (m/s^2) ICBM may let a tracked lead pace this truck to through a
+    curve. It is the truck's steering capability, not the lead's: a car corners harder than a 7,000 lb
+    pickup with a weaker EPS. 0.0 = lead pacing OFF -- every non-Lightning car, and the Lightning when
+    curve.json sets it to 0."""
+    return self._curve_cfg["icbm_lead_lat_accel"] if self.lightning_curve_slow else 0.0
 
   def gentle_launch_accel(self, v_ego: float) -> float:
     """standstillsoft2pnw: a soft accel CEILING (m/s^2) out of a standstill so a follow-launch behind a
