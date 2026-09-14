@@ -125,6 +125,12 @@ installed 09:10 PT, BootCount 208). 10 changes installed today, each on its own 
     before Off + NO-SIGNAL; consult the legacy bool only when CESMode truly reads 0; remove the unreachable CES
     except. Also flagged: VTSC has no GPS `fix_ts` staleness check. Fable rates it medium-low and suggests a 30 s
     freshness check next.
+- **`vtscgpsage2pnw`** (`a9a0bdb957`, Fable SHIP; queued after silentexc3pnw). Telemetry only: VTSCStatus/ces_events
+  `gpsAge`, the age of the GPS fix behind VTSC's map-curve fold, on the same monotonic clock as `icbmGpsAge`. It
+  matters only on the Tesla, since VTSC needs op-long.
+  - It measures the stale-fix gap before any behaviour change. Fable's design: a distance-countdown hold armed at
+    ~3 s of age, no frozen position fed to the fold, release at 60 s. That needs an SR 99 tunnel drive on the Tesla
+    first.
 
 ## Deferred to the owner
 
