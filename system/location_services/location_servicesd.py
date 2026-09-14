@@ -399,6 +399,7 @@ class PoliceUpdater(threading.Thread):
     self._err = ""                  # short last-error tag for the UI on non-ok (e.g. "daily limit", "HTTP 403", "no key")
     self._stop = threading.Event()
     self._speed_ok = False          # wazespeedgate2pnw: hysteresis state for the >=45mph poll gate (fail-closed)
+    self._poll_state_logged = (None, None)   # policemiss2pnw: last logged (state, reason), change-only
     # wazespeedgate2pnw: stable per-device id sent to the proxy so IT can enforce a per-device daily
     # limit (750/day). Read ONCE at startup (not per-poll) -- HardwareSerial (the comma serial, e.g.
     # "eb1f2f7") first, DongleId as fallback, "noid" if neither is set.
@@ -417,6 +418,31 @@ class PoliceUpdater(threading.Thread):
   def snapshot(self):
     with self._lock:
       return list(self._alerts), self._state, self._err
+
+  def armed(self) -> bool:
+    """policemiss2pnw: the speed gate's current verdict -- True while we are polling at highway speed."""
+    return self._speed_ok
+
+  def _hold(self, err):
+    """policemiss2pnw: we are NOT polling (speed gate off) or the poll FAILED -- keep publishing what we
+    already fetched instead of blanking the line. Measured 2026-09-07..13: 57 min on freeway-class roads
+    below 43 mph (traffic) and every failed/backed-off poll blanked reports the device already held.
+    Everything held is published `retained` -> unconfirmed tier (amber), no `cap`, so a report we are not
+    re-verifying can display but can never command a slowdown. State "held", never "ok": an empty hold
+    must not read as a false "Clear" (_line_police)."""
+    held, self._retain = merge_retained_police(self._retain, [], _now_epoch())
+    with self._lock:
+      self._alerts, self._state, self._err = held, "held", err
+
+  def _log_poll_state(self, state, reason, **kw):
+    """Rule 2: every change of poll state (polling / gated / failing) is logged ONCE, with its reason.
+    The gate used to switch polling off with no log line at all, so a week of gate-off minutes could only
+    be reconstructed from the proxy's Lambda logs and the qlogs."""
+    key = (state, reason)
+    if key != self._poll_state_logged:
+      cloudlog.event("location_services_police_poll_state", state=state, reason=reason,
+                     prev_state=self._poll_state_logged[0], prev_reason=self._poll_state_logged[1], **kw)
+      self._poll_state_logged = key
 
   def stop(self):
     self._stop.set()
@@ -603,6 +629,7 @@ class PoliceUpdater(threading.Thread):
           with self._lock:
             self._alerts, self._state = [], "nodata"
             self._err = "no source" if (nosrc and enabled) else ""   # surface the actionable case; disabled = plain "-"
+          self._log_poll_state("off", "no source" if enabled else "disabled")
           self._stop.wait(POLICE_POLL_S)
           continue
         # wazespeedgate2pnw: gate the paid upstream poll on highway speed (cost control) -- only poll
@@ -616,8 +643,8 @@ class PoliceUpdater(threading.Thread):
           # "speed <45mph" told the driver they were too slow while they were doing 70 (observed after
           # a mid-drive reboot, 2026-08-18). Name the real cause -- they diagnose from this string.
           reason = _gate_reason(cur_speed)
-          with self._lock:
-            self._alerts, self._state, self._err = [], "nodata", reason
+          self._hold(reason)                                 # policemiss2pnw: was a wipe (alerts = [])
+          self._log_poll_state("gated", reason)
           self._stop.wait(POLICE_POLL_S)
           continue
         gps = self._cur_gps()
@@ -654,6 +681,7 @@ class PoliceUpdater(threading.Thread):
             self._alerts, self._state, self._err = alerts, "ok", ""
           cloudlog.info("location_services: police poll ok (%d alerts, %s)", len(alerts),
                         src_used)   # heartbeat for diagnosis
+          self._log_poll_state("polling", "")
           backoff = POLICE_POLL_S                            # success -> reset backoff
           consec_fails = 0                                   # ...and the transient-failure streak
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
@@ -680,8 +708,9 @@ class PoliceUpdater(threading.Thread):
             emsg = "bad resp"
           else:                                              # URLError / OSError -> connectivity
             emsg = "net err"
-          with self._lock:
-            self._state, self._err = "nodata", emsg         # NEVER a false 'clear' on failure (decision #4)
+          # NEVER a false 'clear' on failure (decision #4): "held" publishes only what we already fetched,
+          # as retained/amber, and an empty hold is nodata + this reason (policemiss2pnw; was a blank).
+          self._hold(emsg)
           denial = isinstance(e, urllib.error.HTTPError) and e.code in (402, 429)
           backoff, consec_fails = next_police_backoff(backoff, consec_fails, denial)
           # Logged AFTER the decision so the interval printed is the one actually about to be waited,
@@ -690,6 +719,7 @@ class PoliceUpdater(threading.Thread):
           cloudlog.warning("location_services: police poll failed (%s: %s); next poll in %ds (consecutive %d/%d)",
                            type(e).__name__, emsg, int(backoff), consec_fails,
                            POLICE_TRANSIENT_FAILS_BEFORE_BACKOFF)
+          self._log_poll_state("failing", emsg, next_poll_s=int(backoff), consecutive=consec_fails)
       except Exception:
         cloudlog.exception("location_services: police thread loop error (continuing)")  # HARD RULE: never die silently
       self._stop.wait(backoff)
@@ -1047,14 +1077,16 @@ _POLICE_DEBUG_MAX_B = 2_000_000   # ~2 MB cap; truncate-restart beyond (forensic
 _police_dbg_last = {"sig": None}
 
 
-def _police_debug_log(dbg, poi, lat, lon, brg):
+def _police_debug_log(dbg, poi, lat, lon, brg, state="ok", err=""):
   """police2pnw forensics (2026-07-09): the driver saw our banner place a report ~0.5 mi beyond the
   Waze app's icon. The raw pull only ever lived in memory, so the discrepancy was undiagnosable after
   the fact. Persist one line per CHANGE (not per tick) with every report's coords/age/magvar and which
   filter dropped it (stale/opp/passed) + which one we chose — so the next mismatch is a one-minute
-  lookup. Best-effort: any failure is swallowed; display path is unaffected."""
+  lookup. Best-effort: any failure is swallowed; display path is unaffected.
+  policemiss2pnw: also the poll state ("ok" / "held") and its reason, so a line shown from the hold is
+  distinguishable from a live poll without the proxy's Lambda logs."""
   try:
-    sig = (tuple((d["uuid"], d["v"]) for d in dbg), (poi or {}).get("uuid"))
+    sig = (tuple((d["uuid"], d["v"]) for d in dbg), (poi or {}).get("uuid"), state, err)
     if sig == _police_dbg_last["sig"] or not dbg:
       return
     _police_dbg_last["sig"] = sig
@@ -1069,13 +1101,17 @@ def _police_debug_log(dbg, poi, lat, lon, brg):
       f.write(json.dumps({"t": _now_epoch(), "gps": [round(lat, 5), round(lon, 5)], "brg": round(brg or 0, 1),
                           # policedbguuid2pnw: full uuid here too, so "which one did we choose" can
                           # actually be matched against the entries in `reports` (see the note there).
-                          "chosen": (poi or {}).get("uuid", "") if poi else None, "reports": dbg}) + "\n")
+                          "chosen": (poi or {}).get("uuid", "") if poi else None, "poll": state, "err": err,
+                          "reports": dbg}) + "\n")
   except Exception:
     pass
 
 
 def _line_police(alerts, state, err, lat, lon, brg, path, recede):
-  if state != "ok":
+  # policemiss2pnw: "held" = not polling (speed gate / failed poll); `alerts` is what we already fetched,
+  # all flagged retained by PoliceUpdater._hold. Selected and displayed like "ok", but never "clear" and
+  # never a `cap` (see below).
+  if state not in ("ok", "held"):
     # policenear2-2pnw (Fable round 2, F1): this return bypasses _select, so the hemisphere hold
     # would survive the gap -- a poll failure, the 43 mph speed gate disarming, or an LTE dropout --
     # and then admit a stale report at up to 105 deg on the far side. `last_pick` is NOT covered by
@@ -1237,10 +1273,15 @@ def _line_police(alerts, state, err, lat, lon, brg, path, recede):
   # CONTROL pick is published SEPARATELY as `cap` -- the nearest CONFIRMED report, which is the only
   # thing allowed to command a slowdown or raise the banner. Neither channel can suppress the other.
   poi, _a = _select(fresh, "display")
-  confirmed = [al for al in fresh if _tier_of(al, now, base, bonus) == "confirmed"]
+  # policemiss2pnw: a held report is not being re-verified, so it never reaches the CONTROL channel.
+  # _hold() already flags everything retained (-> unconfirmed); this makes the property explicit rather
+  # than a consequence of that flag.
+  confirmed = [] if state == "held" else [al for al in fresh if _tier_of(al, now, base, bonus) == "confirmed"]
   cap_poi, _ca = _select(confirmed, "cap")
-  _police_debug_log(dbg, poi, lat, lon, brg)
+  _police_debug_log(dbg, poi, lat, lon, brg, state, err)
   if poi is None:
+    if state == "held":                           # nothing we hold is ahead, and we are NOT polling: that
+      return {"state": "nodata", "err": err} if err else {"state": "nodata"}   # is not "Clear"
     return {"state": "clear"}                     # nothing ahead
   live = recede.live_mi(poi, lat, lon)
   # policenear2-2pnw: _select now ALWAYS returns (poi, None) -- there is no along-track solve left on
