@@ -25,6 +25,7 @@ def mk(now, **kw):
     brake_pressed=False, regen_braking=False, gas_pressed=False,
     cruise_enabled=True, cruise_available=True, set_speed_ms=SET, v_ego=SET,
     standstill=False, has_lead=False, d_rel=None, v_lead=None, engageable=True,
+    driver_cruise_button=False,
   )
   base.update(kw)
   return ResumeInputs(**base)
@@ -1573,3 +1574,103 @@ def test_pedal_modulation_inside_the_settle_time_writes_no_lift_record():
     d.tick(50, gas_pressed=True, v_ego=20.0, **STEER_ONLY)
     d.tick(int(0.3 / DT), v_ego=20.0, **STEER_ONLY)
   assert not [r for r in d.records if r["phase"] == "lift"], [r for r in d.records if r["phase"] == "lift"]
+
+
+# ---------------------------------------------------------------------------------------------
+# engagegoal2pnw -- OWNER DECISION 2026-09-13 "Cancel, steering drops too". Sun 21:16:33 PT (Corvallis): our
+# gas-set SET- from Standby made the PCM engage at 55 mph with the truck at 34. The whole-system replay of that
+# sequence (events, state machine, controlsd cancel rule, alert, chime) is in
+# selfdrive/selfdrived/tests/test_engagegoal_pnw.py; these pin the brain's decision.
+# ---------------------------------------------------------------------------------------------
+
+def _gas_set_then_cruise_returns(got_ms, driver_btn_at=None, v=15.36):
+  """Steering-only after a brake, accelerate to `v`, lift, the SET fires; 0.15 s later stock cruise engages
+  with set `got_ms`. `driver_btn_at`: seconds after the fire at which the DRIVER pressed a cruise button."""
+  d = Drive()
+  _red_light(d, 5.0)
+  d.tick(300, gas_pressed=True, v_ego=v, **STEER_ONLY)
+  while not d.fired():
+    d.tick(1, v_ego=v, **STEER_ONLY)
+  t_fire = d.offers[0][0]
+  cancels, n_rec = [], len(d.records)
+  engaged = dict(lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=got_ms, v_ego=v)
+  for _ in range(100):
+    now_s = round(d.t - t_fire, 3)
+    btn = driver_btn_at is not None and abs(now_s - driver_btn_at) < DT / 2
+    kw = engaged if now_s >= 0.15 else dict(STEER_ONLY, v_ego=v)
+    out = d.b.update(mk(d.t, driver_cruise_button=btn, **kw))
+    if out.cancel:
+      cancels.append(now_s)
+    d.records.extend(out.records)
+    d.t += DT
+  return d, cancels, [r for r in d.records[n_rec:] if r["phase"] == "verify"]
+
+
+def test_the_2116_overshoot_cancels_at_once_on_the_verify_tick():
+  """42 mph memory, truck at 34.4 mph (15.36 m/s), the PCM engaged at 55 mph (24.59 m/s): cancel once, on the
+  engage tick, with a loud verify that says why."""
+  d, cancels, verify = _gas_set_then_cruise_returns(24.59)
+  assert cancels == [0.15], f"cancel ticks (s after fire): {cancels}"
+  assert len(verify) == 1 and verify[0]["reason"] == "setHigher" and verify[0]["loud"] is True, verify
+  assert verify[0]["cancel"] is True and verify[0]["driverBtn"] is False, verify
+
+
+def test_a_driver_button_in_the_verify_window_is_never_cancelled():
+  """The driver is allowed to go faster: a RES/SET+ of theirs between our press and the come-back means the higher
+  set may be theirs. Logged loud with driverBtn, never cancelled."""
+  for at in (0.05, 0.15):                                           # before, and on, the come-back tick
+    d, cancels, verify = _gas_set_then_cruise_returns(24.59, driver_btn_at=at)
+    assert cancels == [], f"driver button at +{at}s was overruled"
+    assert verify[0]["reason"] == "setHigher" and verify[0]["loud"] and verify[0]["driverBtn"] is True, verify
+    assert verify[0]["cancel"] is False
+
+
+def test_a_gas_set_that_comes_back_at_the_lift_off_speed_is_not_cancelled():
+  d, cancels, verify = _gas_set_then_cruise_returns(15.2)            # the PCM rounds 34.4 mph to 34
+  assert cancels == [] and verify[0]["reason"] == "ok" and verify[0]["cancel"] is False, verify
+
+
+@pytest.mark.parametrize("over_mph", [1.5, 2.9])
+def test_a_come_back_within_3_mph_is_logged_but_not_cancelled(over_mph):
+  d, cancels, verify = _gas_set_then_cruise_returns(15.36 + over_mph * 0.44704)
+  assert cancels == [], f"+{over_mph} mph must not cancel"
+  assert verify[0]["cancel"] is False
+  assert verify[0]["reason"] == ("setHigher" if over_mph * 0.44704 > M.SET_MODE_TOL_MS else "ok"), verify
+
+
+def test_the_cancel_rule_applies_to_RESUME_too():
+  """For RES the wanted speed is the captured set. A RES that comes back more than 3 mph above it cancels."""
+  d = normal_brake_and_resume(post_ticks=60)
+  assert d.fired() and d.offers[-1][2] == pytest.approx(SET)
+  outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
+                        set_speed_ms=SET + 1.5)) for k in range(5)]
+  assert [o.cancel for o in outs] == [True, False, False, False, False], [o.cancel for o in outs]
+
+
+def test_no_cancel_without_our_own_press():
+  """Stock cruise engaging on its own, or the driver's own button, with no fire of ours: nothing to verify, no cancel."""
+  d = Drive()
+  d.tick(50)
+  d.tick(20, brake_pressed=True, **STEER_ONLY)
+  d.tick(30, gas_pressed=True, **STEER_ONLY)                         # back on the power before any window
+  outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
+                        set_speed_ms=SET + 10.0)) for k in range(200)]
+  assert not any(o.cancel for o in outs)
+
+
+def test_a_driver_button_from_an_EARLIER_press_window_does_not_protect_a_later_overshoot():
+  """The driver-button flag belongs to ONE press's window. A button the driver pressed while an earlier press was
+  being verified (that press never brought cruise back) must not stop the cancel for the next press."""
+  d = normal_brake_and_resume(post_ticks=60)                          # RES fires
+  assert d.fired()
+  hold = dict(lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0)
+  d.tick(1, driver_cruise_button=True, **hold)                         # a driver press inside the RES window
+  d.tick(int((M.VERIFY_S + 0.5) / DT), **hold)                         # ...but cruise never came back
+  assert "noCruise" in [r["reason"] for r in d.records if r["phase"] == "verify"], "precondition"
+  d.tick(20, brake_pressed=True, v_ego=15.0, **hold)                   # a fresh brake, then a gas-set
+  d.tick(100, gas_pressed=True, v_ego=15.0, **hold)
+  while len({o[1] for o in d.offers}) < 2:
+    d.tick(1, v_ego=15.0, **hold)
+  outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
+                        set_speed_ms=24.59, v_ego=15.0)) for k in range(3)]
+  assert [o.cancel for o in outs] == [True, False, False], "a stale driver-button flag suppressed the cancel"

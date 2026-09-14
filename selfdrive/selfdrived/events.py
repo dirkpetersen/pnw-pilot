@@ -542,6 +542,24 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 2.),
   },
 
+  # engagegoal2pnw ("Cancel, steering drops too", owner decision 2026-09-13): openpilot's own SET/RES brought the
+  # truck's set speed back more than 3 mph above what it asked for (2026-09-13 21:16:33: 55 mph at 34), so
+  # openpilot cancelled cruise and let go of the steering. USER_DISABLE carries the chime and disengages;
+  # PERMANENT (lower priority, silent) keeps the text visible if openpilot was not engaged on that frame.
+  # Not a pedalPressed/pcmDisable name, so madsquiet never silences it.
+  EventName.madsResumeSetTooHigh: {
+    ET.USER_DISABLE: Alert(
+      "Cruise set too high - cancelled",
+      "Steering off too - press the cruise button or + to restart",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.none, AudibleAlert.disengage, 4.),
+    ET.PERMANENT: Alert(
+      "Cruise set too high - cancelled",
+      "Steering off too - press the cruise button or + to restart",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.none, 4.),
+  },
+
   EventName.madsLateralOnly: {
     ET.PERMANENT: Alert(
       "Steering only",

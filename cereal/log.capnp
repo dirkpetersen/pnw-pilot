@@ -93,6 +93,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     madsLateralOnly @101;  # madsop2pnw: steering is live while openpilot's own engagement is gone — banner only, no control path
     madsControlsMismatchLateral @102;  # madsheartbeat2pnw: the panda revoked lateral authority while MADS was still commanding it
     cruiseOffRequested @103;  # onebutton2pnw: driver pressed the ACC ON/OFF button asking for everything off; blocks re-engagement briefly so the cancel lands
+    madsResumeSetTooHigh @104;  # engagegoal2pnw: our own SET/RES brought the stock set back >3 mph too high; one-frame disengage so the cancel lands
     ldw @53;
     carUnrecognized @54;
     invalidLkasSetting @55;

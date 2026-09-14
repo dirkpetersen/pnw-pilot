@@ -141,6 +141,15 @@ SET_TOL_MS = 0.4 * 0.44704
 # so the verify tolerance has to cover both. This is a REPORTING tolerance only -- it decides
 # whether the log calls the outcome "ok", and gates nothing.
 SET_MODE_TOL_MS = 1.0
+# engagegoal2pnw, OWNER DECISION 2026-09-13 ("Cancel, steering drops too"). MEASURED Sun 2026-09-13
+# 21:16:33 PT, Corvallis (drives/2026-09-13/corvallis-resume-55/): our gas-set SET- from Standby made the
+# PCM engage at 55 mph with the truck at 34 and a 42 mph memory, no driver button anywhere on the bus.
+# "A SET commands no acceleration" broke. So when, on the verify tick of openpilot's OWN press, the
+# truck's set comes back more than 3 mph above what that press wanted (gas-set: the speed at the tap;
+# RESUME: the captured set), openpilot cancels cruise at once -- unless the driver pressed a cruise
+# button inside that window, because the driver is allowed to go faster. Unlike SET_MODE_TOL_MS this
+# ACTS, so it is well clear of mph rounding and the coast between our sample and the tap.
+SET_HIGH_CANCEL_MS = 3.0 * 0.44704
 # The two wire values `ResumeDecision.mode` may take, and the exact set the executor's parser
 # accepts (opendbc icbm_pnw.RESUME_DIR / SET_DIR). Pinned by the wire-contract test: the brain and
 # the executor live in different repos with only a JSON mem-param between them, and a drift here
@@ -299,6 +308,9 @@ class ResumeInputs:
   set_speed_ms: float              # carState.cruiseState.speed as reported RIGHT NOW
   v_ego: float
   standstill: bool
+  # engagegoal2pnw: the DRIVER pressed a cruise button this tick (carState.buttonEvents: RES, SET+, SET-,
+  # SET, ON/OFF). These come from the SCCM on bus 0 only; openpilot's own taps never appear there.
+  driver_cruise_button: bool
   # radarState.leadOne. `has_lead is None` means the read FAILED -- that is a refusal, not "no
   # lead". d_rel/v_lead are only meaningful when has_lead is True.
   has_lead: bool | None
@@ -325,6 +337,9 @@ class ResumeDecision:
   # They are different actions with different risk: "set" commands no speed change at all, so the
   # gates that exist to bound acceleration do not apply to it.
   mode: str = "res"
+  # engagegoal2pnw: cancel stock cruise NOW -- our own press brought the set back too high (see
+  # SET_HIGH_CANCEL_MS). True on exactly one tick per press; the caller turns it into a disengage.
+  cancel: bool = False
   records: list = field(default_factory=list)   # telemetry records to append (usually empty)
 
 
@@ -413,6 +428,8 @@ class MadsResumeBrain:
     # verify lands (Fable review 2026-09-07 round 3, C1 -- reproduced: a RESUME press reported
     # "set", and the selfdrived warning then announced the wrong button).
     self._verify_mode: str | None = None
+    # engagegoal2pnw: a driver cruise button was seen between our press and its verify.
+    self._verify_driver_btn = False
     # Edge detector. THREE-STATE: None = "never observed", which is NOT the same fact as
     # "observed False" (Gemini review 2026-09-06). With a plain False, the first tick after the
     # brain becomes active -- e.g. a selfdrived restart mid-drive
@@ -610,6 +627,7 @@ class MadsResumeBrain:
 
     # --- post-press verification (runs independently of arm/disarm) ----------------------------
     if self._verify_until is not None:
+      self._verify_driver_btn = self._verify_driver_btn or bool(i.driver_cruise_button)
       if i.now > self._verify_until:
         # Cruise never came back inside the window. That is not an error (the press may have been
         # correctly ignored), but it IS the difference between "we pressed and nothing happened"
@@ -634,14 +652,19 @@ class MadsResumeBrain:
           reason = "setLower"
         else:
           reason = "ok"
+        # engagegoal2pnw: cancel at once when OUR press brought it back more than 3 mph too high, and the
+        # driver did not press a cruise button in the window (then it may be theirs: log both, never cancel).
+        cancel = got - want > SET_HIGH_CANCEL_MS and not self._verify_driver_btn
         out.records.append(self._snap(i, {
           "phase": "verify", "reason": reason, "fired": True,
           "gotMs": round(got, 2), "wantMs": round(want, 2),
           # explicit, so it cannot fall back to whatever `_used_gas` happens to be now
           "mode": self._verify_mode or "res",
+          "driverBtn": self._verify_driver_btn, "cancel": cancel,
         }))
         if reason != "ok":
           out.records[-1]["loud"] = True
+        out.cancel = cancel
         self._verify_until = None
 
     # --- arm on the lateral-only edge OR on any later brake press (gate 1) ---------------------
@@ -932,6 +955,7 @@ class MadsResumeBrain:
         "wantMs": round(self._verify_set, 2) if self._verify_set is not None else None,
       }))
     self._verify_until = i.now + VERIFY_S
+    self._verify_driver_btn = bool(i.driver_cruise_button)
     # gasset2pnw: the target is the speed the driver just chose with the accelerator, sampled once
     # here and never moved afterwards -- exactly as _armed_set is for a resume.
     target = float(i.v_ego) if self._used_gas else float(self._armed_set)
