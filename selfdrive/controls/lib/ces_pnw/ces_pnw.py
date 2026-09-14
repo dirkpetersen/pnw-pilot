@@ -683,6 +683,13 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
                                                           # multi-mph slowdown needs anyway.
 
 
+# satele2pnw: every key SpeedAdjustController._publish_status() emits, forwarded into the ces_events tick
+# record as "sa<Key>". A module constant so a test can assert publisher keys == forwarded keys against
+# the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
+SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
+                "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst")
+
+
 class IcbmEpisode:
   """Cap -> clear -> RESTORE -> done state machine (pure, unit-tested; owned by CESController).
 
@@ -2183,9 +2190,7 @@ class CESController:
       # missing ones evaporate in /dev/shm -- the exact trap satele2pnw's own commit message named,
       # and it had already caught vCruise + polKey (published, never picked up, while
       # params_keys.h advertised polKey as reaching ces_events).
-      self._sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in
-                       ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
-                        "ovr", "eng", "polLatch", "polSupp", "polKey")}
+      self._sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in SA_TELE_KEYS}
     except Exception:
       self._sa_tele = {}
     # lanecenter2pnw telemetry: lane-centering trim status — logging only (see _event_record).

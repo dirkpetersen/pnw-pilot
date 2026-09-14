@@ -267,6 +267,10 @@ class SpeedAdjustController:
     # Inert / never touched on any op-long car (self._long_ok True) -- see _publish_target().
     self._pub_ceiling = None     # driver's set latched at cap ENGAGE (icbm2pnw ceiling parity)
     self._restore_ceiling = None # active bounded-restore target (None = no restore in progress)
+    # sanorestore2pnw: did a LIMIT-DROP cap take part in the current episode? A released episode that
+    # involved one never restores (see the release branch in cap()). Reset at every episode engage.
+    self._ep_limit_drop = False
+    self._no_restore_why = None  # telemetry: why the last release did NOT open a restore (None = it did / n.a.)
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
     self._min_pub_target = None  # restore-hardening #1: running MIN of _cap_out published this cap
                                   # episode — the "explainability floor" (mirrors ces_pnw's
@@ -481,6 +485,8 @@ class SpeedAdjustController:
       "polLatch": bool(self._police_latched),
       "polSupp": bool(self._police_suppressed),
       "polKey": self._police_latched_key,
+      "epLim": bool(getattr(self, "_ep_limit_drop", False)),   # sanorestore2pnw
+      "noRst": getattr(self, "_no_restore_why", None),          # sanorestore2pnw
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -862,6 +868,7 @@ class SpeedAdjustController:
     # 2) — not just when the drop-cap itself is computed (mode 2 only) — so it never goes stale across
     # an AutoSpeedReduce 1→2 switch.
     self._update_baseline(v_cruise_set)
+    lc = None
     if self._mode >= 2:                       # limit-drop cap itself: mode 2 only
       lc = self._limit_drop_cap()
       if lc is not None:
@@ -891,9 +898,29 @@ class SpeedAdjustController:
         stock_now = self._read_stock_set(sm)
         driver_went_lower = (stock_now > 0.0 and self._min_pub_target is not None
                              and stock_now < self._min_pub_target - SA_DRIVER_LOWER_TOL)
-        if not driver_went_lower:
+        # sanorestore2pnw (driver directive 2026-09-13): "I want the button control management to
+        # never accelerate to the previous speed. I only want it to accelerate to the previous speed if
+        # there is a police warning -- that's the only exception."  A slowdown for a LOWER POSTED
+        # LIMIT is therefore permanent: when the limit rises again the set stays where it is and the
+        # driver raises it himself. Only a police-only episode walks the set back up. An episode that
+        # involved BOTH is treated as a limit drop -- restoring it would raise the set past a limit that
+        # dropped during it, which is exactly what the directive forbids. Curve slowdowns are a
+        # different brain (icbm2pnw) and keep restoring, capped at limit + 5 (icbmrestorecap2pnw),
+        # per the same conversation.
+        if getattr(self, "_ep_limit_drop", False):
+          self._no_restore_why = "limitDrop"
+          cloudlog.event("speedadjust_no_restore", reason="limitDrop",
+                         ceiling=round(float(self._pub_ceiling), 2), stock=round(float(stock_now), 2))
+        elif driver_went_lower:
+          self._no_restore_why = "driverLower"
+        else:
+          self._no_restore_why = None
           self._restore_ceiling = self._pub_ceiling
           self._restore_deadline = now + RESTORE_WINDOW_S
+      elif not self._long_ok:
+        # Fable review: no ceiling was latched (the driver intervened at engage), so no restore opens --
+        # say so. `None` is documented as "a restore opened / not applicable" and must not be reused here.
+        self._no_restore_why = "noCeiling"
         # else: no restore this episode — leave _restore_ceiling/_restore_deadline at None (already
         # None unless a prior tick set them, which can't happen on a fresh release).
       self._cap_out = None
@@ -942,6 +969,10 @@ class SpeedAdjustController:
       if not intervening:
         self._pub_ceiling = v_cruise_set
         self._min_pub_target = self._cap_out
+      self._ep_limit_drop = False             # sanorestore2pnw: a fresh episode starts clean
+      self._no_restore_why = None             # ...and so does the reason (Fable: it stayed stale through the next cap)
+    if lc is not None:
+      self._ep_limit_drop = True              # sanorestore2pnw: sticky for the rest of the episode
     if target < self._cap_out:
       self._cap_out = max(target, self._cap_out - CAP_SLEW * dt)
     else:

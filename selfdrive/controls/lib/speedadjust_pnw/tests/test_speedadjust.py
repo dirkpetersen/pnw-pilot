@@ -1338,3 +1338,179 @@ def test_cap_absent_clears_both_latch_and_dismissal():
   c._police = _police(0.3, "unconfirmed", cap_mi=None)
   assert c._police_cap(V75, V75) is None
   assert c._police_latched is False and c._police_suppressed is False
+
+
+# ---- sanorestore2pnw: a slowdown for a lower POSTED LIMIT never walks the set back up -------------
+# Driver directive 2026-09-13: "I want the button control management to never accelerate to the previous
+# speed. I only want it to accelerate to the previous speed if there is a police warning -- that's the
+# only exception." Curve slowdowns (icbm2pnw) are a separate brain and keep restoring, per the same
+# conversation. These tests drive a full stock-ACC episode through cap() and assert on what the executor
+# would actually be told (the SpeedAdjustTarget publishes), not on internal flags alone.
+
+def _release(c, v_cruise=V75, v_ego=V60):
+  """Clear sources have already been set by the caller: run through the release debounce."""
+  _tick(c, v_cruise=v_cruise, v_ego=v_ego)
+  if c._release_t is not None:
+    c._release_t -= (RELEASE_S + 0.1)
+  _tick(c, v_cruise=v_cruise, v_ego=v_ego)
+
+
+def _published_incs(c):
+  return [p for _, p in c.mem_params.calls if isinstance(p, dict) and p.get("dir") == "inc"]
+
+
+def test_a_limit_drop_slowdown_does_NOT_restore_when_the_limit_rises():
+  """THE DIRECTIVE. 60 -> 45 zone trims the set 75 -> 56; the limit rises back to 60 and the set must
+  stay where it is. Before this change the executor was told to SET+ back to 75."""
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  assert c.mem_params.last and c.mem_params.last["target"] < V75 - 5 * MPH, "the limit drop never capped"
+  assert c._ep_limit_drop is True
+  c._sl = V60                                            # limit rises back
+  _release(c)
+  for _ in range(20):
+    _tick(c)
+  assert _published_incs(c) == [], f"a limit-drop episode published a restore: {_published_incs(c)}"
+  assert c._restore_ceiling is None
+  assert c._no_restore_why == "limitDrop"
+
+
+def test_a_police_slowdown_STILL_restores():
+  """The one exception, pinned so this change cannot quietly remove it."""
+  c = _stock_ctrl(mode=2, sl=V60, sl_ref=V60, ratio=V75 / V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  assert c._ep_limit_drop is False
+  c._police = {"state": "clear"}
+  _release(c)
+  incs = _published_incs(c)
+  assert incs and abs(incs[-1]["target"] - V75) < 0.01, "a police slowdown no longer restores"
+  assert c._no_restore_why is None
+
+
+def test_an_episode_with_BOTH_police_and_a_limit_drop_does_not_restore():
+  """Restoring would raise the set past a limit that dropped during the episode."""
+  c = _stock_ctrl(mode=2, sl=V60, sl_ref=V60, ratio=V75 / V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                               # police cap engages first
+  c._sl = V45                                            # ...then the limit drops mid-episode
+  for _ in range(10):
+    _tick(c, v_ego=V45)
+  assert c._ep_limit_drop is True
+  c._police = {"state": "clear"}
+  c._sl = V60
+  _release(c)
+  for _ in range(10):
+    _tick(c)
+  assert _published_incs(c) == [], "a mixed police + limit-drop episode restored past the dropped limit"
+
+
+def test_the_flag_does_not_leak_into_the_NEXT_episode():
+  """A limit-drop episode, then later an unrelated police-only episode: the police one must restore.
+  Without the per-episode reset the first episode would silently disable every later police restore."""
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  c._sl = V60
+  _release(c)
+  for _ in range(10):
+    _tick(c)
+  assert c._ep_limit_drop is True and _published_incs(c) == []
+  n_before = len(c.mem_params.calls)
+  c._police = {"state": "alert", "dist_mi": 0.4}          # a new, police-only episode on the 60 road
+  c._ratio = V75 / V60
+  _settle_pub(c, V75, V60)
+  assert c._ep_limit_drop is False, "the limit-drop flag leaked into the next episode"
+  c._police = {"state": "clear"}
+  _release(c)
+  incs = [p for _, p in c.mem_params.calls[n_before:] if isinstance(p, dict) and p.get("dir") == "inc"]
+  assert incs, "a police-only episode after a limit-drop episode did not restore"
+
+
+def test_the_withheld_restore_is_LOGGED_and_in_telemetry(monkeypatch):
+  """Rule 2: a set that deliberately stays low must be explainable after the fact."""
+  import openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller as m
+  events = []
+  monkeypatch.setattr(m.cloudlog, "event", lambda name, **kw: events.append((name, kw)))
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  c._sl = V60
+  _release(c)
+  assert any(n == "speedadjust_no_restore" and kw.get("reason") == "limitDrop" for n, kw in events)
+  c._sa_pub_t -= 1.0                                     # the status publish is throttled at 5 Hz on the real clock
+  _tick(c)
+  status = [p for k, p in c.mem_params.calls if k == "SpeedAdjustStatus"]
+  assert status and status[-1].get("noRst") == "limitDrop" and "epLim" in status[-1]
+
+
+def test_every_published_status_key_is_forwarded_into_ces_events():
+  """satele2pnw lesson: a key published to /dev/shm but not cherry-picked by ces_pnw evaporates. The first
+  version of this test grepped ces_pnw's source for the two new key names, which a comment would satisfy
+  (Fable review). This compares the keys the publisher ACTUALLY emits with the forwarding list."""
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import SA_TELE_KEYS
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  c._sa_pub_t -= 1.0
+  _tick(c)
+  published = [p for k, p in c.mem_params.calls if k == "SpeedAdjustStatus"]
+  assert published, "no status was published -- the test proves nothing"
+  missing = set(published[-1]) - set(SA_TELE_KEYS)
+  assert not missing, f"published but never forwarded into ces_events: {sorted(missing)}"
+
+
+def test_the_no_restore_reason_resets_with_each_episode():
+  """Fable: `noRst` stayed 'limitDrop' through the next police-only episode's whole cap phase."""
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  c._sl = V60
+  _release(c)
+  assert c._no_restore_why == "limitDrop"
+  c._police = {"state": "alert", "dist_mi": 0.4}
+  _settle_pub(c, V75, V60)
+  assert c._no_restore_why is None, "a stale reason from the previous episode"
+
+
+def test_a_release_with_no_latched_ceiling_says_so():
+  """Fable: the intervention path opened no restore but reported None, which means 'it did / n.a.'."""
+  c = _stock_ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)
+  c._pub_ceiling = None                                  # as if the driver intervened at engage
+  c._police = {"state": "clear"}
+  _release(c)
+  assert _published_incs(c) == []
+  assert c._no_restore_why == "noCeiling"
+
+
+def test_police_starting_during_a_limit_drop_release_debounce_is_the_SAME_episode():
+  """Gemini review framed this as the flag 'leaking into a subsequent police episode'. It is not a new
+  episode: during the release debounce the cap has not released, so the police cap continues the SAME
+  episode, with the ceiling latched when the LIMIT DROP engaged. Restoring that ceiling when police
+  clears would also give back the limit-drop trim -- exactly what the directive forbids. Pinned so the
+  behaviour cannot change by accident."""
+  c = _stock_ctrl(mode=2, sl_ref=V60, ratio=V75 / V60, sl=V45)
+  _settle_pub(c, V75, V45)
+  c._sl = V60                                            # limit rises: the limit-drop source clears
+  _tick(c)                                               # ...now inside the release debounce
+  assert c._release_t is not None and c._cap_out is not None
+  c._police = {"state": "alert", "dist_mi": 0.4}          # police arrives before the cap released
+  for _ in range(10):
+    _tick(c)
+  assert c._ep_limit_drop is True, "the episode forgot it began as a limit drop"
+  c._police = {"state": "clear"}
+  _release(c)
+  for _ in range(10):
+    _tick(c)
+  assert _published_incs(c) == []
+
+
+def test_a_limit_drop_SHADOWED_by_a_lower_police_cap_still_marks_the_episode():
+  """Gemini suggested marking the episode only when the limit-drop cap actually BINDS. Rejected: with a
+  police cap below it the limit drop 'does nothing' this episode, but the limit did drop, and restoring
+  the pre-episode set afterwards would put the truck above the new, lower limit. A one-tick map flicker
+  cannot trigger this at all -- SL_DROP_CONFIRM_S requires a lower limit to persist 2 s first."""
+  c = _stock_ctrl(mode=2, sl=V60, sl_ref=V60, ratio=V75 / V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle_pub(c, V75, V60)                               # police cap ~65
+  c._sl = 50 * MPH                                       # a real 60 -> 50 drop (>5%): trim 62.5 mph, police cap 55
+  c._sl_valid_t = time.monotonic() + 1e6
+  for _ in range(10):
+    _tick(c)
+  lc = c._limit_drop_cap()
+  assert lc is not None and lc > c._cap_out, "the scenario is not shadowed -- the test proves nothing"
+  assert c._ep_limit_drop is True
