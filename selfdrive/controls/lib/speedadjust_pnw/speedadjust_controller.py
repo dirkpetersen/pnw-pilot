@@ -311,6 +311,8 @@ class SpeedAdjustController:
     self._icbm_read_t = -1e9
     self._icbm_read_warned = False
     self._icbm_dec_t = -1e9      # monotonic time a fresh ICBM dec was last seen on the bus
+    self._icbm_inc_t = -1e9      # zonefollow2pnw: ...and a fresh ICBM inc (its restore)
+    self._inst = round(time.monotonic(), 3)  # zonefollow2pnw: identifies this process start (ICBM detects a restart)
     self._icbm_hold = False      # the set is lowered by ICBM: the limit-drop ratio keeps the pre-curve set
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
     self._min_pub_target = None  # restore-hardening #1: running MIN of _cap_out published this cap
@@ -550,6 +552,7 @@ class SpeedAdjustController:
       "zoneN": self._zone_n,                                    # sazoneset2pnw: zone episodes opened (ICBM restore bound)
       "zoneLast": _r(self._zone_last),                          # ...and the most recent one's target
       "icbmHold": bool(self._icbm_hold),                        # ratio holding the pre-curve set (ICBM has it tapped down)
+      "inst": self._inst,                                       # zonefollow2pnw: changes only when plannerd restarts
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -874,6 +877,8 @@ class SpeedAdjustController:
     icbm_dir = self._read_icbm(now)          # sazoneset2pnw: None on op-long
     if icbm_dir == "dec":
       self._icbm_dec_t = now
+    elif icbm_dir == "inc":
+      self._icbm_inc_t = now
 
     # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either
     # direction) is an explicit "resume — don't slow me for this" override. Must run BEFORE
@@ -917,6 +922,13 @@ class SpeedAdjustController:
         # in-flight grace after it -- is ICBM's tap. Read as the driver's, it re-anchored the ratio to the tapped-down
         # set and the zone never trimmed. Same known limitation as FIX C: a driver SET- in that window is not an
         # override (an opposite-direction SET+ still is).
+        self._ovr = "icbmTap"
+      elif (not self._long_ok and v_cruise_set > self._last_v_set and self._cap_out is None
+            and now - self._icbm_inc_t < SA_ACTUATION_GRACE_S):
+        # zonefollow2pnw (Fable review of sazoneset2pnw, measured): the same for the curve RESTORE's SET+. Read as the
+        # driver's, each one re-anchored the ratio to the half-restored set, so a limit drop mid-restore trimmed from
+        # it (47/50/54 mph instead of 56). Only while speedadjust is not capping: arbitrate() runs no inc while any
+        # dec is on the bus, so a SET+ during our own cap is the driver's (e.g. dismissing a police slowdown).
         self._ovr = "icbmTap"
       else:
         self._ovr = "applied"

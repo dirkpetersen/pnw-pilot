@@ -523,7 +523,4 @@ def icbm_floor_limit(spd_lim: float, prev: float, now: float = 0.0, pending=None
     return prev, (spd_lim, now)                 # new candidate -> start its clock
   if (now - since) >= ICBM_FLOOR_RISE_HOLD_S:
     return spd_lim, None                        # it stuck -> adopt it
-  return prev, (cand, since)                    # still settling -> keep the lower floor                              # limit dropped -> follow at once (safe direction)
-  if prev > 0.0 and (spd_lim - prev) < ICBM_FLOOR_HYST_MS:
-    return prev                                 # small RISE -> hold, so tap flicker cannot chase it
-  return spd_lim
+  return prev, (cand, since)                    # still settling -> keep the lower floor

@@ -1775,6 +1775,81 @@ def test_a_curve_tap_landing_just_AFTER_the_curve_brain_went_quiet_is_still_its_
   assert c._ovr == "icbmTap", f"an in-flight curve tap read as {c._ovr!r}"
 
 
+def _restore_up(c, stock, n):
+  for _ in range(n):
+    stock += 1 * MPH
+    _set_tick(c, stock)
+  return stock
+
+
+def test_a_curve_RESTORE_SET_plus_is_not_a_driver_override_and_the_ratio_keeps_the_pre_curve_set():
+  """zonefollow2pnw (Fable, measured): ICBM's restore taps read as the driver raising the set, re-anchoring the ratio
+  to the half-restored set -- a limit drop mid-restore then ended at 47 / 50 / 54 mph instead of 56."""
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 20)
+  c.mem_params.icbm = _icbm(75, 75, direction="inc")
+  for _ in range(8):
+    stock += 1 * MPH
+    _set_tick(c, stock)
+    assert c._ovr == "icbmTap", f"a curve restore tap read as {c._ovr!r}"
+  assert c._icbm_hold and abs(c._ratio - 1.25) < 1e-9, f"ratio {c._ratio:.3f} followed the restore"
+
+
+def test_a_restore_tap_landing_just_AFTER_the_curve_brain_went_quiet_is_still_its_own():
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 10)
+  c.mem_params.icbm = _icbm(75, 75, direction="inc")
+  stock = _restore_up(c, stock, 2)
+  c.mem_params.icbm = {}
+  _set_tick(c, stock + 1 * MPH)
+  assert c._ovr == "icbmTap"
+
+
+@pytest.mark.parametrize("case", ["stale", "grace_expired"])
+def test_a_driver_SET_plus_with_no_live_curve_restore_is_still_an_override(case):
+  c = _curve_ctrl()
+  c.mem_params.icbm = _icbm(35, 75)
+  stock = _tap_down(c, V75, 5)
+  c._icbm_dec_t -= SA_ACTUATION_GRACE_S + 0.1
+  if case == "stale":
+    c.mem_params.icbm = _icbm(75, 75, age_s=SA_ICBM_FRESH_S + 0.5, direction="inc")
+  else:
+    c.mem_params.icbm = _icbm(75, 75, direction="inc")
+    _set_tick(c, stock)
+    c.mem_params.icbm = {}
+    c._icbm_inc_t -= SA_ACTUATION_GRACE_S + 0.1
+  _set_tick(c, stock + 1 * MPH)
+  assert c._ovr == "applied"
+
+
+def test_a_driver_SET_plus_during_OUR_OWN_cap_is_still_an_override_even_with_a_curve_restore_published():
+  """arbitrate() runs no inc while any dec is on the bus, so while speedadjust caps, a SET+ is the driver's -- e.g.
+  dismissing a police slowdown. It must not be absorbed as a curve tap."""
+  c = _zone_ctrl()                                        # 75 on a 60, limit now 45: speedadjust is capping
+  c.mem_params = _IcbmMem()
+  c.cap(_sm(speed=V75), V75, V75, V75, True)
+  _set_tick(c, V75)
+  assert c._cap_out is not None
+  c.mem_params.icbm = _icbm(75, 75, direction="inc")
+  _set_tick(c, V75)
+  _set_tick(c, V75 + 1 * MPH)
+  assert c._ovr == "applied", c._ovr
+
+
+def test_each_speedadjust_instance_publishes_its_own_stable_id():
+  """ICBM tells a plannerd restart from a zone count that simply did not move by this id."""
+  a, b = _zone_ctrl(), None
+  stock = _drive(a, V75, 3)
+  ids = {p["inst"] for k, p in a.mem_params.calls if k == "SpeedAdjustStatus"}
+  assert len(ids) == 1 and None not in ids, ids
+  time.sleep(0.002)
+  b = _zone_ctrl()
+  _drive(b, stock, 3)
+  assert {p["inst"] for k, p in b.mem_params.calls if k == "SpeedAdjustStatus"} != ids
+
+
 def test_the_in_flight_grace_after_a_curve_dec_expires():
   c = _curve_ctrl()
   c.mem_params.icbm = _icbm(35, 75)

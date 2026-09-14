@@ -156,6 +156,67 @@ class TestSpeedadjustsZoneBoundsTheRestore:
     ep.note_sa_zone(None, 4, 50 * MPH)
     assert ep.zone_n0 == 4 and ep.zone_cap is None
 
+  @staticmethod
+  def _restarted(ep, zone_tgt=None, limit=45 * MPH, inst=2.0, n=0):
+    ep.note_sa_zone(zone_tgt, n, None, limit, inst)
+
+  def _ep_inst(self, inst_idle=1.0, n_idle=1):
+    ep = IcbmEpisode()
+    ep.note_sa_zone(None, n_idle, 56.25 * MPH, 45 * MPH, inst_idle)
+    ep.step(100.0, 35 * MPH, 75 * MPH, 75 * MPH, True, False, limit_now=45 * MPH)
+    return ep
+
+  def test_a_speedadjust_RESTART_mid_episode_falls_back_to_limit_plus_five_and_says_so(self, monkeypatch):
+    """zonefollow2pnw (Fable A3d): plannerd restarted inside the ~1 s between the latch and ICBM's next status read,
+    so the zone it was setting vanished from its status -- 73-75 mph in a 45 zone."""
+    import openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw as m
+    logged = []
+    monkeypatch.setattr(m.cloudlog, "error", lambda msg, *a, **k: logged.append(msg))
+    ep = self._ep_inst()
+    ep.note_sa_zone(None, 1, 56.25 * MPH, 45 * MPH, 1.0)   # same instance: nothing to bound
+    assert ep.zone_cap is None
+    for _ in range(3):
+      self._restarted(ep)
+    assert ep.zone_why == "saRestart" and math.isclose(ep.zone_cap, 45 * MPH + ICBM_RESTORE_LIMIT_MARGIN_MS)
+    assert len([x for x in logged if "restarted" in x]) == 1
+    assert math.isclose(ep.ceiling, 75 * MPH), "SAFETY: the restart bound edited the cap-phase ceiling"
+
+  def test_a_zone_speed_seen_before_the_restart_stays_the_bound(self):
+    ep = self._ep_inst()
+    ep.note_sa_zone(56.25 * MPH, 2, 56.25 * MPH, 45 * MPH, 1.0)
+    self._restarted(ep)
+    assert ep.zone_why == "saZone" and math.isclose(ep.zone_cap, 56.25 * MPH)
+
+  def test_a_LOWER_zone_from_the_restarted_instance_still_binds(self):
+    ep = self._ep_inst()
+    self._restarted(ep, zone_tgt=48 * MPH)
+    assert math.isclose(ep.zone_cap, 48 * MPH) and ep.zone_why == "saZone"
+
+  def test_a_restart_with_the_limit_unknown_bounds_nothing_but_is_logged(self, monkeypatch):
+    import openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw as m
+    logged = []
+    monkeypatch.setattr(m.cloudlog, "error", lambda msg, *a, **k: logged.append(msg))
+    ep = self._ep_inst()
+    self._restarted(ep, limit=None)
+    assert ep.zone_cap is None and any("NOTHING" in x for x in logged)
+
+  @pytest.mark.parametrize("inst", [None])
+  def test_an_unreadable_instance_is_not_a_restart(self, inst):
+    ep = self._ep_inst()
+    ep.note_sa_zone(None, 1, 56.25 * MPH, 45 * MPH, inst)
+    assert ep.zone_cap is None
+
+  def test_the_instance_at_the_START_is_the_last_idle_read_and_reset_clears_it(self):
+    """A restart between the latch and the first in-episode read must still count."""
+    ep = self._ep_inst(inst_idle=1.0)
+    self._restarted(ep, inst=2.0)
+    assert ep._sa_inst0 == 1.0 and ep.zone_why == "saRestart"
+    ep.reset()
+    ep.note_sa_zone(None, 0, None, 45 * MPH, 2.0)          # idle again, on the new instance
+    ep.step(200.0, 35 * MPH, 50 * MPH, 50 * MPH, True, False, limit_now=45 * MPH)
+    ep.note_sa_zone(None, 0, None, 45 * MPH, 2.0)
+    assert ep._sa_inst0 == 2.0 and ep.zone_cap is None, "the next episode inherited the old restart"
+
   def test_the_bound_only_ever_lowers(self):
     ep = self._episode()
     ep.note_sa_zone(50 * MPH, 4, 50 * MPH)

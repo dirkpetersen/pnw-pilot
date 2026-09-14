@@ -84,9 +84,10 @@ def _cmd(d):
   return None
 
 
-def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0):
+def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0, sa_restart_at=None):
   """script(t) -> (limit_mph, curve_target_mph or None, police or None). Returns (final set mph, trace, controller).
-  tele_phase (0..99 frames) shifts ICBM's ~1 Hz status read against the brains' ticks."""
+  tele_phase (0..99 frames) shifts ICBM's ~1 Hz status read against the brains' ticks. sa_restart_at (s) replaces
+  speedadjust with a fresh instance mid-run -- plannerd restarting while selfdrived (ICBM) keeps its episode."""
   _Clock.t = 1000.0
   monkeypatch.setattr(sa, "time", _Clock)
   c = sa.SpeedAdjustController(types.SimpleNamespace(openpilotLongitudinalControl=False), params=_P(mode))
@@ -105,6 +106,10 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0):
         stock += p[1]
         pending.remove(p)
     sm.cs.cruiseState.speed = stock
+    if sa_restart_at is not None and abs(now - 1000.0 - sa_restart_at) < 0.005:
+      mem = c.mem_params
+      c = sa.SpeedAdjustController(types.SimpleNamespace(openpilotLongitudinalControl=False), params=_P(mode))
+      c.mem_params = mem
     if frame % 100 == tele_phase:                         # ces_pnw re-reads SpeedAdjustStatus at ~1 Hz
       st = next((v for k, v in reversed(c.mem_params.calls) if k == "SpeedAdjustStatus"), None) or {}
       sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in SA_TELE_KEYS}
@@ -259,3 +264,44 @@ class TestACurveOverlappingTheZoneEntry:
       return (60 if t < 5 else 45 if t < 12 else 35), (30 if t0 <= t < 20 else None), None
     final, trace, _ = simulate(monkeypatch, script, 90)
     assert abs(final - 35 * 75 / 60) <= 1.0, f"final {final:.1f}\n{trace}"
+
+
+
+class TestFableFollowUps:
+  """zonefollow2pnw: Fable's non-blocking findings on sazoneset2pnw, measured through this harness."""
+
+  @pytest.mark.parametrize("drop_t", [24.0, 28.0, 32.0, 34.0, 36.0, 40.0])
+  def test_a_limit_drop_DURING_the_curve_restore_ends_at_the_zone_speed(self, monkeypatch, drop_t):
+    """Curve 10-22 s at 35 on a 60 (set 75), restore from ~24 s, the limit drops to 45 at drop_t. ICBM's SET+ taps
+    read as driver overrides and re-anchored the ratio to the half-restored set: 47 / 50 / 54 for 32 / 34 / 36 s."""
+    final, trace, _ = simulate(monkeypatch, _overlap(10.0, drop_t=drop_t), 120)
+    assert abs(final - ZONE) <= 1.0, f"drop@{drop_t}: final {final:.1f}, want ~{ZONE:.1f}\n{trace}"
+
+  def test_a_dense_sweep_of_drop_times_through_the_restore(self, monkeypatch):
+    bad = []
+    for i in range(31):
+      final, _, _ = simulate(monkeypatch, _overlap(10.0, drop_t=15.0 + i), 120, tele_phase=50)
+      if abs(final - ZONE) > 1.0:
+        bad.append((15.0 + i, round(final, 1)))
+    assert not bad, f"drop time / final outside {ZONE:.1f} +- 1: {bad}"
+
+  @pytest.mark.parametrize("t0", [8.0, 9.0, 11.0, 13.0])
+  def test_a_speedadjust_restart_right_after_the_curve_latch_is_bounded(self, monkeypatch, t0):
+    """Fable's A3d: speedadjust (plannerd) restarts 0.25 s after the curve latched, before ICBM's next status read, so
+    the zone that was being set is gone from the status ICBM sees. Measured 75 / 73 / 68 / 64 mph in the 45 zone.
+    Now the restart is detected and the restore held to limit + 5."""
+    final, trace, _ = simulate(monkeypatch, _overlap(t0), 120, tele_phase=50, sa_restart_at=t0 + 0.25)
+    assert final <= 45 + 5 + 1.0, f"curve@{t0}: final {final:.1f} mph in the 45 zone, want <= limit + 5\n{trace}"
+
+  @pytest.mark.parametrize("t0", [7.0, 11.0])
+  def test_no_restart_phase_lets_the_curve_end_faster_than_the_restart_alone(self, monkeypatch, t0):
+    """A restart BEFORE the zone reached the truck loses the zone by itself (speedadjust's baseline is process
+    memory) -- that is not the curve's doing. The curve restore must never add to it."""
+    worse = []
+    for d in (-1.0, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0):
+      for ph in (0, 50):
+        final, _, _ = simulate(monkeypatch, _overlap(t0), 120, tele_phase=ph, sa_restart_at=t0 + d)
+        alone, _, _ = simulate(monkeypatch, _overlap(1e9), 120, tele_phase=ph, sa_restart_at=t0 + d)
+        if final > max(alone, ZONE) + 1.0:
+          worse.append((d, ph, round(final, 1), round(alone, 1)))
+    assert not worse, f"(restart offset, phase, with curve, restart alone): {worse}"

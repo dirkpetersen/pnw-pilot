@@ -1083,7 +1083,7 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
 # the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
 SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
                 "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt", "zoneN", "zoneLast",
-                "icbmHold")
+                "icbmHold", "inst")
 
 
 def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
@@ -1098,7 +1098,8 @@ def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
   except (TypeError, ValueError):
     proportional = False
   ep.note_limit(limit_now if limit_now is not None and limit_now > 0.0 else None, proportional)
-  ep.note_sa_zone(sa_tele.get("saZoneTgt"), sa_tele.get("saZoneN"), sa_tele.get("saZoneLast"))
+  ep.note_sa_zone(sa_tele.get("saZoneTgt"), sa_tele.get("saZoneN"), sa_tele.get("saZoneLast"), limit_now,
+                  sa_tele.get("saInst"))
 
 
 class IcbmEpisode:
@@ -1126,6 +1127,9 @@ class IcbmEpisode:
     self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / "saZone" / None
     self.zone_n0 = None                 # sazoneset2pnw (also cleared in reset()): speedadjust's zone count at latch
     self._sa_zone_n_idle = None         # ...as last read while idle; deliberately NOT cleared by reset()
+    self._sa_restart_logged = False     # zonefollow2pnw (also cleared in reset())
+    self._sa_inst0 = None               # zonefollow2pnw (also cleared in reset()): speedadjust's instance at latch
+    self._sa_inst_idle = None           # ...as last read while idle; NOT cleared by reset()
     self._window_s = window_s
     self._clear_delay_s = clear_delay_s
     self.phase = "idle"                 # idle | cap | restore
@@ -1190,6 +1194,8 @@ class IcbmEpisode:
     self.zone_cap = None                # sazoneset2pnw: STICKY stale-ceiling restore cap (m/s), only lowered
     self.zone_why = None                # sazoneset2pnw: "prop" / "limit5" / "saZone" / None
     self.zone_n0 = None                 # sazoneset2pnw: speedadjust's zone count when this episode began
+    self._sa_restart_logged = False     # zonefollow2pnw: one error per episode
+    self._sa_inst0 = None               # zonefollow2pnw: speedadjust's instance when this episode began
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -1260,7 +1266,7 @@ class IcbmEpisode:
     if cap is not None and (self.zone_cap is None or cap < self.zone_cap):
       self.zone_cap, self.zone_why = cap, why
 
-  def note_sa_zone(self, zone_tgt, zone_n, zone_last) -> None:
+  def note_sa_zone(self, zone_tgt, zone_n, zone_last, limit_now=None, inst=None) -> None:
     """sazoneset2pnw (Fable review, measured): bound the RESTORE by speedadjust's zone speed when a zone set was in
     progress during this episode or BEGAN during it. A curve overlapping a zone entry latches the pre-zone set as
     its ceiling, and the posted limit may already read low at the latch -- so icbm_stale_zone_cap sees nothing
@@ -1281,15 +1287,31 @@ class IcbmEpisode:
     except (TypeError, ValueError):
       n = None
     if self.phase not in ("cap", "restore") or self.ceiling is None:
-      self._sa_zone_n_idle = n
+      self._sa_zone_n_idle, self._sa_inst_idle = n, inst
       return
     if self.zone_n0 is None:
       self.zone_n0 = self._sa_zone_n_idle if self._sa_zone_n_idle is not None else n
-    bound = _pos(zone_tgt)
-    if bound is None and n is not None and self.zone_n0 is not None and n != self.zone_n0:
+    if self._sa_inst0 is None:
+      self._sa_inst0 = self._sa_inst_idle if self._sa_inst_idle is not None else inst
+    bound, why = _pos(zone_tgt), "saZone"
+    if inst is not None and self._sa_inst0 is not None and inst != self._sa_inst0:
+      # zonefollow2pnw (Fable review): speedadjust (plannerd) RESTARTED during this episode -- its zone count and last
+      # target are gone, so a zone that ran just before the restart is invisible (measured: 73-75 mph in a 45 zone).
+      # Unless this episode already holds a bound (a zone speed seen before the restart stays valid), fall back to the
+      # limit + 5 backstop.
+      lim = _pos(limit_now) if self.zone_cap is None else None
+      if lim is not None and (bound is None or lim + C.ICBM_RESTORE_LIMIT_MARGIN_MS < bound):
+        bound, why = lim + C.ICBM_RESTORE_LIMIT_MARGIN_MS, "saRestart"
+      if not self._sa_restart_logged:
+        self._sa_restart_logged = True
+        cloudlog.error("icbm: speedadjust restarted mid-episode; restore capped at "
+                       + (f"{bound:.2f} m/s ({why})" if bound is not None else
+                          f"the bound it already had ({self.zone_why})" if self.zone_cap is not None else
+                          "NOTHING -- posted limit unknown"))
+    elif bound is None and n is not None and self.zone_n0 is not None and n != self.zone_n0:
       bound = _pos(zone_last)
     if bound is not None and (self.zone_cap is None or bound < self.zone_cap):
-      self.zone_cap, self.zone_why = bound, "saZone"
+      self.zone_cap, self.zone_why = bound, why
 
   def _restore_target(self, stock_set, restore_cap):
     """The restore's publish for this tick: (target, "inc"), or (None, None) to HOLD silently.
