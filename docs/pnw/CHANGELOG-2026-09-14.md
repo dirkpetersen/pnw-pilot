@@ -35,6 +35,27 @@ Before it, the truck installed `705c74b931` by itself at a power cycle during th
 | (analysis) | **The iPhone hotspot did not take over from KarlMoik.** Two causes on different attempts: (1) a manual pick of KarlMoik at 17:59 held the radio, and tethering (the arbiter's master switch) was off; (2) after the reboot the arbiter DID try (18:55, 18:57), but the join failed with `WRONG_KEY`, likely WPA3 "Maximize Compatibility" off and unverified, and then with `ssid-not-found` (phone not visible). That started the 5/15 min backoff. | Documented in `docs/pnw/WIFI-NETWORK-POLICY.md` (new, §4 hand-picking and §6 FAQ). Owner set KarlMoik METERED (~17:50); HD uploads stopped there as designed. |
 | `dd3d1f7fbf` (+ FAQ commit) **WIFI-NETWORK-POLICY.md** | New authoritative doc of the WiFi/LTE policy from the code: network kinds, the three metered states, the cost ladder, scans, backoff, the unreadable hold, hand-picks and every way a pin ends, per-connection traffic gates (uploader passes, updater on any link, mapd, IPv6), and a driver FAQ. | 30+ constants spot-checked against the code. |
 
+## Night 09-14 — install batch (Visitor network, one reboot each, LTE watched)
+
+The owner approved continuing the installs tonight with the LTE byte count watched after each reboot. Each install was
+checked 5 min after boot: 0 control/UI tracebacks, `coverage grace resolved … avoided_request=True` (no map
+download), and `wwan0` rx ≤ 5 KB.
+
+| Commit | What | Reboot (PT) | BootCount |
+|---|---|---|---|
+| `e70f52757d` silentexc2pnw 2/6 | speedadjust AutoSpeedReduce read + SpeedAdjustTarget publish logging | 20:12 | 220 |
+| `131349b323` silentexc2pnw 3/6 | VTSC map-input / GPS / VTSCStatus publish logging | 20:19 | 221 |
+| `646fc13c9f` + `6dce8b11bd` silentexc2pnw 4+5/6 | VTSCStatus `mapD` null instead of Infinity; test-only stub | 20:25 | 222 |
+| `78bce4a0c0` silentexc2pnw 6/6 | ICBM lead-pacing failure log with type and count | 20:32 | 223 |
+| `b53650cf56` silentexc3pnw 1/4 | `read_ces_mode` failures logged per caller (CES, VTSC, UI overlay); UI verified stable | 20:38 | 224 |
+| `7f9d3e41d0` silentexc3pnw 2/4 | speedadjust `_read_speed_limit` failure logging | 20:45 | 225 |
+| `c919f6a937` silentexc3pnw 3/4 | VTSC freeway-floor input read logging | 20:51 | 226 |
+| `1351848070` silentexc3pnw 4/4 | RainMode push failure logging (VTSC + CES) | 20:58 | 227 |
+| `beb4f54c55` vtscgpsage2pnw | VTSCStatus/ces_events `gpsAge` (null on the stock-ACC Lightning, verified) | 21:05 | 228 |
+| `b1a901c0f4` pinunmetered2pnw | **Owner decision:** a manual WiFi pick ends when an explicitly unmetered saved network ARRIVES after the pick and is cheaper than the pinned one. Upgrade scans continue (120 s) while pinned on a non-unmetered link. Fable SHIP-WITH-FIX (docs): after a failed join the pick does not return, and the ladder takes its next choice. | 21:12 | 229: verified — arbiter up, 0 tracebacks, rejoined Visitor at boot, upgrade scans every 120 s |
+
+Earlier, all Fable-approved: silentexc2pnw 1/6 `fe4bf3116e` (auto-installed at a power cycle), `mapdgrace2pnw` `c0ecc9db58` (19:21), `nosetcancel2pnw` `52b6fc8aba` (auto).
+
 ## Networking — arbiter logging
 
 | Commit(s) | What changed | Notes |
