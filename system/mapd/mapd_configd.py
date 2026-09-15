@@ -51,6 +51,16 @@ REGION_RESEND_INTERVAL_S = 60.0
 # retries forever at the cap: the owner would rather burn cellular than be stranded without maps.
 # A region CHANGE, coverage arriving, or "Refresh this location map" all reset the escalation.
 REGION_MAX_RESEND_INTERVAL_S = 1800.0   # 30 min
+# mapdgrace2pnw: how long a region's tile must read NOT loaded -- with a steady fix and mapdOut
+# reporting -- before it counts as uncovered and may be requested. mapd loads a tile only while it
+# processes a gpsLocation message, and this process reacts to that same message first. On 111 of 113
+# observed boots 09-02..09-14 the tile loaded 0.1-1.9 s after the check (1 Hz qlogs; 0.075 / 0.119 s
+# in the two full-rate rlogs), yet each boot sent a whole-state download for maps already on disk
+# (drives/2026-09-14/map-redownload/DRIVE_REPORT.md). 10 s is >5x that worst case and leaves room for
+# mapd missing a 1 Hz GPS message or a 1 s load retry (mapLoadRetryDelay) on a busy boot, while a
+# genuinely uncovered region waits 10 s against a 2-3 min whole-state pull. The 09-03 corrupt-tile run
+# (47-57 s unloaded per sampled minute) still requests.
+COVERAGE_GRACE_S = 10.0
 # gpsfix2pnw: no GPS message for this long = the receiver is SILENT (qcomgpsd not running, a tunnel).
 # Only names the logged state; it gates nothing. gpsLocation is 1 Hz, so 3 s is two missed fixes.
 GPS_SILENT_S = 3.0
@@ -325,6 +335,77 @@ class RegionRetry:
     return int(st[1])
 
 
+class CoverageGrace:
+  """mapdgrace2pnw: "mapd has no tile loaded" is only "uncovered" once mapd has had a fair chance.
+
+  An EPISODE is an unbroken run of loops with a steady GPS fix, mapdOut reporting, and the tile not
+  loaded. A region may be requested once it has been the fix's region for COVERAGE_GRACE_S inside the
+  episode. Anything else ends the episode, so the window starts again
+  - at the first fix this process sees,
+  - after a fix gap (mapd needs a GPS message to load anything),
+  - after mapdOut goes silent (a restarted mapd has an empty state again; a dead one is not "uncovered"),
+  and a region entered mid-episode gets its own window, because mapd loads the new square from the same
+  GPS message that tells this process the region changed. The window is kept per region rather than one
+  clock restarted on every change, so a fix jittering across a state bbox edge cannot hold a genuinely
+  uncovered region off forever.
+
+  Rule 2: the episode start, its end (resolved with the time the tile took, or reset and why) and each
+  expiry are logged, change-only; so is a fix with mapdOut silent. `avoided_request` on the end line =
+  the pre-grace code would have sent a request during this episode, which is what the report counts.
+  """
+
+  def __init__(self) -> None:
+    self._start = None          # monotonic start of the current episode (None = no episode)
+    self._since: dict = {}      # region -> monotonic time it first was the fix's region this episode
+    self._expired: set = set()  # regions whose window has passed this episode
+    self._avoided = False       # a request the pre-grace code would have sent was held back this episode
+    self._episodes = 0          # episodes started by this process (1 = the first after start)
+    self._silent_since = None   # monotonic start of "fix but mapdOut silent" (None = not in that state)
+
+  def update(self, now: float, fix: bool, mapd_reporting: bool, tile_loaded: bool, region, request_due: bool) -> bool:
+    """True when `region` has read unloaded for COVERAGE_GRACE_S. `request_due` = every other request
+    condition holds this loop (what the pre-grace code requested on)."""
+    silent = fix and not mapd_reporting
+    if silent and self._silent_since is None:
+      self._silent_since = now
+      cloudlog.error("mapd_configd: coverage unknown: GPS fix but mapdOut silent -- no download request until mapd reports")
+    elif not silent and self._silent_since is not None:
+      state = f"mapdOut {'reporting' if mapd_reporting else 'still silent'}, fix {fix}"
+      cloudlog.warning(f"mapd_configd: coverage mapdOut silence with a fix ended after {now - self._silent_since:.1f} s ({state})")
+      self._silent_since = None
+
+    if not (fix and mapd_reporting and not tile_loaded):
+      if self._start is not None:
+        took, detail = now - self._start, f"({sorted(map(str, self._since))}; avoided_request={self._avoided})"
+        if not fix:
+          cloudlog.warning(f"mapd_configd: coverage grace reset after {took:.2f} s: GPS fix lost {detail}")
+        elif not mapd_reporting:
+          cloudlog.warning(f"mapd_configd: coverage grace reset after {took:.2f} s: mapdOut silent {detail}")
+        else:
+          cloudlog.warning(f"mapd_configd: coverage grace resolved: tile loaded after {took:.2f} s {detail}")
+        self._start, self._avoided = None, False
+        self._since.clear()
+        self._expired.clear()
+      return False
+
+    if self._start is None:
+      self._start = now
+      self._episodes += 1
+    if region not in self._since:
+      prev = f"region change from {sorted(map(str, self._since))}" if self._since else f"episode {self._episodes}"
+      self._since[region] = now
+      cloudlog.warning(f"mapd_configd: coverage grace start {region} ({prev}): tile not loaded, waiting {COVERAGE_GRACE_S:.0f} s")
+    if region in self._expired:
+      return True
+    if now - self._since[region] >= COVERAGE_GRACE_S:
+      self._expired.add(region)
+      waited = now - self._since[region]
+      cloudlog.warning(f"mapd_configd: coverage grace expired: {region} still not loaded after {waited:.2f} s -> uncovered (request_due={request_due})")
+      return True
+    self._avoided = self._avoided or request_due
+    return False
+
+
 def _grid_cells_for_bbox(bbox: list[float]) -> list[tuple[int, int]]:
   """The (lat, lon) tile-grid cell origins (TILE_GRID_DEGREES apart) covering a region's
   [min_lon, min_lat, max_lon, max_lat] bbox — mirrors mapd's settings/download.go adjustedBounds() +
@@ -432,6 +513,7 @@ def main():
   waysel_warned = False          # waysel2pnw: one-shot guard so a broken bridge warns once, not at 20 Hz
   last_requested_region = None   # region of the pull we last asked for (used to hold its retry clock)
   retry = RegionRetry()          # mapdgate2pnw: per-region escalating backoff, survives coverage
+  grace = CoverageGrace()        # mapdgrace2pnw: "not loaded" must last COVERAGE_GRACE_S before a request
   fix_state = None               # gpsfix2pnw: last LOGGED device fix state (None = nothing logged yet)
   fix_state_since = 0.0          # gpsfix2pnw: monotonic time fix_state was entered
   nofix_dropped = 0              # gpsfix2pnw: no-fix samples NOT written since the last logged state
@@ -735,17 +817,24 @@ def main():
     # outlasted the interval by the time it finished -> gapless back-to-back whole-state pulls.
     if dl_active and last_requested_region is not None:
       retry.hold(last_requested_region, now)
-    if uncovered and sm.alive['mapdExtendedOut'] and not dl_active:
+    region = key = None
+    if uncovered:
       g = sm[gps_service]
       region, key = coverage.region_and_key_for_gps(float(g.latitude), float(g.longitude))
-      if region is not None and key is not None and retry.due(region, now):
-        msg = messaging.new_message('mapdIn')
-        msg.mapdIn.type = 'download'
-        msg.mapdIn.str = key
-        pm.send('mapdIn', msg)
-        last_requested_region = region
-        n = retry.record(region, now)
-        cloudlog.warning(f"mapd_configd: uncovered {region}; req {key} (try {n}, next {next_region_interval(n):.0f}s)")
+    due = (uncovered and sm.alive['mapdExtendedOut'] and not dl_active and region is not None and key is not None
+           and retry.due(region, now))
+    # mapdgrace2pnw: `due` is what used to send. It now also needs the region to have read unloaded for
+    # COVERAGE_GRACE_S with a steady fix and mapdOut reporting (CoverageGrace). RefreshLocationMap above
+    # is not delayed: it sends on its own.
+    steady_fix = has_fix and gps_fix_state(sm, gps_service, now) == "fix"
+    if grace.update(now, steady_fix, sm.alive['mapdOut'], tile_here, region, due) and due:
+      msg = messaging.new_message('mapdIn')
+      msg.mapdIn.type = 'download'
+      msg.mapdIn.str = key
+      pm.send('mapdIn', msg)
+      last_requested_region = region
+      n = retry.record(region, now)
+      cloudlog.warning(f"mapd_configd: uncovered {region}; req {key} (try {n}, next {next_region_interval(n):.0f}s)")
 
 
 if __name__ == "__main__":

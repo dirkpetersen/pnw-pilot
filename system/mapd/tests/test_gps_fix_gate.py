@@ -154,10 +154,12 @@ class TestRegionGateNeedsAFix:
   def test_a_no_fix_position_does_not_pick_a_region_to_download(self, monkeypatch):
     """has_fix used to be `alive` only. A no-fix message placed in Washington must not request WA;
     the first real fix (Oregon) must request OR. tileLoaded False = uncovered; mapdExtendedOut alive."""
-    ext = {round(k * 1.0, 3): [("mapdExtendedOut", {})] for k in range(12)}
+    # mapdgrace2pnw: the OR fix must now read unloaded for COVERAGE_GRACE_S before it requests, so the
+    # fix keeps arriving and the replay runs past that window.
+    ext = {round(k * 1.0, 3): [("mapdExtendedOut", {})] for k in range(20)}
     fixes = [(float(i), 47.6, -122.3, 25.0, 180.0, False, 500.0) for i in range(4)] + \
-            [(4.0, 44.0, -121.3, 25.0, 180.0, True, 5.0)]
-    res = R.run(monkeypatch, _steps(fixes, 11.0, t0=1.0, extra=ext))
+            [(float(i), 44.0, -121.3, 25.0, 180.0, True, 5.0) for i in range(4, 17)]
+    res = R.run(monkeypatch, _steps(fixes, 17.0, t0=1.0, extra=ext))
     keys = [m.mapdIn.str for _, s, m in res.sent if s == "mapdIn"]
     assert keys, "no download request at all -- the uncovered path did not run"
     assert all("OR" in k.upper() or "oregon" in k.lower() for k in keys), keys
