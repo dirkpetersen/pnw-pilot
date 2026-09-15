@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-15          # audited against origin/3devpnw @ ed66cc6e04 (networkd/uploader last touched f65fdbdaf9); §3/§4/§6/§7 + networkd line citations updated for pinunmetered2pnw, then §0/§3/§4/§6/§7 + citations again for pinconfigured2pnw (both branch, NOT shipped)
+updated: 2026-09-15          # audited against origin/3devpnw @ ed66cc6e04 (networkd/uploader last touched f65fdbdaf9); §3/§4/§6/§7 + networkd line citations updated for pinunmetered2pnw, then §0/§3/§4/§6/§7 + citations again for pinconfigured2pnw (both branch, NOT shipped); §3/§6 add the hotspotretry2pnw one-free-retry rule (branch, NOT shipped)
 status: current
 ---
 
@@ -236,6 +236,28 @@ driveway" (`network_arbiterd.py:241-244`). A network absent from `ABSENT_SCANS_F
 (`network_arbiterd.py:307`) **consecutive real scans** and then seen again gets a clean slate
 (`_forget_on_reappearance`, `network_arbiterd.py:310-340`) — a scan that did not run (geo-gate
 suppressed, or `nmcli` failed) is **not** evidence of absence and changes nothing.
+
+**One free retry for a transient join failure (`hotspotretry2pnw` — branch, NOT shipped).** The ledger
+above blames every failed bring-up the same way, and the 2026-09-14 18:55 PT case (§6) shows that is too
+blunt: an iPhone hotspot that is not fully awake fails the 4-way handshake, the supplicant calls it
+`WRONG_KEY`, NM asks for secrets, and nmcli exits 4 with "Secrets were required, but not provided" — a
+failure the next poll would have fixed, which instead cost 5–15 min. `_apply` now returns `_con_up`'s
+`(classification, rc, stderr)`, and `classify_join_failure` (`network_arbiter.py`) reads the stderr
+against `TRANSIENT_JOIN_ERRORS` — "secrets were required", "no secrets (were) provided",
+"ssid-not-found", "network could not be found", "association took too long". **Anything else is `real`
+and behaves exactly as before.** When judge_link blames a network whose own last `con up` was classified
+transient, and that network is a **configured `mobile: true` entry**, and its one free retry is unspent,
+the blame is skipped — the network is then simply not in `blocked`, so the same tick's ladder raises it
+again, one poll (20 s) later. The retry is per network and is returned **only by a successful join**, so a
+permanently broken hotspot is blamed on its second try and escalates normally: attempts at 0 s, 20 s,
+100 s, 420 s, then one per 900 s — **one extra `con up` per episode, steady state unchanged**. Logged
+change-only as `netcosttier_join_classified` (ssid, classification, rc, NM's own error text, mobile,
+retrying, and a `rule=` saying why it was or was not retried), so a wording the list gets wrong is visible
+rather than silently blamed. Known over-match: a genuinely **wrong password** produces the same "secrets
+were required" text, and costs one extra attempt. A **pin** is unaffected — a pinned network is joined by
+the UI, not the arbiter, so nothing carries a classification for it and `judge_pin`'s `failed` path is
+unchanged. Tests: `test_network_join_retry.py` plus `TestATransientJoinFailureIsRetriedOnce` /
+`TestTheRetryIsBoundedAndTheLedgerStillWorks` / `TestWhatIsNOTRetried` (389 networkd tests on the branch).
 
 A link is judged usable via `_client_link_usable` (tri-state: `True`=has an IPv4 address,
 `False`=associated with none, `None`=could not tell, `network_arbiterd.py:256-304`) plus NM's per-device
@@ -708,6 +730,13 @@ So after two failures the arbiter waits 5 min, then 15 min, before trying the ph
 1. iPhone → Settings → Personal Hotspot → turn **Maximize Compatibility ON** and keep that screen open.
 2. On the comma, tap the iPhone once, re-entering the password if asked. The tap records a pin, and a
    successful join clears the backoff.
+
+*With `hotspotretry2pnw` (branch, NOT shipped):* neither of those two failures costs 5–15 min any more.
+Both are classified **transient**, so the first one on the phone is not blamed at all — the arbiter simply
+tries again on the next poll, 20 s later, which is what the phone needs to finish waking up. Only the
+second failure in a row goes into the ledger, and from there the 60/300/900 s escalation is unchanged.
+Look for `netcosttier_join_classified` in the log: it carries the return code, NM's own error text, and
+whether it retried. See §3, "One free retry for a transient join failure".
 
 *With `pinunmetered2pnw` + `pinconfigured2pnw` (2026-09-14):* if you are on a network you picked that is
 **not** marked unmetered (e.g. KarlMoik), just turning the iPhone hotspot on is enough — **provided** the
