@@ -543,6 +543,27 @@ for cost reasons (though it can still be outranked if `DisableNetworkCostLadder`
 aren't honored in binary mode, §3). If `TetheringEnabled=0`, the tap alone (an ordinary NM
 `ActivateConnection`) is what does it — the arbiter isn't involved either way in that case (§1).
 
+**The arbiter tried the iPhone hotspot but did not switch. Why?** (observed 2026-09-14 18:55–18:58 PT)
+With tethering on and no pin, the cost-upgrade scan (every `UPGRADE_SCAN_S = 120 s` on a non-unmetered link)
+found `Dirk's iPhone 13` and ran `nmcli con up` on it (log: `priority wifi 'Dirk's iPhone 13' in range ->
+... (leaving openpilot connection KarlMoik)`). Two different join failures followed:
+1. **Wrong key.** wpa_supplicant reported `CTRL-EVENT-SSID-TEMP-DISABLED ... reason=WRONG_KEY`. NM then
+   asked for secrets, but no secret agent is available for the arbiter's `nmcli`, so it logged
+   `Secrets were required, but not provided`. The saved PSK was present (system-stored, `psk-flags=0`)
+   and had connected earlier that evening.
+   - Likely cause, **unverified**: the iPhone hotspot was in WPA3 mode ("Maximize Compatibility" off),
+     while the comma's profile is `key-mgmt=wpa-psk` (WPA2). A WPA3-only AP shows up as a wrong key.
+   - Otherwise the stored password really is wrong.
+2. **Not visible.** NM reported `ssid-not-found` ("association took too long"). iPhones hide the hotspot
+   unless the Personal Hotspot screen is open or a device is already joined.
+
+Each failure is blamed (`netcosttier_assoc_failed`) and starts the backoff `FAIL_BACKOFF_S = (60, 300, 900)`.
+So after two failures the arbiter waits 5 min, then 15 min, before trying the phone again.
+**Fix at the truck:**
+1. iPhone → Settings → Personal Hotspot → turn **Maximize Compatibility ON** and keep that screen open.
+2. On the comma, tap the iPhone once, re-entering the password if asked. The tap records a pin, and a
+   successful join clears the backoff.
+
 **How do I mark a network metered without pinning it?**
 Already the case: Settings → Network → Advanced → "Wi-Fi Network Metered" (the 3-way `default`/
 `metered`/`unmetered` control) **never** records a pin (§4) — it only writes NM's `connection.metered`
