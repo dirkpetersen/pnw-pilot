@@ -1076,30 +1076,41 @@ def icbm_passed_points(points, cur_lat, cur_lon, bearing, v_ego):
 
 
 def _icbm_passed_log(ctl, state, **kw) -> None:
-  """behindgate2pnw (Rule 2): the gate's verdict on a pending START, logged when it CHANGES -- "passed" (it acted),
-  "clear" (the binding point is ahead), "unknown" (it could not tell, with why). A module function taking the
-  controller for the same reason as _curvelead_clear."""
-  key = (state, kw.get("why"), kw.get("started"))
+  """behindgate2pnw (Rule 2): the gate's verdict on a binding map/far candidate, logged when it CHANGES --
+  "passed" (it acted), "clear" (the binding point is ahead), "unknown" (it could not tell, with why). A module
+  function taking the controller for the same reason as _curvelead_clear. behindrun2pnw: a verdict on a RUNNING
+  episode carries phase="run" (and `started` is then the source the episode continues on, None = nothing binds any
+  more, so the restore may begin); a START verdict has no phase key, so the two never collapse into one another."""
+  key = (state, kw.get("why"), kw.get("started"), kw.get("phase"))
   if getattr(ctl, "_icbm_passed_state", None) != key:
     ctl._icbm_passed_state = key
     cloudlog.event("ces_icbm_passed", state=state, **kw)
 
 
-def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis):
-  """behindgate2pnw: the START gate. Called only when an episode would START from a map/far candidate. Returns
+def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis, ceiling=None, running=False):
+  """behindgate2pnw: the passed-point gate. Called whenever a map/far candidate would bind. Returns
   (target, sig, far_v, far_dist), updating ctl._icbm_src / _icbm_gate.
 
   The binding point was passed exactly when that source's candidate CHANGES once the passed points are removed:
   upcoming_curve keeps the first lowest point and icbm_far_map_candidate the lowest cap, so removing other points
-  cannot change a pick that was not itself removed. Then the start is re-decided on the points still ahead (another
-  curve may start it), with vision only where it may start. When the binding point is ahead, nothing here changes
-  the decision. A failure falls back to the ungated decision and says so (throttled)."""
+  cannot change a pick that was not itself removed. Then the decision is re-taken on the points still ahead (another
+  curve may bind instead), with `vis` as the caller's own decision used it. When the binding point is ahead, nothing
+  here changes the decision. A failure falls back to the ungated decision and says so (throttled).
+
+  running=False is the START gate (ceiling None -- no episode holds one yet, vision only where it may start).
+
+  behindrun2pnw (owner 2026-09-14, "Behind-curve gate: yes"): running=True is the same gate on a RUNNING cap episode
+  -- a passed point may neither lower its target nor keep it bound (which holds the restore back). The caller passes
+  what that episode's own decision used: `ceiling` = its latched ceiling (== ref), and vision without the start rule.
+  A curve still ahead keeps full authority: the target is re-decided on the points still ahead, exactly as the running
+  episode would decide it had the passed points not been there. Labelled "mapPassedRun" / phase="run"."""
   src = ctl._icbm_src
+  run = {"phase": "run"} if running else {}
   try:
     points = ctl._map_targets
     mask, why = icbm_passed_points(points, plat, plon, getattr(ctl, "_cur_bearing", None), sig["v_ego"])
     if mask is None:
-      _icbm_passed_log(ctl, "unknown", why=why, src=src)
+      _icbm_passed_log(ctl, "unknown", why=why, src=src, **run)
       return target, sig, far_v, far_dist
     ahead = [p for p, gone in zip(points, mask, strict=True) if not gone]
     near = (sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf")))
@@ -1108,7 +1119,7 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
     if src == "map":
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
       if a_near == near:
-        _icbm_passed_log(ctl, "clear", src=src)
+        _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
                                      veh.icbm_map_scale, veh.icbm_firm_decel)
@@ -1116,25 +1127,27 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
                                      veh.icbm_map_scale, veh.icbm_firm_decel)
       if a_far == far:
-        _icbm_passed_log(ctl, "clear", src=src)
+        _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
     new_sig = {**sig, "map_target_v": a_near[0], "map_target_dist": a_near[1]}
     new_target, _, new_src = icbm_curve_target(
-      sig["v_ego"], sig["v_set"], a_near[0], a_near[1], None, icbm_map_eff_scale, vis[0], vis[1],
+      sig["v_ego"], sig["v_set"], a_near[0], a_near[1], ceiling, icbm_map_eff_scale, vis[0], vis[1],
       map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel, far_v=a_far[0], far_dist=a_far[1], track=True)
   except Exception:
     try:
       if now - (getattr(ctl, "_icbm_passed_err", None) or -1e9) > ICBM_ERR_LOG_S:
         ctl._icbm_passed_err = now
-        cloudlog.exception("behindgate2pnw: passed-point gate FAILED -- ICBM starts WITHOUT it (a passed curve can start a slowdown)")
+        cloudlog.exception("behindgate2pnw: passed-point gate FAILED -- " +
+                           ("a RUNNING ICBM slowdown continues WITHOUT it (a passed curve can deepen it and hold the restore)"
+                            if running else "ICBM starts WITHOUT it (a passed curve can start a slowdown)"))
     except Exception:
       pass                        # logging must not become the thing that raises
     return target, sig, far_v, far_dist
-  ctl._icbm_gate = "mapPassed"
+  ctl._icbm_gate = "mapPassedRun" if running else "mapPassed"
   ctl._icbm_src = new_src
   _icbm_passed_log(ctl, "passed", src=src, dist=round(float(near[1] if src == "map" else far[1]), 1),
-                   passed=sum(mask), started=new_src)
+                   passed=sum(mask), started=new_src, **run)
   return new_target, new_sig, a_far[0], a_far[1]
 
 
@@ -3715,11 +3728,22 @@ class CESController:
             map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
             far_v=far_v, far_dist=far_dist, track=True)
       # behindgate2pnw: a map/far point the truck has already driven past may not START an episode (see
-      # icbm_passed_points). START only, as specified: a running episode keeps the full candidate set.
-      if target is not None and starting and self._icbm_src in ("map", "far"):
+      # icbm_passed_points).
+      # behindrun2pnw (owner 2026-09-14, "Behind-curve gate: yes"): nor may it lower a RUNNING cap episode's target or
+      # keep it bound after the curve (which holds the restore back). Same test, same cannot-tell -> no gate; the
+      # running episode is re-decided on its own inputs (latched ceiling, vision without the start rule).
+      if target is not None and self._icbm_src in ("map", "far"):
+        # vision exactly as the decision being re-taken used it: the MAP-FIRST start rule applies to a START
+        # only; a running episode keeps vision's full authority (icbmmapfirst2pnw). Written as a statement
+        # rather than an `or starting` expression so a running tick never NAMES map_reach -- that local only
+        # exists on the starting path, and relying on `or` short-circuit to avoid a NameError here would put
+        # the whole IcbmTarget publish one edit away from dying in _icbm_step's except.
+        vis_gate = (vis_v, vis_dist)
+        if starting and not icbm_vision_may_start(vis_dist, ttc, map_reach):
+          vis_gate = (0.0, float("inf"))
         target, sig, far_v, far_dist = _icbm_passed_gate(
-          self, now, target, sig, plat, plon, ref, far_v, far_dist,
-          (vis_v, vis_dist) if icbm_vision_may_start(vis_dist, ttc, map_reach) else (0.0, float("inf")))
+          self, now, target, sig, plat, plon, ref, far_v, far_dist, vis_gate,
+          ceiling=ep_ceiling, running=not starting)
       # gpsdrgate2pnw: whether the running cap episode was ever bound by the MAP (stale hold). Sticky within the
       # episode (Fable B1): on a real approach vision joins the map/far candidate for the same curve, and a
       # last-binder record let a vision tick erase the map provenance -> no hold -> restore 50 m before the curve.

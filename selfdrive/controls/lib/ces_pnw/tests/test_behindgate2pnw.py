@@ -315,7 +315,9 @@ class TestTheGate:
         clock, ev = [300.0], []
         c, step, pubs = _controller(mp, clock, ev)
         tr = _drive(c, step, pubs, clock, _road(passed_curve=passed, ahead_curve_at=600.0), 0.0, 24.0)
-        seen[(passed, gate)] = ([row[4] for row in tr], [kw["state"] for _, name, kw in ev if name == "ces_icbm_passed"])
+        # START verdicts only -- behindrun2pnw's running-episode verdicts carry phase="run" and are its own tests' job
+        seen[(passed, gate)] = ([row[4] for row in tr],
+                                [kw["state"] for _, name, kw in ev if name == "ces_icbm_passed" and "phase" not in kw])
         return _starts(tr)[:1]
       finally:
         mp.undo()
@@ -342,46 +344,24 @@ class TestTheGate:
     step(sig, active=True)
     assert c._icbm_gate == "mapPassed" and (not pubs or pubs[-1][1].get("target") is None), (c._icbm_gate, pubs[-1:])
 
-  def test_start_only_a_running_episode_is_untouched(self, monkeypatch):
-    """An episode that started on the approach keeps its full candidate set after the truck passes the curve. The
-    comparison runs until the base episode leaves its cap phase, and must include ticks where the binding point was
-    already passed (else it proves nothing)."""
-    def run(gate):
-      mp = pytest.MonkeyPatch()
-      try:
-        if not gate:
-          _gate_off(mp)
-        clock, ev = [400.0], []
-        c, step, pubs = _controller(mp, clock, ev)
-        return _drive(c, step, pubs, clock, _road(passed_curve=False, ahead_curve_at=400.0), 0.0, 30.0, follow=True)
-      finally:
-        mp.undo()
-    base, gated = run(False), run(True)
-    first = next(i for i, row in enumerate(base) if row[2].get("target") is not None)
-    end = next((i for i in range(first, len(base)) if base[i][5] != "cap"), len(base))
-    past = [row for row in base[first:end] if row[1] > 400.0 + 40.0 + m.ICBM_PASSED_TOL_M]
-    assert past, "the episode ended before the truck passed the curve -- proves nothing"
-    assert [r[2] for r in gated[:end]] == [r[2] for r in base[:end]]
-
-  def test_known_limit_a_running_episode_still_takes_a_lower_passed_point(self, monkeypatch):
-    """START only, as specified (Fable: do not end a real episode on noise). An episode started for a curve AHEAD keeps
-    the full candidate set, so a passed point rated slower still lowers its target. Pinned so a change is deliberate."""
+  def test_the_running_episode_is_behindrun2pnws_job_not_this_ones(self, monkeypatch):
+    """This effort gates STARTS. What a passed point does to a RUNNING episode -- lower its target, hold the restore --
+    was this effort's known limit and is now behindrun2pnw's (owner 2026-09-14, "Behind-curve gate: yes"); its tests own
+    that behaviour. All that is pinned here is that the START gate is still labelled apart from the running one, so the
+    two remain countable separately in ces_events."""
     clock, ev = [450.0], []
     c, step, pubs = _controller(monkeypatch, clock, ev)
-    pts = _road(passed_curve=False, ahead_curve_at=220.0, v_curve=20.0)
-    for i, p in enumerate(_road(v_curve=12.0)):
-      if p["velocity"]:
-        pts[i] = dict(pts[i], velocity=12.0)                 # the passed curve rated 12, the one ahead 20
-    tr = _drive(c, step, pubs, clock, pts, 0.0, 2.0)
-    assert tr[0][4] == "mapPassed" and tr[0][2].get("target") is not None, "the start was not reselected -- proves nothing"
-    assert tr[-1][2]["target"] < tr[0][2]["target"] - 1.0, "the running episode ignored the slower passed point"
+    tr = _drive(c, step, pubs, clock, _road(passed_curve=False, ahead_curve_at=220.0, v_curve=20.0), 0.0, 2.0)
+    assert tr[0][2].get("target") is not None, "the curve ahead never started an episode -- proves nothing"
+    assert [row[4] for row in tr if row[4] == "mapPassedRun"] == [], "a clean approach ran the running gate"
 
   def test_below_the_speed_floor_it_cannot_tell_starts_as_before_and_says_so(self, monkeypatch):
     clock, ev = [500.0], []
     c, step, pubs = _controller(monkeypatch, clock, ev)
     tr = _drive(c, step, pubs, clock, _road(v_curve=3.0), 0.0, 1.5, v=m.ICBM_PASSED_MIN_V - 0.5, v_set=10.0)
     assert _starts(tr), "no start below the floor -- the fail-open path is not exercised"
-    unknown = [kw for _, name, kw in ev if name == "ces_icbm_passed"]
+    # the START verdict (behindrun2pnw adds a phase="run" one for the episode that follows; that is its test)
+    unknown = [kw for _, name, kw in ev if name == "ces_icbm_passed" and "phase" not in kw]
     assert [(u["state"], u["why"]) for u in unknown] == [("unknown", "slow")], unknown
 
   def test_a_crash_in_the_gate_starts_as_before_and_is_logged_once(self, monkeypatch):
