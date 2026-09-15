@@ -1580,15 +1580,18 @@ def test_pedal_modulation_inside_the_settle_time_writes_no_lift_record():
 
 
 # ---------------------------------------------------------------------------------------------
-# engagegoal2pnw -- OWNER DECISION 2026-09-13 "Cancel, steering drops too". Sun 21:16:33 PT (Corvallis): our
-# gas-set SET- from Standby made the PCM engage at 55 mph with the truck at 34. The whole-system replay of that
-# sequence (events, state machine, controlsd cancel rule, alert, chime) is in
-# selfdrive/selfdrived/tests/test_engagegoal_pnw.py; these pin the brain's decision.
+# nosetcancel2pnw -- OWNER DECISION 2026-09-14 "remove it". engagegoal2pnw (03c9c30ba9) cancelled cruise, steering
+# too, when our own press brought the set back more than 3 mph above what it wanted. Its only trigger, Sun 2026-09-13
+# 21:16:33 PT (Corvallis), was a 55 km/h set read as 55 mph (drives/2026-09-14/units-kmh/). The rule is gone: the
+# verify still LOGS the come-back (reason, loud, driverBtn) with the same keys, `cancel` always False, and says so in
+# `overshootAction`. The whole-system replay (events, state machine, MADS, controlsd's cancel rule, alerts, chime) is
+# in selfdrive/selfdrived/tests/test_engagegoal_pnw.py.
 # ---------------------------------------------------------------------------------------------
 
 def _gas_set_then_cruise_returns(got_ms, driver_btn_at=None, v=15.36):
   """Steering-only after a brake, accelerate to `v`, lift, the SET fires; 0.15 s later stock cruise engages
-  with set `got_ms`. `driver_btn_at`: seconds after the fire at which the DRIVER pressed a cruise button."""
+  with set `got_ms`. `driver_btn_at`: seconds after the fire at which the DRIVER pressed a cruise button.
+  Returns (drive, [(s after fire, ResumeDecision)], the verify records)."""
   d = Drive()
   _red_light(d, 5.0)
   d.tick(300, gas_pressed=True, v_ego=v, **STEER_ONLY)
@@ -1598,77 +1601,71 @@ def _gas_set_then_cruise_returns(got_ms, driver_btn_at=None, v=15.36):
     d.tick(1, v_ego=v, **STEER_ONLY)
   assert d.fired(), "precondition: the gas-set must fire within 5 s of lift-off"
   t_fire = d.offers[0][0]
-  cancels, n_rec = [], len(d.records)
+  outs, n_rec = [], len(d.records)
   engaged = dict(lateral_only=False, op_enabled=True, cruise_enabled=True, set_speed_ms=got_ms, v_ego=v)
   for _ in range(100):
     now_s = round(d.t - t_fire, 3)
     btn = driver_btn_at is not None and abs(now_s - driver_btn_at) < DT / 2
     kw = engaged if now_s >= 0.15 else dict(STEER_ONLY, v_ego=v)
     out = d.b.update(mk(d.t, driver_cruise_button=btn, **kw))
-    if out.cancel:
-      cancels.append(now_s)
+    outs.append((now_s, out))
     d.records.extend(out.records)
     d.t += DT
-  return d, cancels, [r for r in d.records[n_rec:] if r["phase"] == "verify"]
+  return d, outs, [r for r in d.records[n_rec:] if r["phase"] == "verify"]
 
 
-def test_the_2116_overshoot_cancels_at_once_on_the_verify_tick():
-  """42 mph memory, truck at 34.4 mph (15.36 m/s), the PCM engaged at 55 mph (24.59 m/s): cancel once, on the
-  engage tick, with a loud verify that says why."""
-  d, cancels, verify = _gas_set_then_cruise_returns(24.59)
-  assert cancels == [0.15], f"cancel ticks (s after fire): {cancels}"
+def test_the_2116_overshoot_is_logged_loud_and_nothing_acts():
+  """As openpilot read it then: 42 mph memory, truck at 34.4 mph (15.36 m/s), the PCM engaged at "55 mph" (24.59 m/s).
+  One loud setHigher verify on the engage tick, cancel False, overshootAction none. The brain has no cancel output."""
+  d, outs, verify = _gas_set_then_cruise_returns(24.59)
   assert len(verify) == 1 and verify[0]["reason"] == "setHigher" and verify[0]["loud"] is True, verify
-  assert verify[0]["cancel"] is True and verify[0]["driverBtn"] is False, verify
-  # the raw cluster values, so a km/h cluster (every set ~1.6x) is recognisable from the record alone
+  assert (verify[0]["cancel"], verify[0]["overshootAction"], verify[0]["driverBtn"]) == (False, "none", False), verify
+  assert [s for s, o in outs if o.records and o.records[0]["phase"] == "verify"] == [0.15]
   assert verify[0]["gotDisplayMph"] == 55.0 and verify[0]["wantDisplayMph"] == 34.4, verify
+  assert "cancel" not in M.ResumeDecision.__dataclass_fields__, "the brain must have no cancel output"
+  assert not hasattr(M, "SET_HIGH_CANCEL_MS")
 
 
-def test_a_driver_button_in_the_verify_window_is_never_cancelled():
-  """The driver is allowed to go faster: a RES/SET+ of theirs between our press and the come-back means the higher
-  set may be theirs. Logged loud with driverBtn, never cancelled."""
+def test_the_verify_record_keeps_every_key_it_had():
+  """Byte-compatible telemetry: every key the engagegoal2pnw/units2pnw verify record had is still written."""
+  _, _, verify = _gas_set_then_cruise_returns(24.59)
+  had = {"phase", "reason", "fired", "gotMs", "wantMs", "mode", "driverBtn", "cancel", "gotDisplayMph", "wantDisplayMph",
+         "unit", "loud", "vEgo", "setMs", "stockSet", "eid", "gasSpent"}
+  assert had <= set(verify[0]), had - set(verify[0])
+
+
+def test_a_driver_button_in_the_verify_window_is_recorded():
+  """A RES/SET+ of the driver's between our press and the come-back means the higher set may be theirs: driverBtn."""
   for at in (0.05, 0.15):                                           # before, and on, the come-back tick
-    d, cancels, verify = _gas_set_then_cruise_returns(24.59, driver_btn_at=at)
-    assert cancels == [], f"driver button at +{at}s was overruled"
-    assert verify[0]["reason"] == "setHigher" and verify[0]["loud"] and verify[0]["driverBtn"] is True, verify
+    d, outs, verify = _gas_set_then_cruise_returns(24.59, driver_btn_at=at)
+    assert verify[0]["reason"] == "setHigher" and verify[0]["loud"] and verify[0]["driverBtn"] is True, (at, verify)
     assert verify[0]["cancel"] is False
 
 
-def test_a_gas_set_that_comes_back_at_the_lift_off_speed_is_not_cancelled():
-  d, cancels, verify = _gas_set_then_cruise_returns(15.2)            # the PCM rounds 34.4 mph to 34
-  assert cancels == [] and verify[0]["reason"] == "ok" and verify[0]["cancel"] is False, verify
+@pytest.mark.parametrize("got_ms", [15.2, 15.36 + 1.5 * 0.44704, 15.36 + 2.9 * 0.44704, 15.36 + 3.1 * 0.44704, 24.59],
+                         ids=["tap_speed", "plus_1p5mph", "plus_2p9mph", "plus_3p1mph", "2116_55"])
+def test_no_come_back_takes_any_action_at_any_size(got_ms):
+  """The old 3 mph line is gone: above it and below it read the same, only the reporting tolerance names the reason."""
+  d, outs, verify = _gas_set_then_cruise_returns(got_ms)
+  assert len(verify) == 1 and verify[0]["cancel"] is False and verify[0]["overshootAction"] == "none", verify
+  assert verify[0]["reason"] == ("setHigher" if got_ms - 15.36 > M.SET_MODE_TOL_MS else "ok"), verify
 
 
-@pytest.mark.parametrize("over_mph", [1.5, 2.9])
-def test_a_come_back_within_3_mph_is_logged_but_not_cancelled(over_mph):
-  d, cancels, verify = _gas_set_then_cruise_returns(15.36 + over_mph * 0.44704)
-  assert cancels == [], f"+{over_mph} mph must not cancel"
-  assert verify[0]["cancel"] is False
-  assert verify[0]["reason"] == ("setHigher" if over_mph * 0.44704 > M.SET_MODE_TOL_MS else "ok"), verify
-
-
-def test_the_cancel_rule_applies_to_RESUME_too():
-  """For RES the wanted speed is the captured set. A RES that comes back more than 3 mph above it cancels."""
+def test_a_RESUME_that_comes_back_high_is_logged_loud_and_nothing_acts():
+  """For RES the wanted speed is the captured set; +1.5 m/s is setHigher, loud, and still no action."""
   d = normal_brake_and_resume(post_ticks=60)
   assert d.fired() and d.offers[-1][2] == pytest.approx(SET)
   outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
                         set_speed_ms=SET + 1.5)) for k in range(5)]
-  assert [o.cancel for o in outs] == [True, False, False, False, False], [o.cancel for o in outs]
+  verify = [r for o in outs for r in o.records if r["phase"] == "verify"]
+  assert len(verify) == 1, verify
+  assert (verify[0]["mode"], verify[0]["reason"], verify[0]["loud"], verify[0]["cancel"], verify[0]["overshootAction"]) \
+    == ("res", "setHigher", True, False, "none"), verify
 
 
-def test_no_cancel_without_our_own_press():
-  """Stock cruise engaging on its own, or the driver's own button, with no fire of ours: nothing to verify, no cancel."""
-  d = Drive()
-  d.tick(50)
-  d.tick(20, brake_pressed=True, **STEER_ONLY)
-  d.tick(30, gas_pressed=True, **STEER_ONLY)                         # back on the power before any window
-  outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
-                        set_speed_ms=SET + 10.0)) for k in range(200)]
-  assert not any(o.cancel for o in outs)
-
-
-def test_a_driver_button_from_an_EARLIER_press_window_does_not_protect_a_later_overshoot():
+def test_a_driver_button_from_an_EARLIER_press_window_is_not_recorded_on_a_later_press():
   """The driver-button flag belongs to ONE press's window. A button the driver pressed while an earlier press was
-  being verified (that press never brought cruise back) must not stop the cancel for the next press."""
+  being verified (that press never brought cruise back) must not mark the next press's verify as driverBtn."""
   d = normal_brake_and_resume(post_ticks=60)                          # RES fires
   assert d.fired()
   hold = dict(lateral_only=True, op_enabled=False, cruise_enabled=False, set_speed_ms=0.0)
@@ -1684,14 +1681,15 @@ def test_a_driver_button_from_an_EARLIER_press_window_does_not_protect_a_later_o
   assert len({o[1] for o in d.offers}) >= 2, "precondition: the second press (gas-set) must fire"
   outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
                         set_speed_ms=24.59, v_ego=15.0)) for k in range(3)]
-  assert [o.cancel for o in outs] == [True, False, False], "a stale driver-button flag suppressed the cancel"
+  verify = [r for o in outs for r in o.records if r["phase"] == "verify"]
+  assert len(verify) == 1 and verify[0]["reason"] == "setHigher", verify
+  assert verify[0]["driverBtn"] is False, "a stale driver-button flag was carried into a later press's verify"
 
 
 @pytest.mark.parametrize("btn_before_fire_s", [0.15, 0.5, 0.95])
-def test_S3_a_driver_RES_just_before_our_gas_set_is_never_pressed_over_or_cancelled(btn_before_fire_s):
+def test_S3_a_driver_RES_just_before_our_gas_set_is_never_pressed_over(btn_before_fire_s):
   """Fable review B1, scenario S3: lift-off; the driver presses RES shortly before our SET- would fire (+1.0 s);
-  the PCM engages ~0.1-0.25 s after THEIR press, at the memory. Our press must not go out on top of theirs, and
-  nothing may be cancelled."""
+  the PCM engages ~0.1-0.25 s after THEIR press, at the memory. Our press must not go out on top of theirs."""
   d = Drive()
   _red_light(d, 5.0)
   d.tick(300, gas_pressed=True, v_ego=15.0, **STEER_ONLY)
@@ -1708,7 +1706,6 @@ def test_S3_a_driver_RES_just_before_our_gas_set_is_never_pressed_over_or_cancel
     d.records.extend(o.records)
     d.t += DT
   assert not any(o.offer for o in outs), "our SET- was offered on top of the driver's own RES"
-  assert not any(o.cancel for o in outs)
   assert [r for r in d.records if r["phase"] == "refuse"][-1]["reason"] in ("ccOn", "latOff"), d.records[-2:]
 
 

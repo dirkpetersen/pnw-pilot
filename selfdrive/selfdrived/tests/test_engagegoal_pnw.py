@@ -182,11 +182,13 @@ class TestTheOnOffButtonOnTheTrucksOwnInputs:
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# engagegoal2pnw -- OWNER DECISION 2026-09-13 "Cancel, steering drops too".
+# nosetcancel2pnw -- OWNER DECISION 2026-09-14 "remove it" (engagegoal2pnw's overshoot cancel, 03c9c30ba9).
 # Sun 2026-09-13 21:16:33 PT, Corvallis (drives/2026-09-13/corvallis-resume-55/, rlog_seg2_2116_timeline.txt):
 # steering-only after a brake to a near stop, the driver accelerated 21:16:13 -> 21:16:32.80 to 15.36 m/s and lifted;
-# our gas-set SET- went out; 0.15 s after the first SET- frame the PCM engaged (CcStat 3->5) with its set at 55 mph
-# (24.59 m/s), no driver button on any bus, and openpilot engaged with it on the same frame.
+# our gas-set SET- went out; 0.15 s after the first SET- frame the PCM engaged (CcStat 3->5) with its set reading
+# "55 mph" (24.59 m/s), no driver button on any bus, and openpilot engaged with it on the same frame. It was 55 km/h,
+# the tap speed (drives/2026-09-14/units-kmh/). This harness replays it as openpilot READ it then -- the worst reading --
+# and proves the verify now only logs: no CANCEL, openpilot stays engaged, steering stays, no alert and no chime.
 # The loop below is selfdrived's per-frame order (update_events -> StateMachine -> MadsPnw -> MadsQuiet -> resume brain
 # -> alerts), controlsd's cancel rule, and the Ford executor's resume/SET path (real opendbc parse_resume_cmd,
 # decide_resume, ResumePress, with carcontroller._resume_button's `frame % 25` idle poll). The truck is a measured
@@ -194,7 +196,7 @@ class TestTheOnOffButtonOnTheTrucksOwnInputs:
 # a driver + engages 0.2 s later at the current speed.
 # ---------------------------------------------------------------------------------------------------------------
 
-def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=False):
+def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None):
   from opendbc.car.ford.icbm_pnw import ResumePress, decide_resume, parse_resume_cmd
   EN = EventName
   sm, mads = StateMachine(), MadsPnw(ALTERNATIVE_EXPERIENCE.ENABLE_MADS)
@@ -203,10 +205,9 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
   cc_en, cc_set, v = True, 18.78, 11.3                      # engaged, 42 mph memory
   cc_prev = False                                            # so frame 0 is the engage edge: openpilot starts engaged
   bp_prev = False
-  pending = False
   cmd, mem = None, {}
   truck_engage_at = truck_drop_at = None
-  log = dict(first_press=None, cancel_frames=[], brain_cancels=[], event_frames=[], sounds=[], alerts=[], lat=[], en=[])
+  log = dict(first_press=None, cancel_frames=[], verify=[], sounds=[], alerts=[], lat=[], en=[], cc=[])
   last_snd = AudibleAlert.none
   for f in range(int(45.0 / DT)):
     t = f * DT
@@ -227,9 +228,8 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
       cc_en, cc_set, truck_engage_at = True, pcm_next_set, None
     if truck_drop_at is not None and t >= truck_drop_at:
       cc_en, truck_drop_at = False, None
-    buttons = driver_plus
 
-    # --- selfdrived.update_events (car events for a pcmCruise Ford + the one-frame cancel event) ---
+    # --- selfdrived.update_events (car events for a pcmCruise Ford) ---
     events = Events()
     if cc_en and not cc_prev:
       events.add(EN.pcmEnable)
@@ -237,10 +237,6 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
       events.add(EN.pcmDisable)
     if brake and (not bp_prev or v > 0.0):
       events.add(EN.pedalPressed)
-    if pending:
-      pending = False
-      events.add(EN.madsResumeSetTooHigh)
-      log["event_frames"].append(f)
     enabled, active = sm.update(events)
     mads.update(enabled, active, brake, cc_en, events, True, False)
     chime = quiet.step(enabled, mads.lateral_only, mads.available, mads.brake_grace_open)
@@ -248,13 +244,8 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
       now=t, mads_available=True, lateral_only=mads.lateral_only, op_enabled=enabled,
       blocked=has_blocking_event(events), engageable=not events.contains(ET.NO_ENTRY),
       brake_pressed=brake, regen_braking=False, gas_pressed=gas, cruise_enabled=cc_en, cruise_available=True,
-      set_speed_ms=cc_set if cc_en else cc_set, v_ego=v, standstill=v < 0.1,
-      driver_cruise_button=buttons or (driver_btn_in_window and log["first_press"] is not None
-                                        and abs(t - log["first_press"] - 0.1) < DT / 2),
-      has_lead=False))
-    if out.cancel:
-      pending = True
-      log["brain_cancels"].append(t)
+      set_speed_ms=cc_set, v_ego=v, standstill=v < 0.1, driver_cruise_button=driver_plus, has_lead=False))
+    log["verify"].extend((t, r) for r in out.records if r["phase"] == "verify")
     if mads.active and not active:
       sm.current_alert_types.append(ET.WARNING)
     if mads.lateral_only:
@@ -271,6 +262,7 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
     log["alerts"].append((t, am.current_alert.alert_text_1))
     log["lat"].append((t, mads.active))
     log["en"].append((t, enabled))
+    log["cc"].append((t, cc_en))
     mem = {"dir": out.mode, "ts": round(t, 3), "eid": out.eid, "set": round(out.set_ms, 2)} if out.offer else {}
 
     # --- controlsd + the Ford carcontroller acc-button chain ---
@@ -286,60 +278,51 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None, driver_btn_in_window=Fals
       if log["first_press"] is None:
         log["first_press"] = t
       if not cc_en and truck_engage_at is None and cmd.mode == "set":
-        # pcm_set_ms: the measured 21:16:33 overshoot; a callable models a PCM that sets relative to the speed
+        # pcm_set_ms: the 21:16:33 reading; a callable models a PCM that sets relative to the speed
         truck_engage_at, pcm_next_set = t + 0.15, (pcm_set_ms(v) if callable(pcm_set_ms) else pcm_set_ms)
     cc_prev, bp_prev = cc_en, brake
   return log
 
 
-class TestTheCorvallisOvershootCancel:
-  def test_the_2116_sequence_cancels_within_0p3s_with_the_alert_and_one_chime(self):
+class TestTheCorvallisOvershootIsLoggedNotCancelled:
+  def test_the_2116_sequence_logs_setHigher_and_nothing_cancels_or_drops_steering(self):
     log = _drive_2116()
     p = log["first_press"]
     assert p is not None, "the gas-set press must go out"
-    assert len(log["brain_cancels"]) == 1 and len(log["event_frames"]) == 1, (log["brain_cancels"], log["event_frames"])
-    first_cancel = log["cancel_frames"][0]
-    assert 0.0 < first_cancel - p <= 0.3, f"CANCEL {first_cancel - p:.2f}s after our SET-"
-    # not a storm: the cancel frames stop once the truck drops cruise (measured ~80 ms)
-    assert len(log["cancel_frames"]) <= 10 and log["cancel_frames"][-1] - first_cancel <= 0.1, log["cancel_frames"]
-    texts = {txt for t, txt in log["alerts"] if first_cancel - 0.02 <= t <= first_cancel + 3.0}
-    assert "Cruise set too high - cancelled" in texts, texts
-    after = [s for t, s in log["sounds"] if t >= p]
-    assert after == [AudibleAlert.disengage], f"speaker after our press: {log['sounds']}"
-    assert not any(active for t, active in log["lat"] if t >= first_cancel + 0.05), "steering must drop too"
+    assert [(r["reason"], r["loud"], r["cancel"], r["overshootAction"]) for _, r in log["verify"]] == \
+      [("setHigher", True, False, "none")], log["verify"]
+    t_verify = log["verify"][0][0]
+    assert 0.0 < t_verify - p <= 0.3, f"verify {t_verify - p:.2f}s after our SET-"
+    assert not [t for t in log["cancel_frames"] if t > p], f"CANCEL after our press: {log['cancel_frames']}"
+    assert all(cc for t, cc in log["cc"] if t >= t_verify), "stock cruise must stay engaged"
+    assert all(en for t, en in log["en"] if t >= t_verify), "openpilot must stay engaged"
+    assert all(lat for t, lat in log["lat"] if t >= t_verify), "steering must stay on"
+    assert not [s for t, s in log["sounds"] if t >= p], f"speaker after our press: {log['sounds']}"
+    assert "Cruise set too high - cancelled" not in {txt for _, txt in log["alerts"]}
 
-  def test_a_later_driver_plus_re_engages_and_is_not_cancelled(self):
-    log = _drive_2116(driver_plus_at=33.0)
-    later = [t for t in log["cancel_frames"] if t >= 33.0]
-    assert later == [], f"the driver's own + was cancelled: {later}"
-    assert any(en for t, en in log["en"] if t >= 33.5), "openpilot must engage with the driver's +"
-    assert len(log["brain_cancels"]) == 1
-
-  def test_S3_a_driver_plus_just_before_our_press_is_neither_pressed_over_nor_cancelled(self):
+  def test_S3_a_driver_plus_just_before_our_press_is_not_pressed_over(self):
     """Fable B1 through the whole loop: lift-off at 26.8 s, the driver's + at 27.65 s (our SET- was due at 27.8 s),
     the truck engages 0.2 s after THEIR press. No press of ours, no CANCEL, openpilot engaged."""
     log = _drive_2116(driver_plus_at=27.65)
     assert log["first_press"] is None, f"our SET- went out at {log['first_press']} on top of the driver's +"
-    assert log["brain_cancels"] == [] and not [t for t in log["cancel_frames"] if t > 27.0], log["cancel_frames"]
+    assert not [t for t in log["cancel_frames"] if t > 27.0], log["cancel_frames"]
     assert any(en for t, en in log["en"] if t >= 28.2), "openpilot must engage with the driver's own +"
 
-  def test_a_driver_button_between_our_press_and_the_come_back_is_not_cancelled(self):
-    log = _drive_2116(driver_btn_in_window=True)
-    assert log["brain_cancels"] == [] and log["event_frames"] == [], log["brain_cancels"]
-    first_press = log["first_press"]
-    assert not [t for t in log["cancel_frames"] if t > first_press], "cancelled although the driver pressed a button"
-
-  @pytest.mark.parametrize("pcm", [lambda v: v, lambda v: v + 2.9 * 0.44704], ids=["at_tap_speed", "plus_2p9mph"])
-  def test_a_come_back_at_or_within_3_mph_of_the_tap_speed_is_not_cancelled(self, pcm):
+  # +5 mph at the press reads +1.99 m/s at the verify (the truck coasts ~0.24 m/s between our sample and the tap): well
+  # past the removed 3 mph (1.34 m/s) line.
+  @pytest.mark.parametrize("pcm", [lambda v: v, lambda v: v + 2.9 * 0.44704, lambda v: v + 5.0 * 0.44704],
+                           ids=["at_tap_speed", "plus_2p9mph", "plus_5mph"])
+  def test_any_come_back_keeps_cruise_openpilot_and_steering_engaged(self, pcm):
     log = _drive_2116(pcm_set_ms=pcm)
     first_press = log["first_press"]
-    assert first_press is not None and log["brain_cancels"] == [], log["brain_cancels"]
+    assert first_press is not None and len(log["verify"]) == 1, log["verify"]
     assert not [t for t in log["cancel_frames"] if t > first_press]
-    assert any(en for t, en in log["en"] if t > first_press + 0.5), "cruise and openpilot must stay engaged"
+    assert all(en and lat for (t, en), (_, lat) in zip(log["en"], log["lat"], strict=True) if t > first_press + 0.5), \
+      "cruise, openpilot and steering must stay engaged"
 
 
-class TestTheSelfdrivedWiringForTheCancel:
-  """selfdrived cannot be imported on the dev host; pin the three lines the harness above reproduces."""
+class TestTheSelfdrivedWiringWithoutTheCancel:
+  """selfdrived cannot be imported on the dev host; pin its source."""
   SRC = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
 
   def test_the_brain_is_told_about_the_drivers_cruise_buttons(self):
@@ -349,20 +332,31 @@ class TestTheSelfdrivedWiringForTheCancel:
     for btn in ("accelCruise", "decelCruise", "resumeCruise", "setCruise", "mainCruise"):
       assert btn in m.group(1), btn
 
-  def test_a_cancel_decision_raises_exactly_one_event_on_the_next_frame(self):
-    assert "if out.cancel:\n        self.set_high_cancel_pending = True" in self.SRC
-    one_frame = ("if self.set_high_cancel_pending:\n      self.set_high_cancel_pending = False\n" +
-                 "      self.events.add(EventName.madsResumeSetTooHigh)")
-    assert one_frame in self.SRC
-    ue = self.SRC.index("def update_events"), self.SRC.index("def data_sample")
-    at = self.SRC.index("self.events.add(EventName.madsResumeSetTooHigh)")
-    assert ue[0] < at < ue[1], "the event must be raised in update_events, before the state machine runs"
+  def test_nothing_in_selfdrived_can_cancel_on_a_verify(self):
+    """Counted, not grepped-and-echoed: zero occurrences of every piece of the removed path."""
+    for gone in ("out.cancel", "set_high_cancel_pending", "madsResumeSetTooHigh", "CANCELLING cruise"):
+      assert self.SRC.count(gone) == 0, gone
 
-  def test_the_event_disengages_chimes_and_is_not_silenced_by_madsquiet(self):
+  def test_the_loud_verify_is_still_a_cloudlog_error(self):
+    loop = self.SRC[self.SRC.index("for rec in out.records:"):self.SRC.index("self.ces_pnw.log_mads_resume(rec)")]
+    assert '\n        if rec.get("loud"):\n          cloudlog.error(' in loop
+
+  def test_the_retired_event_cannot_disengage_chime_or_show_text_even_if_raised(self):
+    """log.capnp keeps @104 reserved; its EVENTS entry has no alert types. Raised on an engaged, steering frame through
+    the real Events, StateMachine, MadsPnw and AlertManager, it changes nothing."""
     from openpilot.selfdrive.selfdrived.events import EVENTS
-    from openpilot.selfdrive.selfdrived.madsquiet_pnw import QUIET_DISENGAGE_EVENTS
-    ev = EVENTS[EventName.madsResumeSetTooHigh]
-    assert ev[ET.USER_DISABLE].audible_alert == AudibleAlert.disengage
-    assert ev[ET.USER_DISABLE].priority > ev[ET.PERMANENT].priority, "the chiming alert must win the AlertManager"
-    assert "madsResumeSetTooHigh" not in QUIET_DISENGAGE_EVENTS
-    assert ET.NO_ENTRY not in ev, "a NO_ENTRY would block the driver's re-engage"
+    assert EVENTS[EventName.madsResumeSetTooHigh] == {}
+    sm, mads, am = StateMachine(), MadsPnw(ALTERNATIVE_EXPERIENCE.ENABLE_MADS), AlertManager()
+    for f in range(20):
+      events = _events(["pcmEnable"] if f == 0 else [])
+      if f == 10:
+        events.add(EventName.madsResumeSetTooHigh)
+      enabled, active = sm.update(events)
+      mads.update(enabled, active, False, True, events, True, False)
+      am.add_many(f, events.create_alerts(sm.current_alert_types))
+      am.process_alerts(f, set())
+      if f == 9:
+        assert (enabled, active, mads.active) == (True, True, True), "precondition: engaged and steering"
+      if f >= 10:
+        assert not has_blocking_event(events)
+        assert (enabled, active, mads.active, am.current_alert.alert_text_1) == (True, True, True, ""), f

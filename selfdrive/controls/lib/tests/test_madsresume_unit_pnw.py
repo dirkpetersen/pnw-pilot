@@ -1,4 +1,4 @@
-"""units2pnw: the overshoot-cancel rule on a km/h cluster.
+"""units2pnw: the gas-set verify on a km/h cluster.
 
 Ford CAN FD carstate now converts Veh_V_DsplyCcSet by carState.cruiseState.speedClusterUnit, which follows the cluster's
 own Cluster_Info1_FD1.MetricActv_B_Actl (pnw-opendbc units2pnw 1/3 + 2/3). So `set_speed_ms` reaches the brain as TRUE
@@ -10,6 +10,9 @@ drives/2026-09-14/units-kmh/). The cluster had been in km/h since 21:08. Standby
 (34.4 mph = 55.3 km/h) when our gas-set SET- fired, and the PCM engaged at "55" -- 55 km/h = 15.28 m/s, the tap speed;
 it then held 53.7-54.0 km/h. openpilot read 55 as mph: gotMs 24.59, "setHigher", LOUD, and under engagegoal2pnw a cancel.
 The replay below feeds that segment's REAL 0x430 frame and real EngBrakeData frames through opendbc's real Ford carstate.
+
+nosetcancel2pnw (owner decision 2026-09-14, "remove it"): that cancel is gone. The verify still reads and logs
+setHigher; every record here carries cancel False and overshootAction "none", whatever the unit.
 """
 import pathlib
 
@@ -61,7 +64,7 @@ class Truck:
 def gas_set_comes_back(stby, engaged, v=TAP_V):
   """The 21:16 gas-set: red light, pull away on the accelerator to v, lift, our SET fires; 0.15 s later (the measured
   PCM response) stock cruise is engaged. `stby` / `engaged` are ResumeInputs overrides for the standby and engaged
-  truck. Returns (cancel times after the fire, the verify records)."""
+  truck. Returns the verify records (asserting on the way that none of them says anything acted)."""
   steer_only = {**STEER_ONLY, **stby, "cruise_enabled": False}
   d = Drive()
   _red_light(d, 5.0)
@@ -71,16 +74,16 @@ def gas_set_comes_back(stby, engaged, v=TAP_V):
       break
     d.tick(1, v_ego=v, **steer_only)
   assert d.fired(), "precondition: the gas-set must fire"
-  t_fire, n_rec, cancels = d.offers[0][0], len(d.records), []
+  t_fire, n_rec = d.offers[0][0], len(d.records)
   for _ in range(100):
     now_s = round(d.t - t_fire, 3)
     kw = dict(lateral_only=False, op_enabled=True, v_ego=v, **engaged) if now_s >= 0.15 else dict(steer_only, v_ego=v)
     out = d.b.update(mk(d.t, **kw))
-    if out.cancel:
-      cancels.append(now_s)
     d.records.extend(out.records)
     d.t += DT
-  return cancels, [r for r in d.records[n_rec:] if r["phase"] == "verify"]
+  verify = [r for r in d.records[n_rec:] if r["phase"] == "verify"]
+  assert all(r["cancel"] is False and r["overshootAction"] == "none" for r in verify), verify
+  return verify
 
 
 class TestCorvallisReplay:
@@ -95,43 +98,46 @@ class TestCorvallisReplay:
     stby, engaged = Truck.inputs(truck.state(T.EB_KMH_42_STBY)), Truck.inputs(truck.state(T.EB_KMH_55))
     assert (stby["cruise_enabled"], stby["set_speed_ms"], stby["set_speed_unit"]) == (False, pytest.approx(42 * KPH), "kph")
     assert (engaged["cruise_enabled"], engaged["set_speed_ms"]) == (True, pytest.approx(55 * KPH))
-    cancels, verify = gas_set_comes_back(stby, engaged)
-    assert cancels == [] and len(verify) == 1, (cancels, verify)
+    verify = gas_set_comes_back(stby, engaged)
+    assert len(verify) == 1, verify
     v = verify[0]
     assert (v["reason"], v["cancel"], v["unit"], v.get("loud")) == ("ok", False, "kph", None), v
     assert v["gotMs"] == pytest.approx(15.28, abs=0.01) and v["wantMs"] == pytest.approx(TAP_V, abs=0.01)
     assert (v["gotDisplayMph"], v["wantDisplayMph"]) == (34.2, 34.4)
     assert "unitAssumed" not in v
 
-  def test_control_the_same_frames_on_an_english_cluster_still_cancel(self):
-    """The overshoot rule is intact: with the real English 0x430 the same raw 55 is 55 mph -> setHigher, cancel +0.15 s."""
+  def test_control_the_same_frames_on_an_english_cluster_still_read_setHigher(self):
+    """The verify is intact: with the real English 0x430 the same raw 55 is 55 mph -> setHigher, loud, no action."""
     T = self._frames()
     truck = Truck(T.CLUSTER_ENG)
     stby, engaged = Truck.inputs(truck.state(T.EB_KMH_42_STBY)), Truck.inputs(truck.state(T.EB_KMH_55))
     assert engaged["set_speed_ms"] == pytest.approx(55 * MPH) and engaged["set_speed_unit"] == "mph"
-    cancels, verify = gas_set_comes_back(stby, engaged)
-    assert cancels == [0.15]
-    assert (verify[0]["reason"], verify[0]["cancel"], verify[0]["unit"]) == ("setHigher", True, "mph")
+    verify = gas_set_comes_back(stby, engaged)
+    assert len(verify) == 1
+    assert (verify[0]["reason"], verify[0]["loud"], verify[0]["cancel"], verify[0]["unit"]) == ("setHigher", True, False, "mph")
     assert verify[0]["gotMs"] == pytest.approx(24.59, abs=0.01)
 
-  def test_a_real_kmh_overshoot_still_cancels(self):
-    """70 km/h = 19.44 m/s from a 15.36 m/s tap (+9 mph): the true-unit compare must not wave a real overshoot through."""
-    cancels, verify = gas_set_comes_back(dict(set_speed_ms=42 * KPH, set_speed_unit="kph"),
-                                         dict(cruise_enabled=True, set_speed_ms=70 * KPH, set_speed_unit="kph"))
-    assert cancels == [0.15] and verify[0]["reason"] == "setHigher"
+  def test_a_real_kmh_overshoot_is_still_logged_loud(self):
+    """70 km/h = 19.44 m/s from a 15.36 m/s tap (+9 mph): the true-unit compare must not wave a real overshoot through
+    the log (Rule 2) -- it is only no longer acted on."""
+    verify = gas_set_comes_back(dict(set_speed_ms=42 * KPH, set_speed_unit="kph"),
+                                dict(cruise_enabled=True, set_speed_ms=70 * KPH, set_speed_unit="kph"))
+    assert len(verify) == 1 and verify[0]["reason"] == "setHigher" and verify[0]["loud"] is True, verify
 
 
 class TestTheBrainConvertsNothing:
   def test_kph_is_not_converted_again(self):
-    """set_speed_ms is already true m/s: a kph unit must not scale it (24.59 stays 24.59 and cancels)."""
-    cancels, verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit="kph"))
-    assert cancels == [0.15] and verify[0]["gotMs"] == pytest.approx(24.59, abs=0.01) and verify[0]["unit"] == "kph"
+    """set_speed_ms is already true m/s: a kph unit must not scale it (24.59 stays 24.59 and reads setHigher)."""
+    verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit="kph"))
+    assert verify[0]["reason"] == "setHigher" and verify[0]["gotMs"] == pytest.approx(24.59, abs=0.01)
+    assert verify[0]["unit"] == "kph"
 
-  def test_the_3_mph_threshold_is_true_speed_on_kph(self):
-    """59 km/h = 16.39 m/s, +1.03 over the tap: no cancel. 61 km/h = 16.94, +1.58 (> 1.34): cancel."""
+  def test_the_verify_tolerance_is_true_speed_on_kph(self):
+    """56 km/h = 15.56 m/s, +0.20 over the tap: ok. 59 km/h = 16.39, +1.03 (> SET_MODE_TOL_MS 1.0): setHigher.
+    (A brain that scaled kph again would read both as setLower.)"""
     kph = lambda n: dict(cruise_enabled=True, set_speed_ms=n * KPH, set_speed_unit="kph")  # noqa: E731
-    assert gas_set_comes_back({}, kph(59))[0] == []
-    assert gas_set_comes_back({}, kph(61))[0] == [0.15]
+    assert gas_set_comes_back({}, kph(56))[0]["reason"] == "ok"
+    assert gas_set_comes_back({}, kph(59))[0]["reason"] == "setHigher"
 
   def test_resume_compares_true_speeds(self):
     d = normal_brake_and_resume(post_ticks=60, set_speed_unit="kph")
@@ -139,19 +145,20 @@ class TestTheBrainConvertsNothing:
     outs = [d.b.update(mk(d.t + k * DT, lateral_only=False, op_enabled=True, cruise_enabled=True,
                           set_speed_ms=SET + 2.0 * MPH, set_speed_unit="kph")) for k in range(5)]
     verify = [r for o in outs for r in o.records if r["phase"] == "verify"]
-    assert [o.cancel for o in outs] == [False] * 5 and verify[0]["reason"] == "setHigher"
+    assert len(verify) == 1 and verify[0]["reason"] == "setHigher" and verify[0]["cancel"] is False
     assert verify[0]["gotMs"] - verify[0]["wantMs"] == pytest.approx(2.0 * MPH, abs=0.01)
 
 
 class TestUnknownUnit:
   def test_unknown_keeps_the_mph_reading_and_is_flagged(self):
-    cancels, verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit="unknown"))
-    assert cancels == [0.15] and verify[0]["unit"] == "unknown" and verify[0]["unitAssumed"] is True
+    verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit="unknown"))
+    assert verify[0]["reason"] == "setHigher" and verify[0]["gotMs"] == pytest.approx(24.59, abs=0.01)
+    assert verify[0]["unit"] == "unknown" and verify[0]["unitAssumed"] is True
 
   @pytest.mark.parametrize("garbage", ["KPH", "km/h", "", None, 2])
   def test_anything_but_the_two_names_is_unknown(self, garbage):
-    cancels, verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit=garbage))
-    assert cancels == [0.15] and verify[0]["unit"] == "unknown"
+    verify = gas_set_comes_back({}, dict(cruise_enabled=True, set_speed_ms=55 * MPH, set_speed_unit=garbage))
+    assert verify[0]["reason"] == "setHigher" and verify[0]["unit"] == "unknown"
 
   def test_flagged_once_per_change_not_per_press(self):
     """Three verifies on one brain: unknown (flag), unknown (no flag), kph, unknown (flag again)."""

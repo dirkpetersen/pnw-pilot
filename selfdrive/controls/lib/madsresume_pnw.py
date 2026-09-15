@@ -141,21 +141,19 @@ SET_TOL_MS = 0.4 * 0.44704
 # so the verify tolerance has to cover both. This is a REPORTING tolerance only -- it decides
 # whether the log calls the outcome "ok", and gates nothing.
 SET_MODE_TOL_MS = 1.0
-# engagegoal2pnw, OWNER DECISION 2026-09-13 ("Cancel, steering drops too"). MEASURED Sun 2026-09-13
-# 21:16:33 PT, Corvallis (drives/2026-09-13/corvallis-resume-55/): our gas-set SET- from Standby made the
-# PCM engage at 55 mph with the truck at 34 and a 42 mph memory, no driver button anywhere on the bus.
-# "A SET commands no acceleration" broke. So when, on the verify tick of openpilot's OWN press, the
-# truck's set comes back more than 3 mph above what that press wanted (gas-set: the speed at the tap;
-# RESUME: the captured set), openpilot cancels cruise at once -- unless the driver pressed a cruise
-# button inside that window, because the driver is allowed to go faster. Unlike SET_MODE_TOL_MS this
-# ACTS, so it is well clear of mph rounding and the coast between our sample and the tap.
-SET_HIGH_CANCEL_MS = 3.0 * 0.44704
+# nosetcancel2pnw, OWNER DECISION 2026-09-14 ("remove it"): engagegoal2pnw's overshoot-CANCEL rule (03c9c30ba9,
+# SET_HIGH_CANCEL_MS = 3 mph: cancel cruise, steering too, when our own press brought the set back high) is GONE.
+# Its only trigger, Corvallis 2026-09-13 21:16:33, was a 55 km/h set read as mph -- the truck set the speed it was
+# doing (drives/2026-09-14/units-kmh/). The verify below still LOGS a come-back above what we wanted ("setHigher",
+# loud, cloudlog.error in selfdrived); nothing acts on it. The record keeps `cancel` (always False) and says so in
+# `overshootAction`.
 # engagegoal2pnw (Fable review 2026-09-13, B1): no RES/SET offer while the DRIVER pressed a cruise button in the last
 # second -- they are already engaging it themselves. Without this, a driver RES ~0.15 s before our SET- fired was
 # invisible to the verify window (it opens at the fire), and the PCM engaging at the driver's memory read as our
-# overshoot: cancel, steering dropped. Refusing the press removes the race at its root (no press of ours, nothing to
-# verify or cancel) and keeps our SET- from landing on top of the driver's own engagement. 1.0 s covers the measured
-# 0.15-0.26 s PCM response with margin; past it, a button that engaged nothing no longer blocks our press.
+# overshoot (then a cancel with steering dropped; since nosetcancel2pnw a false "setHigher" record). Refusing the press
+# removes the race at its root (no press of ours, nothing to verify) and keeps our SET- from landing on top of the
+# driver's own engagement. 1.0 s covers the measured 0.15-0.26 s PCM response with margin; past it, a button that
+# engaged nothing no longer blocks our press.
 DRIVER_BTN_HOLDOFF_S = 1.0
 # The two wire values `ResumeDecision.mode` may take, and the exact set the executor's parser
 # accepts (opendbc icbm_pnw.RESUME_DIR / SET_DIR). Pinned by the wire-contract test: the brain and
@@ -348,9 +346,6 @@ class ResumeDecision:
   # They are different actions with different risk: "set" commands no speed change at all, so the
   # gates that exist to bound acceleration do not apply to it.
   mode: str = "res"
-  # engagegoal2pnw: cancel stock cruise NOW -- our own press brought the set back too high (see
-  # SET_HIGH_CANCEL_MS). True on exactly one tick per press; the caller turns it into a disengage.
-  cancel: bool = False
   records: list = field(default_factory=list)   # telemetry records to append (usually empty)
 
 
@@ -456,7 +451,8 @@ class MadsResumeBrain:
     # verify lands (Fable review 2026-09-07 round 3, C1 -- reproduced: a RESUME press reported
     # "set", and the selfdrived warning then announced the wrong button).
     self._verify_mode: str | None = None
-    # engagegoal2pnw: a driver cruise button was seen between our press and its verify.
+    # engagegoal2pnw: a driver cruise button was seen between our press and its verify (telemetry `driverBtn`: a
+    # higher come-back may be the driver's own).
     self._verify_driver_btn = False
     # units2pnw: the set-speed unit on the last verify record (None = no verify yet), so an assumed unit is flagged
     # for selfdrived's warning once per change, not once per press.
@@ -679,7 +675,7 @@ class MadsResumeBrain:
       elif i.cruise_enabled and _finite(i.set_speed_ms) and float(i.set_speed_ms) > 0.0:
         # units2pnw: everything here is TRUE m/s. set_speed_ms (and a RESUME's want, captured from it) comes from Ford
         # carstate, which converts Veh_V_DsplyCcSet by the cluster unit; a gas-set's want is v_ego. Before that, a km/h
-        # cluster read 1.609x high and every gas-set cancelled (Corvallis 2026-09-13 21:16: 55 km/h read as 55 mph).
+        # cluster read 1.609x high and every gas-set read setHigher (Corvallis 2026-09-13 21:16: 55 km/h read as 55 mph).
         unit = i.set_speed_unit if i.set_speed_unit in ("mph", "kph") else "unknown"
         got = float(i.set_speed_ms)
         want = self._verify_set if self._verify_set is not None else 0.0
@@ -697,15 +693,14 @@ class MadsResumeBrain:
           reason = "setLower"
         else:
           reason = "ok"
-        # engagegoal2pnw: cancel at once when OUR press brought it back more than 3 mph too high, and the
-        # driver did not press a cruise button in the window (then it may be theirs: log both, never cancel).
-        cancel = got - want > SET_HIGH_CANCEL_MS and not self._verify_driver_btn
         out.records.append(self._snap(i, {
           "phase": "verify", "reason": reason, "fired": True,
           "gotMs": round(got, 2), "wantMs": round(want, 2),
           # explicit, so it cannot fall back to whatever `_used_gas` happens to be now
           "mode": self._verify_mode or "res",
-          "driverBtn": self._verify_driver_btn, "cancel": cancel,
+          # nosetcancel2pnw: `cancel` stays in the record (same keys as before) and is always False -- the overshoot
+          # cancel rule was removed 2026-09-14. `overshootAction` says so, so a record is never read as "did not trip".
+          "driverBtn": self._verify_driver_btn, "cancel": False, "overshootAction": "none",
           # Fable review (a): the set in mph, for reading the record at a glance. units2pnw: gotMs/wantMs are true m/s,
           # so these are true mph whatever the cluster shows; `unit` says what it showed. On an "unknown" unit carstate
           # assumed mph, and a km/h cluster then reads gotDisplayMph ~1.6x wantDisplayMph on every gas-set.
@@ -715,11 +710,10 @@ class MadsResumeBrain:
         if reason != "ok":
           out.records[-1]["loud"] = True
         if unit == "unknown" and self._verify_unit != "unknown":
-          # units2pnw (Rule 2): this verify's cancel decision rests on carstate's mph ASSUMPTION. selfdrived warns on
+          # units2pnw (Rule 2): this verify's reason rests on carstate's mph ASSUMPTION. selfdrived warns on
           # this flag, which is set only when the unit CHANGES to unknown -- not on every press while it stays unknown.
           out.records[-1]["unitAssumed"] = True
         self._verify_unit = unit
-        out.cancel = cancel
         self._verify_until = None
 
     # --- arm on the lateral-only edge OR on any later brake press (gate 1) ---------------------

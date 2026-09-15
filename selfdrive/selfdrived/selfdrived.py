@@ -166,10 +166,6 @@ class SelfdriveD:
     # onebutton2pnw: monotonic time of the last ACC ON/OFF press made while openpilot was NOT fully
     # engaged (i.e. the driver asking for everything off out of the steering-only state).
     self.off_request_t = 0.0
-    # engagegoal2pnw: the resume brain asked for cruise to be cancelled because openpilot's own press brought
-    # the set back too high (madsresume_pnw.SET_HIGH_CANCEL_MS). Raised as a one-frame USER_DISABLE event on
-    # the NEXT update_events -- the brain decides after this frame's state machine has already run.
-    self.set_high_cancel_pending = False
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -332,13 +328,6 @@ class SelfdriveD:
       self.off_request_t = 0.0
     if self.off_request_t and (self.sm.frame * DT_CTRL - self.off_request_t) <= OFF_REQUEST_HOLD_S:
       self.events.add(EventName.cruiseOffRequested)
-    # engagegoal2pnw ("Cancel, steering drops too", owner 2026-09-13): ONE frame of a USER_DISABLE event.
-    # openpilot disengages, controlsd's existing `CS.cruiseState.enabled and not CC.enabled` rule sends the
-    # Ford CANCEL (panda-allowed while cruise is engaged), MADS sees a blocking event and does not keep
-    # steering, and the alert chimes. Deliberately NOT a latch: nothing here blocks a later re-engage.
-    if self.set_high_cancel_pending:
-      self.set_high_cancel_pending = False
-      self.events.add(EventName.madsResumeSetTooHigh)
 
     # Block resume if cruise never previously enabled
     resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
@@ -874,11 +863,6 @@ class SelfdriveD:
         has_lead=has_lead, d_rel=d_rel, v_lead=v_lead,
       )
       out = self.mads_resume.update(inputs)
-      if out.cancel:
-        self.set_high_cancel_pending = True
-        cloudlog.error("madsresume2pnw: stock set came back > 3 mph above what our own press wanted, no driver button -- CANCELLING cruise. "
-                       "Set values are true m/s (carstate converts by carState.cruiseState.speedClusterUnit); if the record's unit is "
-                       "unknown, carstate assumed mph, and gotDisplayMph ~1.6x wantDisplayMph on every cancel means km/h. (records: %s)", out.records)
 
       # --- publish / withdraw the offer -------------------------------------------------------
       # Withdrawal is IMMEDIATE and unthrottled: the executor's freshness bound only limits how
@@ -932,7 +916,7 @@ class SelfdriveD:
                            rec.get("mode", "?"), why, rec)
         if rec.get("unitAssumed"):
           # units2pnw (Rule 2): carstate could not establish the cluster unit (Cluster_Info1_FD1 never received) and
-          # ASSUMED mph, so the 3 mph rule compared on that assumption. Flagged by the brain once per change to unknown.
+          # ASSUMED mph, so the verify compared on that assumption. Flagged by the brain once per change to unknown.
           cloudlog.warning("madsresume2pnw: verify compared set speeds with the cluster unit NOT established -- carstate " +
                            "ASSUMED mph; the carstate units2pnw log line has MetricActv_B_Actl (record: %s)", rec)
         if rec.get("loud"):
