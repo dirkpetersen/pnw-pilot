@@ -57,6 +57,11 @@ WS_FRAME_SIZE = 4096
 DEVICE_STATE_UPDATE_INTERVAL = 1.0  # in seconds
 DEFAULT_UPLOAD_PRIORITY = 99  # higher number = lower priority
 
+# athenalogmeter2pnw: how long log_handler sleeps between re-checks while forwarding is paused.
+# The loop already rescans the swaglog directory on a 10 s cadence when idle, so a paused loop
+# ticking at the same rate costs no more than an idle unmetered one.
+LOG_FORWARD_RECHECK_S = 10.0
+
 SEND_PRIORITY_HIGH = 0
 SEND_PRIORITY_LOW = 1
 
@@ -603,9 +608,63 @@ def get_logs_to_send_sorted() -> list[str]:
   return sorted(logs)[:-1]
 
 
+def log_forward_pause_reason(params: Params) -> str | None:
+  """athenalogmeter2pnw: why swaglog forwarding must not run right now, or None if it may run.
+
+  WHY THIS EXISTS. log_handler ships every rotated swaglog file to ATHENA_HOST over the websocket,
+  and its only gate was `if PC: return` -- the metered check lives in upload_handler, on the other
+  queue. So the one traffic class with NO cost gate was the one that runs continuously: ~12 MB/day
+  steady state, and after swaglogcap2pnw raised the cap to 20,000 files / 200 MiB, a single
+  reconnect backlog flush can be up to 200 MiB. The driver's standing rule (uploadgate2pnw, spec
+  2026-07-13, quoted in system/loggerd/uploader.py:pass1_allowed) is "METERED -> no drive-FILE
+  uploads at all ... the driver wants zero metered file traffic". Swaglogs are files leaving the
+  device over the same link, so they fall under the same rule.
+
+  SOURCE OF TRUTH: the `NetworkMetered` param, which system/hardware/hardwared.py writes every
+  DT_HW (0.5 s) straight from `deviceState.networkMetered` -- the same field the uploader's
+  SubMaster reads. Param, not a msgq subscription: athenad already holds four deviceState
+  SubMasters (one per upload_handler thread) so a fifth would not be novel, but it buys nothing
+  here and costs a socket plus a poller in a background thread -- the shape that produced the
+  2026-07-13 commIssue cascade (see [[feedback-no-carstate-sub-in-background-procs]]). The two
+  sources cannot disagree, because one is written from the other. Freshness: the param lags
+  deviceState by at most one hardwared loop plus the params write, which is two orders of
+  magnitude below the LOG_FORWARD_RECHECK_S granularity this gate acts on.
+
+  WHY THE RAW BIT AND NOT uploader.effective_metered(). effective_metered() relaxes metered->False
+  on a configured, GPS-gated priority WiFi, so pass 1 and pass 2 agree with each other. This gate
+  deliberately does NOT take that relaxation: computing `at_home` needs OnPriorityNetwork AND
+  deviceState.networkType, i.e. exactly the msgq coupling avoided above, and a stricter gate can
+  only ever reduce metered traffic, never increase it -- it cannot violate the driver's rule in the
+  expensive direction. The residual asymmetry is narrow and deliberate: on a priority WiFi that NM
+  merely GUESSES is metered, drive files flow while swaglog forwarding stays paused. It costs a
+  12 MB/day trickle that resumes within LOG_FORWARD_RECHECK_S of any link NM reports unmetered.
+
+  NM's THREE-STATE metered is already collapsed upstream by HARDWARE.get_network_metered(), and
+  this gate inherits that mapping unchanged rather than inventing a second one: on WiFi both
+  NM_METERED_YES and NM_METERED_GUESS_YES read metered, while NM_METERED_UNKNOWN reads unmetered;
+  on cellular everything except an explicit NM_METERED_NO reads metered. ([[nm-metered-three-state]]
+  -- "unknown is not unmetered" -- is about the network_arbiterd cost ladder that ranks profiles,
+  not about this bool; diverging here would recreate the two-specs-coexisting defect uploadgate3pnw
+  removed.)
+
+  OUR OWN unknown is a different thing and is NOT collapsed: the param being UNSET means nobody has
+  told us what the link costs yet (hardwared has not written it since the params dir was created,
+  or hardwared is not running). get_bool() would return False there and forward, which is the
+  expensive direction, so unset returns "unknown" and the caller pauses and logs it as an error.
+  """
+  metered = params.get("NetworkMetered")
+  if metered is None:
+    return "unknown"
+  return "metered" if metered else None
+
+
 def log_handler(end_event: threading.Event) -> None:
   if PC:
     return
+
+  params = Params()
+  pause_reason: str | None = None
+  paused_since = 0.
 
   log_files = []
   last_scan = 0.
@@ -615,6 +674,30 @@ def log_handler(end_event: threading.Event) -> None:
       if curr_scan - last_scan > 10:
         log_files = get_logs_to_send_sorted()
         last_scan = curr_scan
+
+      # athenalogmeter2pnw: hold the forward while the link is metered. Placed AFTER the scan so
+      # `pending` is a true backlog count and not a stale one, and BEFORE the send so at most the
+      # one file already in flight crosses a metered link. Nothing else changes: log_files keeps
+      # its order, no xattr is written while paused, and un-acked files stay un-acked, so a pause
+      # neither loses a file nor causes one to be sent twice.
+      reason = log_forward_pause_reason(params)
+      if reason != pause_reason:
+        # Rule 2: a forward that quietly stops is indistinguishable from one that has nothing to
+        # send, so both edges are logged once. "unknown" is an error because it means the gate's
+        # own source of truth is missing and forwarding will not resume on its own.
+        if reason is None:
+          cloudlog.event("athena.log_handler.forward_resumed", was=pause_reason, pending=len(log_files),
+                         paused_s=round(time.monotonic() - paused_since, 1))
+        elif reason == "unknown":
+          cloudlog.event("athena.log_handler.forward_paused", reason=reason, pending=len(log_files), error=True)
+        else:
+          cloudlog.event("athena.log_handler.forward_paused", reason=reason, pending=len(log_files))
+        if reason is not None:
+          paused_since = time.monotonic()
+        pause_reason = reason
+      if reason is not None:
+        end_event.wait(LOG_FORWARD_RECHECK_S)
+        continue
 
       # send one log
       curr_log = None

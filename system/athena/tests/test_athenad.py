@@ -1,4 +1,5 @@
 import pytest
+from contextlib import contextmanager
 from functools import wraps
 import json
 import multiprocessing
@@ -46,6 +47,35 @@ def with_upload_handler(func):
       end_event.set()
       thread.join()
   return wrapper
+
+def _wait_until(cond, timeout: float = 10.0) -> bool:
+  end = time.monotonic() + timeout
+  while time.monotonic() < end:
+    if cond():
+      return True
+    time.sleep(0.01)
+  return cond()
+
+
+def _ack_forwarded_logs(end_event: threading.Event, forwarded: list[str], ack_delay: float = 0.) -> None:
+  """Stand-in for the athena server: drains send_queue and acks forwardLogs the way it does.
+
+  ack_delay paces the forward (log_handler sends the next file only once the previous one is
+  acked), so a test can flip the metered param part-way through a backlog.
+  """
+  while not end_event.is_set():
+    try:
+      _, _, data = athenad.send_queue.get(timeout=0.05)
+    except queue.Empty:
+      continue
+    msg = json.loads(data)
+    if msg.get("method") != "forwardLogs":
+      continue
+    forwarded.append(msg["id"])
+    if ack_delay:
+      end_event.wait(ack_delay)
+    athenad.log_recv_queue.put_nowait(json.dumps({"result": {"success": 1}, "id": msg["id"], "jsonrpc": "2.0"}))
+
 
 @pytest.fixture
 def mock_create_connection(mocker):
@@ -446,3 +476,129 @@ class TestAthenadMethods:
     # ensure the list is all logs except most recent
     sl = athenad.get_logs_to_send_sorted()
     assert sl == fl[:-1]
+
+  # *** athenalogmeter2pnw: the metered gate on swaglog forwarding ***
+
+  def _seed_swaglogs(self, n: int) -> list[str]:
+    files = [f'swaglog.{i:010}' for i in range(n)]
+    for f in files:
+      self._create_file(f, Paths.swaglog_root(), b'{"msg": "hello"}\n')
+    return files
+
+  @contextmanager
+  def _log_forwarding(self, mocker, ack_delay: float = 0.):
+    """Runs the real log_handler against a stand-in athena server that acks every forwardLogs."""
+    mocker.patch('openpilot.system.athena.athenad.PC', False)
+    mocker.patch('openpilot.system.athena.athenad.LOG_FORWARD_RECHECK_S', 0.05)
+    athenad.send_queue = queue.PriorityQueue()
+    athenad.log_recv_queue = queue.Queue()
+
+    events: list[tuple[str, dict]] = []
+    orig_event = athenad.cloudlog.event
+
+    def _record(name, *args, **kwargs):
+      events.append((name, kwargs))
+      return orig_event(name, *args, **kwargs)
+    mocker.patch.object(athenad.cloudlog, 'event', side_effect=_record)
+
+    forwarded: list[str] = []
+    end_event = threading.Event()
+    threads = [
+      threading.Thread(target=_ack_forwarded_logs, args=(end_event, forwarded, ack_delay)),
+      threading.Thread(target=athenad.log_handler, args=(end_event,)),
+    ]
+    for t in threads:
+      t.start()
+    try:
+      yield forwarded, events
+    finally:
+      end_event.set()
+      for t in threads:
+        t.join(10)
+        assert not t.is_alive()
+
+  @pytest.mark.parametrize("value,expected", [(None, "unknown"), (True, "metered"), (False, None)])
+  def test_log_forward_pause_reason(self, value, expected):
+    # unset is NOT "unmetered": nobody has told us what the link costs yet
+    if value is None:
+      self.params.remove("NetworkMetered")
+    else:
+      self.params.put_bool("NetworkMetered", value)
+    assert athenad.log_forward_pause_reason(self.params) == expected
+
+  def test_log_handler_pauses_on_metered(self, mocker):
+    files = self._seed_swaglogs(5)
+    self.params.put_bool("NetworkMetered", True)
+
+    with self._log_forwarding(mocker) as (forwarded, events):
+      time.sleep(0.6)  # ~12 gate ticks at the patched recheck interval
+      assert forwarded == []
+      # nothing was marked as sent either, so the backlog is intact
+      assert athenad.get_logs_to_send_sorted() == files[:-1]
+
+    paused = [kw for name, kw in events if name == "athena.log_handler.forward_paused"]
+    assert len(paused) == 1, "the pause must be logged change-only, not every tick"
+    assert paused[0]["reason"] == "metered"
+    assert paused[0]["pending"] == len(files) - 1
+    # a routine metered pause is informational; only a missing source of truth is an error
+    assert "error" not in paused[0]
+    assert not any(name == "athena.log_handler.forward_resumed" for name, _ in events)
+
+  def test_log_handler_resumes_on_unmetered(self, mocker):
+    files = self._seed_swaglogs(5)
+    self.params.put_bool("NetworkMetered", True)
+
+    with self._log_forwarding(mocker) as (forwarded, events):
+      time.sleep(0.4)
+      assert forwarded == []
+      self.params.put_bool("NetworkMetered", False)
+      assert _wait_until(lambda: len(forwarded) >= len(files) - 1), forwarded
+      time.sleep(0.4)  # ... and then stops, rather than resending
+
+    assert forwarded == list(reversed(files[:-1]))  # newest first, each exactly once
+    assert athenad.get_logs_to_send_sorted() == []  # all acked; the active file is never sent
+
+    resumed = [kw for name, kw in events if name == "athena.log_handler.forward_resumed"]
+    assert len(resumed) == 1, "the resume must be logged change-only, not every tick"
+    assert resumed[0]["was"] == "metered"
+
+  def test_log_handler_pause_loses_nothing_and_resends_nothing(self, mocker):
+    files = self._seed_swaglogs(10)
+    self.params.put_bool("NetworkMetered", False)
+
+    # ~0.1 s per file, so the metered flip lands part-way through the backlog
+    with self._log_forwarding(mocker, ack_delay=0.1) as (forwarded, events):
+      assert _wait_until(lambda: len(forwarded) >= 2), forwarded
+      self.params.put_bool("NetworkMetered", True)
+      time.sleep(0.5)  # lets the in-flight file finish, then the gate must hold
+      sent_when_metered = len(forwarded)
+      time.sleep(0.5)  # ~5 more files would have gone out without the gate
+      assert len(forwarded) == sent_when_metered, "forwarding continued over a metered link"
+      assert sent_when_metered < len(files) - 1, "the pause came too late to prove anything"
+
+      self.params.put_bool("NetworkMetered", False)
+      assert _wait_until(lambda: len(forwarded) >= len(files) - 1), forwarded
+      time.sleep(0.4)
+
+    assert forwarded == list(reversed(files[:-1]))  # every rotated file, in order, exactly once
+    assert len(set(forwarded)) == len(forwarded)
+    assert athenad.get_logs_to_send_sorted() == []
+
+  def test_log_handler_pauses_when_metered_is_unknown(self, mocker):
+    files = self._seed_swaglogs(4)
+    self.params.remove("NetworkMetered")
+
+    with self._log_forwarding(mocker) as (forwarded, events):
+      time.sleep(0.6)
+      assert forwarded == []
+      self.params.put_bool("NetworkMetered", False)
+      assert _wait_until(lambda: len(forwarded) >= len(files) - 1), forwarded
+
+    paused = [kw for name, kw in events if name == "athena.log_handler.forward_paused"]
+    assert len(paused) == 1
+    assert paused[0]["reason"] == "unknown"
+    # Rule 2: a missing source of truth stops forwarding for good, so it is logged at ERROR
+    assert paused[0]["error"] is True
+    resumed = [kw for name, kw in events if name == "athena.log_handler.forward_resumed"]
+    assert len(resumed) == 1
+    assert resumed[0]["was"] == "unknown"
