@@ -320,30 +320,101 @@ def _ces_mode_read_failed(who, key, e, consequence) -> None:
     pass                          # the fallback already happened in read_ces_mode; logging must not raise
 
 
+# cesmodehold2pnw (owner decision 2026-09-14, Fable's silentexc3pnw Q1): a failed read used to switch that caller's CES
+# master Off on the very read that failed -- no CES decisions / ICBM curve slowdowns (CES), no VTSC curve slowdowns
+# (VTSC), overlay and its NO-SIGNAL dead-man hidden (UI). Each caller now keeps its last GOOD mode for this long after
+# its first failed read, then falls back to what that read computed. BOUNDED on purpose: what raises here in practice is
+# a params_keys.h / params_pyx.so mismatch, which is NOT transient -- an unbounded hold would drive the old mode forever
+# on a device whose params layer is broken, with nothing on screen saying so.
+CES_MODE_HOLD_S = 10.0
+# who -> [last good mode (None before the first good read), monotonic time of the first failed read of this outage
+# (None while reads are fine), fallback in force]. Module state, so per PROCESS and per caller: CES holds in selfdrived,
+# VTSC in plannerd, the overlay in ui, each on its own reads.
+_ces_mode_hold_st = {}
+
+
+def _ces_mode_log(fn, msg) -> None:
+  """cesmodehold2pnw: one change-only hold log line. Guarded like _ces_mode_read_failed -- read_ces_mode never raised
+  before and the UI overlay calls it with no try of its own, so a failing logger must not make it raise."""
+  try:
+    fn(msg)
+  except Exception:
+    pass                          # the logger itself is what failed; there is nowhere left to report it
+
+
+def _ces_mode_hold(who, mode, ok) -> int:
+  """cesmodehold2pnw: what read_ces_mode returns. `mode` is what this read computed, `ok` is False when a read raised.
+  A good read stores the mode and ends any hold; a failed read returns the last good mode until CES_MODE_HOLD_S has
+  passed, then `mode` (the fallback). With no good read yet -- a failure at startup -- the fallback applies at once.
+  Change-only log lines: hold started / hold expired (or nothing to hold) / readable again."""
+  try:
+    st = _ces_mode_hold_st.setdefault(who, [None, None, False])
+    if ok:
+      if st[1] is not None:
+        _ces_mode_log(cloudlog.warning, f"read_ces_mode ({who}): CES master readable again after " +
+                      f"{time.monotonic() - st[1]:.1f} s -- mode {mode}")
+      st[:] = [mode, None, False]
+      return mode
+    now = time.monotonic()
+    if st[1] is None:                        # first failed read of this outage
+      st[1] = now
+      if st[0] is not None:
+        _ces_mode_log(cloudlog.warning, f"read_ces_mode ({who}): CES master unreadable -- {who} holds its last good " +
+                      f"mode {st[0]} for up to {CES_MODE_HOLD_S:.0f} s")
+    if st[0] is not None and now - st[1] < CES_MODE_HOLD_S:
+      return st[0]
+    if not st[2]:                            # change-only: the hold is over, or there was nothing to hold
+      st[2] = True
+      why = (f"the {CES_MODE_HOLD_S:.0f} s hold of mode {st[0]} expired" if st[0] is not None else
+             "no good read yet (it failed at startup)")
+      _ces_mode_log(cloudlog.error, f"read_ces_mode ({who}): CES master unreadable, {why} -- {who} falls back to " +
+                    f"mode {mode} until a read succeeds")
+    return mode
+  except Exception as e:
+    # only the hold bookkeeping can raise here; the read already produced `mode`, so that is what the caller gets
+    _ces_mode_read_failed(who, "mode hold", e, f"{who} uses this read's own mode {mode}, with no hold")
+    return mode
+
+
+def ces_mode_lost(who) -> bool:
+  """cesmodehold2pnw: True while `who`'s CES master is unreadable AND the fallback is in force (the hold expired, or
+  there was no good mode to hold) AND that fallback is not what the driver chose -- the last good mode was non-Off, or
+  is unknown. False while reads succeed, DURING the hold (the held mode is the driver's, and CES is still running and
+  publishing on it), and when the last good mode was Off (the fallback matches it, so nothing is lost). The UI
+  overlay's NO-SIGNAL alarm reads this."""
+  st = _ces_mode_hold_st.get(who)
+  return bool(st is not None and st[2] and (st[0] is None or st[0] != CES_MODE_OFF))
+
+
 def read_ces_mode(params, who="unnamed") -> int:
   """Read the CESMode INT param (source of truth). Back-compat: if CESMode is missing/0 but the old
-  BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Defensive: any failure
-  => Off (0). Used by BOTH the CES and VTSC runtime readers so they always agree.
+  BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Used by BOTH the CES and VTSC runtime
+  readers so they always agree. Never raises (the UI overlay calls it with no try of its own).
   silentexc3pnw: `who` names the caller in the failure log (CES in selfdrived, VTSC in plannerd, the CES overlay in
-  the UI). An unset CESMode reads its "0" default and an unset legacy bool reads False: neither raises or logs."""
+  the UI). An unset CESMode reads its "0" default and an unset legacy bool reads False: neither raises or logs.
+  cesmodehold2pnw: when a read fails, `who` keeps its last good mode for CES_MODE_HOLD_S, then falls back (see
+  _ces_mode_hold)."""
+  ok = True
   try:
     mode = int(params.get("CESMode", return_default=True) or 0)
   except Exception as e:
-    # silentexc3pnw: fallback unchanged (0, then the legacy bool below still applies). What raises here in practice
-    # is an UnknownKeyName from a params_keys.h / params_pyx.so mismatch (a malformed stored INT does not: Params
-    # returns the default for it and warns itself).
-    mode = 0
-    _ces_mode_read_failed(who, "CESMode", e, f"{who} treats the CES master as Off (Standard if the legacy " +
-                          "ConditionalExperimentalSwitching bool is set) while this lasts")
+    # silentexc3pnw: what raises here in practice is an UnknownKeyName from a params_keys.h / params_pyx.so mismatch
+    # (a malformed stored INT does not: Params returns the default for it and warns itself).
+    mode, ok = CES_MODE_OFF, False
+    _ces_mode_read_failed(who, "CESMode", e, f"{who} keeps its last good mode for up to {CES_MODE_HOLD_S:.0f} s " +
+                          "(none before the first good read), then treats the CES master as Off (Standard if the " +
+                          "legacy ConditionalExperimentalSwitching bool is set) while this lasts")
   if mode == CES_MODE_OFF:
     try:
       if params.get_bool("ConditionalExperimentalSwitching"):
         mode = CES_MODE_STANDARD
     except Exception as e:
-      # silentexc3pnw: was `except Exception: pass`. Fallback unchanged (the back-compat is skipped, mode stays Off).
+      # silentexc3pnw: was `except Exception: pass`. The back-compat is skipped (mode stays Off after the hold).
+      ok = False
       _ces_mode_read_failed(who, "ConditionalExperimentalSwitching", e,
-                            f"legacy back-compat skipped: {who} treats the CES master as Off while this lasts")
-  return mode
+                            f"legacy back-compat skipped: {who} keeps its last good mode for up to " +
+                            f"{CES_MODE_HOLD_S:.0f} s, then treats the CES master as Off while this lasts")
+  return _ces_mode_hold(who, mode, ok)
 
 
 # --- button override states (CESButtonState mem param) ----------------------

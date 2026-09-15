@@ -48,7 +48,7 @@ import pyray as rl
 from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, read_ces_mode
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ces_enabled, ces_mode_lost, read_ces_mode
 from openpilot.selfdrive.ui.ui_state import ui_state
 
 # rain2pnw: magnitudes for the "RAIN armed" indicator, from the same source the controllers use
@@ -223,8 +223,8 @@ class CesStatusRenderer(Widget):
     self._last_poll = now
     # light-ces-gentle: the master is the INT CESMode (0=Off,1=Light,2=Standard); the overlay shows for
     # BOTH Light and Standard (any non-Off). read_ces_mode keeps back-compat with the old bool param.
-    # silentexc3pnw: read_ces_mode logs its own read failures (an unreadable CESMode hides this overlay AND the
-    # NO-SIGNAL dead-man below, exactly as before) and never raises.
+    # silentexc3pnw: read_ces_mode logs its own read failures and never raises. cesmodehold2pnw: through a failed read it
+    # keeps this overlay's last good mode for CES_MODE_HOLD_S (the UI process's own state), then falls back.
     master_on = ces_enabled(read_ces_mode(ui_state.params, who="CES overlay"))
     self._ces_enabled = master_on
     # ces2pnw (driver req 2026-07-10): "Hide CES debug information" toggle — default OFF (overlay
@@ -245,6 +245,15 @@ class CesStatusRenderer(Widget):
     elif self._onroad_t0 is None:
       self._onroad_t0 = now
     grace_over = self._onroad_t0 is not None and (now - self._onroad_t0) > _GRACE_S
+    if ces_mode_lost("CES overlay"):
+      # cesmodehold2pnw: the CES master is unreadable and the hold is over (or there never was a good read) while the
+      # driver had CES on or its choice is unknown -- CES/VTSC have fallen back the same way in their own processes. The
+      # fallback mode is not the driver's, so no data lines: the NO-SIGNAL alarm, after the same onroad grace. Not
+      # during the hold: CES is still running on the held mode and publishing, so its live lines are the honest view.
+      self._st, self._vtsc, self._card_layout = {}, {}, None
+      self._no_signal = grace_over
+      self._cached_layout = self._alarm_layout() if grace_over else None
+      return
     self._no_signal = False
     if not master_on or self._mem is None:
       self._st = {}

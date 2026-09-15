@@ -144,7 +144,9 @@ class VTSCController:
       try:
         # VTSC rides the CES master selector (CESMode): non-Off -> VTSC on. The mode also picks the
         # tune: Light -> GENTLE_PROFILE (anti-sawtooth), Standard -> DEFAULT_PROFILE. On ANY car.
-        self._mode = CES.read_ces_mode(self.params, who="VTSC")   # silentexc3pnw: logs its own read failures
+        # silentexc3pnw: logs its own read failures. cesmodehold2pnw: holds the last good mode through a failed read for
+        # CES.CES_MODE_HOLD_S (plannerd's own state), then falls back.
+        self._mode = CES.read_ces_mode(self.params, who="VTSC")
         # rain2pnw: push the live wet-weather tier into the capability view (applies on EVERY car).
         # Isolated try — a RainMode read hiccup must NEVER fall through to the outer except that
         # disables VTSC (curve control is not rain's dependant); worst case rain stays at its last tier.

@@ -7,6 +7,10 @@ its NO-SIGNAL dead-man). An unreadable CESMode therefore switched all of that of
 (CESMode -> 0, then the legacy bool still applies; legacy -> skipped); each failure is now logged -- the first at once,
 then at most one line per CES_MODE_READ_ERR_LOG_S, counting the failures since the previous line -- with its own state
 per caller and per read. An unset param is not a failure and does not log.
+
+cesmodehold2pnw: that fallback is now reached only after the caller has held its last good mode for CES_MODE_HOLD_S
+(10 s) -- the tests below therefore read the fallback out of a caller with no good read behind it, or past the window.
+The hold itself lives in test_ces_mode_hold.py.
 """
 import copy
 import json
@@ -56,6 +60,7 @@ def logs():
 def fresh_state(monkeypatch, tmp_path):
   """Module-level log state: each test starts with no failure history. Lightnings read the built-in curve defaults."""
   monkeypatch.setattr(C, "_ces_mode_read_err", {})
+  monkeypatch.setattr(C, "_ces_mode_hold_st", {})   # cesmodehold2pnw: no last good mode carried in from another test
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "absent.json"))
   monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "absent-rain.json"))
 
@@ -125,7 +130,7 @@ def test_an_unknown_key_is_logged_and_reads_off(clock, logs):
   assert len(lines) == 1
   assert lines[0].levelno >= logging.ERROR and lines[0].exc_info is not None and lines[0].exc_info[0] is UnknownKeyName
   assert "(UnknownKeyName)" in lines[0].msg and "(1 failure(s)" in lines[0].msg
-  assert "VTSC treats the CES master as Off" in lines[0].msg
+  assert "VTSC keeps its last good mode for up to 10 s" in lines[0].msg   # cesmodehold2pnw
   assert logs.mode(key="ConditionalExperimentalSwitching") == []
 
 
@@ -143,7 +148,7 @@ def test_an_unreadable_legacy_bool_is_logged_and_the_mode_stays_off(clock, logs)
   assert logs.mode(key="CESMode") == []
   # a non-Off CESMode never reads the legacy bool, so a broken legacy key cannot log there
   assert C.read_ces_mode(_P(clock, mode=lambda t: 1, legacy=lambda t: UKN_LEGACY), who="VTSC") == 1
-  assert len(logs.errors()) == 1
+  assert len(logs.mode(key="ConditionalExperimentalSwitching")) == 1 and logs.mode(key="CESMode") == []
 
 
 @pytest.mark.parametrize("bad, exc_type", [("abc", ValueError), (TypeError("bad"), TypeError),
@@ -181,7 +186,8 @@ def test_a_raising_logger_cannot_change_the_result_or_escape(clock, logs, monkey
   """The UI overlay calls read_ces_mode with no try of its own."""
   def boom(*a, **k):
     raise RuntimeError("logger down")
-  monkeypatch.setattr(C.cloudlog, "exception", boom)
+  for level in ("exception", "error", "warning"):   # cesmodehold2pnw: the hold's change-only lines too
+    monkeypatch.setattr(C.cloudlog, level, boom)
   assert C.read_ces_mode(_P(clock, mode=lambda t: UKN), who="CES overlay") == 0
   assert C.read_ces_mode(_P(clock, mode=lambda t: UKN, legacy=lambda t: True), who="CES overlay") == 2
   assert C.read_ces_mode(_P(clock, mode=lambda t: 0, legacy=lambda t: UKN_LEGACY), who="CES overlay") == 0
@@ -211,6 +217,7 @@ def _vsm():
 
 def _vtsc_drive(clock, fp, brand, mode, ticks=200):
   clock[0] = 1000.0
+  C._ces_mode_hold_st.clear()   # cesmodehold2pnw: each drive is a fresh plannerd
   c = vc.VTSCController(FakeCP(fp, brand, True), params=_P(clock, mode=mode))
   c.mem_params = _VMem()
   out = []
@@ -233,15 +240,18 @@ def test_vtsc_an_unreadable_cesmode_drives_exactly_like_ces_off_and_says_so(cloc
   assert got == _vtsc_drive(clock, fp, brand, lambda t: 0)
   assert len(logs.mode("VTSC")) == 1
   assert [r for r in logs.errors() if "enable/mode read FAILED" in str(r.msg)] == []   # read_ces_mode handled it
-  mid = _vtsc_drive(clock, fp, brand, lambda t: 2 if t < 3.0 else UKN)
+  # cesmodehold2pnw: mid-drive, VTSC's reads land on whole seconds, so the 3 s failure holds Standard to exactly 13 s
+  mid = _vtsc_drive(clock, fp, brand, lambda t: 2 if t < 3.0 else UKN, ticks=400)
   assert min(cap for cap, _, _ in mid[:60]) < V_SET - 1.0
-  assert mid == _vtsc_drive(clock, fp, brand, lambda t: 2 if t < 3.0 else 0)
+  assert mid == _vtsc_drive(clock, fp, brand, lambda t: 2 if t < 13.0 else 0, ticks=400)
+  assert mid != _vtsc_drive(clock, fp, brand, lambda t: 2 if t < 3.0 else 0, ticks=400)   # the hold is what differs
 
 
 # ---------------------------------------------------------------- through CES (selfdrived), all three cars
 def _ces_run(clock, fp, brand, op_long, mode, lead, curve0, v0, T=12.0):
   """The REAL CESController.experimental_request at 100 Hz (the silentexc2pnw CES identity harness, shortened)."""
   clock[0] = 5000.0
+  C._ces_mode_hold_st.clear()   # cesmodehold2pnw: each run is a fresh selfdrived
   st = {"curve_at": curve0, "v": v0, "stock": 60 * MPH}
 
   class Mem:
@@ -318,15 +328,21 @@ def test_ces_an_unreadable_cesmode_runs_exactly_like_ces_off_and_says_so(clock, 
   got = _ces_run(clock, fp, brand, op_long, lambda t: UKN, lead, curve0, v0)
   want = _ces_run(clock, fp, brand, op_long, lambda t: 0, lead, curve0, v0)
   assert _acted(want, what) == 0 and got == want
-  assert len(logs.mode("CES")) == 1 and "CES treats the CES master as Off" in logs.mode("CES")[0].msg
+  assert len(logs.mode("CES")) == 1 and "CES keeps its last good mode for up to 10 s" in logs.mode("CES")[0].msg
 
 
 @pytest.mark.parametrize("fp, brand, op_long, lead, curve0, v0, what", SCENES)
-def test_ces_a_failure_mid_drive_is_exactly_switching_ces_off(clock, logs, fp, brand, op_long, lead, curve0, v0, what):
-  got = _ces_run(clock, fp, brand, op_long, lambda t: 2 if t < 6.0 else UKN, lead, curve0, v0)
-  want = _ces_run(clock, fp, brand, op_long, lambda t: 2 if t < 6.0 else 0, lead, curve0, v0)
+def test_ces_a_failure_mid_drive_holds_standard_then_is_exactly_switching_ces_off(clock, logs, monkeypatch, fp, brand,
+                                                                                    op_long, lead, curve0, v0, what):
+  """cesmodehold2pnw: CES reads at ~1 Hz on 0.01 s float steps (x.01 s), so a 10 s hold lands ON a read and float
+  rounding picks the side. 9.5 s puts the expiry unambiguously on the 10th read after the first failure (16.01 s); the
+  10.0 s boundary itself is pinned with an exact clock in test_ces_mode_hold.py."""
+  monkeypatch.setattr(C, "CES_MODE_HOLD_S", 9.5)
+  got = _ces_run(clock, fp, brand, op_long, lambda t: 2 if t < 6.0 else UKN, lead, curve0, v0, T=20.0)
+  want = _ces_run(clock, fp, brand, op_long, lambda t: 2 if t < 16.0 else 0, lead, curve0, v0, T=20.0)
   assert _acted({"dec": got["dec"][:600], "puts": [p for p in got["puts"] if p[0] < 5006.0]}, what) > 0
   assert got == want
+  assert got != _ces_run(clock, fp, brand, op_long, lambda t: 2 if t < 6.0 else 0, lead, curve0, v0, T=20.0)
   assert len(logs.mode("CES")) == 1
 
 
@@ -336,6 +352,7 @@ def _overlay(monkeypatch, params):
   monkeypatch.setattr(cs, "ui_state", types.SimpleNamespace(params=params, started=False, is_metric=False))
   r = object.__new__(cs.CesStatusRenderer)
   r._last_poll, r._mem, r._onroad_t0, r._ces_enabled = -1e9, None, None, None
+  C._ces_mode_hold_st.clear()   # cesmodehold2pnw: each call is a fresh ui (these cases are about the read, not the hold)
   r._update_state()
   return r._ces_enabled
 

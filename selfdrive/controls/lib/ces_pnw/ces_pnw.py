@@ -2739,11 +2739,11 @@ class CESController:
 
   def _read_params(self):
     if self._frame % max(1, int(1.0 / DT_CTRL)) == 0:   # ~1 Hz (selfdrived steps at 100 Hz / DT_CTRL)
-      try:
-        mode = C.read_ces_mode(self.params, who="CES")   # silentexc3pnw: logs its own read failures (never raises)
-      except Exception:
-        mode = C.CES_MODE_OFF
-      self._set_mode(mode)
+      # silentexc3pnw: logs its own read failures. cesmodehold2pnw: holds the last good mode through a failed read for
+      # C.CES_MODE_HOLD_S. It never raises (every read, the hold and every log line are guarded inside it), so the
+      # silent `except Exception: mode = CES_MODE_OFF` that sat here could not run and is gone; selfdrived's own
+      # guard around experimental_request() still backstops it.
+      self._set_mode(C.read_ces_mode(self.params, who="CES"))
       # rain2pnw: push the live wet-weather tier into the capability view (used by the ICBM curve
       # target below; applies in shadow too). Defensive — never let a param hiccup break _read_params.
       try:

@@ -216,7 +216,13 @@ def _fake_model(apex_k, apex_d, v_ego):
 def _make_ctrl():
   from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
   cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
-  c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: True))
+  # cesmodehold2pnw: this stub used to omit `get` entirely, so read_ces_mode's CESMode read RAISED and VTSC came up
+  # enabled only through the legacy-bool fallback. Now that a failed read holds the last good mode (and, in the next
+  # commit, stops consulting the legacy bool), these state-machine tests must say what they mean: CESMode = Standard.
+  # Key-aware, because _read_enabled() also reads RainMode through this same get() -- a blanket "2" would arm heavy
+  # rain and change the curve targets these tests pin.
+  c = VTSCController(cp, params=types.SimpleNamespace(get=lambda k, return_default=False: "2" if k == "CESMode" else None,
+                                                      get_bool=lambda k: True))
   c.mem_params = None              # no overlay publish in the test
   return c
 
@@ -289,7 +295,9 @@ def test_state_machine_confidence_cut_then_brake_hold_release():
 def test_state_machine_disabled_is_neutral():
   from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
   cp = types.SimpleNamespace(openpilotLongitudinalControl=True)
-  c = VTSCController(cp, params=types.SimpleNamespace(get_bool=lambda k: False))  # CES off
+  # cesmodehold2pnw: as in _make_ctrl() -- say "CES off" with a readable CESMode instead of leaning on a raising read
+  c = VTSCController(cp, params=types.SimpleNamespace(get=lambda k, return_default=False: "0" if k == "CESMode" else None,
+                                                      get_bool=lambda k: False))  # CES off
   c.mem_params = None
   c._last_t = time.monotonic() - 0.05
   out = c.cap({'modelV2': _fake_model(TERW_KAPPA, 50.0, 28.0)}, V70, 28.0)
