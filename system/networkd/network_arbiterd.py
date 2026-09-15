@@ -46,6 +46,7 @@ from openpilot.system.networkd.network_arbiter import (
   UPGRADE_SCAN_S,
   UnmeteredYield,
   arrival_candidates,
+  classify_join_failure,
   decide,
   explain_fallback,
   home_to_yield_to,
@@ -78,18 +79,48 @@ HOTSPOT_SUBNET = "192.168.43.0/24"   # AP client subnet, masqueraded out the LTE
 PDN_THROTTLE_TOKEN = "pdn-ipv4-call-throttled"
 
 
-def _nmcli(args: list[str]) -> str | None:
-  """Run an nmcli query/command. Returns stdout on success, None on any failure (logged)."""
+def _nmcli_run(args: list[str]) -> subprocess.CompletedProcess | None:
+  """Run nmcli and return the RAW CompletedProcess, or None if it could not be run at all.
+
+  hotspotretry2pnw: `_nmcli` folds every failure into None, which is all its callers need -- but a join
+  that failed because a phone hotspot's 4-way handshake did not complete is a different fact from a
+  wrong password or a dead router, and only the return code and stderr can tell them apart. Extracted
+  so `_con_up` can see them, without changing what `_nmcli` returns to everything else."""
   try:
-    proc = subprocess.run(["nmcli", *args], capture_output=True, text=True,
+    return subprocess.run(["nmcli", *args], capture_output=True, text=True,
                           timeout=NMCLI_TIMEOUT_S, check=False)
   except (OSError, subprocess.TimeoutExpired):
     cloudlog.exception(f"network_arbiterd: nmcli {args} failed to run")
+    return None
+
+
+def _nmcli(args: list[str]) -> str | None:
+  """Run an nmcli query/command. Returns stdout on success, None on any failure (logged)."""
+  proc = _nmcli_run(args)
+  if proc is None:
     return None
   if proc.returncode != 0:
     cloudlog.warning(f"network_arbiterd: nmcli {args} rc={proc.returncode} err={proc.stderr.strip()}")
     return None
   return proc.stdout
+
+
+def _con_up(conn_id: str) -> tuple[str, int | None, str]:
+  """`nmcli con up <conn_id>`, reporting HOW it failed: (classification, rc, error text).
+
+  ("", 0, "") on success. `classification` is classify_join_failure's "transient"/"real" on a failure,
+  and "real" when nmcli could not be run at all (our own NMCLI_TIMEOUT_S, or an exec error) -- we learnt
+  nothing there, so it keeps the pre-change behaviour. The caller decides what to do with it; this
+  function only reads the evidence. The rc/stderr warning mirrors `_nmcli`'s, so nothing that used to be
+  visible in the log stops being visible."""
+  proc = _nmcli_run(["con", "up", conn_id])
+  if proc is None:
+    return "real", None, "nmcli could not be run"
+  if proc.returncode == 0:
+    return "", 0, ""
+  err = " ".join(proc.stderr.split())
+  cloudlog.warning(f"network_arbiterd: nmcli ['con', 'up', {conn_id!r}] rc={proc.returncode} err={err}")
+  return classify_join_failure(err), proc.returncode, err
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess | None:
@@ -442,24 +473,29 @@ def _expected_active(action: str, ssid: str) -> str | None:
 
 
 def _apply(action: str, ssid: str, current_active: str | None = None, active_read_ok: bool = True,
-           why: str = "") -> None:
+           why: str = "") -> tuple[str, int | None, str]:
   """Run the one action chosen by decide(). All failures are logged, never raised.
   `current_active`/`active_read_ok` are this tick's read, used only to say in the log what is being left.
-  `why` (arbiterfu2pnw) is explain_fallback's text for an up_fallback, used only in its log line."""
+  `why` (arbiterfu2pnw) is explain_fallback's text for an up_fallback, used only in its log line.
+
+  hotspotretry2pnw: returns `_con_up`'s (classification, rc, error) for a CLIENT bring-up, and
+  ("", 0, "") for everything else. The caller carries it to the next tick, where judge_link decides
+  whether the bring-up is to be blamed -- a failed `con up` leaves nothing active, so the failure is
+  only ever seen one poll later."""
   if action == "noop":
-    return
+    return "", 0, ""
   if action == "up_priority":
     conn_id = priority_connection_id(ssid.strip())
     cloudlog.info(f"network_arbiterd: priority wifi '{ssid}' in range -> {conn_id} ({_leaving(current_active, active_read_ok)})")
     _set_hotspot_nat(False)                       # hotspot going away -> tear down its NAT
-    _nmcli(["con", "up", conn_id])
+    return _con_up(conn_id)
   elif action == "up_fallback":
     # netcosttier2pnw: tier 1/2 -- some other saved wifi, cheaper than our own LTE.
     conn_id = priority_connection_id(ssid.strip())
     leaving = _leaving(current_active, active_read_ok)
     cloudlog.info(f"network_arbiterd: falling back to saved wifi '{ssid}' -> {conn_id} [{why}] ({leaving})")
     _set_hotspot_nat(False)
-    _nmcli(["con", "up", conn_id])
+    return _con_up(conn_id)
   elif action == "up_hotspot":
     cloudlog.info("network_arbiterd: bringing hotspot up (+NAT)")
     _set_hotspot_nat(True)                         # install NAT BEFORE the AP so the first client packet routes
@@ -470,6 +506,7 @@ def _apply(action: str, ssid: str, current_active: str | None = None, active_rea
     _set_hotspot_nat(False)
   else:
     cloudlog.error(f"network_arbiterd: unknown action {action!r}")
+  return "", 0, ""
 
 
 # --- GPS / home-location for the geo-gate ------------------------------------------------------------
@@ -758,6 +795,12 @@ def main() -> NoReturn:
   prev_on_priority: bool | None = None  # firehose2pnw: change-only publish of OnPriorityNetwork (flash-wear guard)
   assoc_fail: dict[str, tuple[int, float]] = {}  # netcosttier2pnw: ssid -> (consecutive failures, blocked-until)
   pending_up: tuple[str, float] | None = None   # netcosttier2pnw: (ssid, raised_at) awaiting judgement
+  # hotspotretry2pnw: how the LAST client bring-up went, as (ssid_lower, classification, rc, error).
+  # Overwritten on every up_priority/up_fallback, success included, so a later failure can never
+  # inherit an older classification; consulted one tick later, when judge_link blames the bring-up.
+  last_join: tuple[str, str, int | None, str] = ("", "", None, "")
+  transient_used: set[str] = set()              # hotspotretry2pnw: ssids whose ONE free retry is spent
+  join_class_logged: tuple | None = None        # hotspotretry2pnw: last logged classification (change-only)
   absent_scans: dict[str, int] = {}             # netcosttier2pnw: ssid -> consecutive REAL scans missing it
   prev_active_ssid = ""                          # netcosttier2pnw: to spot a link appearing that we did not raise
   # netscanpin2pnw: the driver's manual pick. The arbiter never WRITES WifiManualPick; it tracks the
@@ -793,6 +836,10 @@ def main() -> NoReturn:
                       legacy_ssid=(params.get("TetheringPriorityWifi") or ""),
                       legacy_home_raw=params.get("TetheringHomeLocation"))
       net_ssids = pn.ssids(nets)
+      # hotspotretry2pnw: the configured entries that TRAVEL (the driver's iPhone). Only these get the
+      # one-shot retry below: a phone hotspot that is not fully awake is the measured transient case,
+      # while a stationary AP that refuses the stored PSK is a wrong password until proven otherwise.
+      mobile_ssids = {(e.get("ssid") or "").strip().lower() for e in nets if e.get("mobile")}
       current_active, active_read_ok = _active_wifi_read()
       if active_read_ok:                        # unreadhold2pnw: a good read ends the run (and re-arms its logs)
         unread_since, unread_hold_logged, unread_release_logged = None, None, False
@@ -1002,7 +1049,51 @@ def main() -> NoReturn:
                        hold_s=ACTIVE_UNREADABLE_HOLD_S,
                        error="nmcli con show --active kept failing past the hold; counting the bring-up as failed without a verification read")
       if verdict.blame:
-        _note_attempt(assoc_fail, verdict.blame, verdict.blame_ok, now)
+        # hotspotretry2pnw: A TRANSIENT JOIN FAILURE ON THE PHONE COSTS ONE POLL, NOT 5-15 MINUTES.
+        # Measured 2026-09-14 18:55 PT: `con up` on the iPhone hotspot failed with "Secrets were
+        # required, but not provided" (the supplicant had reported WRONG_KEY) -- and the SAME profile
+        # joined the SAME phone cleanly three hours later and again the next morning, so the password
+        # was never wrong; the phone was not awake. Today that failure is blamed immediately and the
+        # ledger exiles the phone for 60 s, then 300 s, then 900 s.
+        # So: the FIRST such failure on a configured MOBILE entry is not blamed. Nothing else changes --
+        # the network is simply not in `blocked` below, so this same tick's ladder raises it again, one
+        # poll (20 s) after it failed. The retry is spent per network and is returned ONLY by a
+        # successful join, so a phone that always fails is blamed on its second try and lands in the
+        # ordinary escalating backoff: one extra `con up` per episode, and the 15-minute steady state
+        # is untouched. `blame_ok` (the link came up) always goes to _note_attempt, which is what logs
+        # netcosttier_recovered and clears the ledger.
+        blamed = verdict.blame.lower()
+        cls = last_join[1] if last_join[0] == blamed else ""
+        retry = (not verdict.blame_ok and cls == "transient" and blamed in mobile_ssids
+                 and blamed not in transient_used)
+        if cls and not verdict.blame_ok:
+          # Rule 2: say which way this failure was read, with the rc and NM's own words, so an error
+          # string classify_join_failure does not recognise is visible instead of silently blamed.
+          entry = (blamed, last_join[2], last_join[3], cls, retry)
+          if entry != join_class_logged:
+            rule = ("a transient join failure on a configured mobile entry is retried once before the ledger blames it"
+                    if retry else
+                    "not a transient failure -- blamed as usual" if cls != "transient" else
+                    "not a configured mobile entry -- blamed as usual" if blamed not in mobile_ssids else
+                    "its one retry is already spent; only a successful join returns it")
+            cloudlog.event("netcosttier_join_classified", ssid=blamed, classification=cls,
+                           rc=last_join[2], error=last_join[3], mobile=blamed in mobile_ssids,
+                           retrying=retry, retry_in_s=POLL_INTERVAL_S if retry else None, rule=rule)
+            join_class_logged = entry
+        if retry:
+          transient_used.add(blamed)
+        else:
+          if verdict.blame_ok:
+            transient_used.discard(blamed)
+            # Fable: a classified failure AFTER a successful join is news -- re-arm the change-only log, or the
+            # evening retry of an ssid that already failed this morning goes unreported (Rule 2).
+            join_class_logged = None
+          _note_attempt(assoc_fail, verdict.blame, verdict.blame_ok, now)
+        if last_join[0] == blamed:
+          # Fable: the classification is CONSUMED here. Without this, `last_join` lingers and a LATER, unrelated
+          # blame of the same ssid (an external NM autoconnect that then dies in DHCP) inherits the old "transient"
+          # verdict and is swallowed once.
+          last_join = ("", "", None, "")
 
       # A network that has been genuinely out of range and has come back gets a clean slate.
       _forget_on_reappearance(assoc_fail, absent_scans,
@@ -1157,7 +1248,7 @@ def main() -> NoReturn:
         except Exception as e:
           cloudlog.exception("network_arbiterd: could not explain the fallback choice; joining it anyway")
           why = f"reason unavailable: {type(e).__name__}"
-      _apply(action, target_ssid, current_active, active_read_ok, why)
+      join_cls, join_rc, join_err = _apply(action, target_ssid, current_active, active_read_ok, why)
       expected = _expected_active(action, target_ssid)
       if expected is not None:
         requested_active = expected
@@ -1165,6 +1256,8 @@ def main() -> NoReturn:
         # Remember what we raised. A `con up` that fails outright leaves NOTHING active, so this is
         # the only way that failure is ever visible -- judging the active link alone cannot see it.
         pending_up = (target_ssid, now)
+        # hotspotretry2pnw: ...and HOW it went, for the blame one tick from now.
+        last_join = (target_ssid.lower(), join_cls, join_rc, join_err)
         prev_active_ssid = target_ssid.lower()
         # ...and DROP any cached usability for it. DEFENCE IN DEPTH, not the load-bearing fix: with
         # judge_link keeping a pending link sticky through an unreadable tick regardless of the

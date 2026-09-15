@@ -40,6 +40,10 @@ class FakeNM:
     self.ip: dict[str, str | None] = {}
     self.conn: dict[str, str] = {}
     self.behave: dict[str, object] = {}
+    # hotspotretry2pnw: connection id -> the stderr nmcli prints when `con up` on it fails. Only read
+    # for a `refuse`; unset means a bare failure with no text, which classifies as `real` (i.e. exactly
+    # the pre-change behaviour, which is why no existing scenario had to change).
+    self.up_error: dict[str, str] = {}
     self.fail_reads: set[str] = set()
     self.t = 0.0
     self.ups: list[str] = []
@@ -81,6 +85,11 @@ class FakeNM:
       if b == "refuse":
         self.active = None
         return None
+      if b == "late":
+        # hotspotretry2pnw: nmcli returned an error (our own NMCLI_TIMEOUT_S can kill it at 15 s) but
+        # NetworkManager carried the activation through anyway -- a failing rc with a link that is up.
+        self.active, self.ip[c] = c, "10.0.0.2"
+        return None
       self.active = c
       self.ip[c] = "10.0.0.2" if b == "ok" else None
       return ""
@@ -107,6 +116,17 @@ def run_loop(monkeypatch, nm, ticks=8, near_home=True, hooks=(), priority=(HOME,
   # explicitly unmetered entry in range, and a stationary phone would wrongly qualify as "home".
   state = {"n": 0}
   monkeypatch.setattr(d, "_nmcli", nm.nmcli)
+
+  def _proc(args):
+    """hotspotretry2pnw: `_con_up` needs the return code and stderr, so it goes through `_nmcli_run`
+    rather than `_nmcli`. Delegate to the SAME FakeNM state machine so every scenario still drives it,
+    and render a failure as rc=4 plus whatever nm.up_error scripts for that connection."""
+    out = nm.nmcli(args)
+    if out is None:
+      return subprocess.CompletedProcess(args, 4, "", nm.up_error.get(args[-1], ""))
+    return subprocess.CompletedProcess(args, 0, out, "")
+
+  monkeypatch.setattr(d, "_nmcli_run", _proc)
   monkeypatch.setattr(d, "_run", lambda args: subprocess.CompletedProcess(args, 0, "", ""))
   monkeypatch.setattr(d, "_modem_index", lambda: None)
   monkeypatch.setattr(d, "_lte_throttled_recently", lambda: False)
@@ -1848,3 +1868,298 @@ class TestTheHomeRuleIsUnchanged:
              priority=(HOME, PHONE), params={"WifiManualPick": _pick(PHONE)})
     assert nm.up_log == [(4 * POLL, ID_HOME)], nm.up_log
     assert _cleared(events) == [{"ssid": PHONE, "reason": "home", "trigger": HOME}], _cleared(events)
+
+
+# ================================================================================================
+# hotspotretry2pnw — a TRANSIENT join failure costs one poll, not 5-15 minutes of backoff.
+#
+# MEASURED 2026-09-14 18:55:12 PT: an upgrade scan found "Dirk's iPhone 13", the arbiter ran `nmcli con
+# up` on it, wpa_supplicant reported `CTRL-EVENT-SSID-TEMP-DISABLED ... reason=WRONG_KEY`, NM asked for
+# secrets, no secret agent is available for the arbiter's nmcli, and it exited 4 with "Secrets were
+# required, but not provided". The retry at 18:57:20 failed differently (NM `ssid-not-found`). Each was
+# blamed and the ledger exiled the phone for 60 s, then 300 s. The password was never wrong: the SAME
+# profile joined the SAME phone at 21:50, 21:53, 22:13 and on 09-15 at 07:39:43, 22 s after the hotspot
+# was switched on. An iPhone hotspot that is not fully awake fails the 4-way handshake.
+# ================================================================================================
+
+# nmcli's own wording for the two measured failures, and one that must stay `real`.
+SECRETS_ERR = "Error: Connection activation failed: (7) Secrets were required, but not provided."
+NOT_FOUND_ERR = "Error: Connection activation failed: (53) The Wi-Fi network could not be found."
+REAL_ERR = "Error: Connection activation failed: (1) Unknown reason."
+
+
+def _classified(events):
+  return [kw for n, kw in events if n == "netcosttier_join_classified"]
+
+
+def _blamed(timed):
+  return [(t, kw["ssid"], kw["consecutive_failures"]) for t, kw in _named(timed, "netcosttier_assoc_failed")]
+
+
+class TestATransientJoinFailureIsRetriedOnce:
+  def test_the_1855_case_a_secrets_failure_then_success_costs_ONE_TICK_and_no_backoff(self, monkeypatch, timed_events):
+    """THE REPORT. The phone refuses at 0 s with the secrets error and is awake by the next poll. The
+    arbiter must retry it at 20 s and join -- with nothing in the ledger and no hotspot blip. Before this
+    change: blamed at 20 s, hotspot raised at 20 s, phone not retried until ~80 s."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = lambda t: "refuse" if t < POLL else "ok"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, ID_PHONE)], nm.up_log
+    assert _blamed(timed) == [], f"a transient failure went into the ledger: {_blamed(timed)}"
+    assert nm.active == ID_PHONE
+
+  def test_and_the_log_says_WHY_it_was_retried_with_the_rc_and_NM_s_own_words(self, monkeypatch, events):
+    """Rule 2: a retry that happens for a reason nobody can see is the silence this repo bans."""
+    nm = FakeNM()
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = lambda t: "refuse" if t < POLL else "ok"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, priority=(HOME, PHONE))
+    got = _classified(events)
+    assert len(got) == 1, got
+    assert got[0]["ssid"] == PHONE.lower() and got[0]["classification"] == "transient"
+    assert got[0]["retrying"] is True and got[0]["mobile"] is True
+    assert got[0]["rc"] == 4 and got[0]["error"] == SECRETS_ERR
+    assert got[0]["retry_in_s"] == POLL
+
+  def test_the_OTHER_measured_failure_ssid_not_found_is_transient_too(self, monkeypatch, timed_events):
+    """18:57:20 PT: NM `ssid-not-found`, 'association took too long' -- the phone had gone back to sleep."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = lambda t: "refuse" if t < POLL else "ok"
+    nm.up_error[ID_PHONE] = NOT_FOUND_ERR
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, ID_PHONE)], nm.up_log
+    assert _blamed(timed) == []
+
+
+class TestTheRetryIsBoundedAndTheLedgerStillWorks:
+  def test_TWO_transient_failures_in_a_row_land_in_the_ledger(self, monkeypatch, timed_events):
+    """The bound. One free retry per network, then the ordinary escalating backoff -- so a phone that
+    always fails cannot hold the radio in a 20 s loop."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, ID_PHONE), (2 * POLL, HOTSPOT)], nm.up_log
+    assert _blamed(timed) == [(2 * POLL, PHONE.lower(), 1)], _blamed(timed)
+
+  def test_a_PERMANENTLY_broken_hotspot_still_escalates_60_300_900(self, monkeypatch, timed_events):
+    """The worst-case attempt rate. Against a phone that never joins the change costs exactly ONE extra
+    `con up` per episode; the escalation and its 15-minute steady state are untouched."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=40, near_home=False, priority=(HOME, PHONE))
+    attempts = [t for t, c in nm.up_log if c == ID_PHONE]
+    assert attempts == [0.0, POLL, 100.0, 420.0], attempts   # free retry, then 60 s, 300 s, 900 s
+    assert [(t, f) for t, _s, f in _blamed(timed)] == [(40.0, 1), (120.0, 2), (440.0, 3)], _blamed(timed)
+
+  def test_the_free_retry_comes_back_ONLY_after_a_successful_join(self, monkeypatch, timed_events):
+    """It is spent per network and returned by a join, not by time -- so a morning hotspot that wakes up
+    slowly is forgiven again tomorrow, while one that never works is never forgiven twice."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    # fails at 0 s (retry spent), joins at 20 s (retry returned), fails again at 200 s, joins at 220 s
+    nm.behave[ID_PHONE] = lambda t: "refuse" if t in (0.0, 200.0) else "ok"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    hooks = [lambda nm, tk: nm.__setattr__("active", None) if tk == 10 else None]   # the phone drops at 200 s
+    run_loop(monkeypatch, nm, ticks=14, near_home=False, hooks=hooks, priority=(HOME, PHONE))
+    assert [t for t, c in nm.up_log if c == ID_PHONE] == [0.0, POLL, 200.0, 220.0], nm.up_log
+    assert _blamed(timed) == [], f"the second episode was not forgiven: {_blamed(timed)}"
+
+
+class TestWhatIsNOTRetried:
+  def test_a_REAL_failure_is_blamed_immediately_exactly_as_before(self, monkeypatch, timed_events):
+    """An error string the classifier does not recognise keeps today's behaviour, and the log shows the
+    raw text so a wording this list gets wrong is visible rather than silently swallowed."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = REAL_ERR
+    run_loop(monkeypatch, nm, ticks=4, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, HOTSPOT)], nm.up_log
+    assert _blamed(timed) == [(POLL, PHONE.lower(), 1)], _blamed(timed)
+    cls = [kw for _t, n, kw in timed if n == "netcosttier_join_classified"]
+    assert [(c["classification"], c["retrying"], c["error"]) for c in cls] == [("real", False, REAL_ERR)], cls
+
+  def test_a_STATIONARY_configured_network_is_not_retried_and_the_log_says_why(self, monkeypatch, timed_events):
+    """A router that refuses the stored PSK is a wrong password until proven otherwise; only a hotspot
+    that travels with the car gets the benefit of the doubt."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    nm.active, nm.scan, nm.metered = HOTSPOT, [HOME], {HOME: "no"}
+    nm.behave[ID_HOME] = "refuse"
+    nm.up_error[ID_HOME] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=4, near_home=True, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_HOME), (POLL, HOTSPOT)], nm.up_log
+    assert _blamed(timed) == [(POLL, HOME.lower(), 1)], _blamed(timed)
+    cls = [kw for _t, n, kw in timed if n == "netcosttier_join_classified"]
+    assert [(c["classification"], c["mobile"], c["retrying"]) for c in cls] == [("transient", False, False)], cls
+
+  def test_a_link_that_came_UP_and_then_died_is_not_a_transient_JOIN_failure(self, monkeypatch, timed_events):
+    """`con up` succeeded (rc 0) and DHCP never completed -- a different failure, judged by the grace as
+    before. This pins that the carried classification is overwritten by every bring-up, success included."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = lambda t: "refuse" if t < POLL else "no_dhcp"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, priority=(HOME, PHONE))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL, ID_PHONE), (POLL + d.DHCP_GRACE_S, HOTSPOT)], nm.up_log
+    assert _blamed(timed) == [(POLL + d.DHCP_GRACE_S, PHONE.lower(), 1)], _blamed(timed)
+    # ...and it is not dressed up as one in the log either: only the 0 s `con up` gets a classification.
+    cls = [(t, kw["classification"]) for t, kw in _named(timed, "netcosttier_join_classified")]
+    assert cls == [(POLL, "transient")], cls
+
+  def test_a_join_that_nmcli_GAVE_UP_ON_but_NM_completed_is_a_recovery_on_that_tick(self, monkeypatch, timed_events):
+    """Our own NMCLI_TIMEOUT_S (15 s) can kill `nmcli con up` while NetworkManager carries the activation
+    through, so a failing rc can be followed by the link genuinely coming up. That is a SUCCESS: it clears
+    the ledger and logs netcosttier_recovered on THAT tick, and it does not spend the free retry. Here the
+    phone is blamed for a real failure first (so there IS a ledger entry), then comes up this way."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = REAL_ERR
+
+    def nm_finishes_the_join_itself(fake, tk):
+      if tk == 2:                       # before the 60 s backoff expires at 80 s
+        fake.behave[ID_PHONE], fake.up_error[ID_PHONE] = "late", SECRETS_ERR
+
+    run_loop(monkeypatch, nm, ticks=8, near_home=False, hooks=[nm_finishes_the_join_itself],
+             priority=(HOME, PHONE))
+    assert _blamed(timed) == [(POLL, PHONE.lower(), 1)], _blamed(timed)
+    rec = [(t, kw["after_failures"]) for t, kw in _named(timed, "netcosttier_recovered")]
+    assert rec == [(5 * POLL, 1)], f"the recovery was not recorded on the tick the link was seen up: {rec}"
+    # ...and the failing rc of a join that WORKED is not logged as a classified failure.
+    cls = [(t, kw["classification"]) for t, kw in _named(timed, "netcosttier_join_classified")]
+    assert cls == [(POLL, "real")], cls
+
+
+  def test_a_transient_failure_on_ONE_network_does_not_forgive_ANOTHER(self, monkeypatch, timed_events):
+    """The phone refuses transiently at 0 s; before the next tick NetworkManager autoconnects KarlMoik on
+    its own (measured 2026-09-13 22:01 PT, logged `by=external`) and KarlMoik never gets an address. The
+    carried classification belongs to the PHONE, so KarlMoik is blamed on the grace as usual -- even with
+    KarlMoik configured as a mobile entry here, so the only thing keeping it out of the retry is the
+    ssid check."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+
+    def nm_grabs_karlmoik(fake, tk):
+      if tk == 1:
+        fake.active, fake.ip[ID_STAR], fake.scan = ID_STAR, None, [STAR]
+
+    run_loop(monkeypatch, nm, ticks=6, near_home=False, hooks=[nm_grabs_karlmoik],
+             priority=(HOME, PHONE, STAR), mobile=(PHONE, STAR))
+    assert nm.up_log == [(0.0, ID_PHONE), (POLL + d.DHCP_GRACE_S, HOTSPOT)], nm.up_log
+    assert _blamed(timed) == [(POLL + d.DHCP_GRACE_S, STAR.lower(), 1)], _blamed(timed)
+
+
+class TestAHotspotThatIsNeverVisibleIsNeverTried:
+  def test_no_con_up_at_all_on_a_phone_that_is_in_no_scan(self, monkeypatch, events):
+    """Part of the brief: `ssid-not-found` attempts are avoided because the ladder already requires the
+    network to be in THIS tick's real scan (choose_wifi's `low not in scan` -> continue). Nothing here is
+    new -- the test exists so that property cannot be lost while relaxing the ledger."""
+    nm = FakeNM()
+    nm.active, nm.scan, nm.metered = None, [], {PHONE: "no"}
+    run_loop(monkeypatch, nm, ticks=20, near_home=False, priority=(HOME, PHONE))
+    assert [c for _t, c in nm.up_log if c != HOTSPOT] == [], nm.up_log
+    assert nm.up_log == [(0.0, HOTSPOT)], f"the hotspot was re-raised or the phone was tried blind: {nm.up_log}"
+    assert _classified(events) == []
+
+
+class TestTheClassificationLogIsChangeOnly:
+  def test_the_same_failure_over_and_over_is_logged_once_per_distinct_reason(self, monkeypatch, events):
+    """Change-only, like every other hold/kept line in this daemon -- but a DIFFERENT error string is
+    news and is logged again."""
+    nm = FakeNM()
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+    hooks = [lambda nm, tk: nm.up_error.__setitem__(ID_PHONE, NOT_FOUND_ERR) if tk == 10 else None]
+    run_loop(monkeypatch, nm, ticks=40, near_home=False, hooks=hooks, priority=(HOME, PHONE))
+    got = [(c["classification"], c["retrying"], c["error"]) for c in _classified(events)]
+    assert got == [("transient", True, SECRETS_ERR), ("transient", False, SECRETS_ERR),
+                   ("transient", False, NOT_FOUND_ERR)], got
+
+  def test_a_CONSUMED_classification_is_not_inherited_by_a_LATER_blame(self, monkeypatch, timed_events):
+    """Fable (hotspotretry2pnw review, scratch S1): the carried classification must be CLEARED once its blame is
+    decided, or a LATER, unrelated failure of the same ssid inherits it and is forgiven a second time.
+    Sequence: the phone fails transiently at 0 s; at 20 s it is out of the scan, so the failure is judged (retry
+    granted, not blamed) and never retried; at 60 s NetworkManager autoconnects it ITSELF and the link works, which
+    returns the free retry; at 100 s that link dies in DHCP. That death is its own failure and must be blamed on the
+    tick the grace expires. Without the fix the stale "transient" verdict is reused, the blame is swallowed, and the
+    truck sits 20 s longer on a dead link."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+
+    def gone_then_nm_joins_it_then_it_dies(fake, tk):
+      if tk == 1:                                     # out of the scan: judged, retry granted, never attempted
+        fake.scan = ()
+      if tk == 3:                                     # NM autoconnects it and it WORKS -> the free retry comes back
+        fake.scan = (PHONE,)
+        fake.behave[ID_PHONE], fake.up_error[ID_PHONE] = "ok", None
+        fake.active, fake.ip[ID_PHONE] = ID_PHONE, "172.20.10.5"
+      if tk == 5:                                     # ...and then NM's own link dies in DHCP
+        fake.ip[ID_PHONE], fake.behave[ID_PHONE] = None, "no_dhcp"
+
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=[gone_then_nm_joins_it_then_it_dies],
+             priority=(HOME, PHONE))
+    assert _blamed(timed) == [(5 * POLL, PHONE.lower(), 1)], \
+      f"the DHCP death was not blamed on its own grace tick -- a consumed classification was inherited: {_blamed(timed)}"
+    cls = [(t, kw["classification"], kw["retrying"]) for t, kw in _named(timed, "netcosttier_join_classified")]
+    assert cls == [(POLL, "transient", True)], f"a later blame was dressed up as the old join failure: {cls}"
+
+  def test_a_retry_AFTER_a_successful_join_is_logged_again(self, monkeypatch, timed_events):
+    """Fable (Rule 2): the classification log is change-only, so a second transient failure with byte-identical
+    fields would be suppressed unless the successful join in between re-arms it. Without the re-arm the evening
+    retry of a phone that already failed in the morning happens silently."""
+    timed, clock = timed_events
+    nm = FakeNM()
+    clock["nm"] = nm
+    _away(nm, HOTSPOT, scan=(PHONE,))
+    nm.behave[ID_PHONE] = "refuse"
+    nm.up_error[ID_PHONE] = SECRETS_ERR
+
+    def the_retry_works_then_it_fails_the_same_way_again(fake, tk):
+      if tk == 1:                                     # the granted retry joins -> the free retry is returned
+        fake.behave[ID_PHONE], fake.up_error[ID_PHONE] = "ok", None
+      if tk == 4:                                     # the phone drops and refuses exactly as it did at 0 s
+        fake.active = None
+        fake.behave[ID_PHONE], fake.up_error[ID_PHONE] = "refuse", SECRETS_ERR
+
+    run_loop(monkeypatch, nm, ticks=10, near_home=False, hooks=[the_retry_works_then_it_fails_the_same_way_again],
+             priority=(HOME, PHONE))
+    cls = [(t, kw["classification"], kw["retrying"]) for t, kw in _named(timed, "netcosttier_join_classified")]
+    assert cls == [(POLL, "transient", True),          # the morning failure: retried
+                   (5 * POLL, "transient", True),      # the evening one, after a success returned the retry
+                   (6 * POLL, "transient", False)], \
+      f"a retry after a successful join went unlogged (change-only not re-armed): {cls}"

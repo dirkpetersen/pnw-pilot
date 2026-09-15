@@ -193,6 +193,48 @@ def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bo
           and now - last_scan >= interval_s)
 
 
+# --- hotspotretry2pnw: which join failures are evidence that a network is broken ------------------
+
+# Substrings of nmcli's stderr (case-folded, whitespace-collapsed) that mean "this join failed for a
+# reason that says nothing about whether the network works". MEASURED 2026-09-14 18:55-18:58 PT on the
+# truck: the arbiter ran `nmcli con up` on `Dirk's iPhone 13`; wpa_supplicant reported
+# `CTRL-EVENT-SSID-TEMP-DISABLED ... reason=WRONG_KEY`, NM then asked for secrets, no secret agent is
+# available for the arbiter's nmcli, and nmcli exited 4 with "Secrets were required, but not provided".
+# At 18:57 the retry failed differently: NM `ssid-not-found`, "association took too long". Both are
+# transient -- the SAME saved profile joined the SAME phone cleanly at 21:50, 21:53, 22:13, and again on
+# 09-15 at 07:39:43 within 22 s of the hotspot being switched on. An iPhone hotspot that is not fully
+# awake fails the 4-way handshake, which the supplicant reports as WRONG_KEY.
+TRANSIENT_JOIN_ERRORS = (
+  "secrets were required",       # NM asked for a PSK mid-activation (the measured WRONG_KEY case)
+  "no secrets provided",         # same failure, other NM/nmcli wordings
+  "no secrets were provided",
+  "ssid-not-found",              # NM's own state-reason string, verbatim
+  "network could not be found",  # nmcli's rendering of NM_DEVICE_STATE_REASON_SSID_NOT_FOUND (53)
+  "association took too long",   # NM's supplicant-timeout wording
+)
+
+
+def classify_join_failure(error: str) -> str:
+  """"transient" or "real", for a `nmcli con up` that FAILED. Never called on a success.
+
+  A transient failure is worth ONE immediate retry before the association-failure ledger exiles the
+  network for 60/300/900 s (see network_arbiterd._note_attempt). A real one is blamed as before.
+
+  THE DEFAULT IS "real", deliberately: an unrecognised error keeps exactly today's behaviour, so the
+  worst this classifier can do by under-matching is nothing at all. The caller logs the raw rc and
+  error text with the classification either way (`netcosttier_join_classified`), so an error string
+  this list does not know is VISIBLE rather than silently swallowed -- that log line is how a wording
+  this list gets wrong would be found.
+
+  OVER-MATCHING, stated plainly: "secrets were required" is also what a genuinely WRONG STORED
+  PASSWORD produces -- NM cannot tell a refused handshake from a bad PSK, and neither can this. So a
+  wrong password costs one extra `con up` (one 20 s poll) before the ledger starts, and nothing more:
+  the retry is spent once per network and never resets except on a successful join, so a permanently
+  broken hotspot still lands in the normal escalating backoff."""
+  low = " ".join((error or "").split()).lower()
+  return "transient" if any(tok in low for tok in TRANSIENT_JOIN_ERRORS) else "real"
+
+
 PIN_HOME_ABSENT_SCANS = 3                  # consecutive REAL scans missing a home network = genuinely absent
 PIN_HOME_FAR_M = 2.0 * HOME_GEOFENCE_M      # confidently far from a home network's learned location
 
