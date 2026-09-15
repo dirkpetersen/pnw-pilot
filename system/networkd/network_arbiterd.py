@@ -44,9 +44,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.networkd.network_arbiter import (
   HOTSPOT_CONNECTION_ID,
   UPGRADE_SCAN_S,
+  UnmeteredYield,
+  arrival_candidates,
   decide,
   explain_fallback,
   home_to_yield_to,
+  unmetered_to_yield_to,
   update_home_arrival,
   judge_link,
   judge_pin,
@@ -766,7 +769,8 @@ def main() -> NoReturn:
   pin_ended_key: tuple[str, float] | None = None  # pin_key once it has ended (dropped/failed/...)
   pin_problem = ""                              # last logged pick-read problem (change-only log)
   pin_held_logged: tuple | None = None          # last logged hold (change-only log)
-  pin_home_state: dict[str, tuple[int, bool]] = {}  # netrank2pnw: home networks' absence since the pick
+  pin_home_state: dict[str, tuple[int, bool]] = {}  # netrank2pnw: absence since the pick (pinunmetered2pnw: every candidate)
+  pin_kept_logged: set[tuple[str, str]] = set()  # pinunmetered2pnw: (network, why) already logged as not ending this pin
   cost_unread_logged: tuple | None = None       # netrank2pnw: last logged hold for an unreadable active cost
   last_upgrade_scan = float("-inf")             # netscanpin2pnw: last cost-upgrade scan issued
   last_fix: tuple[float, float, float] | None = None  # gpscarry2pnw: last fresh fix THIS PROCESS saw (never persisted)
@@ -837,6 +841,7 @@ def main() -> NoReturn:
             cloudlog.event("netcosttier_pin_cleared", ssid=pin_key[0], reason="superseded", by=pick[0])
           pin_key, pin_first_seen, pin_seen_active, pin_ended_key = pick, time.monotonic(), False, None
           pin_home_state = {}                   # netrank2pnw: arrival evidence belongs to ONE pick
+          pin_kept_logged = set()               # pinunmetered2pnw: ...and so do its "kept" log lines
           cloudlog.event("netcosttier_pin_set", ssid=pick[0])
         elif pick is None and pin_key is not None and pin_key != pin_ended_key:
           # present last tick, absent now: only a manager start (CLEAR_ON_MANAGER_START) or a hand removal
@@ -888,8 +893,12 @@ def main() -> NoReturn:
       # upgrade_scan_due), and never while the link is settling: a bring-up awaiting judgement, or a link
       # that appeared since last tick, may still be inside its DHCP window.
       link_settling = pending_up is not None or (bool(active_ssid_now) and active_ssid_now.lower() != prev_active_ssid)
+      # pinunmetered2pnw: a pin suppresses the upgrade scan only while its network is not the active link yet (the
+      # join). Once on it, the scan runs like on any link not explicitly unmetered: an unmetered network arriving
+      # now ends the pin, and on client WiFi away from a learned location this scan is the only way to see it.
+      pin_joining = pin_in_force and pin_key is not None and active_ssid_now.lower() != pin_key[0].lower()
       upgrade_due = upgrade_scan_due(tethering_enabled and fallback_enabled, on_client_wifi,
-                                     active_metered == "no", pin_in_force, link_settling,
+                                     active_metered == "no", pin_joining, link_settling,
                                      time.monotonic(), last_upgrade_scan)
       if upgrade_due:
         last_upgrade_scan = time.monotonic()   # throttle the ATTEMPT, so a failing scan cannot hammer
@@ -1019,28 +1028,45 @@ def main() -> NoReturn:
       # stationary, explicitly unmetered configured network is in range (home_to_yield_to, Fable D2).
       pin_ssid = pin_key[0] if pin_in_force and pin_key else ""
       home = ""
+      unmet = UnmeteredYield("", "", "")
       if pin_ssid:
         # netrank2pnw: a pin gives way only to a home network that has ARRIVED since the pick -- genuinely
         # absent (consecutive real scans, or GPS confidently far) and then back. A pick made while home is
         # visible therefore sticks. See update_home_arrival for what counts as evidence.
+        # pinunmetered2pnw: arrival is tracked for EVERY configured entry and saved profile (arrival_candidates),
+        # because any explicitly unmetered one can now end a pin; stationary entries keep their GPS evidence.
         stationary = [e for e in nets if not e.get("mobile")]
-        pin_home_state = update_home_arrival(pin_home_state,
-                                             [(e["ssid"], e.get("lat"), e.get("lon")) for e in stationary],
-                                             scan_raw, gps)
+        pin_home_state = update_home_arrival(pin_home_state, arrival_candidates(nets, saved), scan_raw, gps)
+        arrived = {k for k, (_m, gone) in pin_home_state.items() if gone}
         home = home_to_yield_to([e["ssid"] for e in stationary], scan_raw, saved, unmetered_ssids, blocked,
-                                pin_ssid, arrived={k for k, (_m, gone) in pin_home_state.items() if gone})
+                                pin_ssid, arrived=arrived)
+        # pinunmetered2pnw (owner decision 2026-09-14): "when an unmetered network appears !" -- an explicitly
+        # unmetered saved network that ARRIVED ends a pin on a network that is not explicitly unmetered. The pinned
+        # network's cost is the last one READ (the active link's is read every tick; None = never read).
+        pinned_metered = next((v for k, v in _metered_cache.items() if k.lower() == pin_ssid.lower()), None)
+        unmet = unmetered_to_yield_to(scan_raw, saved, unmetered_ssids, blocked, pin_ssid, pinned_metered, arrived)
       pv = judge_pin(pin_ssid, pin_first_seen, pin_seen_active,
                      raw_active_ssid if active_read_ok else None,
                      bool(pin_ssid) and verdict.blame.lower() == pin_ssid.lower() and not verdict.blame_ok,
-                     now, home_ssid=home)
+                     now, home_ssid=home, unmetered_ssid=unmet.ends_by)
       pin_seen_active = pv.seen_active
       if pv.ended:
         # `trigger` is the home network whose arrival ended the pin -- NOT necessarily what the ladder
         # joins next (an explicitly unmetered member earlier in the list would win). The bring-up that
-        # follows logs what is actually joined. (Was `to=`, which claimed the latter.)
+        # follows logs what is actually joined. (Was `to=`, which claimed the latter.) `by` for the unmetered
+        # reason means the same: the network whose arrival ended it.
         cloudlog.event("netcosttier_pin_cleared", ssid=pin_ssid, reason=pv.ended,
-                       **({"trigger": home} if pv.ended == "home" else {}))
+                       **({"trigger": home} if pv.ended == "home" else
+                          {"by": unmet.ends_by} if pv.ended == "unmetered" else {}))
         pin_ended_key = pin_key
+      elif unmet.kept_by and (unmet.kept_by.lower(), unmet.kept_why) not in pin_kept_logged:
+        # pinunmetered2pnw: say why a cheaper, explicitly unmetered network in range did NOT end the pin -- otherwise
+        # "the phone is on and nothing happens" is indistinguishable from a broken rule. Once per network per pick.
+        cloudlog.event("netcosttier_pin_kept", ssid=pin_ssid, by=unmet.kept_by, reason=unmet.kept_why,
+                       rule="an unmetered network ends a pin only after it has been out of range since the pick"
+                       if unmet.kept_why == "visible_since_pick" else
+                       "the pinned network's connection.metered could not be read, so nothing is known to be cheaper")
+        pin_kept_logged.add((unmet.kept_by.lower(), unmet.kept_why))
       pinned = bool(pv.pinned_ssid)
 
       action, target_ssid = decide(

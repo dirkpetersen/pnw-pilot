@@ -35,9 +35,12 @@ in range is ranked by one key:
 What that means for the two rankings netcosttier2pnw rejected:
   * LIST POSITION is still never a COST ranking -- it only orders members inside one cost class, where
     the driver's own order is the only preference left to express.
-  * the `mobile` FLAG still does not rank anything. It does decide one thing now: a manual pick yields
-    to a STATIONARY, explicitly unmetered configured network in range (home_to_yield_to) -- a mobile
-    entry such as the iPhone never ends a pin.
+  * the `mobile` FLAG still does not rank anything. It decides only which ARRIVAL EVIDENCE a network can
+    have: a stationary entry's learned location counts (home_to_yield_to, GPS), a mobile entry's does not.
+
+pinunmetered2pnw (2026-09-14, owner decision) -- a manual pick also ends when an explicitly unmetered saved
+network ARRIVES and the pinned network is not itself explicitly unmetered (unmetered_to_yield_to). That
+includes the mobile iPhone, which netrank2pnw had exempted.
 """
 from __future__ import annotations
 
@@ -106,7 +109,7 @@ class PinVerdict(NamedTuple):
 
 def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid: str | None,
               blamed_failed: bool, now: float, join_window_s: float = PIN_JOIN_WINDOW_S,
-              home_ssid: str = "") -> PinVerdict:
+              home_ssid: str = "", unmetered_ssid: str = "") -> PinVerdict:
   """Is the driver's manual pick still in force?
 
   A pin HOLDS the radio: while it is in force the arbiter takes no cost-driven action at all. That
@@ -121,6 +124,10 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
     * join_timeout  it never became the active link within join_window_s (wrong password, AP gone).
     * home          netrank2pnw (Fable D2): a stationary, explicitly unmetered configured network is in
                     range (home_ssid, from home_to_yield_to). The ladder then takes it.
+    * unmetered     pinunmetered2pnw (owner decision): an explicitly unmetered saved network has arrived and
+                    the pinned network is not explicitly unmetered (unmetered_ssid, from
+                    unmetered_to_yield_to). The ladder then takes the cheapest network. `home` is checked
+                    first, so a home arrival keeps its own reason.
     * superseded    a newer pick replaced it -- decided by the caller, which sees the new (ssid, ts).
     * reboot        WifiManualPick is CLEAR_ON_MANAGER_START.
 
@@ -135,6 +142,8 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
     return PinVerdict("", seen_active, "failed")
   if home_ssid:
     return PinVerdict("", seen_active, "home")
+  if unmetered_ssid:
+    return PinVerdict("", seen_active, "unmetered")
   if active_ssid.lower() == pick_ssid.lower():
     return PinVerdict(pick_ssid, True, "")
   if seen_active:
@@ -144,7 +153,7 @@ def judge_pin(pick_ssid: str, first_seen: float, seen_active: bool, active_ssid:
   return PinVerdict(pick_ssid, False, "")
 
 
-def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bool, pinned: bool,
+def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bool, pin_joining: bool,
                      link_settling: bool, now: float, last_scan: float, interval_s: float = UPGRADE_SCAN_S) -> bool:
   """Should the arbiter scan for a CHEAPER network although the geo-gate would not?
 
@@ -161,17 +170,24 @@ def upgrade_scan_due(ladder_on: bool, on_client_wifi: bool, active_unmetered: bo
   only a scan can find the better network. On an explicitly unmetered link nothing can outrank it on cost,
   so no scan.
 
+  pinunmetered2pnw: a pin no longer suppresses it once the pinned network IS the active link. A pin now ends
+  when an explicitly unmetered network arrives (unmetered_to_yield_to), and on a client link away from a
+  learned location the upgrade scan is the only scan there is -- suppressed, the arrival could never be seen
+  (the 2026-09-14 case: KarlMoik pinned, the iPhone hotspot turned on, nothing happened). On a pinned link
+  that is explicitly unmetered nothing can end the pin on cost, and `active_unmetered` still suppresses it.
+
   Suppressed:
     * ladder off         -- kill switch = pre-ladder behaviour
     * not on client wifi -- off client wifi the geo-gate already lets scans through
     * active unmetered   -- nothing is cheaper
-    * pinned             -- the driver chose this network
+    * pin_joining        -- a pin is in force and its network is not the active link yet: the UI is still
+                            joining it, and a scan must not take the radio off-channel under that join
     * link_settling      -- a bring-up is awaiting judgement, or the link appeared this tick. A scan takes
                             the single radio off-channel, and the FIRST upgrade scan is immediate, so without
                             this it could land inside the link's DHCP window (Fable, netscanpin2pnw review).
     * throttled          -- at most one per interval_s
   """
-  return (ladder_on and on_client_wifi and not active_unmetered and not pinned and not link_settling
+  return (ladder_on and on_client_wifi and not active_unmetered and not pin_joining and not link_settling
           and now - last_scan >= interval_s)
 
 
@@ -256,9 +272,11 @@ def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, 
     * ARRIVED: established genuinely absent since the pick (update_home_arrival), then back,
   is in range. Then the pin ends and the ladder takes that network.
 
-  Mobile entries are NOT exempt from being pinned over, and they do not end a pin: the iPhone is a mobile
-  priority entry, and "any up_priority ends the pin" would reopen exactly the measured case of the driver
-  picking Starlink while his phone is in range.
+  Mobile entries never end a pin HERE: the iPhone is a mobile priority entry, and "any up_priority ends the
+  pin" would reopen exactly the measured case of the driver picking Starlink while his phone is in range.
+  pinunmetered2pnw: an ARRIVING explicitly unmetered network -- mobile or not, configured or not -- ends a pin
+  on a network that is not explicitly unmetered through unmetered_to_yield_to. This rule is kept as it was: it
+  also ends a pin on an unmetered network (the phone picked on the road, then home), which that one does not.
 
   A pick made while the home network is ALREADY visible sticks: `arrived` excludes it until it has been
   genuinely absent. (The first cut of this function implemented the rule literally -- any qualifying home
@@ -279,6 +297,98 @@ def home_to_yield_to(stationary_ssids: list[str], scan_ssids: list[str] | None, 
         and low not in blocked):
       return ssid
   return ""
+
+
+def arrival_candidates(nets: list[dict], saved_connections: list[str]) -> list[tuple[str, float | None, float | None]]:
+  """pinunmetered2pnw: every network whose arrival since a pick is tracked, as update_home_arrival's (ssid, lat, lon).
+
+  netrank2pnw tracked stationary configured entries only, because only they could end a pin. Now any explicitly
+  unmetered saved network can, so every configured entry and every saved client profile is tracked:
+    * a STATIONARY configured entry keeps its learned location, so the GPS evidence and the GPS veto on a scan
+      gap apply exactly as before (a home AP silent for a minute while GPS says the truck is home is not absence);
+    * a MOBILE entry gets NO location even if one is stored ("Add Network Here" records one): the phone travels
+      with the truck, so "far from where it was added" is not absence and "near it" is not presence. Its
+      absence can only come from real scans;
+    * a saved profile that is not configured has no location, so the same.
+  One entry per network, case-insensitively, configured entries first: update_home_arrival counts one miss per
+  entry, so a duplicate would count every miss twice."""
+  out: list[tuple[str, float | None, float | None]] = []
+  seen: set[str] = set()
+  for e in nets:
+    ssid = (e.get("ssid") or "").strip()
+    if ssid and ssid.lower() not in seen:
+      seen.add(ssid.lower())
+      out.append((ssid, None, None) if e.get("mobile") else (ssid, e.get("lat"), e.get("lon")))
+  for conn in saved_connections:
+    ssid = ssid_of(conn)
+    if ssid and ssid.lower() not in seen:
+      seen.add(ssid.lower())
+      out.append((ssid, None, None))
+  return out
+
+
+class UnmeteredYield(NamedTuple):
+  ends_by: str    # the explicitly unmetered network whose arrival ends the pin ("" = the pin is not ended by this rule)
+  kept_by: str    # a network that WOULD end it but does not -- for the change-only log line ("" = none)
+  kept_why: str   # "visible_since_pick" | "pinned_cost_unread"
+
+
+def unmetered_to_yield_to(scan_ssids: list[str] | None, saved_connections: list[str], unmetered_ssids: set[str] | None,
+                          blocked_ssids: set[str] | None, pinned_ssid: str, pinned_metered: str | None,
+                          arrived: set[str] | None) -> UnmeteredYield:
+  """pinunmetered2pnw: the explicitly unmetered network a manual pick must give way to.
+
+  OWNER DECISION 2026-09-14, asked "should a manual WiFi pick end on its own when you mark that network metered, or
+  when an unmetered network appears?", verbatim: "when an unmetered network appears !". The case: KarlMoik (mobile
+  Starlink) picked by hand and marked metered; the iPhone hotspot turned on; nothing happened, because only a
+  stationary home could end a pin (home_to_yield_to) and no scan ran while pinned.
+
+  A pin ends when a network is ALL of:
+    * a SAVED client profile whose connection.metered is EXPLICITLY `no` (unknown is not unmetered);
+    * in this tick's REAL scan (None = no scan ran = no evidence);
+    * ARRIVED since the pick (update_home_arrival over arrival_candidates) -- so a pick made while it was already
+      visible still sticks, as the owner decided on 2026-09-13;
+    * not serving a failure backoff, and not the pinned network itself;
+    * STRICTLY CHEAPER than the pinned network: the pinned network's cost was READ and is not `no`.
+  Nothing is cheaper than an explicitly unmetered pin, so such a pin is never ended here.
+
+  Configured or not: any saved profile qualifies. choose_wifi already ranks every saved profile by cost first
+  ("an unmetered network is always prioritized over a metered network or a default setting", 2026-09-13), and
+  `no` is set on a saved profile only by the driver marking it so. Limiting this to configured entries would
+  leave the truck on a paid pin beside a network the ladder itself ranks above it.
+
+  A pinned network whose cost was never read (`pinned_metered` None: every read failed and nothing is cached) is
+  NOT treated as "not unmetered": ending a pin on cost needs a cost that was read (the netrank2pnw D1 rule). The
+  pin holds, and `kept_why` says so.
+
+  `ends_by` is the network whose arrival ended the pin, NOT necessarily what the ladder joins next (a cheaper or
+  better-ranked network in range would win). Candidates are visited in case-folded SSID order, so the result is
+  stable. When nothing ends the pin, `kept_by`/`kept_why` name the first network that qualified on everything
+  else, so the log can say why the phone did not take over."""
+  if not scan_ssids or not (pinned_ssid or "").strip():
+    return UnmeteredYield("", "", "")
+  pinned_cost = None if pinned_metered is None else pinned_metered.strip().lower()
+  if pinned_cost == "no":
+    return UnmeteredYield("", "", "")
+  scan = {x.lower() for x in scan_ssids}
+  unmetered = {u.lower() for u in (unmetered_ssids or set())}
+  blocked = {b.lower() for b in (blocked_ssids or set())}
+  pinned = pinned_ssid.strip().lower()
+  came = {a.lower() for a in (arrived or set())}
+  kept = ("", "")
+  for ssid in sorted({ssid_of(c) for c in saved_connections if ssid_of(c)}, key=lambda s: (s.lower(), s)):
+    low = ssid.lower()
+    if low == pinned or low not in scan or low not in unmetered or low in blocked:
+      continue
+    if low not in came:
+      why = "visible_since_pick"
+    elif pinned_cost is None:
+      why = "pinned_cost_unread"
+    else:
+      return UnmeteredYield(ssid, "", "")
+    if not kept[0]:
+      kept = (ssid, why)
+  return UnmeteredYield("", *kept)
 
 
 def on_priority_network(active_ssid: str, configured_ssids: list[str], active_metered: str | None) -> bool:

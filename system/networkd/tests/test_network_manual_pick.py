@@ -7,9 +7,10 @@ import pytest
 
 from openpilot.system.networkd.geo_gate import HOME_GEOFENCE_M
 from openpilot.system.networkd.network_arbiter import (COST_METERED, COST_UNKNOWN, COST_UNMETERED,
-                                                       PIN_HOME_FAR_M, PIN_JOIN_WINDOW_S, UPGRADE_SCAN_S, cost_class,
-                                                       home_to_yield_to, judge_pin, on_priority_network,
-                                                       parse_manual_pick, update_home_arrival, upgrade_scan_due)
+                                                       PIN_HOME_FAR_M, PIN_JOIN_WINDOW_S, UPGRADE_SCAN_S, arrival_candidates,
+                                                       cost_class, home_to_yield_to, judge_pin, on_priority_network,
+                                                       parse_manual_pick, unmetered_to_yield_to, update_home_arrival,
+                                                       upgrade_scan_due)
 
 STAR, PHONE = "KarlMoik", "Dirk’s iPhone 13"
 
@@ -77,8 +78,10 @@ class TestJudgePin:
 
 class TestUpgradeScanDue:
   """netrank2pnw: `on_tier0` became `active_unmetered` (the scan is due on ANY link not explicitly
-  unmetered, configured or not), and `link_settling` was added (never scan inside a DHCP window)."""
-  BASE = dict(ladder_on=True, on_client_wifi=True, active_unmetered=False, pinned=False, link_settling=False,
+  unmetered, configured or not), and `link_settling` was added (never scan inside a DHCP window).
+  pinunmetered2pnw: `pinned` became `pin_joining` -- a pin suppresses the scan only while its network is not the
+  active link yet; once on it, an arriving unmetered network can end the pin, and only a scan can see it arrive."""
+  BASE = dict(ladder_on=True, on_client_wifi=True, active_unmetered=False, pin_joining=False, link_settling=False,
               now=500.0, last_scan=0.0)
 
   def test_due_on_a_link_that_is_not_explicitly_unmetered(self):
@@ -88,7 +91,7 @@ class TestUpgradeScanDue:
     ("ladder_on", False),         # kill switch = pre-ladder behaviour
     ("on_client_wifi", False),    # not needed: off client wifi the geo-gate already allows scanning
     ("active_unmetered", True),   # nothing can be cheaper
-    ("pinned", True),             # the driver chose
+    ("pin_joining", True),        # the UI is still joining the driver's pick
     ("link_settling", True),      # a bring-up may still be inside its DHCP window
   ])
   def test_each_guard_suppresses_it(self, field, value):
@@ -278,3 +281,126 @@ class TestUpdateHomeArrival:
     st = {}
     self.step(st, [STAR])
     assert st == {}
+
+
+# ---- pinunmetered2pnw: a pin ends when an explicitly unmetered network ARRIVES (owner decision 2026-09-14) ----
+
+CAFE = "CafeFree"
+SAVED2 = [*SAVED, f"openpilot connection {CAFE}"]
+
+
+class TestUnmeteredToYieldTo:
+  """A pin ends for a saved, explicitly unmetered network that is in the real scan, ARRIVED, not in backoff, not the
+  pinned network -- and only when the pinned network's cost was read and is not `no`."""
+
+  @staticmethod
+  def y(scan=(PHONE, STAR), saved=SAVED2, unmetered=(PHONE,), blocked=(), pinned=STAR, pinned_metered="yes",
+        arrived=(PHONE,)):
+    return unmetered_to_yield_to(None if scan is None else list(scan), list(saved), set(unmetered), set(blocked), pinned,
+                                 pinned_metered, None if arrived is None else {a.lower() for a in arrived})
+
+  def test_an_ARRIVED_unmetered_network_ends_a_METERED_pin(self):
+    assert self.y() == (PHONE, "", "")
+
+  def test_and_a_DEFAULT_cost_pin_too(self):
+    """Strictly cheaper means `no` beats `unknown` as well as `yes`."""
+    assert self.y(pinned_metered="unknown").ends_by == PHONE
+
+  def test_the_MOBILE_phone_qualifies_there_is_no_configured_list_input_at_all(self):
+    """netrank2pnw exempted mobile entries; the owner's rule does not. Mobility only changes arrival EVIDENCE."""
+    assert self.y().ends_by == PHONE
+
+  def test_a_network_visible_since_the_pick_does_not_and_is_named(self):
+    assert self.y(arrived=()) == ("", PHONE, "visible_since_pick")
+    assert self.y(arrived=None) == ("", PHONE, "visible_since_pick")
+
+  def test_an_EXPLICITLY_UNMETERED_pin_is_never_ended_here(self):
+    assert self.y(pinned_metered="no") == ("", "", "")
+    assert self.y(pinned_metered=" No ") == ("", "", "")
+
+  def test_a_pinned_cost_that_was_NEVER_READ_holds_and_says_so(self):
+    """None is a failed read with nothing cached -- not `unknown`. A cost move needs a cost that was read."""
+    assert self.y(pinned_metered=None) == ("", PHONE, "pinned_cost_unread")
+
+  def test_DEFAULT_cost_does_not_qualify(self):
+    assert self.y(unmetered=()) == ("", "", "")
+
+  def test_a_network_IN_BACKOFF_does_not_qualify(self):
+    assert self.y(blocked=(PHONE.lower(),)) == ("", "", "")
+
+  def test_an_UNSAVED_network_does_not_qualify(self):
+    assert self.y(saved=["Hotspot", f"openpilot connection {STAR}"]) == ("", "", "")
+
+  def test_it_must_be_in_THIS_TICKS_REAL_scan(self):
+    assert self.y(scan=None) == ("", "", "")
+    assert self.y(scan=(STAR,)) == ("", "", "")
+
+  def test_the_pinned_network_never_yields_to_itself(self):
+    """Its cost comes from a different read than the candidates', so they can disagree (e.g. marked mid-tick)."""
+    assert self.y(scan=(STAR,), unmetered=(STAR,), arrived=(STAR,)) == ("", "", "")
+
+  def test_no_pin_nothing_to_end(self):
+    assert self.y(pinned="  ") == ("", "", "")
+
+  def test_the_comma_hotspot_and_lte_profiles_are_never_candidates(self):
+    assert self.y(scan=("Hotspot", "lte"), unmetered=("Hotspot", "lte"), arrived=("Hotspot", "lte")) == ("", "", "")
+
+  def test_a_NON_configured_saved_profile_qualifies(self):
+    assert self.y(scan=(CAFE,), unmetered=(CAFE,), arrived=(CAFE,)).ends_by == CAFE
+
+  def test_it_is_case_insensitive(self):
+    """Called directly: the helper above folds `arrived` itself, which hid a case-sensitive `arrived` (mutation)."""
+    assert unmetered_to_yield_to([PHONE.upper(), STAR], SAVED2, {PHONE.lower()}, set(), STAR.lower(), "yes",
+                                 {PHONE.swapcase()}).ends_by == PHONE
+
+  def test_an_arrival_wins_over_an_EARLIER_network_that_was_visible_since_the_pick(self):
+    """Order only picks WHICH network is named; any arrived one ends the pin. CafeFree sorts first and did not arrive."""
+    assert self.y(scan=(CAFE, PHONE), unmetered=(CAFE, PHONE), arrived=(PHONE,)) == (PHONE, "", "")
+
+  def test_the_named_network_is_STABLE_first_in_case_folded_order(self):
+    saved = [f"openpilot connection {PHONE}", f"openpilot connection {CAFE}"]
+    assert self.y(scan=(PHONE, CAFE), saved=saved, unmetered=(PHONE, CAFE), arrived=(PHONE, CAFE)).ends_by == CAFE
+    assert self.y(scan=(PHONE, CAFE), saved=saved, unmetered=(PHONE, CAFE), arrived=()).kept_by == CAFE
+
+
+class TestArrivalCandidates:
+  NETS = [{"ssid": HOME, "lat": 47.0, "lon": -122.0, "mobile": False},
+          {"ssid": PHONE, "lat": 45.0, "lon": -123.0, "mobile": True},     # "Add Network Here" stored a spot
+          {"ssid": "visitor", "lat": None, "lon": None, "mobile": False}]
+
+  def test_stationary_entries_keep_their_learned_location(self):
+    assert (HOME, 47.0, -122.0) in arrival_candidates(self.NETS, SAVED2)
+
+  def test_a_MOBILE_entry_has_NO_location_even_when_one_is_stored(self):
+    """Otherwise GPS "far from where the phone was added" would read as the phone being absent, and "near it" would
+    veto its scan misses."""
+    assert (PHONE, None, None) in arrival_candidates(self.NETS, SAVED2)
+
+  def test_saved_profiles_that_are_not_configured_are_tracked_without_a_location(self):
+    got = arrival_candidates(self.NETS, SAVED2)
+    assert (STAR, None, None) in got and (CAFE, None, None) in got
+
+  def test_one_entry_per_network_case_insensitively_configured_first(self):
+    """update_home_arrival counts one miss per entry; a duplicate would count every miss twice."""
+    nets = [*self.NETS, {"ssid": HOME.upper(), "lat": 1.0, "lon": 1.0, "mobile": False}]
+    got = arrival_candidates(nets, SAVED2)
+    assert [s.lower() for s, _a, _b in got] == [HOME.lower(), PHONE.lower(), "visitor", STAR.lower(), CAFE.lower()]
+    assert got[2] == ("visitor", None, None), "the configured spelling wins over the saved profile's 'Visitor'"
+
+  def test_the_comma_hotspot_lte_and_blank_entries_are_not_tracked(self):
+    got = arrival_candidates([{"ssid": " ", "mobile": False}], ["Hotspot", "lte", "openpilot connection  "])
+    assert got == []
+
+
+class TestJudgePinUnmetered:
+  def test_an_unmetered_arrival_ends_the_pin(self):
+    assert judge_pin(STAR, 0.0, True, STAR, False, 5.0, unmetered_ssid=PHONE) == ("", True, "unmetered")
+
+  def test_home_keeps_its_own_reason_when_both_apply(self):
+    assert judge_pin(STAR, 0.0, True, STAR, False, 5.0, home_ssid=HOME, unmetered_ssid=HOME).ended == "home"
+
+  def test_a_failure_still_comes_first(self):
+    assert judge_pin(STAR, 0.0, True, STAR, True, 5.0, unmetered_ssid=PHONE).ended == "failed"
+
+  def test_an_unreadable_active_read_still_wins(self):
+    assert judge_pin(STAR, 0.0, True, None, False, 5.0, unmetered_ssid=PHONE) == (STAR, True, "")
