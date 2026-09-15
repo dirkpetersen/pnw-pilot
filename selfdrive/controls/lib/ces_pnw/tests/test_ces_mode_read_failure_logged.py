@@ -134,10 +134,36 @@ def test_an_unknown_key_is_logged_and_reads_off(clock, logs):
   assert logs.mode(key="ConditionalExperimentalSwitching") == []
 
 
-def test_the_legacy_bool_still_applies_after_a_cesmode_failure(clock, logs):
-  """Fallback unchanged: an unreadable CESMode is 0, and 0 + the legacy bool set is Standard -- as before."""
-  assert C.read_ces_mode(_P(clock, mode=lambda t: UKN, legacy=lambda t: True), who="CES") == 2
+def test_the_legacy_bool_is_not_consulted_after_a_cesmode_failure(clock, logs):
+  """cesmodehold2pnw Q2: it used to be -- an unreadable CESMode was 0, and 0 + the bool set meant Standard. The bool
+  cannot tell Light from Standard (toggles.py writes it as `CESMode > 0`), so it must not stand in for a failed read:
+  a Light driver would silently get the Standard tune. It is not even READ."""
+  class _Counting(_P):
+    reads = 0
+
+    def get_bool(self, k):
+      if k == "ConditionalExperimentalSwitching":
+        _Counting.reads += 1
+      return super().get_bool(k)
+
+  assert _Counting(clock, mode=lambda t: 0, legacy=lambda t: True).get_bool("ConditionalExperimentalSwitching") is True
+  _Counting.reads = 0                                   # positive control: this stub does report a set legacy bool
+  assert C.read_ces_mode(_Counting(clock, mode=lambda t: UKN, legacy=lambda t: True), who="CES") == 0
+  assert _Counting.reads == 0                           # ... and read_ces_mode never asked for it
   assert len(logs.mode("CES")) == 1
+  assert "NOT consulted on a failed read" in logs.mode("CES")[0].msg
+
+
+def test_the_legacy_bool_still_migrates_a_device_that_only_has_it(clock, logs, tmp_path):
+  """The migration itself is untouched: on a REAL Params, an UNSET CESMode reads its "0" default -- a genuine 0 -- so
+  an old device carrying only the bool still comes up Standard."""
+  p = Params(str(tmp_path))
+  p.put_bool("ConditionalExperimentalSwitching", True)
+  assert p.get("CESMode") is None                       # really unset (it reads the "0" default, it does not raise)
+  assert C.read_ces_mode(p, who="CES") == 2             # ... and the legacy bool still migrates it to Standard
+  p.put("CESMode", 1)                                   # once the driver picks a mode, CESMode wins outright
+  assert C.read_ces_mode(p, who="CES") == 1
+  assert logs.errors() == []
 
 
 def test_an_unreadable_legacy_bool_is_logged_and_the_mode_stays_off(clock, logs):
@@ -174,10 +200,14 @@ def test_failure_log_is_rate_limited_to_once_a_minute(clock, logs, key):
 
 
 def test_each_caller_and_each_read_has_its_own_log_state(clock, logs):
-  both = _P(clock, mode=lambda t: UKN, legacy=lambda t: UKN_LEGACY)
+  # cesmodehold2pnw Q2: the legacy read is reached only when CESMode itself reads a genuine 0, so the two failing reads
+  # now need their own params (one stub failing both would only ever log the CESMode one).
+  bad_mode = _P(clock, mode=lambda t: UKN)
+  bad_legacy = _P(clock, mode=lambda t: 0, legacy=lambda t: UKN_LEGACY)
   for who in ("VTSC", "CES", "CES overlay"):
-    C.read_ces_mode(both, who=who)
-    C.read_ces_mode(both, who=who)
+    for p in (bad_mode, bad_legacy):
+      C.read_ces_mode(p, who=who)
+      C.read_ces_mode(p, who=who)
   for who in ("VTSC", "CES", "CES overlay"):
     assert len(logs.mode(who, "CESMode")) == 1 and len(logs.mode(who, "ConditionalExperimentalSwitching")) == 1
 
@@ -189,7 +219,7 @@ def test_a_raising_logger_cannot_change_the_result_or_escape(clock, logs, monkey
   for level in ("exception", "error", "warning"):   # cesmodehold2pnw: the hold's change-only lines too
     monkeypatch.setattr(C.cloudlog, level, boom)
   assert C.read_ces_mode(_P(clock, mode=lambda t: UKN), who="CES overlay") == 0
-  assert C.read_ces_mode(_P(clock, mode=lambda t: UKN, legacy=lambda t: True), who="CES overlay") == 2
+  assert C.read_ces_mode(_P(clock, mode=lambda t: UKN, legacy=lambda t: True), who="CES overlay") == 0   # Q2
   assert C.read_ces_mode(_P(clock, mode=lambda t: 0, legacy=lambda t: UKN_LEGACY), who="CES overlay") == 0
 
 

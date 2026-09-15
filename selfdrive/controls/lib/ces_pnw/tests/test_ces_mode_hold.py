@@ -189,7 +189,7 @@ def test_a_broken_hold_still_returns_the_read_and_is_logged(clock, logs, monkeyp
 @pytest.fixture
 def no_hold(monkeypatch):
   """The pre-cesmodehold2pnw behaviour of read_ces_mode: whatever this read computed, with no hold."""
-  monkeypatch.setattr(C, "_ces_mode_hold", lambda who, mode, ok: mode)
+  monkeypatch.setattr(C, "_ces_mode_hold", lambda who, mode, ok, migrated=False: mode)
 
 
 def test_read_ces_mode_is_identical_for_every_good_read(clock, logs, no_hold):
@@ -285,3 +285,18 @@ def test_the_overlay_never_raises_when_the_master_is_unreadable(clock, logs, mon
                        (lambda t: 0, lambda t: UKN_LEGACY), (lambda t: "abc", lambda t: False)):
     C._ces_mode_hold_st.clear()
     assert len(_ui_run(monkeypatch, clock, mode, 15.0, legacy=legacy)) == 76
+
+
+def test_a_LEGACY_only_failure_does_not_arm_the_hold_so_a_fresh_Off_is_honoured(clock, logs, monkeypatch):
+  """Fable (cesmodehold2pnw review): CESMode is the source of truth. If IT reads fine and says Off, a failure to read
+  the legacy bool must not hold the previous mode -- that would override a driver who just picked Off for 10 s, and
+  leave ces_mode_lost True (a permanent NO-SIGNAL alarm) for as long as the legacy key stays unreadable."""
+  ok_standard = _P(clock, mode=lambda t: 2, legacy=lambda t: False)
+  assert C.read_ces_mode(ok_standard, who="CES") == 2                     # a good read: Standard is the last good mode
+  clock[0] += 1.0
+  legacy_broken = _P(clock, mode=lambda t: 0, legacy=lambda t: UKN_LEGACY)
+  for dt in (0.0, 1.0, 5.0, 20.0, 120.0):                                 # well past CES_MODE_HOLD_S
+    clock[0] += dt
+    assert C.read_ces_mode(legacy_broken, who="CES") == 0, f"held the old mode at +{dt}s on a legacy-only failure"
+    assert not C.ces_mode_lost("CES"), f"alarmed at +{dt}s although CESMode itself is readable"
+  assert [r for r in logs.records if "ConditionalExperimentalSwitching" in r.msg], "the legacy failure must still be logged"

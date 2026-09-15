@@ -328,8 +328,8 @@ def _ces_mode_read_failed(who, key, e, consequence) -> None:
 # on a device whose params layer is broken, with nothing on screen saying so.
 CES_MODE_HOLD_S = 10.0
 # who -> [last good mode (None before the first good read), monotonic time of the first failed read of this outage
-# (None while reads are fine), fallback in force]. Module state, so per PROCESS and per caller: CES holds in selfdrived,
-# VTSC in plannerd, the overlay in ui, each on its own reads.
+# (None while reads are fine), fallback in force, that last good mode came from the LEGACY migration]. Module state, so
+# per PROCESS and per caller: CES holds in selfdrived, VTSC in plannerd, the overlay in ui, each on its own reads.
 _ces_mode_hold_st = {}
 
 
@@ -342,18 +342,25 @@ def _ces_mode_log(fn, msg) -> None:
     pass                          # the logger itself is what failed; there is nowhere left to report it
 
 
-def _ces_mode_hold(who, mode, ok) -> int:
+def _ces_mode_last_was_migrated(who) -> bool:
+  """cesmodehold2pnw (Fable): did `who`'s last good mode come from the legacy-bool migration? Only then does a failed
+  LEGACY read hide something -- otherwise CESMode itself is readable and is the source of truth."""
+  st = _ces_mode_hold_st.get(who)
+  return bool(st is not None and len(st) > 3 and st[3])
+
+
+def _ces_mode_hold(who, mode, ok, migrated=False) -> int:
   """cesmodehold2pnw: what read_ces_mode returns. `mode` is what this read computed, `ok` is False when a read raised.
   A good read stores the mode and ends any hold; a failed read returns the last good mode until CES_MODE_HOLD_S has
   passed, then `mode` (the fallback). With no good read yet -- a failure at startup -- the fallback applies at once.
   Change-only log lines: hold started / hold expired (or nothing to hold) / readable again."""
   try:
-    st = _ces_mode_hold_st.setdefault(who, [None, None, False])
+    st = _ces_mode_hold_st.setdefault(who, [None, None, False, False])
     if ok:
       if st[1] is not None:
         _ces_mode_log(cloudlog.warning, f"read_ces_mode ({who}): CES master readable again after " +
                       f"{time.monotonic() - st[1]:.1f} s -- mode {mode}")
-      st[:] = [mode, None, False]
+      st[:] = [mode, None, False, migrated]
       return mode
     now = time.monotonic()
     if st[1] is None:                        # first failed read of this outage
@@ -387,13 +394,14 @@ def ces_mode_lost(who) -> bool:
 
 
 def read_ces_mode(params, who="unnamed") -> int:
-  """Read the CESMode INT param (source of truth). Back-compat: if CESMode is missing/0 but the old
-  BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Used by BOTH the CES and VTSC runtime
-  readers so they always agree. Never raises (the UI overlay calls it with no try of its own).
+  """Read the CESMode INT param (source of truth). Back-compat: if CESMode reads a genuine 0 (including UNSET, which
+  reads its "0" default) but the old BOOL `ConditionalExperimentalSwitching` is set, treat that as Standard (2). Used by
+  BOTH the CES and VTSC runtime readers so they always agree. Never raises (the UI overlay calls it with no try of its
+  own).
   silentexc3pnw: `who` names the caller in the failure log (CES in selfdrived, VTSC in plannerd, the CES overlay in
   the UI). An unset CESMode reads its "0" default and an unset legacy bool reads False: neither raises or logs.
   cesmodehold2pnw: when a read fails, `who` keeps its last good mode for CES_MODE_HOLD_S, then falls back (see
-  _ces_mode_hold)."""
+  _ces_mode_hold); after a FAILED CESMode read the legacy bool is not consulted at all (see below)."""
   ok = True
   try:
     mode = int(params.get("CESMode", return_default=True) or 0)
@@ -402,19 +410,33 @@ def read_ces_mode(params, who="unnamed") -> int:
     # (a malformed stored INT does not: Params returns the default for it and warns itself).
     mode, ok = CES_MODE_OFF, False
     _ces_mode_read_failed(who, "CESMode", e, f"{who} keeps its last good mode for up to {CES_MODE_HOLD_S:.0f} s " +
-                          "(none before the first good read), then treats the CES master as Off (Standard if the " +
-                          "legacy ConditionalExperimentalSwitching bool is set) while this lasts")
-  if mode == CES_MODE_OFF:
+                          "(none before the first good read), then treats the CES master as Off while this lasts " +
+                          "(the legacy ConditionalExperimentalSwitching bool is NOT consulted on a failed read)")
+  # cesmodehold2pnw (owner decision 2026-09-14, Fable's silentexc3pnw Q2): the legacy migration applies only when
+  # CESMode genuinely READS 0 -- an unset CESMode reads its "0" default, so devices that only ever had the old bool
+  # still migrate exactly as before. It must NOT stand in for a FAILED read: the bool cannot tell Light from Standard
+  # (settings/toggles.py writes it as `CESMode > 0`), so consulting it after a failure hands a Light driver the
+  # STANDARD tune -- a silently different car -- where Off is at least the state the overlay is alarming about.
+  migrated = False
+  if ok and mode == CES_MODE_OFF:
     try:
       if params.get_bool("ConditionalExperimentalSwitching"):
-        mode = CES_MODE_STANDARD
+        mode, migrated = CES_MODE_STANDARD, True
     except Exception as e:
-      # silentexc3pnw: was `except Exception: pass`. The back-compat is skipped (mode stays Off after the hold).
-      ok = False
+      # silentexc3pnw: was `except Exception: pass`. The back-compat is skipped, so mode stays the Off that CESMode
+      # itself reported.
+      # Fable (cesmodehold2pnw review): a LEGACY failure arms the hold ONLY when the last good mode came from the
+      # migration itself. On a device that does not migrate, CESMode -- the source of truth -- was read fine and says
+      # Off, so holding would override a driver who just picked Off for CES_MODE_HOLD_S and would leave
+      # ces_mode_lost True (a permanent NO-SIGNAL alarm) for as long as the legacy key stays unreadable, over a
+      # perfectly readable master. On a migrating device the effective mode really is lost, so the hold still applies.
+      ok = not _ces_mode_last_was_migrated(who)      # ok False == arm the hold
       _ces_mode_read_failed(who, "ConditionalExperimentalSwitching", e,
-                            f"legacy back-compat skipped: {who} keeps its last good mode for up to " +
-                            f"{CES_MODE_HOLD_S:.0f} s, then treats the CES master as Off while this lasts")
-  return _ces_mode_hold(who, mode, ok)
+                            (f"legacy back-compat skipped: {who} keeps its last good (migrated) mode for up to " +
+                             f"{CES_MODE_HOLD_S:.0f} s, then treats the CES master as Off while this lasts") if not ok
+                            else (f"legacy back-compat skipped: CESMode itself read {mode} (Off) and is used as-is; " +
+                                  "the hold is not armed, because the last good mode did not come from the migration"))
+  return _ces_mode_hold(who, mode, ok, migrated)
 
 
 # --- button override states (CESButtonState mem param) ----------------------
