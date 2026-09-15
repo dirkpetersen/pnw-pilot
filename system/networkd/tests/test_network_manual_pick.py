@@ -289,15 +289,18 @@ CAFE = "CafeFree"
 SAVED2 = [*SAVED, f"openpilot connection {CAFE}"]
 
 
+TRUCK_CONFIGURED = (HOME, "Visitor", PHONE)   # the truck's TetheringPriorityNetworks: 2 stationary + the mobile phone
+
+
 class TestUnmeteredToYieldTo:
-  """A pin ends for a saved, explicitly unmetered network that is in the real scan, ARRIVED, not in backoff, not the
-  pinned network -- and only when the pinned network's cost was read and is not `no`."""
+  """A pin ends for a saved, CONFIGURED, explicitly unmetered network that is in the real scan, ARRIVED, not in backoff,
+  not the pinned network -- and only when the pinned network's cost was read and is not `no`."""
 
   @staticmethod
-  def y(scan=(PHONE, STAR), saved=SAVED2, unmetered=(PHONE,), blocked=(), pinned=STAR, pinned_metered="yes",
-        arrived=(PHONE,)):
-    return unmetered_to_yield_to(None if scan is None else list(scan), list(saved), set(unmetered), set(blocked), pinned,
-                                 pinned_metered, None if arrived is None else {a.lower() for a in arrived})
+  def y(scan=(PHONE, STAR), saved=SAVED2, configured=TRUCK_CONFIGURED, unmetered=(PHONE,), blocked=(), pinned=STAR,
+        pinned_metered="yes", arrived=(PHONE,)):
+    return unmetered_to_yield_to(None if scan is None else list(scan), list(saved), list(configured), set(unmetered),
+                                 set(blocked), pinned, pinned_metered, None if arrived is None else {a.lower() for a in arrived})
 
   def test_an_ARRIVED_unmetered_network_ends_a_METERED_pin(self):
     assert self.y() == (PHONE, "", "")
@@ -306,9 +309,14 @@ class TestUnmeteredToYieldTo:
     """Strictly cheaper means `no` beats `unknown` as well as `yes`."""
     assert self.y(pinned_metered="unknown").ends_by == PHONE
 
-  def test_the_MOBILE_phone_qualifies_there_is_no_configured_list_input_at_all(self):
-    """netrank2pnw exempted mobile entries; the owner's rule does not. Mobility only changes arrival EVIDENCE."""
+  def test_the_MOBILE_phone_qualifies_mobility_is_not_an_input(self):
+    """netrank2pnw exempted mobile entries; the owner's rule does not. Mobility only changes arrival EVIDENCE, which
+    the caller folds into `arrived`; this function takes the configured SSIDs with no mobile flag at all."""
     assert self.y().ends_by == PHONE
+
+  def test_a_configured_STATIONARY_entry_qualifies_too(self):
+    """In the daemon home_to_yield_to is judged first and names it `home`; this rule alone would end it as well."""
+    assert self.y(scan=(HOME, STAR), unmetered=(HOME,), arrived=(HOME,)) == (HOME, "", "")
 
   def test_a_network_visible_since_the_pick_does_not_and_is_named(self):
     assert self.y(arrived=()) == ("", PHONE, "visible_since_pick")
@@ -345,22 +353,53 @@ class TestUnmeteredToYieldTo:
   def test_the_comma_hotspot_and_lte_profiles_are_never_candidates(self):
     assert self.y(scan=("Hotspot", "lte"), unmetered=("Hotspot", "lte"), arrived=("Hotspot", "lte")) == ("", "", "")
 
-  def test_a_NON_configured_saved_profile_qualifies(self):
-    assert self.y(scan=(CAFE,), unmetered=(CAFE,), arrived=(CAFE,)).ends_by == CAFE
+  def test_a_NON_configured_saved_profile_does_NOT_qualify_and_is_named_as_such(self):
+    """pinconfigured2pnw -- OWNER DECISION 2026-09-14 ~21:30 PT, verbatim "(no just the configued ones)". A saved cafe
+    the driver marked unmetered, arrived, in range: it does not end the pin, and the log can say why."""
+    assert self.y(scan=(CAFE, STAR), unmetered=(CAFE,), arrived=(CAFE,)) == ("", CAFE, "not_configured")
+    assert self.y(scan=(CAFE, STAR), unmetered=(CAFE,), arrived=()) == ("", CAFE, "not_configured")
+    assert self.y(scan=(CAFE, STAR), unmetered=(CAFE,), arrived=(CAFE,), pinned_metered=None) == ("", CAFE, "not_configured")
+
+  def test_the_same_network_ends_it_once_it_IS_configured(self):
+    """The list is what decides, nothing else about the network."""
+    assert self.y(scan=(CAFE, STAR), configured=(*TRUCK_CONFIGURED, CAFE), unmetered=(CAFE,), arrived=(CAFE,)) == \
+      (CAFE, "", "")
+
+  def test_an_unconfigured_network_is_not_reported_when_nothing_else_would_qualify(self):
+    """`not_configured` is named only for a network that passes the scan, cost and backoff guards."""
+    assert self.y(scan=(CAFE, STAR), unmetered=(), arrived=(CAFE,)) == ("", "", "")
+    assert self.y(scan=(CAFE, STAR), unmetered=(CAFE,), blocked=(CAFE.lower(),), arrived=(CAFE,)) == ("", "", "")
+    assert self.y(scan=(STAR,), unmetered=(CAFE,), arrived=(CAFE,)) == ("", "", "")
+
+  def test_an_unconfigured_network_never_HIDES_a_configured_one(self):
+    """CafeFree sorts before the phone. Its arrival must not stand in for the phone's (the phone did not arrive), and its
+    `not_configured` must not replace the phone's own reason in the log."""
+    assert self.y(scan=(CAFE, PHONE), unmetered=(CAFE, PHONE), arrived=(CAFE,)) == ("", PHONE, "visible_since_pick")
+    assert self.y(scan=(CAFE, PHONE), unmetered=(CAFE, PHONE), arrived=(CAFE, PHONE)) == (PHONE, "", "")
+    assert self.y(scan=(CAFE, PHONE), unmetered=(CAFE, PHONE), arrived=(CAFE, PHONE), pinned_metered=None) == \
+      ("", PHONE, "pinned_cost_unread")
+
+  def test_the_first_unconfigured_network_is_named_stably(self):
+    saved = [f"openpilot connection {STAR}", "openpilot connection zed", f"openpilot connection {CAFE}"]
+    assert self.y(scan=("zed", CAFE), saved=saved, unmetered=("zed", CAFE), arrived=()) == ("", CAFE, "not_configured")
 
   def test_it_is_case_insensitive(self):
-    """Called directly: the helper above folds `arrived` itself, which hid a case-sensitive `arrived` (mutation)."""
-    assert unmetered_to_yield_to([PHONE.upper(), STAR], SAVED2, {PHONE.lower()}, set(), STAR.lower(), "yes",
-                                 {PHONE.swapcase()}).ends_by == PHONE
+    """Called directly: the helper above folds `arrived` itself, which hid a case-sensitive `arrived` (mutation). The
+    configured spelling may differ in case and surrounding space from the saved profile's."""
+    assert unmetered_to_yield_to([PHONE.upper(), STAR], SAVED2, [f" {PHONE.swapcase()} "], {PHONE.lower()}, set(),
+                                 STAR.lower(), "yes", {PHONE.swapcase()}).ends_by == PHONE
 
   def test_an_arrival_wins_over_an_EARLIER_network_that_was_visible_since_the_pick(self):
     """Order only picks WHICH network is named; any arrived one ends the pin. CafeFree sorts first and did not arrive."""
-    assert self.y(scan=(CAFE, PHONE), unmetered=(CAFE, PHONE), arrived=(PHONE,)) == (PHONE, "", "")
+    configured = (*TRUCK_CONFIGURED, CAFE)
+    assert self.y(scan=(CAFE, PHONE), configured=configured, unmetered=(CAFE, PHONE), arrived=(PHONE,)) == (PHONE, "", "")
 
   def test_the_named_network_is_STABLE_first_in_case_folded_order(self):
     saved = [f"openpilot connection {PHONE}", f"openpilot connection {CAFE}"]
-    assert self.y(scan=(PHONE, CAFE), saved=saved, unmetered=(PHONE, CAFE), arrived=(PHONE, CAFE)).ends_by == CAFE
-    assert self.y(scan=(PHONE, CAFE), saved=saved, unmetered=(PHONE, CAFE), arrived=()).kept_by == CAFE
+    configured = (PHONE, CAFE)
+    assert self.y(scan=(PHONE, CAFE), saved=saved, configured=configured, unmetered=(PHONE, CAFE),
+                  arrived=(PHONE, CAFE)).ends_by == CAFE
+    assert self.y(scan=(PHONE, CAFE), saved=saved, configured=configured, unmetered=(PHONE, CAFE), arrived=()).kept_by == CAFE
 
 
 class TestArrivalCandidates:
@@ -369,27 +408,26 @@ class TestArrivalCandidates:
           {"ssid": "visitor", "lat": None, "lon": None, "mobile": False}]
 
   def test_stationary_entries_keep_their_learned_location(self):
-    assert (HOME, 47.0, -122.0) in arrival_candidates(self.NETS, SAVED2)
+    assert (HOME, 47.0, -122.0) in arrival_candidates(self.NETS)
 
   def test_a_MOBILE_entry_has_NO_location_even_when_one_is_stored(self):
     """Otherwise GPS "far from where the phone was added" would read as the phone being absent, and "near it" would
     veto its scan misses."""
-    assert (PHONE, None, None) in arrival_candidates(self.NETS, SAVED2)
+    assert (PHONE, None, None) in arrival_candidates(self.NETS)
 
-  def test_saved_profiles_that_are_not_configured_are_tracked_without_a_location(self):
-    got = arrival_candidates(self.NETS, SAVED2)
-    assert (STAR, None, None) in got and (CAFE, None, None) in got
+  def test_exactly_the_configured_entries_are_tracked(self):
+    """pinconfigured2pnw: an unconfigured saved profile cannot end a pin, so its arrival is not tracked."""
+    assert arrival_candidates(self.NETS) == [(HOME, 47.0, -122.0), (PHONE, None, None), ("visitor", None, None)]
 
-  def test_one_entry_per_network_case_insensitively_configured_first(self):
+  def test_one_entry_per_network_case_insensitively(self):
     """update_home_arrival counts one miss per entry; a duplicate would count every miss twice."""
     nets = [*self.NETS, {"ssid": HOME.upper(), "lat": 1.0, "lon": 1.0, "mobile": False}]
-    got = arrival_candidates(nets, SAVED2)
-    assert [s.lower() for s, _a, _b in got] == [HOME.lower(), PHONE.lower(), "visitor", STAR.lower(), CAFE.lower()]
-    assert got[2] == ("visitor", None, None), "the configured spelling wins over the saved profile's 'Visitor'"
+    got = arrival_candidates(nets)
+    assert [s.lower() for s, _a, _b in got] == [HOME.lower(), PHONE.lower(), "visitor"]
+    assert got[0] == (HOME, 47.0, -122.0), "the first entry's spelling and location win"
 
-  def test_the_comma_hotspot_lte_and_blank_entries_are_not_tracked(self):
-    got = arrival_candidates([{"ssid": " ", "mobile": False}], ["Hotspot", "lte", "openpilot connection  "])
-    assert got == []
+  def test_blank_entries_are_not_tracked(self):
+    assert arrival_candidates([{"ssid": " ", "mobile": False}, {"mobile": True}]) == []
 
 
 class TestJudgePinUnmetered:

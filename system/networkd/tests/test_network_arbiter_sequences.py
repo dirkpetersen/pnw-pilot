@@ -1625,17 +1625,61 @@ class TestAnUnmeteredNetworkThatArrivesEndsThePin:
     assert _cleared(events) == []
     assert _kept(events) == [(STAR, PHONE, "visible_since_pick")], _kept(events)
 
-  def test_a_NON_configured_saved_network_marked_unmetered_ends_it_too(self, monkeypatch, events):
-    """The owner said "an unmetered network". choose_wifi ranks every saved profile by cost first, so a saved cafe
-    the driver marked unmetered outranks paid Starlink with or without a list entry -- and ends the pin the same way."""
+  def test_a_NON_configured_saved_network_marked_unmetered_does_NOT_end_it_and_the_log_says_why(self, monkeypatch, events):
+    """pinconfigured2pnw -- INVERTED. pinunmetered2pnw let any saved profile end a pin. Asked to confirm "any saved
+    network marked unmetered counts, not just your configured ones", the owner answered on 2026-09-14 ~21:30 PT,
+    verbatim: "(no just the configued ones)". A saved cafe the driver marked unmetered, NOT in the list, genuinely
+    leaves and comes back while metered Starlink is pinned. The ladder would take it; the pin holds; the log says why,
+    once."""
     nm = FakeNM()
     _with(nm, CAFE)
     _away(nm, ID_STAR, scan=(STAR,))
     nm.metered[CAFE] = "no"
-    run_loop(monkeypatch, nm, ticks=10, near_home=True, hooks=[_scan_by_tick(CAFE, range(6))], priority=(HOME, PHONE),
+    run_loop(monkeypatch, nm, ticks=14, near_home=True, hooks=[_scan_by_tick(CAFE, range(6))], priority=(HOME, PHONE),
              params={"WifiManualPick": _pick(STAR)})
+    assert nm.ups == [] and nm.active == ID_STAR, f"an unconfigured unmetered network ended the pin: {nm.up_log}"
+    assert _cleared(events) == [], _cleared(events)
+    assert any(n == "netcosttier_pin_held" and kw["target"] == CAFE for n, kw in events), \
+      "precondition: the ladder must want the cafe, or this test proves nothing"
+    assert _kept(events) == [(STAR, CAFE, "not_configured")], _kept(events)
+    assert "TetheringPriorityNetworks" in next(kw["rule"] for n, kw in events if n == "netcosttier_pin_kept")
+
+  def test_the_same_network_CONFIGURED_as_a_MOBILE_entry_ends_it(self, monkeypatch, events):
+    """The identical sequence with the cafe added to the list as a mobile entry (as the iPhone is): the list is the
+    only difference, and the pin ends as `unmetered`."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    _away(nm, ID_STAR, scan=(STAR,))
+    nm.metered[CAFE] = "no"
+    run_loop(monkeypatch, nm, ticks=10, near_home=True, hooks=[_scan_by_tick(CAFE, range(6))],
+             priority=(HOME, PHONE, CAFE), mobile=(PHONE, CAFE), params={"WifiManualPick": _pick(STAR)})
     assert nm.up_log == [(6 * POLL, ID_CAFE)], nm.up_log
     assert _cleared(events) == [{"ssid": STAR, "reason": "unmetered", "by": CAFE}], _cleared(events)
+    assert _kept(events) == [], _kept(events)
+
+  def test_the_same_network_CONFIGURED_as_a_STATIONARY_entry_ends_it_as_home(self, monkeypatch, events):
+    """And as a stationary entry. Every stationary network the `unmetered` rule accepts, the home rule accepts too, and
+    home is judged first -- so the reason is `home` (away from its learned location, then in range)."""
+    nm = FakeNM()
+    _with(nm, CAFE)
+    _away(nm, ID_STAR, scan=(STAR,))
+    nm.metered[CAFE] = "no"
+    run_loop(monkeypatch, nm, ticks=10, near_home=True, gps=FAR_FIX, hooks=[_scan_by_tick(CAFE, range(6))],
+             priority=(HOME, PHONE, CAFE), mobile=(PHONE,), params={"WifiManualPick": _pick(STAR)})
+    assert nm.up_log == [(6 * POLL, ID_CAFE)], nm.up_log
+    assert _cleared(events) == [{"ssid": STAR, "reason": "home", "trigger": CAFE}], _cleared(events)
+
+  def test_a_STATIONARY_configured_network_visible_at_the_pick_is_logged_as_such_not_as_unconfigured(self, monkeypatch,
+                                                                                                     events):
+    """Found by mutation: the daemon must hand the rule EVERY configured entry, not only mobile ones. Starlink picked at
+    home with Hannelore (stationary, unmetered) in range: the pin sticks, and the kept line must say why truthfully --
+    Hannelore IS configured."""
+    nm = FakeNM()
+    _away(nm, ID_STAR, scan=(STAR, HOME))
+    nm.metered[HOME] = "no"
+    run_loop(monkeypatch, nm, ticks=6, near_home=True, priority=(HOME, PHONE), params={"WifiManualPick": _pick(STAR)})
+    assert nm.ups == [] and _cleared(events) == [], nm.up_log
+    assert _kept(events) == [(STAR, HOME, "visible_since_pick")], _kept(events)
 
   def test_a_REPICK_starts_its_log_afresh(self, monkeypatch, events):
     """Found by mutation: the kept line is once per network PER PICK. A second pick of the same network with the

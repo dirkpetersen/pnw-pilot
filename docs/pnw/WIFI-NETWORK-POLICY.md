@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-14          # audited against origin/3devpnw @ ed66cc6e04 (networkd/uploader last touched f65fdbdaf9); §3/§4/§6/§7 + networkd line citations updated for pinunmetered2pnw (branch, NOT shipped)
+updated: 2026-09-15          # audited against origin/3devpnw @ ed66cc6e04 (networkd/uploader last touched f65fdbdaf9); §3/§4/§6/§7 + networkd line citations updated for pinunmetered2pnw, then §0/§3/§4/§6/§7 + citations again for pinconfigured2pnw (both branch, NOT shipped)
 status: current
 ---
 
@@ -10,7 +10,7 @@ status: current
 `selfdrive/ui/mici/layouts/settings/network/network_layout.py`, `system/loggerd/uploader.py`,
 `system/updated/updated.py`, `system/mapd/mapd_configd.py`, `system/hardware/{hardwared.py,base.py,
 tici/hardware.py}`, `common/params_keys.h`, and the `system/networkd/tests/*` suite (297+ tests as of
-`f65fdbdaf9`; 360 on branch `pinunmetered2pnw`). Where an older doc (`docs/NETWORK2XNOR.md`) or a memory note disagrees with this code,
+`f65fdbdaf9`; 360 on branch `pinunmetered2pnw`, 368 on `pinconfigured2pnw`). Where an older doc (`docs/NETWORK2XNOR.md`) or a memory note disagrees with this code,
 **the code wins** — the disagreement is called out explicitly below, not silently reconciled. Every
 rule below cites `file:line` and, where one exists, the test that pins it as a spec.
 
@@ -29,8 +29,9 @@ every saved WiFi network currently in range by cost (unmetered beats unknown bea
 switches `wlan0` to the cheapest usable one, falling back to the comma's own hotspot (bridged onto LTE
 for any tethered clients) when nothing usable is in range. A network the driver taps by hand in the
 Settings WiFi list is recorded as a **pin** and the arbiter will not move the radio off it for cost
-reasons until the pin ends — which, since `pinunmetered2pnw` (branch, not shipped), includes an explicitly
-unmetered saved network *arriving* while the pinned network is not itself explicitly unmetered (§4). With `TetheringEnabled=0` the arbiter only ever tears the hotspot down if
+reasons until the pin ends — which, since `pinunmetered2pnw`/`pinconfigured2pnw` (branch, not shipped),
+includes an explicitly unmetered **configured** network *arriving* while the pinned network is not itself
+explicitly unmetered (§4). With `TetheringEnabled=0` the arbiter only ever tears the hotspot down if
 it finds it up — NetworkManager's own built-in autoconnect (with priority order asserted by the
 arbiter) picks client WiFi on its own, and none of the cost-ladder/pin logic below runs at all.
 
@@ -40,10 +41,10 @@ arbiter) picks client WiFi on its own, and none of the cost-ladder/pin logic bel
 
 | Kind | What it is | Where it lives |
 |---|---|---|
-| **Saved WiFi profile** | Any network the driver has joined once. NM connection id `openpilot connection <SSID>` (`priority_connection_id`, `network_arbiter.py:56-58`), created by `WifiManager.connect_to_network` / `.activate_connection` (`wifi_manager.py:655-746`). | NM config, not a param |
+| **Saved WiFi profile** | Any network the driver has joined once. NM connection id `openpilot connection <SSID>` (`priority_connection_id`, `network_arbiter.py:58-60`), created by `WifiManager.connect_to_network` / `.activate_connection` (`wifi_manager.py:655-746`). | NM config, not a param |
 | **`TetheringPriorityNetworks`** | JSON list of configured entries the arbiter treats specially: `{"label","ssid","lat","lon","portal","mobile"}` (`priority_networks.py:1-17`, `_coerce_entry` `priority_networks.py:23-45`). `lat/lon` = the network's learned GPS geofence center (auto-learned, see §3); `portal` = an optional captive-portal handler key (§3); `mobile: true` marks an entry that **travels with the car** (e.g. the driver's iPhone hotspot) — it is exempt from geofence learning, never ends a pin as `home`, and its arrival since a pick can only be established by scans (§4). (Before `pinunmetered2pnw` it could never end a pin at all.) | Param `TetheringPriorityNetworks` (`params_keys.h:77`, `PERSISTENT, STRING`) |
 | **Legacy single-priority params** | `TetheringPriorityWifi` (one SSID, `params_keys.h:58`) + `TetheringHomeLocation` (one `[lat,lon]`, `params_keys.h:76`). Migrated into a one-entry `TetheringPriorityNetworks` list **only** when the new param has never held a valid JSON list — an explicit `[]` (all entries deleted via UI) is authoritative and is **not** resurrected (`priority_networks.parse`, `priority_networks.py:48-85`; tests `test_legacy_migration`, `test_empty_list_is_respected_not_resurrected`, `priority_networks.py` tests). | — |
-| **The comma's own hotspot** | NM connection id literally `Hotspot` (`HOTSPOT_CONNECTION_ID`, `network_arbiter.py:53`). Broadcasts SSID `weedle-<first 4 chars of DongleId>` (`wifi_manager.py:188-192`), default password `"swagswagcomma"` (`DEFAULT_TETHERING_PASSWORD`, `wifi_manager.py:36`), gateway `192.168.43.1` (`TETHERING_IP_ADDRESS`, `wifi_manager.py:34`), subnet `192.168.43.0/24` (`TETHERING_SUBNET`/`HOTSPOT_SUBNET`, `wifi_manager.py:35`, `network_arbiterd.py:75`). Raising it installs `ip_forward` + an iptables-legacy MASQUERADE of that subnet out the LTE uplink (`_set_hotspot_nat`, `network_arbiterd.py:395-413`; the UI toggle's own copy is `_set_tethering_nat`, `wifi_manager.py:846-868`) — NAT is installed *before* the AP comes up so the first client packet already routes. | Param `TetheringEnabled` (`params_keys.h:57`, `PERSISTENT, BOOL, default "0"`) |
+| **The comma's own hotspot** | NM connection id literally `Hotspot` (`HOTSPOT_CONNECTION_ID`, `network_arbiter.py:55`). Broadcasts SSID `weedle-<first 4 chars of DongleId>` (`wifi_manager.py:188-192`), default password `"swagswagcomma"` (`DEFAULT_TETHERING_PASSWORD`, `wifi_manager.py:36`), gateway `192.168.43.1` (`TETHERING_IP_ADDRESS`, `wifi_manager.py:34`), subnet `192.168.43.0/24` (`TETHERING_SUBNET`/`HOTSPOT_SUBNET`, `wifi_manager.py:35`, `network_arbiterd.py:75`). Raising it installs `ip_forward` + an iptables-legacy MASQUERADE of that subnet out the LTE uplink (`_set_hotspot_nat`, `network_arbiterd.py:395-413`; the UI toggle's own copy is `_set_tethering_nat`, `wifi_manager.py:846-868`) — NAT is installed *before* the AP comes up so the first client packet already routes. | Param `TetheringEnabled` (`params_keys.h:57`, `PERSISTENT, BOOL, default "0"`) |
 | **LTE** | The modem, `wwan0`, a **netplan-managed** gsm profile named `lte`. Never touched with `nmcli con modify` here — that crashes NetworkManager on this AGNOS (keyfile-writer assertion on a netplan-owned profile); only `con up`/`con down` and modem-level `mmcli` calls are used (`network_arbiterd.py:28-32`, `_park_lte`/`_unpark_lte`, `network_arbiterd.py:593-610`). | Params `GsmApn`, `GsmRoaming`, `GsmMetered` (`params_keys.h:53-55`) |
 
 **The single-radio constraint is specifically between AP mode and WiFi-client mode on `wlan0`.** LTE
@@ -54,7 +55,7 @@ route) — it does not mean the arbiter "chooses" LTE as a WiFi-radio state.
 
 **The arbiter only arbitrates the radio while `TetheringEnabled=1`.** `decide()`'s first branch:
 tethering off → `down_hotspot` if the hotspot happens to be up, else `noop`, and it "never touches
-client wifi" (`network_arbiter.py:695-699`; tests `test_off_hotspot_up_tears_it_down`,
+client wifi" (`network_arbiter.py:702-706`; tests `test_off_hotspot_up_tears_it_down`,
 `test_off_never_touches_client_wifi`, `test_off_ignores_priority_config`). With tethering off, NM's own
 built-in autoconnect picks client WiFi; the only thing the arbiter still does is repair
 `autoconnect`/`autoconnect-priority` on saved profiles (`_wifi_autoconnect_repair`,
@@ -68,19 +69,19 @@ built-in autoconnect picks client WiFi; the only thing the arbiter still does is
 ### NM's three-state `connection.metered`
 
 NetworkManager's per-connection `connection.metered` property has **three** values, and the middle one
-is not a synonym for either end (`network_arbiter.py:522-536`):
+is not a synonym for either end (`network_arbiter.py:529-543`):
 
 | Value | Meaning | Constant |
 |---|---|---|
-| `no` | asserted cheap (driver, or the OS, said so) | `COST_UNMETERED = 0` (`network_arbiter.py:523`) |
-| `unknown` | **the default — nobody ever said** | `COST_UNKNOWN = 1` (`network_arbiter.py:524`) |
-| `yes` | asserted expensive | `COST_METERED = 2` (`network_arbiter.py:525`) |
+| `no` | asserted cheap (driver, or the OS, said so) | `COST_UNMETERED = 0` (`network_arbiter.py:530`) |
+| `unknown` | **the default — nobody ever said** | `COST_UNKNOWN = 1` (`network_arbiter.py:531`) |
+| `yes` | asserted expensive | `COST_METERED = 2` (`network_arbiter.py:532`) |
 
 Measured on the truck 2026-09-10: of four saved client profiles only the iPhone and the home WiFi
 carried an explicit `no` — the driver's mobile Starlink and "Visitor" were both `unknown`
 (`network_arbiterd.py:181-184`). **Folding `unknown` into `unmetered` is explicitly rejected** — an
 earlier cut did that and let an alphabetical tiebreak decide between a metered Starlink and an
-unmetered iPhone (`network_arbiter.py:564-567`; test `test_unknown_metered_state_is_NOT_treated_as_metered`,
+unmetered iPhone (`network_arbiter.py:571-574`; test `test_unknown_metered_state_is_NOT_treated_as_metered`,
 `test_case_insensitive_like_the_rest_of_the_module` family in `test_network_cost_tiers.py`).
 
 ### The driver's UI control
@@ -126,22 +127,22 @@ until first written) is what `uploader.py` and `updated.py` read as the "is this
 
 ### The loop
 
-`network_arbiterd.main()` (`network_arbiterd.py:739-1256`) runs forever, polling `nmcli` every
+`network_arbiterd.main()` (`network_arbiterd.py:739-1261`) runs forever, polling `nmcli` every
 `POLL_INTERVAL_S = 20.0` s (`network_arbiterd.py:68`, each `nmcli` call bounded by
 `NMCLI_TIMEOUT_S = 15.0` s, `network_arbiterd.py:69`). Each tick it builds a snapshot — active
 connection, scan results, saved connections, metered states, GPS, the manual pick — and calls the pure
-function `decide(...)` (`network_arbiter.py:651-735`), then applies exactly one action.
+function `decide(...)` (`network_arbiter.py:658-742`), then applies exactly one action.
 
-### The ranking, exactly (`choose_wifi`, `network_arbiter.py:539-610`)
+### The ranking, exactly (`choose_wifi`, `network_arbiter.py:546-617`)
 
 For **every saved WiFi profile currently in range** (in the scan, or the currently-active usable link —
-"sticky", `network_arbiter.py:593-596`), sort by:
+"sticky", `network_arbiter.py:600-603`), sort by:
 
-1. **cost class** — `COST_UNMETERED (0) < COST_UNKNOWN (1) < COST_METERED (2)` (`network_arbiter.py:523-536`)
+1. **cost class** — `COST_UNMETERED (0) < COST_UNKNOWN (1) < COST_METERED (2)` (`network_arbiter.py:530-543`)
 2. **configured membership** — a `TetheringPriorityNetworks` entry beats a non-member; members keep
-   the driver's own list order among themselves (`member_rank`, `network_arbiter.py:585-590`)
+   the driver's own list order among themselves (`member_rank`, `network_arbiter.py:592-597`)
 3. **SSID** — a stable tiebreak so two equal-cost, equal-membership networks never flap
-   (`network_arbiter.py:608-609`; test `test_the_choice_is_stable_between_equal_cost_networks`)
+   (`network_arbiter.py:615-616`; test `test_the_choice_is_stable_between_equal_cost_networks`)
 
 Driver, verbatim (2026-09-13): *"we don't want a solution where it just scans the Starlink SSIDs that I
 have configured; we need a generic solution where an unmetered network is always prioritized over a
@@ -153,13 +154,13 @@ tier 0 regardless of an unmetered non-member in range; cost now dominates member
 `test_an_explicitly_unmetered_NON_member_beats_a_DEFAULT_configured_network`.
 
 The winner brings up `up_priority` (if it's a configured member) or `up_fallback` (if not) —
-`network_arbiter.py:711-717`; both do the same `nmcli con up`, the name is purely about membership for
-logging. `explain_fallback` (`network_arbiter.py:616-648`) computes, purely from `decide()`'s own
+`network_arbiter.py:718-724`; both do the same `nmcli con up`, the name is purely about membership for
+logging. `explain_fallback` (`network_arbiter.py:623-655`) computes, purely from `decide()`'s own
 inputs, *why* each configured network lost (not in scan / no saved profile / in failure backoff /
 outranked), logged only on an applied `up_fallback` (test
 `test_a_configured_network_IN_RANGE_that_loses_on_cost_is_named_as_outranked`).
 
-**Nothing usable → the comma's own hotspot** (`up_hotspot`, `network_arbiter.py:732-735`) — bridged
+**Nothing usable → the comma's own hotspot** (`up_hotspot`, `network_arbiter.py:739-742`) — bridged
 onto LTE via NAT for any tethered clients (§1). If tethering is off in the first place, this never
 fires; see §1.
 
@@ -168,7 +169,7 @@ fires; see §1.
 `DisableNetworkCostLadder` (`params_keys.h:67`, `PERSISTENT, BOOL, default "0"` — **inverted polarity**,
 0 = ladder ON) is re-read every tick (`network_arbiterd.py:789`). Set, it reverts to the **exact
 pre-ladder binary behaviour**: the first reachable *configured* entry, or the hotspot, no notion of
-cost at all — deliberately, "that is what the kill switch is for" (`network_arbiter.py:689-693`). The
+cost at all — deliberately, "that is what the kill switch is for" (`network_arbiter.py:696-700`). The
 **one** thing it still honors is the failure-backoff ledger (below) — a kill switch that lets a dead
 router strand the device offline is not a safe kill switch. Manual pins and upgrade scans are **not**
 honored in binary mode (test `test_with_the_ladder_disabled_the_behaviour_is_pre_ladder_binary`).
@@ -206,8 +207,8 @@ The geo-gate above predates the cost ladder, when the only client WiFi the arbit
 already the cheapest thing available. Measured 2026-09-13: the truck sat on metered Starlink for **66
 minutes** with the unmetered iPhone never even scanned for, because the geo-gate suppresses scanning on
 *any* client WiFi away from a learned location (commit `67eacc66c3`). `upgrade_scan_due`
-(`network_arbiter.py:156-192`) forces through **one scan per `UPGRADE_SCAN_S = 120.0` s**
-(`network_arbiter.py:83`) whenever the ladder is on, we're on client WiFi, the active link is **not
+(`network_arbiter.py:158-194`) forces through **one scan per `UPGRADE_SCAN_S = 120.0` s**
+(`network_arbiter.py:85`) whenever the ladder is on, we're on client WiFi, the active link is **not
 explicitly unmetered**, the UI is not still joining a manual pick (`pin_joining`), and the link is not
 still settling (a bring-up awaiting judgement, or one that just appeared — so the very first upgrade
 scan can't land inside a DHCP window). Suppressed entirely on an explicitly-unmetered link, since
@@ -246,7 +247,7 @@ black hole and is marked unusable.
 
 `DHCP_GRACE_S = 60.0` s (`network_arbiterd.py:235`) — NM's own DHCP timeout is 45 s and the poll is
 20 s, so a first look can legally land mid-activation; inside the grace window a not-yet-usable link
-stays sticky rather than being blamed. `judge_link` (`network_arbiter.py:438-519`) is the pure function
+stays sticky rather than being blamed. `judge_link` (`network_arbiter.py:445-526`) is the pure function
 that decides sticky/blame/pending each tick — tested directly in `test_network_link_judgement.py`
 (26 tests) because four separate defects lived in this exact logic as loop glue before it was
 extracted.
@@ -262,7 +263,7 @@ NM slow to answer at boot or mid-activation is ridden out with margin"), any `up
 `up_fallback`/`up_hotspot` is suppressed as `noop` and logged once (change-only) as
 `network_arbiter_active_unreadable_hold`. **The hold is gated on there being something to hold onto** —
 a link seen active at the last good read, or the arbiter's own unresolved bring-up
-(`seen_active or requested_active`, `network_arbiterd.py:1130`) — so a cold boot with nothing active yet
+(`seen_active or requested_active`, `network_arbiterd.py:1136`) — so a cold boot with nothing active yet
 is **not** delayed by up to 120 s (`unreadhold2pnw`, commit `a0dd8097ee`; test
 `test_at_BOOT_with_nothing_to_hold_an_unreadable_read_does_not_delay_the_first_connection`). Past the
 bound, the action goes through as before and `network_arbiter_active_unreadable_released` is logged
@@ -290,7 +291,7 @@ Past the bound, a new ERROR-level `netcosttier_blamed_unverified` event precedes
 | `network_arbiter_active_unreadable_hold` / `_released` | Unreadable-read hold engaged/released |
 | `netcosttier_active_cost_unreadable` | The active link's cost couldn't be read and nothing is cached — a cost-driven move is suppressed (§ "D1" below) |
 | `netcosttier_pin_set` / `_cleared` / `_held` / `_unreadable` | Manual-pin lifecycle (§4) |
-| `netcosttier_pin_kept` | *(`pinunmetered2pnw`)* An explicitly unmetered network that would otherwise end the pin did not — `reason=visible_since_pick` (it was in range when the pick was made) or `pinned_cost_unread`. Once per network per pick (§4) |
+| `netcosttier_pin_kept` | *(`pinunmetered2pnw`/`pinconfigured2pnw`)* An explicitly unmetered network that would otherwise end the pin did not — `reason=visible_since_pick` (it was in range when the pick was made), `pinned_cost_unread`, or `not_configured` (it is not a `TetheringPriorityNetworks` entry). Once per network per pick (§4) |
 | `network2xnor_portal_try` / `network2xnor_captive_portal` | Captive-portal auto-accept attempts/results |
 | `network2xnor_lte_signal` | LTE bars/dBm/operator changed (throttled to every `SIGNAL_EVERY_N=3` ticks ≈ 60 s, `network_arbiterd.py:70`) |
 
@@ -302,7 +303,7 @@ distinct from a successful read of "unknown". Left alone, `choose_wifi` would ra
 at home on the unmetered home WiFi with the unmetered phone also in range, one failed first read tore
 the home link down and rebuilt it, right at boot when NM is slowest to answer (commit `8546e17288`).
 Fix: while the active link is **usable** and its cost is unread (`None`, not "unknown"), any `up_*`
-action is suppressed (`network_arbiterd.py:1085-1104`) and logged once as
+action is suppressed (`network_arbiterd.py:1091-1110`) and logged once as
 `netcosttier_active_cost_unreadable`. A link that is **not** usable is exempt — a failure-driven move
 must never be held. The kill switch's binary mode has no notion of cost and is exempt too.
 
@@ -336,45 +337,48 @@ A failed write is **logged loudly, never swallowed**: `"netscanpin: FAILED to re
 The arbiter tracks the `(ssid, ts)` identity it last saw — it never writes the param itself, so a new
 pick racing an ending old one can never be clobbered (`network_arbiterd.py:763-770`). While a pin is
 **in force**, `decide()`'s ladder result is overridden to `noop` for any `up_priority`/`up_fallback`/
-`up_hotspot` (`network_arbiterd.py:1106-1115`) — this holds through **both** the join itself (so the
+`up_hotspot` (`network_arbiterd.py:1112-1121`) — this holds through **both** the join itself (so the
 arbiter never fights the UI's own activation mid-DHCP) and the time spent on it afterward. It requires
 `tethering_enabled and fallback_enabled` — with the ladder kill-switched, pins are not honored at all
 (§3). `down_hotspot` (tearing the hotspot down because tethering itself was disabled) is **never**
 suppressed by a pin.
 
-### Every way a pin ends (`judge_pin`, `network_arbiter.py:110-153`)
+### Every way a pin ends (`judge_pin`, `network_arbiter.py:112-155`)
 
 | Reason | Exact condition |
 |---|---|
-| `failed` | `judge_link` blamed the pinned network (associated, no usable link, past `DHCP_GRACE_S`) — "a pin must never hold the device offline"; the failure ledger then applies as normal (`network_arbiter.py:120-122`) |
+| `failed` | `judge_link` blamed the pinned network (associated, no usable link, past `DHCP_GRACE_S`) — "a pin must never hold the device offline"; the failure ledger then applies as normal (`network_arbiter.py:122-124`) |
 | `dropped` | It **was** the active link (seen active at least once since the pick) and no longer is |
-| `join_timeout` | Never became the active link within `PIN_JOIN_WINDOW_S = 90.0` s of the arbiter first seeing the pick (`network_arbiter.py:80-82`) — chosen against NM's 45 s DHCP timeout plus the UI password-retry path re-adding the profile |
+| `join_timeout` | Never became the active link within `PIN_JOIN_WINDOW_S = 90.0` s of the arbiter first seeing the pick (`network_arbiter.py:82-84`) — chosen against NM's 45 s DHCP timeout plus the UI password-retry path re-adding the profile |
 | `home` | A **stationary, explicitly unmetered** configured network has *arrived* since the pick (see below) |
-| `unmetered` | *(`pinunmetered2pnw`, branch, not shipped — owner decision 2026-09-14)* An **explicitly unmetered saved** network has *arrived* since the pick and the pinned network is **not** itself explicitly unmetered (see "The `unmetered` rule" below). Logged `netcosttier_pin_cleared reason=unmetered by=<ssid>`. `home` is checked first, so a home arrival keeps its own reason (`network_arbiter.py:143-146`) |
+| `unmetered` | *(`pinunmetered2pnw`+`pinconfigured2pnw`, branch, not shipped — owner decisions 2026-09-14 ~19:45 and ~21:30 PT)* An **explicitly unmetered, saved AND configured** network has *arrived* since the pick and the pinned network is **not** itself explicitly unmetered (see "The `unmetered` rule" below). Logged `netcosttier_pin_cleared reason=unmetered by=<ssid>`. `home` is checked first, so a home arrival keeps its own reason (`network_arbiter.py:145-148`) |
 | `superseded` | A newer `(ssid, ts)` pick replaced this one — decided by the daemon comparing identities (`network_arbiterd.py:839-845`) |
 | `param_removed` | `WifiManualPick` went absent (SSH release hatch), **or** is present but the value could not be decoded as JSON — `params_pyx` returns `None` for both, so this reason covers both (`network_arbiterd.py:846-851`) |
 | `reboot` | `WifiManualPick` is `CLEAR_ON_MANAGER_START` — a manager restart clears it unconditionally |
 
 An **unreadable** active-connection read (`nmcli` failed) is **no evidence** and neither ends nor
-advances a pin (`judge_pin`, `network_arbiter.py:139-140`; test `test_an_UNREADABLE_active_read_is_no_evidence`
+advances a pin (`judge_pin`, `network_arbiter.py:141-142`; test `test_an_UNREADABLE_active_read_is_no_evidence`
 / `test_an_unreadable_ACTIVE_read_does_not_end_the_pin`). Likewise a `WifiManualPick` read failure or a
 damaged value is logged (`netcosttier_pin_unreadable`) and **changes nothing** — "only an ABSENT param
 is a silent 'no pin'" (`network_arbiterd.py:830-851`).
 
-### A mobile network (the iPhone) is never `home` — but since `pinunmetered2pnw` it can end a pin as `unmetered`
+### A mobile network (the iPhone) is never `home` — but since `pinunmetered2pnw` it can end a pin as `unmetered`, if it is configured
 
-`home_to_yield_to` (`network_arbiter.py:259-299`) only considers **stationary** configured entries
-(`not e.get("mobile")`, `network_arbiterd.py:1038`). Exempting mobile entries was deliberate: "the
+`home_to_yield_to` (`network_arbiter.py:261-301`) only considers **stationary** configured entries
+(`not e.get("mobile")`, `network_arbiterd.py:1039`). Exempting mobile entries was deliberate: "the
 iPhone is a mobile priority entry, and 'any `up_priority` ends the pin' would reopen exactly the
 measured case of the driver picking Starlink while his phone is in range" (commit `43036409a4`). Test:
 `test_the_MOBILE_phone_in_range_does_NOT_end_the_pin`.
 
-**Superseded in part by the owner's 2026-09-14 decision** (branch `pinunmetered2pnw`, not shipped): the
-phone still never ends a pin as `home`, but an *arriving* explicitly unmetered phone does end a pin on a
-network that is not explicitly unmetered, as `unmetered` (next section). The measured case the exemption
-protected — a pick made **while the phone is in range** — is still protected, by the arrival requirement:
-a phone that stays in range never "arrives". Test (inverted from netrank2pnw):
-`test_the_phone_going_away_and_coming_back_ends_a_METERED_pin_as_unmetered_not_as_home`.
+**Superseded in part by the owner's 2026-09-14 decisions** (branches `pinunmetered2pnw` +
+`pinconfigured2pnw`, not shipped): the phone still never ends a pin as `home`, but an *arriving* explicitly
+unmetered phone does end a pin on a network that is not explicitly unmetered, as `unmetered` (next section)
+— **because `Dirk's iPhone 13` is a configured `mobile: true` entry**. `mobile` is no longer a
+disqualifier; being absent from `TetheringPriorityNetworks` is. The measured case the exemption protected —
+a pick made **while the phone is in range** — is still protected, by the arrival requirement: a phone that
+stays in range never "arrives". Tests (inverted from netrank2pnw):
+`test_the_phone_going_away_and_coming_back_ends_a_METERED_pin_as_unmetered_not_as_home`,
+`test_the_MOBILE_phone_qualifies_mobility_is_not_an_input`.
 
 ### The `home_to_yield_to` / arrival rule (D2, `netrank2pnw`)
 
@@ -382,17 +386,17 @@ A pin ends as `reason="home"` **only** for a home network that has genuinely *ar
 was made — not merely "is in range right now". `home_to_yield_to` requires ALL of: stationary
 (not mobile), **explicitly unmetered** (`no`, not `unknown`), present in this tick's **real** scan, a
 saved profile, not serving a failure backoff, not the pinned network itself, and **arrived**
-(`network_arbiter.py:266-273,294-299`).
+(`network_arbiter.py:268-275,296-301`).
 
-"Arrived" (`update_home_arrival`, `network_arbiter.py:198-256`) is established by evidence only — a
+"Arrived" (`update_home_arrival`, `network_arbiter.py:200-258`) is established by evidence only — a
 pick made deliberately while home is already visible must **stick**, not revert on the very next tick
 (driver-approved case: "pick Starlink, drive home, and the truck stays on paid Starlink in the
 driveway", commit `989427d339`):
 
-- `PIN_HOME_ABSENT_SCANS = 3` (`network_arbiter.py:194`) consecutive **real** scans that do not list
+- `PIN_HOME_ABSENT_SCANS = 3` (`network_arbiter.py:196`) consecutive **real** scans that do not list
   it — but **only** while GPS cannot place the truck within `PIN_HOME_FAR_M` of that network's learned
   location (a missing scan at home is a router reboot or a weak AP, not the truck leaving); or
-- GPS more than `PIN_HOME_FAR_M = 2.0 × HOME_GEOFENCE_M = 500.0` m (`network_arbiter.py:195`) from the
+- GPS more than `PIN_HOME_FAR_M = 2.0 × HOME_GEOFENCE_M = 500.0` m (`network_arbiter.py:197`) from the
   network's learned location, on a tick where no real scan listed it — this is how a road pick (where
   the geo-gate suppresses scanning until arrival) ever gets to "arrived" at all.
 
@@ -402,12 +406,13 @@ count (flicker never adds up). Once established, absence persists for the life o
 with_home_continuously_in_range`, `test_home_FLICKERING_in_scan_results_does_not_end_it`,
 `test_home_missing_from_scans_while_GPS_says_the_truck_is_STILL_HOME_does_not_end_it`.
 
-The `home` rule is **unchanged** by `pinunmetered2pnw` and is not folded into the `unmetered` rule: it
+The `home` rule is **unchanged** by `pinunmetered2pnw`/`pinconfigured2pnw` and is not folded into the
+`unmetered` rule: it
 still ends a pin on an explicitly unmetered network (the phone picked on the road, then home arrives),
 which the strictly-cheaper `unmetered` rule would not. Test:
 `test_home_still_ends_a_pin_on_the_UNMETERED_phone`.
 
-### The `unmetered` rule (`pinunmetered2pnw` — branch, NOT shipped)
+### The `unmetered` rule (`pinunmetered2pnw` + `pinconfigured2pnw` — branch, NOT shipped)
 
 **Owner decision, 2026-09-14 ~19:45 PT.** Asked *"Should a manual WiFi pick end on its own when you mark
 that network metered, or when an unmetered network appears?"*, the owner answered, verbatim: *"when an
@@ -416,17 +421,28 @@ marked metered; turning on the iPhone hotspot did not take over, because only a 
 a pin and no upgrade scan ran while pinned. **Marking a network metered still does not end or change a
 pin by itself.**
 
-`unmetered_to_yield_to` (`network_arbiter.py:336-391`), called from `network_arbiterd.py:1046-1047`, ends
+**Owner decision, 2026-09-14 ~21:30 PT** (`pinconfigured2pnw`, narrowing the above). Asked to confirm
+*"Any saved network marked unmetered counts, not just your configured ones"*, the owner answered, verbatim:
+***"(no just the configued ones)"*** — so **only a `TetheringPriorityNetworks` entry can end a pin this
+way** (condition 2 below). A saved profile the driver marked unmetered but never added to the list never
+ends a pin, even though the unpinned ladder still ranks it by cost (§3). *(Asked in the same breath whether
+"a hotspot turned on within about 4–6 minutes of a pick won't end it" was acceptable, the owner answered
+"(OK)" — that window stands unchanged; see the residual risks below.)*
+
+`unmetered_to_yield_to` (`network_arbiter.py:334-398`), called from `network_arbiterd.py:1050-1051`, ends
 the pin (`reason="unmetered"`) when a network is **ALL** of:
 
 1. a **saved** client profile (`openpilot connection <SSID>`) whose `connection.metered` is **explicitly
    `no`** — `unknown` does not qualify;
-2. in this tick's **real** scan (a scan that did not run is no evidence; the list the daemon seeds with the
+2. a **configured `TetheringPriorityNetworks` entry** — stationary or `mobile` alike (Hannelore, Visitor,
+   `Dirk's iPhone 13`), matched case- and whitespace-insensitively against the saved profile's SSID
+   (`pinconfigured2pnw`; the daemon passes `pn.ssids(nets)`, `network_arbiterd.py:795`);
+3. in this tick's **real** scan (a scan that did not run is no evidence; the list the daemon seeds with the
    active configured network is not used);
-3. **arrived** since the pick — the same `update_home_arrival` evidence as `home`, now tracked for every
-   candidate (`arrival_candidates`, `network_arbiter.py:302-327`);
-4. not serving a failure backoff, and not the pinned network itself;
-5. **strictly cheaper** than the pinned network: the pinned network's `connection.metered` was **read**
+4. **arrived** since the pick — the same `update_home_arrival` evidence as `home`, now tracked for every
+   **configured** entry (`arrival_candidates`, `network_arbiter.py:304-325`);
+5. not serving a failure backoff, and not the pinned network itself;
+6. **strictly cheaper** than the pinned network: the pinned network's `connection.metered` was **read**
    and is not `no`. An explicitly unmetered pin is never ended by this rule; a pinned network whose cost
    was never successfully read is not assumed expensive (the D1 rule: a cost move needs a cost that was
    read) and the pin holds.
@@ -434,11 +450,16 @@ the pin (`reason="unmetered"`) when a network is **ALL** of:
 Then the ordinary cost ladder takes the cheapest network in range — **not necessarily the one that
 arrived** (see the risk below).
 
-**Configured or not.** Any saved profile qualifies, not only `TetheringPriorityNetworks` entries. The
-ladder already ranks every saved profile by cost first (§3, the 2026-09-13 generic rule), and `no` is set
-on a profile only by the driver marking it. Restricting the rule to configured entries would leave the
-truck on a paid pin beside a network the ladder itself ranks above it. Test:
-`test_a_NON_configured_saved_network_marked_unmetered_ends_it_too`.
+**Configured only.** The first cut of this rule (`pinunmetered2pnw`) let *any* saved profile qualify, on the
+reasoning that the ladder already ranks every saved profile by cost first (§3, the 2026-09-13 generic rule)
+and that `no` is written only by the driver marking it. The owner overruled that on 2026-09-14 ~21:30 PT: a
+pin is the driver's explicit choice, and only a network he explicitly listed may override it. The asymmetry
+is deliberate — the **unpinned** ladder still happily moves to an unconfigured unmetered network; the list
+membership only decides what may end a **pin**. Tests:
+`test_a_NON_configured_saved_network_marked_unmetered_does_NOT_end_it_and_the_log_says_why`,
+`test_the_same_network_CONFIGURED_as_a_MOBILE_entry_ends_it`,
+`test_the_same_network_CONFIGURED_as_a_STATIONARY_entry_ends_it_as_home` (the identical sequence three
+times; the list is the only difference).
 
 **Arrival evidence by kind of network** (`arrival_candidates`):
 
@@ -446,7 +467,7 @@ truck on a paid pin beside a network the ladder itself ranks above it. Test:
 |---|---|---|
 | stationary configured entry | its learned `lat/lon` | exactly as for `home` above — 3 real scans (not counted while GPS places the truck within 500 m), or GPS > 500 m |
 | mobile configured entry (the iPhone) | **none**, even if one is stored ("Add Network Here" records one) | **3 consecutive real scans only** |
-| saved profile, not configured | none | 3 consecutive real scans only |
+| saved profile, not configured | *not tracked at all* (`pinconfigured2pnw`) | n/a — it can never end a pin |
 
 **Scans while pinned.** See §3 — the upgrade scan now runs every 120 s on a joined pin that is not
 explicitly unmetered, so the arrival can be seen away from home. Away from home that means a phone must
@@ -455,8 +476,14 @@ learned location scans run every 20 s, so about 1 min.
 
 **Logging** (change-only): `netcosttier_pin_cleared reason=unmetered by=<ssid>` when it ends (`by` = the
 network whose arrival ended it, like `home`'s `trigger`); `netcosttier_pin_kept ssid=<pinned> by=<ssid>
-reason=visible_since_pick|pinned_cost_unread` once per network per pick when a cheaper, explicitly
-unmetered network in range did **not** end it (`network_arbiterd.py:1062-1070`).
+reason=visible_since_pick|pinned_cost_unread|not_configured` once per network per pick when a cheaper,
+explicitly unmetered network in range did **not** end it (`network_arbiterd.py:1066-1076`).
+`not_configured` (`pinconfigured2pnw`) is the new one: the network passed the scan, cost and backoff
+guards but is not in `TetheringPriorityNetworks`, and the line's `rule=` says so. It is reported **only
+when no configured network is being named**, so it can never stand in place of the phone's own reason
+(`test_an_unconfigured_network_never_HIDES_a_configured_one`), and only for a network that would otherwise
+have qualified — an unconfigured network that is merely saved, or metered, or in backoff, is not named
+(`test_an_unconfigured_network_is_not_reported_when_nothing_else_would_qualify`).
 
 **A flapping hotspot.** No presence confirmation was added; one real-scan appearance after established
 absence ends the pin. Reasons: (a) a pin ends at most once — it cannot oscillate; (b) the absence
@@ -480,9 +507,15 @@ repeated retries of a flaky phone are the unpinned ladder's existing behaviour (
   hotspot screen is opened.
 - **A hotspot turned on soon after the pick does not end it.** Absence must be established first (≈4–6
   min of upgrade scans away from home); a phone switched on within that window counts as visible since the
-  pick, and `netcosttier_pin_kept reason=visible_since_pick` says so.
-- A saved, explicitly unmetered **non-configured** network has no learned location, so its AP dropping out of
-  3 scans while the truck is parked beside it reads as absence (no GPS veto).
+  pick, and `netcosttier_pin_kept reason=visible_since_pick` says so. **Accepted by the owner
+  2026-09-14 ~21:30 PT** ("(OK)") — no change made.
+- ~~A saved, explicitly unmetered **non-configured** network has no learned location, so its AP dropping
+  out of 3 scans while the truck is parked beside it reads as absence (no GPS veto).~~ **Closed by
+  `pinconfigured2pnw`**: such a network can no longer end a pin, and its arrival is no longer tracked.
+- **The list is now load-bearing for pins.** A network the driver marked unmetered but forgot to add to
+  `TetheringPriorityNetworks` will not take over from a pick, however cheap it is. The failure is visible
+  rather than silent (`netcosttier_pin_kept reason=not_configured`), and the workaround is either
+  "Add Network Here" or simply tapping the network in Settings (which supersedes the pin immediately).
 
 ### Marking a network metered does **not** pin it
 
@@ -505,10 +538,13 @@ path plus the mobile exemption, not a special case. (This specific sequence is n
 or documented anywhere in the repo as of this audit — it is reconstructed here from the code paths
 above, which fully account for the observed behavior.)
 
-**With `pinunmetered2pnw` (branch, not shipped)** the same evening would go differently: upgrade scans keep
-running on the pinned KarlMoik, the iPhone is missing from them while its hotspot is off, and once it is
-turned on the next upgrade scan sees it arrive — the pin ends (`reason=unmetered by=<iPhone>`) and the
-ladder joins the phone (`test_TONIGHT_karlmoik_pinned_and_marked_metered_then_the_iPhone_hotspot_turns_on`).
+**With `pinunmetered2pnw` + `pinconfigured2pnw` (branch, not shipped)** the same evening would go
+differently: upgrade scans keep running on the pinned KarlMoik, the iPhone is missing from them while its
+hotspot is off, and once it is turned on the next upgrade scan sees it arrive — the pin ends
+(`reason=unmetered by=<iPhone>`) and the ladder joins the phone
+(`test_TONIGHT_karlmoik_pinned_and_marked_metered_then_the_iPhone_hotspot_turns_on`). The phone qualifies
+because it is a **configured** entry; `mobile: true` no longer disqualifies it, and KarlMoik — also a
+configured entry, but the pinned one — is excluded as the pin itself.
 The separate 18:55 `WRONG_KEY` failure joining the iPhone is not addressed by this and would still block
 the join.
 
@@ -534,7 +570,7 @@ def effective_metered(network_type, metered, at_home):
 - `metered` — `deviceState.networkMetered` (§2).
 - `at_home` — the `OnPriorityNetwork` param (`params_keys.h:201`, `CLEAR_ON_MANAGER_START, BOOL`),
   written change-only by `network_arbiterd`'s `on_priority_network(active_ssid, configured_ssids,
-  active_metered)` (`network_arbiter.py:394-416`, `network_arbiterd.py:938-941`): **True** iff the
+  active_metered)` (`network_arbiter.py:401-423`, `network_arbiterd.py:938-941`): **True** iff the
   active client SSID is a configured `TetheringPriorityNetworks` entry (case-insensitive) **and** its
   `connection.metered` is not explicitly `yes`. An explicitly-metered configured network does **not**
   qualify — membership alone used to authorize uploads over a link the driver had explicitly marked
@@ -673,18 +709,27 @@ So after two failures the arbiter waits 5 min, then 15 min, before trying the ph
 2. On the comma, tap the iPhone once, re-entering the password if asked. The tap records a pin, and a
    successful join clears the backoff.
 
-*With `pinunmetered2pnw` (2026-09-14):* if you are on a network you picked that is **not** marked
-unmetered (e.g. KarlMoik), just turning the iPhone hotspot on is enough — **provided** the phone was out of
-range for 3 consecutive scans since you picked (about 4–6 min away from home, about 1 min near a learned
-location). The pin ends and the truck takes the cheapest network in range (§4, "The `unmetered` rule"). The
-iPhone profile must be marked unmetered (it is, as of 2026-09-10).
+*With `pinunmetered2pnw` + `pinconfigured2pnw` (2026-09-14):* if you are on a network you picked that is
+**not** marked unmetered (e.g. KarlMoik), just turning the iPhone hotspot on is enough — **provided** the
+phone was out of range for 3 consecutive scans since you picked (about 4–6 min away from home, about 1 min
+near a learned location). The pin ends and the truck takes the cheapest network in range (§4, "The
+`unmetered` rule"). Two conditions on the phone: its profile must be marked unmetered (it is, as of
+2026-09-10), **and it must be in your Priority Networks list** (it is — `Dirk's iPhone 13`, a `mobile`
+entry). A network that is *not* in that list never ends a pick, however cheap it is (owner decision
+2026-09-14 ~21:30 PT).
 
-**Why didn't my phone hotspot take over from a network I picked?** *(`pinunmetered2pnw`)*
-Look for `netcosttier_pin_kept` in the log: `reason=visible_since_pick` means the phone was already in range
-when you picked (or came on before 3 scans had missed it), so your pick stands; `reason=pinned_cost_unread`
-means the picked network's metered setting could not be read. No `netcosttier_pin_kept` at all: the phone is
-not in the scans, is not marked unmetered, is in failure backoff, or the network you picked is itself marked
-unmetered (nothing is cheaper). To force it, tap the phone in Settings.
+**Why didn't my phone hotspot take over from a network I picked?** *(`pinunmetered2pnw`/`pinconfigured2pnw`)*
+Look for `netcosttier_pin_kept` in the log. Three reasons:
+- `reason=visible_since_pick` — the phone was already in range when you picked (or came on before 3 scans had
+  missed it), so your pick stands;
+- `reason=not_configured` — the network is saved and marked unmetered but is **not in your Priority Networks
+  list**, and since the owner's 2026-09-14 ~21:30 PT decision only listed networks may end a pick. Add it via
+  Settings → Network → Advanced → "Add Network Here", or just tap it (a tap supersedes the pin immediately);
+- `reason=pinned_cost_unread` — the picked network's metered setting could not be read.
+
+No `netcosttier_pin_kept` at all: the phone is not in the scans, is not marked unmetered, is in failure
+backoff, or the network you picked is itself marked unmetered (nothing is cheaper). To force it either way,
+tap the phone in Settings.
 
 **How do I mark a network metered without pinning it?**
 Already the case: Settings → Network → Advanced → "Wi-Fi Network Metered" (the 3-way `default`/
@@ -696,10 +741,11 @@ code.
 
 **How do I clear a pin?**
 It clears itself the moment any of the conditions in §4's table fire (most commonly: the network drops,
-or you tap a different network; with `pinunmetered2pnw`, also an unmetered network arriving). To force it: tap a different network (supersedes it immediately), or
+or you tap a different network; with `pinunmetered2pnw`/`pinconfigured2pnw`, also a **configured**
+unmetered network arriving). To force it: tap a different network (supersedes it immediately), or
 remove the `WifiManualPick` param directly (the "manual release hatch over SSH", pinned by
 `test_removing_WifiManualPick_releases_the_pin_and_the_ladder_resumes`; *the earlier citation here,
-`network_arbiter.py:462`, pointed at unrelated `choose_wifi` docstring text*) —
+`network_arbiter.py:469`, pointed at unrelated `choose_wifi` docstring text*) —
 `Params().remove("WifiManualPick")`. It also clears on any manager restart
 or reboot (`CLEAR_ON_MANAGER_START`).
 
@@ -739,9 +785,20 @@ with the `peak` captive-portal handler, `network.py:388`).
   built on branch `pinunmetered2pnw` (NOT shipped; §4 "The `unmetered` rule"). Marking the pinned network
   metered still does not end a pin by itself. Open follow-ups from building it, for the owner: (1) after
   the pin ends the ladder may take a different unmetered network than the one that arrived (e.g. the home
-  WiFi you picked away from); (2) a hotspot switched on within ~4–6 min of a pick (away from home) does not
-  end it; (3) whether the iPhone keeps advertising its hotspot with no client connected is unverified, and
+  WiFi you picked away from); ~~(2) a hotspot switched on within ~4–6 min of a pick (away from home) does
+  not end it~~ **— put to the owner 2026-09-14 ~21:30 PT and ACCEPTED as-is ("(OK)"); no change made**;
+  (3) whether the iPhone keeps advertising its hotspot with no client connected is unverified, and
   decides how long "visible at pick time" protects a pick.
+- ~~**Does "an unmetered network" mean any saved profile, or only the configured ones?**~~ **DECIDED by the
+  owner 2026-09-14 ~21:30 PT.** Asked to confirm *"Any saved network marked unmetered counts, not just your
+  configured ones"*, he answered, verbatim: ***"(no just the configued ones)"*** — built on branch
+  `pinconfigured2pnw` (NOT shipped; §4 "The `unmetered` rule", "Configured only"). Only a
+  `TetheringPriorityNetworks` entry — stationary or `mobile` — can end a pin; an unconfigured saved profile
+  marked unmetered cannot, and is logged `netcosttier_pin_kept reason=not_configured` when it is in range and
+  ignored. The unpinned cost ladder is **unchanged** and still moves to unconfigured unmetered networks.
+  New follow-up for the owner: a network marked unmetered but never added to the list now silently loses the
+  ability to override a pick — visible in the log, but not in the UI (the Priority Networks screen does not
+  show metered state, and the metered control is only usable while connected, §6).
 - **The IPv6 route metric** (§5): LTE's IPv6 route (metric 1000) beats WiFi's kernel-default IPv6 route
   (metric 1024) on every saved profile, so any IPv6-reachable host (mapd's download host, the updater's
   LFS host) is dialed over LTE even while correctly associated to WiFi for IPv4. This is a live,
@@ -793,11 +850,11 @@ with the `peak` captive-portal handler, `network.py:388`).
 | `ABSENT_SCANS_FOR_FRESH_START` | 2 real scans | `system/networkd/network_arbiterd.py:307` |
 | `GPS_MAX_AGE_S` | 10.0 s | `system/networkd/network_arbiterd.py:477` |
 | `HOME_GEOFENCE_M` | 250.0 m | `system/networkd/geo_gate.py:18` |
-| `PIN_JOIN_WINDOW_S` | 90.0 s | `system/networkd/network_arbiter.py:80` |
-| `UPGRADE_SCAN_S` | 120.0 s | `system/networkd/network_arbiter.py:83` |
-| `PIN_HOME_ABSENT_SCANS` | 3 real scans | `system/networkd/network_arbiter.py:194` |
-| `PIN_HOME_FAR_M` | 500.0 m (2× `HOME_GEOFENCE_M`) | `system/networkd/network_arbiter.py:195` |
-| `COST_UNMETERED` / `COST_UNKNOWN` / `COST_METERED` | 0 / 1 / 2 | `system/networkd/network_arbiter.py:523-525` |
+| `PIN_JOIN_WINDOW_S` | 90.0 s | `system/networkd/network_arbiter.py:82` |
+| `UPGRADE_SCAN_S` | 120.0 s | `system/networkd/network_arbiter.py:85` |
+| `PIN_HOME_ABSENT_SCANS` | 3 real scans | `system/networkd/network_arbiter.py:196` |
+| `PIN_HOME_FAR_M` | 500.0 m (2× `HOME_GEOFENCE_M`) | `system/networkd/network_arbiter.py:197` |
+| `COST_UNMETERED` / `COST_UNKNOWN` / `COST_METERED` | 0 / 1 / 2 | `system/networkd/network_arbiter.py:530-532` |
 | `BACKOFF_SCHEDULE_S` (LTE PDN-throttle guard) | (30.0, 120.0, 300.0, 600.0) s | `system/networkd/lte_guard.py:20` |
 | `PORTAL_TIMEOUT_S` | 8 s | `system/networkd/captive_portal.py:58` |
 | `MAX_FORM_HOPS` | 3 | `system/networkd/captive_portal.py:59` |
@@ -856,7 +913,9 @@ with the `peak` captive-portal handler, `network.py:388`).
 | Pin holds during join and after | `test_the_pin_holds_the_radio_DURING_the_join` (`test_network_arbiter_sequences.py`) |
 | Pin ends: failed/dropped/join_timeout/superseded | `test_the_pin_ends_when_the_pinned_network_DROPS_and_the_ladder_resumes`, `test_a_pick_that_never_joins_ends_on_the_join_window`, `test_a_pinned_network_that_FAILS_does_not_hold_the_device_offline`, `test_a_newer_pick_supersedes_the_old_one` (`test_network_arbiter_sequences.py`) |
 | Mobile entry never ends a pin as `home`; a phone in range at the pick does not end it | `test_the_MOBILE_phone_in_range_does_NOT_end_the_pin` (`test_network_arbiter_sequences.py`) |
-| *(pinunmetered2pnw, branch)* An arriving explicitly unmetered network ends a pin on a non-unmetered network; the owner's 2026-09-14 case | `test_TONIGHT_karlmoik_pinned_and_marked_metered_then_the_iPhone_hotspot_turns_on`, `test_the_phone_going_away_and_coming_back_ends_a_METERED_pin_as_unmetered_not_as_home`, `test_a_NON_configured_saved_network_marked_unmetered_ends_it_too` (`test_network_arbiter_sequences.py`); `TestUnmeteredToYieldTo`, `TestArrivalCandidates` (`test_network_manual_pick.py`) |
+| *(pinunmetered2pnw, branch)* An arriving explicitly unmetered network ends a pin on a non-unmetered network; the owner's 2026-09-14 case | `test_TONIGHT_karlmoik_pinned_and_marked_metered_then_the_iPhone_hotspot_turns_on`, `test_the_phone_going_away_and_coming_back_ends_a_METERED_pin_as_unmetered_not_as_home` (`test_network_arbiter_sequences.py`); `TestUnmeteredToYieldTo`, `TestArrivalCandidates` (`test_network_manual_pick.py`) |
+| *(pinconfigured2pnw, branch)* **Only a configured entry ends a pin** — the same network, three times, the list the only difference | `test_a_NON_configured_saved_network_marked_unmetered_does_NOT_end_it_and_the_log_says_why`, `test_the_same_network_CONFIGURED_as_a_MOBILE_entry_ends_it`, `test_the_same_network_CONFIGURED_as_a_STATIONARY_entry_ends_it_as_home`, `test_a_STATIONARY_configured_network_visible_at_the_pick_is_logged_as_such_not_as_unconfigured` (`test_network_arbiter_sequences.py`); `test_a_NON_configured_saved_profile_does_NOT_qualify_and_is_named_as_such`, `test_the_same_network_ends_it_once_it_IS_configured`, `test_a_configured_STATIONARY_entry_qualifies_too`, `test_exactly_the_configured_entries_are_tracked` (`test_network_manual_pick.py`) |
+| *(pinconfigured2pnw, branch)* `reason=not_configured` is reported, never hides a configured network, and only for one that would otherwise qualify | `test_an_unconfigured_network_never_HIDES_a_configured_one`, `test_an_unconfigured_network_is_not_reported_when_nothing_else_would_qualify`, `test_the_first_unconfigured_network_is_named_stably` (`test_network_manual_pick.py`) |
 | *(pinunmetered2pnw, branch)* What does not end it: unmetered pin, `unknown`, backoff, unread pinned cost, no real scan, visible since pick, flicker | `TestWhatDoesNotEndThePin`, `TestAFlappingHotspotDoesNotThrash`, `test_a_pick_made_while_the_iPhone_is_ALREADY_visible_sticks_and_the_log_says_why` (`test_network_arbiter_sequences.py`) |
 | *(pinunmetered2pnw, branch)* Upgrade scans while pinned: 120 s on metered, none on unmetered, none during the join | `TestUpgradeScansWhilePinned` (`test_network_arbiter_sequences.py`) |
 | *(pinunmetered2pnw, branch)* The `home` rule is unchanged | `test_home_still_ends_a_pin_on_the_UNMETERED_phone` + every `TestPinYieldsToHome` / `TestAPickMadeAtHomeSticks` test |
@@ -871,5 +930,7 @@ itself was last touched by `f65fdbdaf9`, `arbiterfu2pnw`). Mirror: `docs/WIFI-NE
 workbench root; canonical copy is this one, on the branch, per the doc-reorganization convention in
 `../CLAUDE.md` / `../../CLAUDE.md`. On branch `pinunmetered2pnw` (NOT shipped) the `network_arbiter.py` /
 `network_arbiterd.py` line citations throughout were re-mapped to that branch's code, and §0, §1, §3, §4, §6,
-§7 and the test index describe the owner's 2026-09-14 "when an unmetered network appears" rule. The root
-mirror is not updated until the branch ships.*
+§7 and the test index describe the owner's 2026-09-14 ~19:45 PT "when an unmetered network appears" rule.
+Branch `pinconfigured2pnw` (2026-09-15, also NOT shipped) re-mapped those citations once more and narrowed
+§0/§3/§4/§6/§7 and the test index to the owner's 2026-09-14 ~21:30 PT "(no just the configued ones)"
+decision. The root mirror is not updated until the branch ships.*

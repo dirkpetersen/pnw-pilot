@@ -1033,18 +1033,22 @@ def main() -> NoReturn:
         # netrank2pnw: a pin gives way only to a home network that has ARRIVED since the pick -- genuinely
         # absent (consecutive real scans, or GPS confidently far) and then back. A pick made while home is
         # visible therefore sticks. See update_home_arrival for what counts as evidence.
-        # pinunmetered2pnw: arrival is tracked for EVERY configured entry and saved profile (arrival_candidates),
+        # pinunmetered2pnw: arrival is tracked for EVERY configured entry, mobile ones included (arrival_candidates),
         # because any explicitly unmetered one can now end a pin; stationary entries keep their GPS evidence.
+        # pinconfigured2pnw: configured entries only -- an unconfigured saved profile cannot end a pin.
         stationary = [e for e in nets if not e.get("mobile")]
-        pin_home_state = update_home_arrival(pin_home_state, arrival_candidates(nets, saved), scan_raw, gps)
+        pin_home_state = update_home_arrival(pin_home_state, arrival_candidates(nets), scan_raw, gps)
         arrived = {k for k, (_m, gone) in pin_home_state.items() if gone}
         home = home_to_yield_to([e["ssid"] for e in stationary], scan_raw, saved, unmetered_ssids, blocked,
                                 pin_ssid, arrived=arrived)
         # pinunmetered2pnw (owner decision 2026-09-14): "when an unmetered network appears !" -- an explicitly
         # unmetered saved network that ARRIVED ends a pin on a network that is not explicitly unmetered. The pinned
         # network's cost is the last one READ (the active link's is read every tick; None = never read).
+        # pinconfigured2pnw (owner decision 2026-09-14 ~21:30 PT): "(no just the configued ones)" -- only a
+        # TetheringPriorityNetworks entry (net_ssids, stationary or mobile) can end it.
         pinned_metered = next((v for k, v in _metered_cache.items() if k.lower() == pin_ssid.lower()), None)
-        unmet = unmetered_to_yield_to(scan_raw, saved, unmetered_ssids, blocked, pin_ssid, pinned_metered, arrived)
+        unmet = unmetered_to_yield_to(scan_raw, saved, net_ssids, unmetered_ssids, blocked, pin_ssid, pinned_metered,
+                                      arrived)
       pv = judge_pin(pin_ssid, pin_first_seen, pin_seen_active,
                      raw_active_ssid if active_read_ok else None,
                      bool(pin_ssid) and verdict.blame.lower() == pin_ssid.lower() and not verdict.blame_ok,
@@ -1065,6 +1069,8 @@ def main() -> NoReturn:
         cloudlog.event("netcosttier_pin_kept", ssid=pin_ssid, by=unmet.kept_by, reason=unmet.kept_why,
                        rule="an unmetered network ends a pin only after it has been out of range since the pick"
                        if unmet.kept_why == "visible_since_pick" else
+                       "only a network in TetheringPriorityNetworks ends a pin; this one is saved and unmetered but not configured"
+                       if unmet.kept_why == "not_configured" else
                        "the pinned network's connection.metered could not be read, so nothing is known to be cheaper")
         pin_kept_logged.add((unmet.kept_by.lower(), unmet.kept_why))
       pinned = bool(pv.pinned_ssid)
