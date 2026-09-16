@@ -4,20 +4,20 @@ Continues [`CHANGELOG-2026-09-14.md`](CHANGELOG-2026-09-14.md). Repos: **pnw-pil
 **pnw-opendbc**. Every change is reviewed by **Fable** (the only reviewer, `docs/CODING-POLICY.md`) before push, then
 installed on the F-150 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked.
 
-**Channel tip:** `origin/3devpnw` = `efaf459124` (gassetwait2pnw).
-**Installed and verified on the truck:** `efaf459124`, 21:10 PT, BootCount 242 — which carries every row below.
-**Seven changes, one reboot each, all verified.** In order: `4f84801a79` pinconfigured2pnw
-(07:56 PT, BootCount 232) · `fa540a8c43` swaglogcap2pnw (08:03, 233) · `6896f85b4f` carrying behindrun2pnw
-`57d79657bc` (confirmed running at 238, booted 18:29) · `974767198b` cesmodehold2pnw A+B (19:04, 239) ·
-`f02d6864e3` athenalogmeter2pnw (19:24, 240) · `c519b70b25` hotspotretry2pnw (21:06, 241).
-`efaf459124` gassetwait2pnw (21:10, 242) — verified at 21:33 PT once the truck appeared on the iPhone hotspot:
-selfdrived/plannerd/ui PIDs unchanged over 25 s, the new constants live in the running tree, and the
-`accelUnknown` ERROR path has never fired. Four tracebacks since boot, all benign and all pre-existing
-categories: 2 athenad websocket retries, 1 soundd `assert stream.active` at startup, 1 uploader
-`upload_failed` (INFO, a transient during the KarlMoik → hotspot switch). **Trap worth recording:** grepping
-the swaglogs for `gassetwait2pnw` returns 3 hits that are the **updater echoing the commit message**, not the
-feature's own log line — the same trap that made a `ces_mode` grep look alive earlier tonight. Check the
-daemon field, never the bare count.
+**Channel tip:** `origin/3devpnw` = `341e1ee132` (onoffgas2pnw) + docs on top.
+**Installed and verified on the truck:** `341e1ee132`, 2026-09-16 02:03 PT, BootCount 243 — carries every row
+below. **Nine changes across the session, verified one reboot each except the last two** (see the note in the
+gas-set section for why that pairing keeps attribution). In order:
+`4f84801a79` pinconfigured2pnw (09-15 07:56 PT, BootCount 232) · `fa540a8c43` swaglogcap2pnw (08:03, 233) ·
+`6896f85b4f` carrying behindrun2pnw `57d79657bc` (running at 238, booted 18:29) · `974767198b`
+cesmodehold2pnw A+B (19:04, 239) · `f02d6864e3` athenalogmeter2pnw (19:24, 240) · `c519b70b25`
+hotspotretry2pnw (21:06, 241) · `efaf459124` gassetwait2pnw (21:10, 242) · `0394808579` gassettel2pnw +
+`341e1ee132` onoffgas2pnw (09-16 02:03, 243).
+
+**A grep trap worth keeping.** Searching the device swaglogs for a feature name — `gassetwait2pnw`,
+`onoffgas2pnw`, `ces_mode` — returns hits that are the **`updated` daemon echoing the commit message**, not
+the feature logging anything. It read as "the feature is alive" twice tonight before the daemon field was
+checked. Check the daemon, never the bare count.
 
 ## ✅ The map re-download leak is closed
 
