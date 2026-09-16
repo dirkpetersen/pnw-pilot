@@ -68,6 +68,34 @@ and every combination latches `postResumeBrake`; at some phases a 20–40 ms par
 mid-press abort. No such episode exists in the corpus (of 5 on-power lift-offs, 0 braked within 3 s), so this is
 unmeasured rather than measured-safe.
 
+## Speed control — the first drive on the new wait, and what it uncovered
+
+The owner drove at 21:45–21:53 PT, ~35 minutes after `gassetwait2pnw` went on. Full analysis:
+`drives/2026-09-15/gassetwait-first-drive/DRIVE_REPORT.md`.
+
+**The half second works.** Two gas-sets, both `waitWhy=onPower`, both fired at **0.50 / 0.51 s** after
+lift-off (not the 0.76 s the un-anchored decel window would have given), both verified `ok`. The delivered
+set speed came back **29.0 mph against a 28.6 mph lift-off** and **34.0 against 33.2** — i.e. *above* the
+driver's speed, where the 1.0 s wait had been losing 0.62–0.88 mph. Owner: *"the half second really made a
+difference."* This also closes the tap-back-up idea for good: the residual is below one 1 mph tap and now
+falls on the generous side.
+
+| Commit(s) | What changed | Notes |
+|---|---|---|
+| `0394808579` **gassettel2pnw** (installed 09-16 02:03 PT, BootCount 243) | Gas-set records gain **`vLift`** (v_ego latched on the lift-off frame — the speed the driver chose) and **`vGasMax`** (the press peak, tracked for the creep rule and never emitted). Both null, never 0.0, when unreadable; gas-set records only. | Why: the delivered shortfall is `vLift` minus the verify record's set speed, and `vLift` was nowhere in the log — every past measurement was a qlog reconstruction, which is what held the analysis to n=5 of 317 segments. Fable SHIP, no defects: pure telemetry proven by enumerating all four sites of the new state; and because selfdrived runs `mads.update` before the brain, the **verify record itself carries `vLift`**, so the shortfall is a one-record subtraction. Filter on the record's `unit` — "unknown" means carstate assumed mph. 10/10 mutants (two were Fable's own, which survived its pass and are now killed). |
+| `341e1ee132` **onoffgas2pnw** (installed 09-16 02:03 PT, BootCount 243) | **Owner report:** *"at the 3rd or 4th crossing it completely disengages — so even the lateral control disengages."* **Root cause:** the wheel's ACC ON/OFF button. On one frame `lateral_only` went True→False together with `cruiseOffRequested`, with `btn=['mainCruise']`, `gas=True`, 25 mph, `steerOverride` active — the only such press in the 3-minute log. openpilot sent **zero** 0x083 frames in that window, so it came from the wheel, not our own SET spoof. The owner's own 09-07 rule then turned everything off in one press. **Fix (owner decision):** the press is ignored while the accelerator is down. | Fable SHIP-WITH-FIX — the fix was **disclosure, not code**, and it matters: `gasPressed` is *any* pedal travel (`>1e-6`), and with One-Pedal Drive the foot lives on the pedal, so **59 % of steering-only time on that very drive had the accelerator down** (1122/1915 frames). One-press-off now needs the foot fully lifted. Second disclosed effect: we stop *latching* the press, not sending it, so when the truck answers it by engaging (~half the time) openpilot now engages along at the stale set speed. Owner re-confirmed with the 59 % in hand. Safety: overpowering the wheel, the brake, shifting out of drive, lift-and-press and the UI toggle are all untouched. 1704 tests, 7/7 mutants. |
+
+**Both installed on one reboot** (BootCount 243), against the usual one-change-per-reboot discipline. Stated
+rather than glossed: `gassettel2pnw` is pure telemetry that Fable proved cannot change behaviour, so a
+failure would still be attributable to `onoffgas2pnw`. Verified after the reboot: one selfdrived process and
+it is stable, plannerd/ui PIDs unchanged over 25 s, both changes present in the running tree, and the only
+tracebacks are the known benign trio (athenad websocket, soundd boot assert, one uploader retry).
+
+**Two corrections made to the drive report**, both from following the evidence rather than the first read:
+its §2 originally said lateral had NOT disengaged — wrong, the owner's account was right, proven by replaying
+the recorded rlog through the real brain on the device; and the "180 ms cruise-before-brake" theory is
+withdrawn (a real observation, but at a different crossing, and not the cause here).
+
 ## In progress
 
 - **The felt 5 mph sag is still open.** It is the PCM's own regen→ACC torque hand-off: after cruise engages the
