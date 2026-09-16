@@ -143,6 +143,42 @@ def has_blocking_event(events: Events) -> bool:
   return False
 
 
+def off_request_latches(main_press: bool, lateral_only: bool, gas_pressed: bool) -> bool:
+  """PURE. Should a wheel ACC ON/OFF press latch the "turn everything off" request?
+
+  The driver's rule (2026-09-07): while MADS is steering with cruise off, ONE press of the wheel's ON/OFF
+  button turns everything off -- cruise and steering together. `lateral_only` is what names that state; a
+  press outside it is the truck's own business and was never latched.
+
+  onoffgas2pnw (OWNER DECISION 2026-09-15): NOT while the accelerator is down. On the 09-15 21:52 drive the
+  driver was accelerating away from a crossing at 25 mph, hands on the wheel, when the truck reported a
+  single mainCruise press -- openpilot sent no 0x083 frames in that window, so it came from the wheel. The
+  off-request latched and MADS dropped lateral on the same frame: "at the 3rd or 4th crossing it completely
+  disengages and I don't understand why" (drives/2026-09-15/gassetwait-first-drive/). Gripping the wheel
+  mid-acceleration is exactly where a thumb finds that button, and a deliberate "everything off" is never so
+  urgent it cannot wait for a lift -- while accelerating away from a crossing is the one moment the driver
+  has explicitly said they want the system to hold on.
+
+  SCOPE, AND IT IS WIDER THAN "ACCELERATING" (Fable review 2026-09-15, D1). On the Lightning `gasPressed` is
+  `ApedPos_Pc_ActlArb/100 > 1e-6` (ford/carstate.py:93) -- ANY pedal travel, not "on the power". With
+  One-Pedal Drive the foot lives on that pedal, so this is not a rare state: measured on the 09-15 21:45
+  drive, **59 % of steering-only time had the accelerator down** (1122 of 1915 frames). The one-press-off
+  rule therefore now needs the foot FULLY lifted, and is ignored for most of the time the driver spends in
+  steering-only. That is the trade the owner accepted; it is not a corner case.
+
+  SECOND CONSEQUENCE (Fable D2): the press is still sent to the truck -- we only stop LATCHING it. The truck
+  answers an ON/OFF press from Standby by ENGAGING roughly half the time (measured, 2026-09-07). Previously
+  the latch made openpilot refuse and controlsd cancelled that engagement; now, with the pedal down,
+  openpilot will engage along with it at the truck's stale set speed. Mild, and the resume brain's 1.0 s
+  driver-button holdoff is the only interaction, but it is a real behaviour change.
+
+  Deliberately NOT a fingerprint check: any car whose wheel reports mainCruise gets the same rule (Ford,
+  Honda, GM; the Tesla never produces one). Every other way to stop the system is untouched -- overpowering
+  the wheel, the brake, shifting out of drive, the same press with the foot lifted, the UI toggle.
+  """
+  return bool(main_press) and bool(lateral_only) and not bool(gas_pressed)
+
+
 class MadsPnw:
   """The lateral-authority state machine. Pure: no params, no sockets, no clock."""
 

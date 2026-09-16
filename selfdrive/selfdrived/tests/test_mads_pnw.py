@@ -978,16 +978,24 @@ class TestBrakeArrivesLate:
 
     selfdrived needs cereal to import, which is not built on the dev host, so this pins the gate by
     reading the source -- the same technique test_capture_age_bound uses for MADS_BRAKE_GRACE_FRAMES.
+
+    NARROWED 2026-09-15 by onoffgas2pnw: the condition moved out of selfdrived into the pure predicate
+    `mads_pnw.off_request_latches`, so the gate is now a real testable function rather than a source regex
+    (see test_onoffgas_pnw.py, which pins the whole truth table including this regression's case:
+    `off_request_latches(main_press=True, lateral_only=False, ...) is False`). What is still pinned HERE is
+    the wiring -- that selfdrived passes the STEERING-ONLY state into it, and nothing else sets the latch.
     """
     import pathlib
     import re
     src = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
-    m = re.search(r"^\s*if (.+?) and any\(be\.pressed and be\.type == ButtonType\.mainCruise",
-                  src, re.M)
+    m = re.search(r"^\s*if off_request_latches\((.+?)\):", src, re.M)
     assert m, "could not find the ON/OFF press latch in selfdrived.py"
     gate = m.group(1)
     msg = f"ON/OFF latch must be gated on the STEERING-ONLY state, got `{gate}`"
     assert "lateral_only" in gate, msg
+    assert "self.enabled" not in gate, f"the 2026-09-07 regression gate is back: `{gate}`"
+    assert src.count("self.off_request_t = self.sm.frame * DT_CTRL") == 1, \
+      "exactly one place may set the off-request latch"
 
   def test_cancel_button_without_brake_never_arms(self):
     """A cancel-button disengage has no brake: the window must expire and stay off."""

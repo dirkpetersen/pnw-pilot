@@ -22,7 +22,9 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
 from openpilot.selfdrive.selfdrived.state import StateMachine
-from openpilot.selfdrive.selfdrived.mads_pnw import MadsPnw, has_blocking_event, MADS_BRAKE_GRACE_FRAMES  # madsop2pnw: parallel lateral authority
+# madsop2pnw: parallel lateral authority
+from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_latches,
+                                                     MADS_BRAKE_GRACE_FRAMES)
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
@@ -316,8 +318,24 @@ class SelfdriveD:
     # about; `lateral_only` names it exactly. Read from the previous frame (mads.update runs later
     # in this tick), which is correct: the steering-only state persists across frames, and using
     # this frame's value would need an ordering change for no benefit.
-    if self.mads.lateral_only and any(be.pressed and be.type == ButtonType.mainCruise for be in CS.buttonEvents):
+    #
+    # onoffgas2pnw (OWNER DECISION 2026-09-15, after the drive below): the press is IGNORED while the
+    # driver is on the accelerator. Evidence -- drives/2026-09-15/gassetwait-first-drive/: accelerating
+    # away from a crossing at 25 mph with `steerOverride` active, the truck reported ONE mainCruise press
+    # (Steering_Data_FD1 0x083 `CcButtnOnOffPress`; openpilot sent ZERO 0x083 frames in that window, so it
+    # was the wheel, not our own SET spoof). That latched the off-request and MADS dropped lateral on the
+    # same frame, which the driver experienced as "at the 3rd or 4th crossing it completely disengages and
+    # I don't understand why". Gripping the wheel mid-acceleration is exactly where a thumb finds that
+    # button, and a DELIBERATE "turn it all off" is never so urgent that it cannot wait for a lift -- while
+    # the one moment the driver has said they want the system to hold on is the acceleration away from a
+    # crossing. The rule itself is unchanged everywhere else.
+    main_press = any(be.pressed and be.type == ButtonType.mainCruise for be in CS.buttonEvents)
+    if off_request_latches(main_press, self.mads.lateral_only, CS.gasPressed):
       self.off_request_t = self.sm.frame * DT_CTRL
+    elif main_press and self.mads.lateral_only:
+      # Rule 2: a press that is deliberately not acted on must SAY so. Without this a driver who DID mean it
+      # sees nothing happen with no way to tell a swallowed press from a missed one.
+      cloudlog.warning("onoffgas2pnw: ACC ON/OFF press IGNORED, accelerator is down (v_ego=%.1f m/s) -- lift off and press again", CS.vEgo)
     # An ENGAGE press cancels the off-request outright (Gemini review 2026-09-07, finding B). The
     # driver may press OFF and change their mind a second later; without this the latch would still
     # be standing, openpilot would refuse, and controlsd's cancel rule would kill the engagement
