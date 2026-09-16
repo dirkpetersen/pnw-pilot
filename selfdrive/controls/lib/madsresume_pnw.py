@@ -554,6 +554,8 @@ class MadsResumeBrain:
     self._gas_a0 = float("nan")
     self._gas_wait_s = GAS_SET_RELEASE_MIN_S
     self._gas_wait_why = "slowing"
+    # gassettel2pnw: v_ego latched on the same lift-off tick -- the speed the driver chose.
+    self._gas_v_lift = float("nan")
     # when our own resume last fired, for the post-resume rejection check
     self._fired_t: float | None = None
     # cruise_enabled edge detector, for clearing the opt-out. THREE-STATE like _lat_prev.
@@ -628,6 +630,13 @@ class MadsResumeBrain:
         "a0": round(self._gas_a0, 2) if _finite(self._gas_a0) else None,
         "waitS": round(self._gas_wait_s, 2),
         "waitWhy": self._gas_wait_why,
+        # gassettel2pnw. `vLift` is v_ego on the lift-off frame -- the speed the driver chose, and the
+        # left-hand side of the delivered shortfall (vLift - the verify record's gotMs). `vGasMax` is the
+        # peak reached during the press, already tracked for the creep rule and never emitted: the two
+        # differ when the driver eased off before lifting, which is exactly when a shortfall reads oddly.
+        # Both null rather than 0.0 when unreadable -- a real 0 and a failed read must not look alike.
+        "vLift": round(self._gas_v_lift, 2) if _finite(self._gas_v_lift) else None,
+        "vGasMax": round(self._gas_v_max, 2) if self._gas_v_max > 0.0 else None,
       })
     if extra:
       rec.update(extra)
@@ -649,6 +658,7 @@ class MadsResumeBrain:
     self._gas_a0 = float("nan")
     self._gas_wait_s = GAS_SET_RELEASE_MIN_S
     self._gas_wait_why = "slowing"
+    self._gas_v_lift = float("nan")
     self._fired_mode = None
     self._armed_set = None
     self._armed_set_age = 0.0
@@ -1042,6 +1052,11 @@ class MadsResumeBrain:
       # and a live read would call every lift-off "slowing", which is the bug this replaces.
       self._gas_a0 = float(i.a_ego) if _finite(i.a_ego) else float("nan")
       self._gas_wait_s, self._gas_wait_why = gas_set_wait_s(self._gas_a0)
+      # gassettel2pnw: the speed the driver actually chose. THE number the whole feature is judged by --
+      # the delivered shortfall is this minus the set speed the verify record comes back with -- and until
+      # now it was nowhere in the log, so every measurement of it had to be reconstructed from qlogs. That
+      # reconstruction is what kept the 09-15 sample at n=5.
+      self._gas_v_lift = float(i.v_ego) if _finite(i.v_ego) else float("nan")
       # gassetwait2pnw: anchor the decel estimator's window to THIS instant, for the gas-set path only.
       #
       # Why this is needed and not tidying: `decelUnknown` refuses until a decel window lies entirely
