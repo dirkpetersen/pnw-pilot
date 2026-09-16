@@ -5,8 +5,8 @@ Continues [`CHANGELOG-2026-09-14.md`](CHANGELOG-2026-09-14.md). Repos: **pnw-pil
 installed on the F-150 Lightning's comma 3X on its own reboot while openpilot is disengaged, and health-checked.
 
 **Channel tip:** `origin/3devpnw` = `efaf459124` (gassetwait2pnw).
-**Installed and verified on the truck:** `c519b70b25` (hotspotretry2pnw), 21:06 PT, BootCount 241 — which carries
-every row below except gassetwait2pnw. Tonight's sequence, one reboot each: `4f84801a79` pinconfigured2pnw
+**Installed and verified on the truck:** `efaf459124`, 21:10 PT, BootCount 242 — which carries every row below.
+**Seven changes, one reboot each, all verified.** In order: `4f84801a79` pinconfigured2pnw
 (07:56 PT, BootCount 232) · `fa540a8c43` swaglogcap2pnw (08:03, 233) · `6896f85b4f` carrying behindrun2pnw
 `57d79657bc` (confirmed running at 238, booted 18:29) · `974767198b` cesmodehold2pnw A+B (19:04, 239) ·
 `f02d6864e3` athenalogmeter2pnw (19:24, 240) · `c519b70b25` hotspotretry2pnw (21:06, 241).
