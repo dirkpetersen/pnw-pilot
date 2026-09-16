@@ -88,6 +88,42 @@ RELEASE_MAX_S = 3.0
 # never before one. A lift shorter than this is still the same press (see `_gas_spent`).
 GAS_SET_RELEASE_MIN_S = 1.0
 
+# gassetwait2pnw, OWNER REPORT 2026-09-15 08:45 PT: "once I accelerated and lift the foot of the gas one pedal
+# braking kicks in and the truck brakes for a second and then the cruise control takes over with the then lower
+# speed". The driver's rule, given 2026-09-15 evening: while cruise is on and they have been accelerating on the
+# pedal, LIFTING OFF MEANS "lock in this speed", not "slow down". Everywhere else a lift still means they want to
+# slow, which is what the 1.0 s above protects.
+#
+# Both halves survive because the wait now depends on what the driver was doing AT LIFT-OFF:
+#   a_ego > GAS_SET_ONPOWER_MS2   -> they were on the power  -> 0.5 s
+#   otherwise (incl. unreadable)  -> they were already slowing -> 1.0 s, unchanged
+#
+# Why 0.5 s is enough, from the one clean current-config trace (drives/2026-09-15/gasset-regen-loss/, 09-14
+# 22:01:41.141, route 00000173 seg 3, 10 Hz carState): after lift-off the truck COASTS for the first half second
+# -- at +0.50 s it was still at 30.69 mph against a 30.62 mph lift-off, aEgo +0.07. One-pedal regen only bites
+# between +0.5 and +1.3 s, and by the time the 1.0 s wait expired the truck was 1.01 mph down, so the PCM latched
+# 30 against a 30.62 mph lift-off. Firing at 0.5 s puts the latch back on the speed the driver actually chose.
+#
+# Why the braking case is NOT reopened: the 1.0 s exists for one logged episode (weekend Sat 12:41:50, brake at
+# +0.69 s after lift-off). In that episode the driver had ALREADY been slowing for 5 s before lifting off, so
+# a_ego was negative and this branch keeps the full 1.0 s. The short wait is reachable only from a positive
+# acceleration, which is the opposite situation.
+#
+# Why this threshold -- and READ THE METRIC, because the report's number is not the one this code uses.
+# The report's `a0` (§2) is the MEAN aEgo over the 0.5 s BEFORE lift-off. On that metric the 5 real firings sit
+# in [+0.53, +1.63], none of the 13 lift-offs below -0.2 engaged, and nothing sits between. THIS CODE LATCHES
+# aEgo ON THE LIFT-OFF FRAME, which reads LOWER: the Kalman estimate is already decaying as the foot comes off.
+# Recomputed on the same 317 segments (Fable review 2026-09-15), the frame metric gives: the 5 firings span
+# [+0.12, +1.47], so one of them (09-13 21:16:32, +0.12) takes the LONG wait under +0.5; and two non-firing
+# lift-offs sit at +0.49 / +0.51, so the "-0.2 to +0.5 is empty" property does NOT hold here.
+# +0.5 is therefore NOT the floor of the firing population on the metric that ships -- it is ABOVE it, i.e.
+# conservative in the only direction that matters: a real gas-set can only fall back to today's 1.0 s, never a
+# slowing lift-off forward to 0.5 s. All 4 lift-offs followed by a brake inside 1.0 s had frame aEgo <= -0.16.
+# n=5 cannot carry a threshold on its own; what carries it is that every error direction is today's behaviour.
+# `a0` is in every record, so this can be re-derived on the frame metric once there are more than 5 firings.
+GAS_SET_RELEASE_MIN_ACCEL_S = 0.5
+GAS_SET_ONPOWER_MS2 = 0.5
+
 # How long the offer stays on the wire once every gate has passed. The executor polls the
 # mem-param at 4 Hz and its own freshness limit is 0.5 s, so 1.0 s is comfortably enough for
 # exactly one poll+press while keeping the total exposure short. Re-published every tick and
@@ -325,6 +361,10 @@ class ResumeInputs:
   # carState.cruiseState.speedClusterUnit). TELEMETRY ONLY here: set_speed_ms is already true m/s, because Ford CAN FD
   # carstate converts Veh_V_DsplyCcSet by this unit (pnw-opendbc units2pnw). "unknown" means carstate ASSUMED mph.
   set_speed_unit: str = "unknown"
+  # gassetwait2pnw: carState.aEgo. Read ONCE, on the tick both pedals come up, to decide whether this
+  # lift-off is "on the power" (0.5 s wait) or "already slowing" (1.0 s, today's behaviour). NaN -- the
+  # default, and what a caller that does not supply it gets -- takes the LONG wait. See gas_set_wait_s().
+  a_ego: float = float("nan")
   # onetoggle2pnw: the separate MadsAutoResume toggle is GONE -- "Disengage on brake" governs both
   # halves of the behaviour. This is not a loosening: the arm gate below requires the rising edge of
   # `lateral_only`, and mads_pnw sets
@@ -371,6 +411,23 @@ def _finite(x) -> bool:
     return math.isfinite(float(x))
   except (TypeError, ValueError):
     return False
+
+
+def gas_set_wait_s(a_ego) -> tuple[float, str]:
+  """PURE. gassetwait2pnw: how long the GAS-SET path waits after lift-off, and why.
+
+  `a_ego` is the acceleration sampled on the tick BOTH pedals came up -- the driver's last act before
+  lifting, not a live value. Returns (seconds, why) where `why` is one of "onPower" / "slowing" /
+  "accelUnknown"; `why` is recorded on every madsResume record so the branch taken is never a guess.
+
+  An UNREADABLE acceleration is "slowing" -- the LONG wait. That is the fail-safe direction: it keeps
+  today's behaviour and keeps the brake protection the 1.0 s was earned by. A missing input must never
+  buy the shorter, more permissive wait (CLAUDE.md rule 2: an error is not a negative result)."""
+  if not _finite(a_ego):
+    return GAS_SET_RELEASE_MIN_S, "accelUnknown"
+  if float(a_ego) > GAS_SET_ONPOWER_MS2:
+    return GAS_SET_RELEASE_MIN_ACCEL_S, "onPower"
+  return GAS_SET_RELEASE_MIN_S, "slowing"
 
 
 def lead_gate(has_lead, d_rel, v_lead, v_ego, require_headway: bool = True) -> str | None:
@@ -491,6 +548,12 @@ class MadsResumeBrain:
     # current accelerator press. A press that never reaches V_EGO_MIN_MS before its lift-off is judged is a creep
     # (stop-and-go) and does not use up the first press. Reset by a brake arm (a press that reached it is spent).
     self._gas_v_max = 0.0
+    # gassetwait2pnw: the acceleration latched on the lift-off tick, and the wait it bought. Re-derived on
+    # EVERY lift-off (`_released_t` is cleared by any pedal, so the pair can never outlive its release) and
+    # reset to the LONG wait whenever nothing is in flight, so a stale short wait is unreachable.
+    self._gas_a0 = float("nan")
+    self._gas_wait_s = GAS_SET_RELEASE_MIN_S
+    self._gas_wait_why = "slowing"
     # when our own resume last fired, for the post-resume rejection check
     self._fired_t: float | None = None
     # cruise_enabled edge detector, for clearing the opt-out. THREE-STATE like _lat_prev.
@@ -526,6 +589,7 @@ class MadsResumeBrain:
         ttc = round(float(i.d_rel) / vc, 1) if vc > 0.0 else None
     except (TypeError, ValueError, ZeroDivisionError):
       ttc, hdwy = None, None
+    mode = self._fired_mode if self._fired_mode is not None else ("set" if self._used_gas else "res")
     rec = {
       "vEgo": round(float(i.v_ego), 2) if _finite(i.v_ego) else None,
       "setMs": round(self._armed_set, 2) if self._armed_set is not None else None,
@@ -545,12 +609,26 @@ class MadsResumeBrain:
       "vMax": round(self._v_max, 2) if self._v_max is not None else None,
       "vMaxAgeS": round(i.now - self._v_max_t, 1) if self._v_max is not None else None,
       "supp": bool(self._suppressed),
-      "mode": self._fired_mode if self._fired_mode is not None else ("set" if self._used_gas else "res"),
+      "mode": mode,
       "decel": round(self._decel, 2),
       "decelAgeS": round(i.now - self._decel_from, 2) if self._decel_from else None,
       "sinceFireS": round(i.now - self._fired_t, 2) if self._fired_t is not None else None,
       "gasSpent": bool(self._gas_spent),
     }
+    # gassetwait2pnw: which wait this lift-off got and what bought it. `a0` is the latched lift-off
+    # acceleration (null = it could not be read, which is itself the reason for `waitWhy`). Without these
+    # three a short-wait fire and a long-wait fire are indistinguishable in the log.
+    #
+    # GAS-SET RECORDS ONLY (Fable review 2026-09-15, D2). A resume waits RELEASE_MIN_S and is not governed
+    # by any of this, so stamping it with a `waitS` it did not use would be a false record -- and the
+    # `accelUnknown` line selfdrived logs off `waitWhy` would then claim "kept the 1.0 s wait" about a
+    # resume that waited 0.5 s. An absent field cannot lie; a wrong one can.
+    if mode == "set":
+      rec.update({
+        "a0": round(self._gas_a0, 2) if _finite(self._gas_a0) else None,
+        "waitS": round(self._gas_wait_s, 2),
+        "waitWhy": self._gas_wait_why,
+      })
     if extra:
       rec.update(extra)
     return rec
@@ -565,6 +643,12 @@ class MadsResumeBrain:
   def _disarm(self) -> None:
     self._armed = False
     self._used_gas = False
+    # gassetwait2pnw: back to the long wait. `_released_t` is cleared below too, so the next lift-off
+    # re-latches both before either is read -- this is belt-and-braces against a future path that
+    # reads the wait without a release in flight.
+    self._gas_a0 = float("nan")
+    self._gas_wait_s = GAS_SET_RELEASE_MIN_S
+    self._gas_wait_why = "slowing"
     self._fired_mode = None
     self._armed_set = None
     self._armed_set_age = 0.0
@@ -953,11 +1037,36 @@ class MadsResumeBrain:
       return out
     if self._released_t is None:
       self._released_t = i.now
+      # gassetwait2pnw: this is the lift-off tick -- the first frame with BOTH pedals up. Latch the
+      # driver's acceleration HERE and never re-read it: half a second later regen has already bitten
+      # and a live read would call every lift-off "slowing", which is the bug this replaces.
+      self._gas_a0 = float(i.a_ego) if _finite(i.a_ego) else float("nan")
+      self._gas_wait_s, self._gas_wait_why = gas_set_wait_s(self._gas_a0)
+      # gassetwait2pnw: anchor the decel estimator's window to THIS instant, for the gas-set path only.
+      #
+      # Why this is needed and not tidying: `decelUnknown` refuses until a decel window lies entirely
+      # after lift-off, and the estimator resamples on its own free-running DECEL_WINDOW_S cadence,
+      # unaligned to the driver -- so the first qualifying window closes anywhere in
+      # [lift + 0.4, lift + 0.8). At the 1.0 s wait that always closed first and the gate never bound
+      # (see DECEL_WINDOW_S's own note, Fable 2026-09-07 E4). At 0.5 s it becomes THE binding gate on
+      # every single gas-set, and the fire would jitter across [0.5, 0.8) depending only on where the
+      # estimator's phase happened to sit. Measured before this line: 0.76 s against a 0.5 s wait.
+      #
+      # Anchoring makes the first post-lift window close at lift + 0.4 s, deterministically, and it is
+      # strictly closer to what the gate asks for -- the window is now exactly [lift, lift + 0.4]
+      # instead of one that merely happens to start after lift-off. `_decel_from` then equals
+      # `_released_t`, which passes the gate's `<` check, and the fire record's `decel` becomes exactly
+      # the post-lift regen the decision was made on.
+      #
+      # RESUME is deliberately NOT anchored: RELEASE_MIN_S has always lived with this jitter, changing
+      # it is not what the owner asked for, and a resume commands acceleration where a SET does not.
+      if self._used_gas and _finite(i.v_ego):
+        self._v_ref, self._v_ref_t = float(i.v_ego), i.now
       self._last_block = "settling"
       return out
 
     since = i.now - self._released_t
-    if self._used_gas and since >= GAS_SET_RELEASE_MIN_S:
+    if self._used_gas and since >= self._gas_wait_s:
       # first press only: this press's lift-off is judged from here on -- unless it was only a creep
       if self._gas_v_max >= V_EGO_MIN_MS:
         self._gas_spent = True
@@ -986,7 +1095,7 @@ class MadsResumeBrain:
       return out
 
     # --- gate 3: the bounded window ------------------------------------------------------------
-    if since < (GAS_SET_RELEASE_MIN_S if self._used_gas else RELEASE_MIN_S):
+    if since < (self._gas_wait_s if self._used_gas else RELEASE_MIN_S):
       self._last_block = "settling"
       return out
     if since > RELEASE_MAX_S:

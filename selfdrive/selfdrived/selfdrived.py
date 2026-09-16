@@ -855,6 +855,9 @@ class SelfdriveD:
         # without the field reads unknown)
         set_speed_unit=speed_unit_name(getattr(CS.cruiseState, "speedClusterUnit", None)),
         v_ego=float(CS.vEgo),
+        # gassetwait2pnw: sampled every tick, but the brain LATCHES it on the lift-off frame only -- it
+        # decides whether that lift-off was "on the power" (0.5 s wait) or "already slowing" (1.0 s).
+        a_ego=float(CS.aEgo),
         standstill=bool(CS.standstill),
         driver_cruise_button=any(be.pressed and be.type in (ButtonType.accelCruise, ButtonType.decelCruise,
                                                              ButtonType.resumeCruise, ButtonType.setCruise,
@@ -919,6 +922,11 @@ class SelfdriveD:
           # ASSUMED mph, so the verify compared on that assumption. Flagged by the brain once per change to unknown.
           cloudlog.warning("madsresume2pnw: verify compared set speeds with the cluster unit NOT established -- carstate " +
                            "ASSUMED mph; the carstate units2pnw log line has MetricActv_B_Actl (record: %s)", rec)
+        if rec.get("waitWhy") == "accelUnknown" and rec.get("phase") in ("fire", "refuse"):
+          # gassetwait2pnw (Rule 2): carState.aEgo was not finite on the lift-off frame, so the brain could
+          # not tell "on the power" from "already slowing" and fell back to the LONG 1.0 s wait. That is the
+          # safe direction, not a silent one -- the driver simply keeps today's behaviour, and this says why.
+          cloudlog.error("gassetwait2pnw: aEgo unreadable at lift-off -- kept the 1.0 s wait (record: %s)", rec)
         if rec.get("loud"):
           cloudlog.error("madsresume2pnw: cruise resumed to %.2f m/s, ABOVE the driver's captured set speed %.2f m/s -- investigate (record: %s)",
                          rec.get("gotMs", 0.0), rec.get("wantMs", 0.0), rec)
