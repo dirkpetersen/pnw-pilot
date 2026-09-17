@@ -146,10 +146,30 @@ tripwire that cannot trip is not a tripwire.
 | `speedadjustreset2pnw` | 1 | 249 | real, a month old |
 | `uicpu2pnw` | 6 (4 docs) | 375 | real, two months old |
 
-**All six carry a stale `opendbc_repo` pin**, and none of the four live ones can be merged as-is — each is
-64–375 channel commits behind, so merging would revert shipped work exactly as `pscmlimlog2pnw` would have.
-They need **re-porting onto the current channel, one commit at a time**. That is work, not a push, which is
-why "ship everything" does not reach them.
+> ⚠️ **The table above counted the wrong thing, and it is corrected here the same day.** "Commits not on the
+> channel" over-counts: a commit can be absent while its CONTENT is present, because the work was re-ported or
+> rebased and shipped under a different SHA. Re-audited by diffing the actual FILES against `origin/3devpnw`:
+>
+> | branch | first verdict | truth |
+> |---|---|---|
+> | `redlight-stop2pnw` | "real, a month old" | ✅ **SHIPPED** — `drive_helpers.py` byte-identical to the channel |
+> | `speedadjustreset2pnw` | "real, a month old" | ✅ **SHIPPED** — all three parts, incl. the on-device-confirmed `_cur_speed` AttributeError crash fix |
+> | `uicpu2pnw` | "real, two months old" | ✅ **SHIPPED** — `_fast_param_time`/`_record_audio_param` live in `ui_state.py` |
+> | `mapdlog2pnw` | not audited | ✅ superseded by `mapdlogmgr2pnw` — see below |
+> | `madsbrakerace2pnw-blocked` | not audited | ✅ **SHIPPED** — `MADS_BRAKE_GRACE_FRAMES = 45` (branch had 50, tuned in review) |
+> | `lcabort2pnw` | "real, held by the owner" | ✅ correct — the **only** branch with unshipped content (17 lines in `desire_helper.py`) |
+>
+> So there is exactly ONE branch left with unshipped work and it is owner-held. Nothing needs re-porting.
+> All of them still carry a stale `opendbc_repo` pin and still must not be merged.
+
+🔪 **`mapdlog2pnw` is the sharpest example of why "ahead of the channel" means nothing.** Its one commit adds
+a `cloudlog.warning()` inside `installer.py` — an approach later MEASURED NOT TO WORK: the installer is a
+subprocess that exits in milliseconds, before `logmessaged` is up, and swaglog's socket lingers only 10 ms,
+so its cloudlog lines are dropped at boot (on-truck 2026-09-13: override active, pin ignored, **zero**
+warning lines). The channel instead has `mapdlogmgr2pnw`, where **manager logs it itself** via
+`present_status()` — a function the branch does not contain while the channel's `manager.py:147` imports it.
+Merging it would replace a working fix with one proven not to work, and risk an ImportError in manager at
+boot.
 
 ## In flight
 
