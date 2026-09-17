@@ -163,8 +163,13 @@ def check_writers(rep):
 # a real one (mapLat on the map ticks, drowned by the far larger no-candidate population).
 CONDITIONAL = {
   "dqWhy":  (lambda r: r.get("dq") is True, "records whose second was disqualified"),
-  "mapLat": (lambda r: bool(r.get("mapDist")), "records with a map candidate"),
-  "mapLon": (lambda r: bool(r.get("mapDist")), "records with a map candidate"),
+  # Keyed on the ICBM source, not on mapDist (Fable 2026-09-16). mapDist is CES's own 10 s candidate:
+  # on a far-source record it is 0.0 while coordinates legitimately exist, so this used to report
+  # "no map candidate -- nothing to expect" on exactly the drives section 3.4 cares about.
+  "mapLat": (lambda r: r.get("icbmSrc") in ("map", "far") or bool(r.get("mapDist")),
+             "records with a map candidate"),
+  "mapLon": (lambda r: r.get("icbmSrc") in ("map", "far") or bool(r.get("mapDist")),
+             "records with a map candidate"),
 }
 
 

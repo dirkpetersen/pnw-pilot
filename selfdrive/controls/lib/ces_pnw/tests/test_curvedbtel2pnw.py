@@ -34,8 +34,24 @@ from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import Fa
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_ces_mode_read_failure_logged import (
   LIGHTNING, MPH, TESLA, _P,
 )
+# The _icbm_step stub pattern, reused rather than re-grown: the two tests that need a vis/restore
+# source cannot get one out of _drive (its truck never moves, so no episode ever clears).
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_icbm_mapfirst import (
+  _icbm_stub, _pt_north, _run, _sig,
+)
 
 NS = types.SimpleNamespace
+
+
+def _icbm_stub_at(monkeypatch, tmp_path, targets=None, dist=300.0, map_v=8.0):
+  """An _icbm_step stub sitting at LAT0/LON0 with (by default) a binding far candidate ~300 m north."""
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "absent.json"))
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "absent-rain.json"))
+  mgr, step = _icbm_stub()
+  mgr._cur_lat, mgr._cur_lon = LAT0, LON0
+  mgr._map_targets = ([_pt_north(LAT0, LON0, d, map_v) for d in (dist, dist + 40.0)]
+                      if targets is None else targets)
+  return mgr, step
 
 
 # =====================================================================================================
@@ -532,10 +548,23 @@ class TestOnTheRealCallPath:
       assert r["mapCandD"] > 250.0, f"mapCandD {r['mapCandD']} is inside CES's own horizon"
       d = m._haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"])
       assert abs(d - r["mapCandD"]) <= 30.0, f"coordinates {d:.0f} m out vs mapCandD {r['mapCandD']:.0f} m"
+      # THE check, and the one the first version of this test did not make (Fable, round 2). The two
+      # assertions above are both measured against mapCandD, so they pass together even when the
+      # logged node is the WRONG one -- which is exactly what happened: ICBM measures src_dist from
+      # its PROJECTED position (here 32 m behind the fix, gpsAge 0.3), so re-matching 332 m against
+      # the raw fix returned the node at 339 m instead of the arc start `_scene` puts at 300 m.
+      # Pin the ABSOLUTE position of the candidate, which no origin mix-up can satisfy by accident.
+      assert m._haversine_m(LAT0, LON0, r["mapLat"], r["mapLon"]) == pytest.approx(300.0, abs=2.0), \
+        "the logged node is not the one ICBM bound to -- the distance was matched from the wrong origin"
 
   def test_a_source_with_no_map_point_logs_no_candidate_distance(self, monkeypatch, tmp_path):
     """The negative control: _icbm_cand_d must be None for every non-map source, or mapLat/mapLon
-    would be resolved at a vision/restore distance and land on a map point by coincidence."""
+    would be resolved at a vision/restore distance and land on a map point by coincidence.
+
+    ⚠️ This drive only ever produces `far` and `None` records -- the harness truck's GPS does not
+    move, so no episode can clear and no vis/gpsHold/restore record exists. It is therefore NOT
+    sufficient on its own (Fable, round 2: mutating the latch condition to `is not None` survived
+    it). The two tests below cover the sources it cannot reach."""
     recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", False, yaw_of=lambda i: 0.02,
                   cmd_of=lambda i: 0.0, curve_at=300.0, curve_v=8.0)
     assert any(r.get("icbmSrc") not in ("map", "far") for r in recs), "no non-map record to check"
@@ -543,6 +572,49 @@ class TestOnTheRealCallPath:
       if r.get("icbmSrc") not in ("map", "far"):
         assert r.get("mapCandD") in (None, r.get("mapDist") or None), \
           f"icbmSrc={r.get('icbmSrc')} carried a map candidate distance {r.get('mapCandD')}"
+
+  def test_a_VISION_tick_carries_no_candidate(self, monkeypatch, tmp_path):
+    """Pins the latch CONDITION. `src_dist` is a real number for a vision source too (it is
+    vis_dist), so latching on "is the source set" rather than "is the source a map point" attaches a
+    polyline node to a record whose candidate never came from the polyline. The drive harness cannot
+    reach this: its truck never moves, so no episode clears and every record is far/None."""
+    mgr, step = _icbm_stub_at(monkeypatch, tmp_path, targets=[])       # map blind; only vision
+    _run(mgr, step, _sig(29.0, 29.0, vis_lat=3.474, ttc=4.0))
+    assert mgr._icbm_src == "vis", f"expected a vision-sourced tick, got {mgr._icbm_src}"
+    assert mgr._icbm_cand_d is None and mgr._icbm_cand_pt == (None, None)
+
+  def test_a_RESTORE_tick_carries_no_candidate_even_though_the_map_one_was_binding(self, monkeypatch, tmp_path):
+    """Pins the latch POSITION. During a restore the source label is "restore" and nothing is being
+    approached, but `src_dist` still holds the map distance from the decision earlier in the SAME
+    tick -- so latching before the relabel attaches a real node to a record that is giving speed
+    back. Also unreachable from the drive harness."""
+    mgr, step = _icbm_stub_at(monkeypatch, tmp_path)
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert mgr._icbm_src in ("map", "far") and mgr._icbm_cand_d is not None, \
+      f"no map candidate bound (src={mgr._icbm_src}) -- this test would prove nothing"
+    monkeypatch.setattr(mgr._icbm_ep, "step", lambda *a, **k: (20.0, "inc"))
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert mgr._icbm_src == "restore"
+    assert mgr._icbm_cand_d is None and mgr._icbm_cand_pt == (None, None)
+
+  def test_a_tick_that_BLEW_UP_does_not_leave_the_previous_candidate_behind(self, monkeypatch, tmp_path):
+    """Why the latch is also CLEARED at the top of the tick. _icbm_step swallows (loudly) into its
+    own except, so a raise between the clear and the latch would otherwise pair THIS tick's icbmSrc
+    with the PREVIOUS publish's coordinates -- a confidently wrong position, which is worse than the
+    null this whole feature replaced."""
+    mgr, step = _icbm_stub_at(monkeypatch, tmp_path)
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert mgr._icbm_cand_d is not None, "no candidate latched -- this test would prove nothing"
+    said = []
+    monkeypatch.setattr(m.cloudlog, "exception", lambda msg, *a, **k: said.append(msg))
+
+    def boom(*a, **k):
+      raise RuntimeError("far scanner down")
+    monkeypatch.setattr(m, "icbm_far_map_candidate", boom)
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert said, "Rule 2: the failure must be loud"
+    assert mgr._icbm_cand_d is None and mgr._icbm_cand_pt == (None, None), \
+      "the previous tick's candidate survived a failed tick"
 
   def test_a_broken_accumulator_is_logged_and_never_reaches_the_control_loop(self, monkeypatch, tmp_path):
     """Rule 2. A silently dead accumulator is the visK failure; kPeakN going to 0 in the record and
@@ -615,7 +687,11 @@ class TestTheCheckerItself:
     correct record was either skipped or failed; measured against mapCandD it passes."""
     cand = _pt(400.0)
     d = round(m._haversine_m(LAT0, LON0, cand["latitude"], cand["longitude"]), 0)
-    rows = [_good_row(i, icbmSrc="far", mapDist=0.0, mapCandD=d,
+    # mapDist 150, NOT 0: the record names a DIFFERENT, nearer curve that CES can see, which is the
+    # real shape of this case. With mapDist 0 the old I3's `and r.get("mapDist")` filter drops the
+    # row and the check SKIPs, so this test passed against the old checker too and proved nothing
+    # (Fable, round 2).
+    rows = [_good_row(i, icbmSrc="far", mapDist=150.0, mapCandD=d,
                       mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
     assert _run_check(_corpus(tmp_path, rows)) == 0
 
@@ -629,8 +705,11 @@ class TestTheCheckerItself:
 
   def test_coordinates_with_no_distance_to_check_them_against_are_caught(self, tmp_path):
     """Rule 2 (I3c): dropping the un-checkable records would shrink n silently and still print PASS.
-    This is exactly how the old I3 hid every far-candidate record -- `and r.get("mapDist")`."""
-    rows = [_good_row(i, mapCandD=None) for i in range(60)]
+    This is exactly how the old I3 hid every far-candidate record -- `and r.get("mapDist")`.
+
+    ONE orphan among 59 good rows, deliberately: nulling all 60 makes the field ALWAYS-NULL, the
+    presence check fails first, and I3c is never the deciding check (Fable, round 2)."""
+    rows = [_good_row(i) for i in range(59)] + [_good_row(59, mapCandD=None)]
     assert _run_check(_corpus(tmp_path, rows)) == 1
 
   def test_a_peak_that_under_reads_the_instantaneous_sample_is_caught(self, tmp_path):
