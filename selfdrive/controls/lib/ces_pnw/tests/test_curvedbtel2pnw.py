@@ -750,6 +750,27 @@ class TestTheCheckerItself:
     rows = [_good_row(i, mapLat=LAT0, mapLon=LON0) for i in range(60)]
     assert _run_check(_corpus(tmp_path, rows)) == 1
 
+  def test_a_truck_driving_OVER_a_map_node_is_not_a_defect(self, tmp_path):
+    """I3b's false positive, found on the first real corpus (2026-09-17).
+
+    The truck passes directly over map nodes constantly. One record in 46 minutes had mapDist 1.0 m
+    with the node resolved 0.71 m away -- correct, and I3b failed it for being close. As originally
+    written this check would have gone red on essentially every drive, and an acceptance gate that
+    always fails is one a human learns to ignore -- a worse failure than not having the gate.
+
+    The arbiter is `mapDist`, CES's own INDEPENDENT distance: on the truck while mapDist says metres
+    away is the defect; on the truck while mapDist agrees is a node underfoot."""
+    near = _pt(0.8)                                    # a node the truck is almost exactly on
+    rows = [_good_row(i, mapDist=1.0, mapCandD=1.0,
+                      mapLat=near["latitude"], mapLon=near["longitude"]) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 0, "a node underfoot must not fail the gate"
+
+  def test_but_coordinates_copied_from_the_truck_are_STILL_caught(self, tmp_path):
+    """The negative control for the relaxation above -- otherwise I3b would pass anything close.
+    This is the M4 defect proper: the coordinates ARE the truck's while mapDist says 200 m."""
+    rows = [_good_row(i, mapLat=LAT0, mapLon=LON0, mapCandD=0.0) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
   def test_a_far_candidate_beyond_CES_own_horizon_PASSES(self, tmp_path):
     """Fable I1, the checker half. A far candidate at 400 m is past CES's 10 s window, so mapDist is
     0.0 while the coordinates are genuinely 400 m out. Measured against mapDist (the old I3) this

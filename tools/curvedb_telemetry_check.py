@@ -303,9 +303,29 @@ def check_invariants(rep, recs, min_speed):
     rep.check("INFO", "I3d far-map candidates located",
               f"n={len(far)} of {len(geo)}" if far else
               "0 -- no far-source record in this corpus, so the phantom case is unmeasured here")
-    at_truck = sum(1 for r in geo if haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) < 1.0)
-    rep.check("PASS" if at_truck == 0 else "FAIL", "I3b candidate is not the truck",
-              "distinct" if at_truck == 0 else f"{at_truck} records put the candidate ON the truck")
+    # I3b -- the defect I3 alone cannot see: coordinates copied from the truck's own position. I3
+    # compares them against mapCandD, and mapCandD is DERIVED from them, so "point == truck" makes
+    # mapCandD 0 and I3 passes trivially. I3b is the independent witness.
+    #
+    # ⚠️ IT MUST NOT FIRE JUST BECAUSE THE POINT IS CLOSE (corrected 2026-09-17 on the first real
+    # corpus). The truck drives OVER map nodes constantly; one record on a 46-minute drive had
+    # mapDist 1.0 m and a node resolved 0.71 m away, which is correct, not a defect. As originally
+    # written this check would have gone red on essentially every drive -- and an acceptance gate
+    # that always fails is one a human learns to ignore, which is a worse failure than not having it.
+    #
+    # So: use `mapDist`, CES's own INDEPENDENT distance, as the arbiter. Coordinates on the truck
+    # while mapDist says the candidate is metres away is the real defect; coordinates on the truck
+    # while mapDist also says ~0 is a truck sitting on a node.
+    NEAR_M = 1.0
+    at_truck = [r for r in geo
+                if haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) < NEAR_M
+                and (r.get("mapDist") or 0.0) > 5.0]
+    benign = sum(1 for r in geo
+                 if haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) < NEAR_M) - len(at_truck)
+    rep.check("PASS" if not at_truck else "FAIL", "I3b candidate is not the truck",
+              (f"distinct ({benign} legitimately on a node the truck is passing over)" if benign
+               else "distinct") if not at_truck else
+              f"{len(at_truck)} records put the candidate ON the truck while mapDist says otherwise")
 
   # I4 -- section 3.5: the roll-up must cover every sampled flag. dq is a superset (it ORs over the
   # whole window at 100 Hz), so a sampled flag true with dq false means the OR is not running.
