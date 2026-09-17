@@ -3,8 +3,7 @@
 Continues [`CHANGELOG-2026-09-15.md`](CHANGELOG-2026-09-15.md), which ran past midnight — the nine installs it
 records finished at 02:03 PT today. This file covers everything after that.
 
-**Channel tip:** `origin/3devpnw` = `dff1e461a8` · **on the truck:** `dff1e461a8`, `BootCount` 248 — the truck
-is level with the channel; nothing is pending installation.
+**Channel tip:** `origin/3devpnw` = `23f0f47d59` · **on the truck:** `23f0f47d59`, `BootCount` 249 — level.
 
 ---
 
@@ -57,6 +56,12 @@ only ~3 s of the 34 on the 09-08 event, because the speed is lost on the approac
 Also measured, answering the owner's question about combining mapd and vision: today `icbm_curve_target()`
 takes the **`min()`** of map, vision and far-map — **vision can only ADD slowing and can never talk the map
 down at any range.** Over the weekend the deciding source was map 1123 ticks, far 1032, **vision 6**.
+
+## Shipped
+
+| Commit | What changed | Notes |
+|---|---|---|
+| `23f0f47d59` **mapdcargps2pnw** (installed 19:11 PT, BootCount 249) | **mapd can now navigate from the truck's own GPS** — driven by the Chestnut GPU install, which comma say interferes with the comma 3X's receiver. mapd used the modem fix exclusively and never checks `hasFix`. It **relays whichever fix the Python side already selected**, so both halves stay in one frame, mapd stalls only when both receivers are dead, and it **inherits `gpsfix2pnw`'s `hasFix` gate for free** — fixing the known "mapd consumes a no-fix position 2.2 km off" bug without forking mapd. Param `MapdUseCarGps`, **default OFF**. | **No mapd patch needed**: `cereal/gps.go` already prefers `gpsLocationExternal` and latches to it, and that service was empty (0 messages vs 60 for `gpsLocation`). Fable **SHIP**, both optional hardenings applied: the relayed Event now sets `valid=True` like the real publishers, and the `get_bool` is contained — an `UnknownKeyName` would otherwise fire every loop at 20 Hz and take the whole mapd→CES bridge with it, which the first commit message understated. `horizontalAccuracy` and `satelliteCount` are hard **0** on both branches: the first is mapd's way-matching tolerance (`way.go:361`) and inflating it widens adjacent-ramp matching; the second is the DBC's `Invalid` sentinel. `mapd_configd` is now `restart_if_crash=True` since it becomes mapd's sole GPS source. 163 tests, **23/23 mutants**. Verified after the reboot: `MapdUseCarGps=0`, **zero** relay log lines and zero `gpsLocationExternal` messages — the default is genuinely inert — selfdrived/mapd_configd PIDs stable, one soundd boot assert and nothing else. |
 
 ## In flight at the time of writing
 `curvedbtel2pnw` (Phase 1 telemetry) · `icbmfalsify2pnw` (the abort rule) · `mapdcargps2pnw` (relay, in Fable
