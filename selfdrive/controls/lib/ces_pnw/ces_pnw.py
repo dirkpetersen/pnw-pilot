@@ -1628,6 +1628,229 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
   return new_target, new_sig, a_far[0], a_far[1]
 
 
+# --- icbmfalsify2pnw ------------------------------------------------------------------------------------------
+# END a RUNNING map-sourced curve slowdown the truck has PROVED wrong.
+#
+# Every earlier corroborator tried to refuse a slowdown BEFORE the curve and was rejected on the evidence:
+# icbm_map_sanity (vision + point geometry) raised the target on 86 weekend ticks, SEVEN of them on real curves the
+# truck then needed >3.0 m/s^2 for; the icbmK polyline veto gave 33 vetoes, 5 false, under-reading a real curve by up
+# to 77x; vision is only unbiased inside ~50 m = 1.7 s at highway speed. They are all PREDICTIONS.
+#
+# This is a MEASUREMENT. It does nothing until the truck has driven to where the map said the curve was, and then
+# compares the curvature the truck ACTUALLY measured there against the curvature the map's own target implies:
+#     k_map  = A_LAT / target^2        what the cap being commanded is asking the road to be
+#     k_meas = |ach_lat| / v_ego^2     what the truck drove  (ach_lat = _ach_lat(kActl, v_ego), so this is |kActl|)
+# CURVATURE IS SPEED-INDEPENDENT: k = |a_lat| / v^2 is the same number at 69 mph or 44, so "I measured a gentle curve"
+# cannot be explained away by "the slowdown worked" -- which is exactly the confounder that makes measured lateral
+# ACCELERATION useless here. And it can only ever END a cap: it never lowers a target and never commands
+# acceleration. Ending the cap hands the speed back through the existing restore path (1 mph per 0.4 s).
+#
+# EVIDENCE (drives/2026-09-12/central-oregon-weekend/icbmfalsify_replay.py over 123 map/far ICBM episodes; the
+# thresholds were tuned on that corpus, so this is IN-SAMPLE): the rule as the design states it aborts 35 episodes,
+# 0 of them false, cutting 759 s of slowdown. With the PER-CANDIDATE arrival this file implements (see §5 below) it
+# is 26 aborts, still 0 false, 682 s. The 2026-09-08 20:28 phantom is OUT of sample and fires at 20:29:04 either way
+# -- but it buys only ~3 s of that event's 34 s, because the speed is given away on the APPROACH, before anything is
+# measurable. No safe way to veto a slowdown before the curve exists on this truck; the value here is the 682 s
+# elsewhere. See docs/ICBMFALSIFY2PNW.md.
+ICBM_FALSIFY_A_LAT = VTSC_A_LAT   # 2.5 -- the SAME A_LAT_TARGET icbm_curve_target/VTSC solve the curve with, so
+                                  # k_map is literally the inverse of the target the map asked for.
+ICBM_FALSIFY_RATIO = 2.0          # end the cap only when the map asked for MORE THAN 2x the measured curvature
+ICBM_FALSIFY_HOLD_S = 2.0         # sustained this long, so one noisy tick can never end a cap
+ICBM_FALSIFY_PASS_M = 25.0        # the candidate must come this close before we believe the truck reached it
+ICBM_FALSIFY_PAST_M = 10.0        # ...and then recede this far: the truck is PAST it, not approaching it. The first
+                                  # arrival test accepted "within 60 m", which at 30 mph is still ~2 s BEFORE the
+                                  # curve -- the truck was measuring the straight it had not yet left, and that
+                                  # produced both of the replay's false aborts.
+ICBM_FALSIFY_MIN_V = 8.0          # m/s; |a_lat| / v^2 is meaningless at crawl speed
+ICBM_FALSIFY_JUMP_M = 10.0        # m of slack on top of v_ego*dt before a change in the candidate distance means
+                                  # mapd picked a DIFFERENT point -- see icbm_falsify_tick's §5 note. Replayed over
+                                  # the weekend corpus this sits on a plateau: 5 m and 10 m both give 26 aborts /
+                                  # 682 s, 2 m gives 19 / 567, 20 m gives 27 / 692. 10 m leaves headroom for GPS
+                                  # jitter at the 4 Hz tick rate (v*dt is only ~2 m at the MIN_V floor).
+ICBM_FALSIFY_MAX_DT_S = 1.0       # s between ticks (~0.25 s nominal) beyond which nobody was watching: wall time
+                                  # nobody measured through may not count toward the hold, and the distance track is
+                                  # re-anchored rather than carried across the gap (same idiom as ICBM_LEAD_MAX_GAP_S).
+# RULE 2: SteerLimitStatus carries NO TIMESTAMP. If controlsd stops publishing it, _sl_k_actl FREEZES at its last
+# value and stays perfectly readable -- and a frozen small curvature would BUY A CAP REMOVAL. So the hold may only
+# complete if the measurement has changed at least once inside it, which is what tying this to HOLD_S expresses.
+# Cost, measured over the weekend corpus (18,591 moving ticks above MIN_V with a kActl): the longest run of a
+# bit-identical kActl was 3 s (once), 2 s six times, 1 s 177 times -- kActl is a 6-decimal yaw-rate-derived reading
+# refreshed at 5 Hz, so on a moving truck it does not repeat. A false "stale" only resets the hold and KEEPS the cap.
+ICBM_FALSIFY_STALE_S = ICBM_FALSIFY_HOLD_S
+ICBM_FALSIFY_LOG_S = ICBM_ERR_LOG_S   # rule-2: throttle the falsify crash log (this runs at ~4 Hz)
+
+
+def icbm_measured_curvature(ach_lat, v_ego, min_v=ICBM_FALSIFY_MIN_V):
+  """icbmfalsify2pnw (PURE): the curvature the truck ACTUALLY drove this tick = |a_lat| / v_ego^2 (1/m).
+
+  None -- "not measurable" -- when either input is missing/non-finite or the speed is at or below `min_v`, where
+  |a_lat| / v^2 is dominated by yaw noise. None is NOT zero: a zero would read as "perfectly straight road", which is
+  the strongest possible evidence FOR ending a cap. Never raises."""
+  try:
+    if ach_lat is None or v_ego is None:
+      return None
+    a, v = abs(float(ach_lat)), float(v_ego)
+  except (TypeError, ValueError):
+    return None
+  if not (math.isfinite(a) and math.isfinite(v)) or not (v > float(min_v)):
+    return None
+  return a / (v * v)
+
+
+def icbm_falsify_tick(min_d, prev_d, held, dt, cand_dist, target, ach_lat, v_ego, meas_age):
+  """icbmfalsify2pnw (PURE): one tick of the arrive-then-measure test on a RUNNING map/far cap.
+
+  -> (min_d, prev_d, held, falsified, why, k_map, k_meas). `falsified` True means the cap this tick would command has
+  been measured wrong and must be ended; `why` always names what the tick decided, so a zero is interpretable.
+
+  ARRIVAL is PER CANDIDATE. The truck has reached THIS candidate only when it came within ICBM_FALSIFY_PASS_M and has
+  SINCE receded ICBM_FALSIFY_PAST_M. Two things are deliberately not enough:
+    * a bare "d grew" -- the candidate distance jumps when mapd re-picks a point (126 -> 300 m in the 09-08 trace),
+      and would read as arrival one second into a slowdown for a point 300 m away;
+    * a min_d carried across a candidate CHANGE -- which is ICBMFALSIFY2PNW.md §5, the one thing the implementer had
+      to settle. A long curve has several map nodes. Once any node has been passed, an episode-wide min_d reads
+      "arrived" for every later candidate too, INCLUDING A NODE STILL AHEAD, whose target would then be judged
+      against curvature measured back at the node already behind. That is a cap removed on a curve nobody has driven
+      yet. So the track is re-anchored the moment the candidate changes, and the physics says exactly when that is: a
+      FIXED point's distance can change by at most v_ego*dt between ticks, so anything beyond that (plus
+      ICBM_FALSIFY_JUMP_M of slack) is a different point. The two-node curve therefore stays capped by construction,
+      not by a special case: the second node is simply never "arrived" until the truck drives to it.
+
+  RULE 2 (this is what the `why` values are for): an unreadable speed, an unreadable lateral accel, a FROZEN one
+  (meas_age), an unusable distance or wall time nobody measured through all RESET the hold. A missing input can never
+  buy a cap removal. Never raises."""
+  try:
+    d = float(cand_dist) if cand_dist is not None else None
+    if d is not None and not (math.isfinite(d) and d >= 0.0):
+      d = None
+  except (TypeError, ValueError):
+    d = None
+  if d is None:
+    return None, None, 0.0, False, "noDistance", None, None
+  try:
+    step, v = float(dt), float(v_ego)
+  except (TypeError, ValueError):
+    return None, d, 0.0, False, "gap", None, None
+  if not (math.isfinite(v) and 0.0 < step <= ICBM_FALSIFY_MAX_DT_S):
+    return d, d, 0.0, False, "gap", None, None
+  if prev_d is None:
+    return d, d, 0.0, False, "start", None, None
+  if abs(d - prev_d) > max(v, 0.0) * step + ICBM_FALSIFY_JUMP_M:
+    return d, d, 0.0, False, "newPoint", None, None      # §5: mapd re-picked -- a DIFFERENT point, start again
+  min_d = d if min_d is None else min(min_d, d)
+  if not (min_d <= ICBM_FALSIFY_PASS_M and d > min_d + ICBM_FALSIFY_PAST_M):
+    return min_d, d, 0.0, False, "approaching", None, None
+  try:
+    t = float(target)
+  except (TypeError, ValueError):
+    t = None
+  if t is None or not math.isfinite(t) or t <= 0.0:
+    return min_d, d, 0.0, False, "noTarget", None, None
+  k_map = ICBM_FALSIFY_A_LAT / (t * t)
+  try:
+    age = float(meas_age)
+  except (TypeError, ValueError):
+    age = float("inf")
+  # `age + step`, not `age`: this tick is about to credit `step` seconds of hold to THIS reading, so the reading has
+  # to still be fresh at the END of the interval being credited. With a bare `age` a reading that froze exactly as the
+  # hold began could carry it to HOLD_S - one tick before the staleness ever tripped, i.e. a single live measurement
+  # plus repeats could end a cap. This way the hold provably cannot complete without the measurement changing.
+  if not (math.isfinite(age) and age + step < ICBM_FALSIFY_STALE_S):
+    return min_d, d, 0.0, False, "stale", k_map, None    # frozen reading: unreadable, not "straight road"
+  k_meas = icbm_measured_curvature(ach_lat, v_ego)
+  if k_meas is None:
+    return min_d, d, 0.0, False, "unreadable", k_map, None
+  if not (k_meas * ICBM_FALSIFY_RATIO < k_map):
+    return min_d, d, 0.0, False, "consistent", k_map, k_meas   # the road matches the claim: the cap stands
+  try:
+    held = float(held) + step
+  except (TypeError, ValueError):
+    return min_d, d, 0.0, False, "unreadable", k_map, k_meas
+  return min_d, d, held, held >= ICBM_FALSIFY_HOLD_S, "falsified", k_map, k_meas
+
+
+def _icbm_falsify_log(ctl, state, **kw) -> None:
+  """icbmfalsify2pnw (Rule 2, §7): the rule's verdict on a RUNNING map/far cap, logged when it CHANGES --
+  "end" (the cap is being ended, with the numbers that justify it), "resume" (the evidence lapsed, so the cap is free
+  to bind again, with the reason) and "blind" (the truck has ARRIVED but the measurement cannot be made, so the rule
+  is inert and says so). A cap that silently disappears is exactly the failure this project forbids: the driver feels
+  the truck stop slowing and nothing explains it. Module function taking the controller, same as _icbm_passed_log."""
+  key = (state, kw.get("why"))
+  if getattr(ctl, "_icbm_falsify_state", None) != key:
+    ctl._icbm_falsify_state = key
+    cloudlog.event("ces_icbm_falsify", state=state, **kw)
+
+
+def _icbm_falsify_reset(ctl) -> None:
+  """icbmfalsify2pnw: forget the running cap's arrival evidence. Called from __init__, from EVERY tick that has no
+  map/far cap running (the evidence belongs to that cap: carrying a min_d into the next candidate would call a curve
+  "passed" that is still ahead -- ICBMFALSIFY2PNW.md §5) and when ICBM goes inactive."""
+  ctl._icbm_falsify_min_d = None
+  ctl._icbm_falsify_prev_d = None
+  ctl._icbm_falsify_held = 0.0
+  ctl._icbm_falsify_t = None
+  ctl._icbm_falsify_k = None
+  ctl._icbm_falsify_k_t = None
+  ctl._icbm_falsify_on = False
+  ctl._icbm_falsify_state = None
+
+
+def _icbm_falsify_gate(ctl, now, target, src, cand_dist, k_actl, v_ego):
+  """icbmfalsify2pnw: the running-cap gate. -> the target, or None when the cap has been ENDED.
+
+  Called ONLY while the episode is in its cap phase and the binding candidate is map/far sourced (§6: a vision-sourced
+  cap is not falsifiable this way and is left alone). A START is never gated, so this can only ever end a slowdown
+  that has already been running -- it can never stop one from beginning, and it never lowers anything.
+
+  §5 -- ENDING THE CAP MUST NOT BLIND THE TRUCK TO A NODE STILL AHEAD. Nothing here is latched: the gate re-decides
+  from scratch every tick on that tick's own binding candidate, and the caller's normal icbm_curve_target() path (plus
+  the passed-point gate) runs unconditionally before it. So the instant the evidence lapses -- a different candidate
+  binds, or the truck loads up in a curve a node ahead was right about -- `held` resets and the very next tick
+  publishes the cap again. The cap ends; the FEATURE does not stop. icbm_falsify_tick's per-candidate arrival is what
+  stops a node still ahead from being judged on curvature measured at one already behind.
+
+  CRASH SAFETY (_icbm_step runs in selfdrived, restart_if_crash=False): a raise here falls back to the UNGATED
+  decision -- the cap STANDS -- and says so, throttled. Fail-open for this rule means keeping the slowdown."""
+  try:
+    prev_t = getattr(ctl, "_icbm_falsify_t", None)
+    dt = now - prev_t if prev_t is not None else 0.0
+    ctl._icbm_falsify_t = now
+    # Rule 2: age the MEASUREMENT, not the tick -- k_actl is what freezes if controlsd stops publishing, and ach_lat
+    # cannot be used for this (it is k_actl * v_ego^2, so it keeps moving on a frozen k_actl as the truck slows).
+    if getattr(ctl, "_icbm_falsify_k_t", None) is None or k_actl != getattr(ctl, "_icbm_falsify_k", None):
+      ctl._icbm_falsify_k, ctl._icbm_falsify_k_t = k_actl, now
+    min_d, prev_d, held, falsified, why, k_map, k_meas = icbm_falsify_tick(
+      getattr(ctl, "_icbm_falsify_min_d", None), getattr(ctl, "_icbm_falsify_prev_d", None),
+      getattr(ctl, "_icbm_falsify_held", 0.0) or 0.0, dt, cand_dist, target,
+      _ach_lat(k_actl, v_ego), v_ego, now - ctl._icbm_falsify_k_t)
+    ctl._icbm_falsify_min_d, ctl._icbm_falsify_prev_d, ctl._icbm_falsify_held = min_d, prev_d, held
+    if not falsified:
+      if why in ("stale", "unreadable"):        # arrived, but the rule cannot see -- Rule 2, say so
+        _icbm_falsify_log(ctl, "blind", why=why, src=src,
+                          kMap=round(k_map, 6) if k_map is not None else None)
+      elif getattr(ctl, "_icbm_falsify_on", False):
+        _icbm_falsify_log(ctl, "resume", why=why, src=src,
+                          kMeas=round(k_meas, 6) if k_meas is not None else None)
+      ctl._icbm_falsify_on = False
+      return target
+    ctl._icbm_gate = "mapFalsified"
+    ctl._icbm_falsify_on = True
+    _icbm_falsify_log(ctl, "end", why=None, src=src, kMap=round(k_map, 6), kMeas=round(k_meas, 6),
+                      ratio=round(k_map / k_meas, 1) if k_meas > 0.0 else None,
+                      dist=round(float(cand_dist), 1), minD=round(float(min_d), 1),
+                      target=round(float(target), 2), held=round(float(held), 2))
+    return None
+  except Exception:
+    try:
+      if now - (getattr(ctl, "_icbm_falsify_err", None) or -1e9) > ICBM_FALSIFY_LOG_S:
+        ctl._icbm_falsify_err = now
+        cloudlog.exception("icbmfalsify2pnw: the falsify gate FAILED -- the RUNNING map slowdown CONTINUES without " +
+                           "it (a curve the truck has already measured as gentle keeps holding the speed down)")
+    except Exception:
+      pass                        # logging must not become the thing that raises
+    return target
+
+
 CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icbmKVis",
                        "icbmSaneT", "icbmSaneWhy", "icbmBehind")
 
@@ -3215,6 +3438,9 @@ class CESController:
     self._str_tq = None             # section 3.6: driver steering torque (per-car scale), this tick
     self._curve_err_t = None        # rule-2 throttle for the _curve_peak_step failure log
     self._curve_err_n = 0           # failures since that log line
+    # icbmfalsify2pnw: the running cap's arrival evidence (min_d / prev_d / held / measurement age).
+    _icbm_falsify_reset(self)
+    self._icbm_falsify_err = None
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -4233,6 +4459,7 @@ class CESController:
         self._icbm_gps_age = None         # gpslag2pnw
         self._icbm_stale_hold = None      # gpsdrgate2pnw
         self._icbm_passed_state = None    # behindgate2pnw: the next verdict after a Chill interlude logs again
+        _icbm_falsify_reset(self)         # icbmfalsify2pnw: no arrival evidence carried across a Chill interlude
         # curvefloor2pnw (Fable 2026-09-05, F5): reset the floor state too. Without this a stale
         # icbmFlrHit=True is published alongside icbmT=None, and _icbm_floor_lim survives a Chill
         # interlude -- so the debounce carries a limit from before the gap into the road after it.
@@ -4526,6 +4753,35 @@ class CESController:
           cloudlog.event("ces_icbm_stale_hold", state="release", why="gpsBack" if gps_state != "stale" else
                          ("capBound" if target is not None else "episodeEnded"), held_s=round(now - hold["t0"], 1))
         self._icbm_stale_hold = None
+      # icbmfalsify2pnw: END a RUNNING map/far cap the truck has DRIVEN PAST and MEASURED WRONG (see
+      # _icbm_falsify_gate). Placed HERE, last of the ICBM decision, for two reasons:
+      #   * `target` is the value that will be published -- every penalty, the posted-limit floor and the
+      #     lead pace have already been applied, so k_map = A_LAT/target^2 is computed on the same number
+      #     the replay's icbmT was (a target raised by the lead pace simply makes the rule less willing to
+      #     abort, which is the safe direction);
+      #   * it is after gpsdrgate2pnw's stale hold, so a cap the truck has MEASURED wrong is not re-held
+      #     the same tick by "we lost the fix, keep holding" -- a measurement outranks that guess. (A LATER
+      #     tick can still re-hold on the sticky _icbm_cap_src; bounded by ICBM_GPS_STALE_HOLD_MAX_S, and
+      #     the same exposure behindrun2pnw noted for any clear.)
+      # THE ARRIVAL EVIDENCE BELONGS TO THE MAP/FAR CAP THAT IS RUNNING RIGHT NOW, so ANY tick without one
+      # forgets it -- not just a tick where the EPISODE ended (`starting`). That was the original condition and
+      # it left ICBMFALSIFY2PNW.md §5 open: a cap can stop binding, or be bound by vision / the stale-GPS hold,
+      # for a few ticks WITHOUT the episode leaving its cap phase (the S-gap clear debounce holds the phase for
+      # ~3 s). Across such a gap min_d and prev_d survived, and the next map candidate -- a DIFFERENT node, one
+      # the truck has NOT driven to -- was measured against them: min_d <= PASS_M from the node already behind
+      # made it read "arrived" immediately, so a curve STILL AHEAD could be falsified on curvature measured
+      # before it. icbm_falsify_tick's own re-anchors do not cover this: the wall-time "gap" re-anchor needs
+      # ICBM_FALSIFY_MAX_DT_S (1 s, i.e. > 4 ticks) and the "newPoint" jump test only sees a jump larger than
+      # v_ego*dt + JUMP_M, which at 25 m/s over a 1 s hiatus is 35 m of slack. Resetting is the conservative
+      # direction in both senses: the rule must re-arrive before it can end anything, and a cap it cannot judge
+      # STANDS.
+      if starting or target is None or self._icbm_src not in ("map", "far"):
+        _icbm_falsify_reset(self)
+      else:
+        target = _icbm_falsify_gate(
+          self, now, target, self._icbm_src,
+          sig.get("map_target_dist", float("inf")) if self._icbm_src == "map" else far_dist,
+          getattr(self, "_sl_k_actl", None), sig["v_ego"])
       # icbmmapfirst2pnw: hand the episode the binding candidate's DISTANCE (apex-passage detection
       # for the early restore) and the in-curve flag (restore entry deferral / restore pause).
       src_dist = {"map": sig.get("map_target_dist", float("inf")),
