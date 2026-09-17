@@ -369,14 +369,29 @@ def _pose_curvature(live_pose, v_ego):
   both-car regression surface. livePose is ALREADY in selfdrived's SubMaster (selfdrived.py:117), so
   this adds no subscription either.
 
-  KNOWN AND DELIBERATE APPROXIMATION -- device frame, not calibrated frame. paramsd and torqued both
-  run Pose.from_live_pose() through the calibrator before using .z as a vehicle yaw rate; this does
-  not, because the calibrator is not reachable from here without plumbing selfdrived state into CES.
-  The residual is the mount misalignment (a few degrees of yaw/pitch/roll), so the error is a
-  ~0.1 % scale term plus cross-coupling from the other two axes. That is immaterial for telemetry,
-  and section 3.1 asks for exactly this cross-check to QUANTIFY it: on the Lightning both sources
-  are logged side by side (kPose vs slKActl), and tools/curvedb_telemetry_check.py reports their
-  ratio. If that ratio turns out not to be ~1.0, the calibrated pose is the fix -- but measure first.
+  ⚠️ THE `.z` IS NEGATED, AND THAT IS NOT A FUDGE. The device frame's z is the opposite sign to the
+  vehicle convention `carState.yawRate` uses (positive = left), so the raw reading describes every
+  bend as the mirror of the one the truck actually drove. openpilot itself does the same negation on
+  the same quantity: `paramsd.py:98` feeds the Kalman filter `np.array([[-self.observed_yaw_rate]])`.
+
+  MEASURED ON THE TRUCK 2026-09-17, first real corpus, 46 min of Lightning driving -- this shipped
+  WRONG and the section 3.7 cross-check is what caught it, exactly as designed:
+    * 285 of 292 real bends (|k| > 0.0008 on BOTH sources) had OPPOSITE signs -- 97.6 %.
+    * |kPose / slKActl| median 0.992, so the magnitude was always right. Calibration was never the
+      problem; the paragraph that used to live here guessed at the calibrated pose and guessed wrong.
+    * Ground truth from a THIRD, independent witness -- the steering wheel. On 213 records with
+      |strAng| > 8 deg: slKActl agreed with the wheel 95.3 %, achLat 95.3 %, kPose 0.5 %.
+  Why it mattered: kPose is the ONLY achieved curvature the Tesla has (D1), and CURVEDB2PNW keys its
+  rows on (site, HEADING). Every Tesla curve would have been stored bending the wrong way, and on the
+  Lightning the defect is invisible because slKActl is there and correct -- so it would have surfaced
+  months later as the two cars inexplicably disagreeing, inside a database already feeding control.
+
+  STILL a device-frame approximation, not the calibrated frame: paramsd and torqued run
+  Pose.from_live_pose() through the calibrator first, which is not reachable from here without
+  plumbing selfdrived state into CES. The residual is mount misalignment -- a ~0.1 % scale term plus
+  cross-axis coupling -- and the 0.992 measured ratio is the evidence that it is immaterial.
+  tools/curvedb_telemetry_check.py's I2 keeps reporting the ratio on every corpus; it is SIGNED for
+  precisely this reason, because "is it non-zero" could not have seen any of the above.
 
   Gated on `.valid`, the same first test paramsd applies (paramsd.py:73). An invalid pose logs null,
   not 0.0 -- an uninitialised localizer must not read as a straight road. Pure, never raises."""
@@ -384,7 +399,7 @@ def _pose_curvature(live_pose, v_ego):
     av = live_pose.angularVelocityDevice
     if not av.valid:
       return None
-    return _curvature_from_yaw(av.z, v_ego)
+    return _curvature_from_yaw(-av.z, v_ego)
   except (AttributeError, KeyError, TypeError, ValueError):
     return None
 

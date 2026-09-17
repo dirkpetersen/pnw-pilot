@@ -98,15 +98,29 @@ class TestPoseCurvature:
   """3.1 (P1-A): THE fix for defect D1 -- the Tesla has no yaw-rate CAN signal at all, so the only
   achieved curvature it can ever have comes from the localizer."""
 
-  def test_it_reads_angular_velocity_device_z(self):
+  def test_it_reads_angular_velocity_device_z_AND_NEGATES_IT(self):
+    """THE SIGN IS THE POINT (measured on the truck 2026-09-17; this shipped inverted for one day).
+
+    The device frame's z runs opposite to the vehicle convention `carState.yawRate` uses
+    (positive = left), so the raw reading describes every bend as the mirror of the one driven.
+    openpilot negates the same quantity itself at paramsd.py:98. On the first real corpus, 285 of
+    292 real bends disagreed in sign with slKActl while |ratio| was 0.992 -- right magnitude, wrong
+    direction -- and against the steering wheel as a third witness kPose agreed 0.5 % of the time
+    where slKActl agreed 95.3 %.
+
+    This test previously asserted the UNNEGATED value, i.e. it pinned the bug. A test can hold a
+    defect in place as firmly as it can hold a contract."""
     lp = NS(angularVelocityDevice=NS(x=0.0, y=0.0, z=0.25, valid=True))
-    assert m._pose_curvature(lp, 25.0) == pytest.approx(0.01)
+    assert m._pose_curvature(lp, 25.0) == pytest.approx(-0.01)
+    # ...and it must agree in SIGN with the CAN-derived pair, which is the convention of record.
+    assert m._pose_curvature(NS(angularVelocityDevice=NS(z=-0.25, valid=True)), 25.0) > 0
+    assert m._curvature_from_yaw(0.25, 25.0) > 0
 
   def test_it_works_where_CS_yawRate_is_dead(self):
     """The Tesla case, stated as an invariant: CAN says 0.0 (a lie), livePose says the truth."""
     lp = NS(angularVelocityDevice=NS(z=0.25, valid=True))
-    assert m._curvature_from_yaw(0.0, 25.0) == 0.0            # what carState offers on the Raven
-    assert m._pose_curvature(lp, 25.0) == pytest.approx(0.01)  # what livePose offers instead
+    assert m._curvature_from_yaw(0.0, 25.0) == 0.0             # what carState offers on the Raven
+    assert m._pose_curvature(lp, 25.0) == pytest.approx(-0.01)  # what livePose offers instead
 
   def test_an_invalid_pose_is_null_not_zero(self):
     """An uninitialised/diverged localizer must NOT read as a perfectly straight road -- that is
@@ -501,9 +515,14 @@ class TestOnTheRealCallPath:
                   cmd_of=lambda i: 0.0,
                   pose_of=lambda i: 0.25)                    # what the localizer measured: a real bend
     last = recs[-1]
-    assert last["kPose"] == pytest.approx(0.01, rel=0.02)
-    assert last["kPoseP"] == pytest.approx(0.01, rel=0.02)
-    assert last["achLatPose"] == pytest.approx(0.25 * 25.0, rel=0.02)   # yaw * v = 6.25 m/s^2
+    # NEGATED (2026-09-17): device-frame z runs opposite the vehicle convention, so a +0.25 rad/s
+    # reading is a bend to the OTHER side. Only the SIGNED fields move -- kPoseP is a peak of
+    # abs(k_pose) (CurvePeak.step), unsigned by design exactly like kPeak, so the fix cannot touch
+    # it. That asymmetry is why checker I5 (kPoseP >= |kPose|) still holds either way, and why the
+    # sign defect was invisible to every "is the field alive / is it plausible" check.
+    assert last["kPose"] == pytest.approx(-0.01, rel=0.02)
+    assert last["kPoseP"] == pytest.approx(0.01, rel=0.02)              # magnitude, unsigned
+    assert last["achLatPose"] == pytest.approx(-0.25 * 25.0, rel=0.02)   # -yaw * v = -6.25 m/s^2
     assert last["kPeak"] is None, "the CAN-derived pair is still dead -- that is the fact being worked around"
 
   def test_an_invalid_localizer_nulls_rather_than_claiming_a_straight_road(self, monkeypatch, tmp_path):
