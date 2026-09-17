@@ -171,6 +171,67 @@ warning lines). The channel instead has `mapdlogmgr2pnw`, where **manager logs i
 Merging it would replace a working fix with one proven not to work, and risk an ImportError in manager at
 boot.
 
+## 🔴 Afternoon — Phase 1's first real drive found a bug in Phase 1, exactly as designed
+
+Installed at the 12:47 ignition. Four hours later the section-3.7 acceptance checker, run against the
+first real corpus (46 min, Lightning, pulled over SSH), **FAILED on I2** — and it was right.
+
+**`kPose` / `achLatPose` shipped SIGN-INVERTED.** Not noise, not scale:
+
+* median `kPose/slKActl` = **−0.892** (n=1,074 moving).
+* on unambiguous bends (|k| > 0.0008 on BOTH): **285 of 292 opposite — 97.6 %**, |ratio| median
+  **0.992**. Magnitude always right.
+* third witness, the steering wheel (|strAng| > 8°, n=213): `slKActl` **95.3 %**, `achLat` **95.3 %**,
+  `kPose` **0.5 %**.
+
+**Root cause, from frame definitions rather than from the correlation:** the device frame is
+`[Forward, Right, Down]`, so +z about a downward axis is a RIGHT turn, while `carState.yawRate` is
+ISO-8855 positive-LEFT. openpilot negates the same quantity itself at `paramsd.py:98`. Shipped as
+**`36f914a17c`** (Fable SHIP, 18/18 mutants); on the corpus I2 moves **−0.892 → +0.892, FAIL → PASS**.
+
+**Why a sign mattered here more than signs usually do:** `kPose` is the ONLY achieved curvature the
+Tesla has (D1 — `CS.yawRate` is 0.0 on 7,218 of 7,221 moving Raven ticks), and the curve DB keys rows
+on (site, **heading**). Every Tesla curve would have been stored bending the wrong way. On the
+Lightning it is **invisible**, because `slKActl` is there and correct — so without the signed
+cross-check it would have surfaced months later as the two cars inexplicably disagreeing, inside a
+database already feeding braking. "Is the field alive" could not see it. Only a signed comparison
+against a second source could.
+
+**And the checker itself had a defect the same corpus exposed** (`837326fe52`, checker + tests only):
+**I3b would have gone red on every drive.** It flagged any map candidate within 1 m of the truck; one
+record had `mapDist` 1.0 m with the node 0.71 m away — the truck was driving OVER a map node, which
+happens constantly. A gate that always fails is one a human learns to ignore, so it now tests
+CONSISTENCY (coordinates on the truck *while `mapDist` says metres away*) and prints the benign count
+rather than dropping it.
+
+## 🟠 Afternoon — the driver's live complaint, now quantified: ICBM over-slows
+
+Driver, 14:25 PT: *"button control management also took me down to 38 mph… it's going too slow."*
+Full analysis: [`drives/2026-09-17/curvedb-first-capture/DRIVE_REPORT.md`](../../../../drives/2026-09-17/curvedb-first-capture/DRIVE_REPORT.md).
+
+**The event.** ICBM commanded **38 mph** where the map asked **44**. Measured `kPeak` 0.00394 →
+**R ≈ 254 m**. At 38 mph that bend is **1.1 m/s²**; at 50 mph it is 2.0; at the driver's set of 62 it
+would have been 3.0 — so the curve was real, and **38 was ~12 mph more slowdown than the geometry
+justified.**
+
+**Across the day** (same-tick, map-sourced, >25 mph, k > 0.0015 — **n = 39**):
+
+| | |
+|---|---|
+| commanded BELOW the map's own target | **22/39 = 56 %**, median **−2.8 mph** |
+| lat accel at the ICBM-commanded speed | median **1.40 m/s²** |
+| lat accel at the map-asked speed | median **1.62 m/s²** |
+| design target `A_LAT` | **2.50 m/s²** |
+
+**Two contributions, and the second is the larger:** ICBM undercuts the map (the Lightning
+`curve_speed_penalty_ms` stacking on an already-reduced apex), **and the map's own numbers are
+conservative** — even at `mapV` the truck only pulls 1.62 m/s². ⚠️ **n = 39, one drive, one corridor;
+re-run over a week before touching a constant.**
+
+Also captured: 310 s of angle saturation and 350 s of driver steering override across 6,782 moving
+seconds (4.6 % / 5.2 %) — the driver's steering warning is real but **not root-caused**; it needs the
+exact time or the matching qlog.
+
 ## In flight
 
 Nothing. Everything built is shipped; the four branches with real unshipped work need re-porting (table above),
