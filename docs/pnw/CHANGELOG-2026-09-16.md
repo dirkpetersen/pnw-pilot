@@ -3,7 +3,10 @@
 Continues [`CHANGELOG-2026-09-15.md`](CHANGELOG-2026-09-15.md), which ran past midnight — the nine installs it
 records finished at 02:03 PT today. This file covers everything after that.
 
-**Channel tip:** `origin/3devpnw` = `23f0f47d59` · **on the truck:** `23f0f47d59`, `BootCount` 249 — level.
+**Channel tip:** `origin/3devpnw` = `18a023cf74` · **on the truck:** `23f0f47d59`, `BootCount` 249. The one
+commit between them is **docs-only**, so the truck is level on code. (⚠️ the *local* `3devpnw` ref is still at
+`23f0f47d59` — fast-forward it before branching anything, or you will build on a base that is missing commits;
+see [[feedback-keep-local-remote-in-sync]].)
 
 ---
 
@@ -63,6 +66,46 @@ down at any range.** Over the weekend the deciding source was map 1123 ticks, fa
 |---|---|---|
 | `23f0f47d59` **mapdcargps2pnw** (installed 19:11 PT, BootCount 249) | **mapd can now navigate from the truck's own GPS** — driven by the Chestnut GPU install, which comma say interferes with the comma 3X's receiver. mapd used the modem fix exclusively and never checks `hasFix`. It **relays whichever fix the Python side already selected**, so both halves stay in one frame, mapd stalls only when both receivers are dead, and it **inherits `gpsfix2pnw`'s `hasFix` gate for free** — fixing the known "mapd consumes a no-fix position 2.2 km off" bug without forking mapd. Param `MapdUseCarGps`, **default OFF**. | **No mapd patch needed**: `cereal/gps.go` already prefers `gpsLocationExternal` and latches to it, and that service was empty (0 messages vs 60 for `gpsLocation`). Fable **SHIP**, both optional hardenings applied: the relayed Event now sets `valid=True` like the real publishers, and the `get_bool` is contained — an `UnknownKeyName` would otherwise fire every loop at 20 Hz and take the whole mapd→CES bridge with it, which the first commit message understated. `horizontalAccuracy` and `satelliteCount` are hard **0** on both branches: the first is mapd's way-matching tolerance (`way.go:361`) and inflating it widens adjacent-ramp matching; the second is the DBC's `Invalid` sentinel. `mapd_configd` is now `restart_if_crash=True` since it becomes mapd's sole GPS source. 163 tests, **23/23 mutants**. Verified after the reboot: `MapdUseCarGps=0`, **zero** relay log lines and zero `gpsLocationExternal` messages — the default is genuinely inert — selfdrived/mapd_configd PIDs stable, one soundd boot assert and nothing else. |
 
+## ⛔ Late 09-16 — the abort rule the owner wanted for the 09-17 drive is DEAD CODE, and shipped work already covers it
+
+`icbmfalsify2pnw` is finished — 66 tests, **21/21 mutants killed**, committed `894e04a059` — and **deliberately
+not pushed**. `behindrun2pnw` (`57d79657bc`, shipped 09-15, installed the same night) drops a passed map point
+once it is 5 m behind along mapd's path; the abort rule cannot arm until the candidate has receded **10 m**
+from closest approach *and then held 2 s*, which is always strictly later. Measured end to end through the
+real `_icbm_step` on all 7 replay windows:
+
+| | gate reached | verdicts | cap-ends |
+|---|---|---|---|
+| behindrun **LIVE** (today's truck) | **252 ticks** | 244 `approaching`, 8 `gap`, **0 falsified** | **0** |
+| behindrun **OFF** (the code the design was measured on) | **330 ticks** | 52 `falsified` | **27 / 3 episodes** |
+
+Not a harness artifact — a uniform zero is exactly the shape Rule 2 says to distrust, so it was checked by
+turning behindrun off on the same corpus, which produces 52 falsifications. The design's 35-abort / **759 s**
+corpus stands as recorded: it was measured **09-11..13, before `behindrun2pnw` existed**, and is not retracted.
+Residual value is only where behindrun declines — **2 of 23,828** moving weekend ticks, and honestly
+">= 0.008 %" rather than exactly it, because `icbm_passed_points` has six decline reasons and that study saw
+three. Recommendation recorded in `docs/PENDING-WORK.md` and design-doc §10: keep the branch as the record,
+revisit only if `behindrun2pnw` is ever narrowed. `TestPreemptedByBehindrun` fails loudly the day that changes.
+
+**Worth stating plainly: the owner's drive home is already covered — by something installed the night before,
+earlier in the episode and without needing a measurement.**
+
+## 🗄 Late 09-16 — the CES corpus now leaves the device (owner request)
+
+Owner, on being told the archive is write-only while the Phase 2 gate wants 6–8 weeks retained *and*
+reachable: *"add all the logs including the ces log to aws s3 upload."* Built as `ceslogup2pnw`, stacked on
+`curvedbtel2pnw`: the archived generations ride the **existing** S3 uploader under a `pnwlogs/` key prefix,
+**in place** (no copy, no hardlink, no staging — the deleter must never be able to reclaim them, and a
+hardlink would defeat the archive's own 2 GB budget), on unmetered links only, **last** in pass 1 so drive
+data always goes first, with a `.zst` key on a plain file so `do_upload` compresses ~10× on the fly.
+
+`/data/pnw` holds the Waze API key, so eligibility is an explicit allowlist, never a sweep: a named
+directory, a required filename prefix, **and** a regular-file test. The third gate is not belt-and-braces —
+Fable defeated the first two with a symlink wearing the right name, which `open()` follows.
+
 ## In flight at the time of writing
-`curvedbtel2pnw` (Phase 1 telemetry) · `icbmfalsify2pnw` (the abort rule) · `mapdcargps2pnw` (relay, in Fable
-review). None pushed. Each gets its own reboot and health check, as always.
+Both halves of curvedb Phase 1 are **built and in Fable review, none pushed**: `curvedbtel2pnw`
+(`e6918f5a50`) and `ceslogup2pnw` (`f0911ba3d8`, stacked on it). Fable returned **SHIP WITH CHANGES** on the
+first commit of each; the must-fix commits are what is under review now. `mapdcargps2pnw` **shipped** (see
+above). `icbmfalsify2pnw` is finished and held, by recommendation, as an owner decision. Each ship gets its
+own reboot and health check, as always.
