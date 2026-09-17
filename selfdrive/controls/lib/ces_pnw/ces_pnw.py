@@ -240,6 +240,292 @@ def _ach_lat(k_actl, v_ego):
     return None
 
 
+# =================================================================================================
+# curvedbtel2pnw -- CURVEDB2PNW.md PHASE 1 (sections 3.1-3.7). TELEMETRY ONLY.
+#
+# NOTHING BELOW IS READ BY ANY CONTROL PATH. Phase 1 exists so that in 6-8 weeks there is data good
+# enough to decide whether a learned curve database (Phase 2) is worth building at all, and it pays
+# for itself meanwhile on the open ICBM phantom-slowdown items (2026-09-05, 2026-09-08).
+#
+# The four measured facts that motivate each helper -- re-measured on this workbench's own corpora
+# before writing any of it, because Phase 2's whole premise rests on them:
+#
+#   D1  achieved curvature is DEAD ON THE TESLA. On 2026-09-03 (hotspot-drive-tesla, 7,221 ticks
+#       above 5 m/s) `slKActl` is exactly 0.0 on 7,218 and null on 3 -- non-zero ZERO times. The
+#       same field on the Lightning (2026-09-08 phantom corpus, 1,136 moving ticks) is non-zero on
+#       1,097. Root cause (Fable): controlsd computes kActl = CS.yawRate / vEgo, and
+#       opendbc/car/tesla/carstate.py never sets ret.yawRate -- and the Raven party DBC carries no
+#       yaw-rate signal at all, so there is nothing to fix in the car interface. A field that reads
+#       0.0 curvature is not "no data", it reads as PERFECTLY STRAIGHT ROAD, which is the most
+#       dangerous possible default for anything that would later cancel a slowdown. -> _pose_curvature
+#       derives it from livePose instead (section 3.1); no opendbc change, no submodule pin bump,
+#       which is what keeps Phase 1 behaviour-neutral.
+#   D1b a real zero and a dead sensor must never be indistinguishable. -> _zero_is_null (section 3.2),
+#       the same discipline gassettel2pnw applied to vLift/vGasMax.
+#   D5  the record samples INSTANTANEOUSLY at ~1 Hz while control runs at 100 Hz, so 99 of every 100
+#       readings are thrown away. -> CurvePeak (section 3.3). `max`, not mean: Fable's 10 Hz qlog
+#       test (75 segments, 1,584 s) found the straight-road per-second max is p99 0.31 / max 0.53
+#       m/s^2 with overrides and lane changes excluded, while on curves the within-second max/mean
+#       ratio is only 1.06 -- so the peak is not noise-dominated and averaging would erase the curve.
+#   D3  the record says where the TRUCK is and how far the candidate is, but never where the
+#       candidate IS. -> map_candidate_point (section 3.4). Map/far ticks sit median 49 m, p75 91 m,
+#       p90 129 m before the candidate, so clustering truck positions smears one episode across
+#       several "sites", mostly covering the straight approach.
+# =================================================================================================
+
+# The yaw-rate -> curvature divide's speed floor. DELIBERATELY the same value controlsd uses
+# (drive_helpers.MIN_SPEED == 1.0, controlsd.py:446/531) and NOT the 0.1 the design text names:
+# kPeak's achieved half has to stay numerically comparable to the slKActl/achLat pair it is checked
+# against (section 3.7's cross-consistency invariant), and a 0.1 floor would amplify crawl-speed yaw
+# noise by 10x and let every stop-and-go second dominate the per-second max. Duplicated rather than
+# imported for the same reason _ach_lat is duplicated in controlsd: keeping selfdrived's import graph
+# unchanged. test_curvedbtel2pnw.py pins it equal to drive_helpers.MIN_SPEED so a drift fails loudly.
+CURVE_MIN_SPEED = 1.0
+
+# map_candidate_point's match tolerance. mapDist is itself a haversine to a point in the SAME list,
+# so a correct match is exact; 30 m is section 3.7's own invariant bound, and anything worse means
+# the point list changed underneath us -> log null rather than a coordinate that is quietly wrong.
+CURVE_CAND_TOL_M = 30.0
+
+# section 3.5 disqualifier bits. One OR'd field per record, so a whole second can be admitted or
+# rejected without re-deriving it from sampled flags that may have been between events at the sample
+# instant. Kept as a bitmask internally (one `|=` per tick) and rendered to names only at record time.
+DQ_SAT = 1        # steering saturation -- the pass under-reports the road (defect D2)
+DQ_DRIVER = 2     # driver steering override
+DQ_LANECHG = 4    # lane change in progress
+DQ_BLINKER = 8    # turn signal on (signalled turn / exit, not the through road)
+_DQ_NAMES = ((DQ_SAT, "sat"), (DQ_DRIVER, "drv"), (DQ_LANECHG, "lc"), (DQ_BLINKER, "blnk"))
+
+
+def _dq_names(bits: int) -> str:
+  """Render a disqualifier bitmask to a stable, comma-joined name list ("" when clean). Pure."""
+  try:
+    return ",".join(n for b, n in _DQ_NAMES if int(bits) & b)
+  except (TypeError, ValueError):
+    return ""
+
+
+def _zero_is_null(x):
+  """curvedbtel2pnw section 3.2 (P1-B): an exactly-zero curvature/lateral reading logs as null.
+
+  WHY: see D1 in the block above -- on the Tesla `slKActl` reads 0.0 on 7,218 of 7,221 moving ticks,
+  which is a dead signal wearing the costume of a measurement. Downstream, "null" is a question and
+  "0.0" is an answer; only one of those is honest here. Section 3.2's companion rule lives offline:
+  a pass is admissible only if that sensor produced a non-zero reading somewhere else on the SAME
+  drive, which is a count of non-nulls (tools/curvedb_telemetry_check.py reports exactly that).
+
+  Applied to the value AS LOGGED, i.e. after rounding. A reading that rounds to zero at the field's
+  own precision (1e-6 1/m, 1e-3 m/s^2) is below any physical meaning on a road, so collapsing it
+  into the same "prove the sensor was alive elsewhere" bucket is correct and keeps the rule simple:
+  a 0.0 never appears in these fields at all. Pure."""
+  if x is None:
+    return None
+  return None if x == 0.0 else x
+
+
+def _curvature_from_yaw(yaw_rate, v_ego):
+  """Signed path curvature (1/m) from a yaw rate (rad/s) and speed (m/s): k = yaw / max(v, floor).
+  None (never 0.0, never an exception) on missing or non-finite input -- see _zero_is_null. Pure."""
+  try:
+    if yaw_rate is None or v_ego is None:
+      return None
+    k = float(yaw_rate) / max(float(v_ego), CURVE_MIN_SPEED)
+    return k if math.isfinite(k) else None
+  except (TypeError, ValueError):
+    return None
+
+
+def _pose_curvature(live_pose, v_ego):
+  """curvedbtel2pnw section 3.1 (P1-A): achieved curvature for BOTH cars, from the localizer instead
+  of from CAN.
+
+  `livePose.angularVelocityDevice.z` IS the yaw rate -- locationd publishes it
+  (locationd.py:221) and openpilot's own tests name it as such
+  (locationd/test/test_locationd_scenarios.py: 'yaw_rate': ['angularVelocityDevice', 'z']). It is
+  present on every car because it comes from the device's own IMU + vision, which is exactly why it
+  fixes D1 without touching a car interface: no opendbc change, no submodule pin bump, no
+  both-car regression surface. livePose is ALREADY in selfdrived's SubMaster (selfdrived.py:117), so
+  this adds no subscription either.
+
+  KNOWN AND DELIBERATE APPROXIMATION -- device frame, not calibrated frame. paramsd and torqued both
+  run Pose.from_live_pose() through the calibrator before using .z as a vehicle yaw rate; this does
+  not, because the calibrator is not reachable from here without plumbing selfdrived state into CES.
+  The residual is the mount misalignment (a few degrees of yaw/pitch/roll), so the error is a
+  ~0.1 % scale term plus cross-coupling from the other two axes. That is immaterial for telemetry,
+  and section 3.1 asks for exactly this cross-check to QUANTIFY it: on the Lightning both sources
+  are logged side by side (kPose vs slKActl), and tools/curvedb_telemetry_check.py reports their
+  ratio. If that ratio turns out not to be ~1.0, the calibrated pose is the fix -- but measure first.
+
+  Gated on `.valid`, the same first test paramsd applies (paramsd.py:73). An invalid pose logs null,
+  not 0.0 -- an uninitialised localizer must not read as a straight road. Pure, never raises."""
+  try:
+    av = live_pose.angularVelocityDevice
+    if not av.valid:
+      return None
+    return _curvature_from_yaw(av.z, v_ego)
+  except (AttributeError, KeyError, TypeError, ValueError):
+    return None
+
+
+def map_candidate_point(points, cur_lat, cur_lon, target_dist, tol_m: float = CURVE_CAND_TOL_M):
+  """curvedbtel2pnw section 3.4 (P1-D): the (lat, lon) of the mapd path point a candidate DISTANCE
+  refers to -- where the curve is, as opposed to where the truck is.
+
+  Matched the same way map_turn_direction already matches (same haversine, nearest |d - target_dist|
+  over the same cached point list), so for map/far candidates the match is EXACT: target_dist was
+  computed as a haversine to a point in this very list, on this very tick. `tol_m` therefore only
+  ever fires when the list changed underneath us, and then the answer is (None, None) -- a null,
+  not a coordinate that is silently 300 m wrong.
+
+  target_dist of 0.0 / None / inf means "no candidate this tick" (decision_telemetry renders an
+  infinite mapDist as 0.0), and returns (None, None). Pure, never raises."""
+  try:
+    td = float(target_dist) if target_dist is not None else 0.0
+  except (TypeError, ValueError):
+    return None, None
+  if not points or cur_lat is None or cur_lon is None or td <= 0.0 or not math.isfinite(td):
+    return None, None
+  best, best_err = None, float('inf')
+  for p in points:
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if la != la or lo != lo:                          # NaN guard, as every other scanner here does
+      continue
+    err = abs(_haversine_m(cur_lat, cur_lon, la, lo) - td)
+    if err < best_err:
+      best, best_err = (la, lo), err
+  if best is None or best_err > tol_m:
+    return None, None
+  return best
+
+
+class CurvePeak:
+  """curvedbtel2pnw section 3.3 (P1-C) + 3.1 + 3.5: the 100 Hz accumulator each ces_events record
+  drains. Pure arithmetic on primitives -- no I/O, no clock, no messaging, no exceptions.
+
+  WHY IT LIVES HERE AND NOT IN A DAEMON, which is the single most important structural fact about
+  this feature: `slKCmd`/`slKActl` are NOT available at control rate outside controlsd. controlsd
+  publishes SteerLimitStatus behind a `% 20 == 0` gate (5 Hz) and ces_pnw reads it in _read_map() at
+  ~1 Hz, so a "per-second max" over that feed is a max of at most 5 samples, not 100. And a
+  background process polling faster would need carState/controlsState msgq subscriptions -- the
+  exact pattern behind the 2026-07-13 uploader commIssue cascade
+  ([[feedback-no-carstate-sub-in-background-procs]]). So: the daemon compacts, ces_pnw measures.
+
+  WHY max(commanded, achieved) AND NOT ACHIEVED ALONE (defect D2): achieved curvature is bounded by
+  steering authority. 30 % of hands-off curve ticks carry a saturation flag, and on the 2026-09-08
+  19:44 PSCM LimitReached event the request went 0.1225 -> 0.162 rad with the wheel flat. Where the
+  truck cannot follow, achieved UNDER-reads the road -- precisely on the curves that matter. The
+  commanded half is what the planner believed the road was; the achieved half is what happened.
+
+  COST: three abs + three compares per tick. Proven affordable -- controlsd already runs an
+  identical 100 Hz peak accumulator (_flight_peak_achlat_acc, controlsd.py:445-449) in a process
+  with the same real-time budget.
+
+  WINDOW SEMANTICS: take() drains and restarts, so a record's kPeak covers exactly the ticks since
+  the PREVIOUS record -- normally ~100 (the ~1 Hz tick cadence), fewer around an adopt record.
+  `n` is reported as kPeakN so "nothing was measured" (the visK failure mode: a field that is logged
+  but never computed) is never confusable with "the road was straight"."""
+  __slots__ = ("k_peak", "k_pose_peak", "n", "dq_bits")
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self) -> None:
+    self.k_peak = 0.0
+    self.k_pose_peak = 0.0
+    self.n = 0
+    self.dq_bits = 0
+
+  def step(self, k_actl, k_cmd, k_pose, dq_bits: int = 0) -> None:
+    """One control tick. Any of the three curvatures may be None (missing / non-finite / dead
+    sensor) and simply does not contribute; `n` still counts the tick, so a window that ran but saw
+    nothing is distinguishable from a window that never ran."""
+    self.n += 1
+    if k_actl is not None:
+      a = abs(k_actl)
+      if a > self.k_peak:
+        self.k_peak = a
+    if k_cmd is not None:
+      a = abs(k_cmd)
+      if a > self.k_peak:
+        self.k_peak = a
+    if k_pose is not None:
+      a = abs(k_pose)
+      if a > self.k_pose_peak:
+        self.k_pose_peak = a
+    if dq_bits:
+      self.dq_bits |= int(dq_bits)
+
+  def take(self) -> tuple:
+    """Drain this window and start the next: (k_peak, k_pose_peak, n, dq_bits)."""
+    out = (self.k_peak, self.k_pose_peak, self.n, self.dq_bits)
+    self.reset()
+    return out
+
+
+# Every key _curve_tele() emits, pinned by test_curvedbtel2pnw.py. Same contract as
+# CURVELEAD_TELE_KEYS/VTSC_TELE_KEYS: adding a field here without emitting it (or vice versa)
+# silently produces a null column that reads as "the feature did not trigger" -- that has now
+# happened four times in this file's history (visK, icbmKVis, waysel2pnw's eight, lcSpdA).
+CURVE_TELE_KEYS = ("kPeak", "kPeakN", "kPoseP", "kPose", "achLatPose", "dq", "dqWhy", "strTq",
+                   "mapLat", "mapLon")
+
+
+def _curve_tele(ctl, raw_vego, map_dist) -> dict:
+  """curvedbtel2pnw: the telemetry fragment for BOTH ces_events record families (the tick/adopt
+  record and the CES-off "steer" breadcrumb), so the two cannot drift -- the one-builder contract
+  _curvelead_tele already carries.
+
+  SIDE EFFECT, and it is deliberate: this DRAINS the accumulator (CurvePeak.take), exactly like
+  _event_record consuming _gl_ev_pending. It must therefore be called at most once per record, and
+  the two callers are mutually exclusive per tick (_steer_log_step returns immediately once
+  _enabled is True, and _publish_status builds either an adopt OR a tick record, never both).
+
+  `map_dist` is the record's own mapDist; None on the CES-off breadcrumb, which carries no map
+  candidate at all -- mapLat/mapLon are null there, and the section 3.7 check reports that as an
+  expected-null population rather than a defect.
+
+  Never raises: a missing/absent accumulator (the permissive test stub, or a controller built before
+  this feature) yields an all-null fragment with kPeakN 0, which is the honest reading."""
+  peak = getattr(ctl, "_curve_peak", None)
+  if peak is not None:
+    k_peak, k_pose_peak, n, dq_bits = peak.take()
+  else:
+    k_peak, k_pose_peak, n, dq_bits = 0.0, 0.0, 0, 0
+  pose_k = getattr(ctl, "_pose_k", None)
+  map_lat, map_lon = map_candidate_point(getattr(ctl, "_map_targets", None),
+                                         getattr(ctl, "_cur_lat", None), getattr(ctl, "_cur_lon", None),
+                                         map_dist)
+  return {
+    # section 3.3: the per-second PEAK of max(|achieved|, |commanded|). Null when the window
+    # measured nothing at all -- read kPeakN first, never kPeak alone.
+    "kPeak": _zero_is_null(round(k_peak, 6)) if n else None,
+    "kPeakN": n,
+    # section 3.1 at peak resolution: the livePose-derived achieved half on its own. This is the
+    # ONLY achieved curvature the Tesla has (D1), and section 3.9's exit criterion 1 ("alive on both
+    # cars") cannot be met from a 1 Hz sample of a quantity section 3.3 itself argues must be peaked.
+    "kPoseP": _zero_is_null(round(k_pose_peak, 6)) if n else None,
+    # section 3.1 instantaneous, sampled exactly the way slKActl/achLat are sampled so the
+    # cross-check between the two sources is apples-to-apples. Signed (direction is information).
+    "kPose": _zero_is_null(round(pose_k, 6)) if pose_k is not None else None,
+    "achLatPose": _zero_is_null(_round_or_none(_ach_lat(pose_k, raw_vego), 3)),
+    # section 3.5: one OR over the window. None (not False) when the window never ran -- "no ticks"
+    # is not "clean".
+    "dq": bool(dq_bits) if n else None,
+    "dqWhy": _dq_names(dq_bits) if dq_bits else None,
+    # section 3.6: driver steering torque -- SEVERITY, where strPrs is only presence. Ford
+    # SteeringColumnTorque is +-8 Nm and Tesla EPAS_torsionBarTorque +-20.5 Nm: same unit, different
+    # scale, so it is per-car and must never be thresholded car-agnostically.
+    # Known limitation, stated rather than hidden: this is the 1 Hz SAMPLE the design asks for, not
+    # a peak, so a short override can be sampled at zero. `dq`/`dqWhy` still flag that second.
+    "strTq": _zero_is_null(getattr(ctl, "_str_tq", None)),
+    # section 3.4: where the CURVE is, not where the truck is.
+    "mapLat": map_lat, "mapLon": map_lon,
+  }
+
+
 _COMPASS_PTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 
@@ -2847,6 +3133,14 @@ class CESController:
     # curvelead2pnw: lead-continuity clock + this tick's lead-pace / map-claim telemetry (_curvelead_note).
     self._icbm_lead_trk = IcbmLeadTrack()
     _curvelead_clear(self)
+    # curvedbtel2pnw (CURVEDB2PNW.md sections 3.1-3.6): the 100 Hz curvature/disqualifier accumulator
+    # every ces_events record drains, plus the two per-tick samples that go with it. TELEMETRY ONLY --
+    # no control path reads any of this. See CurvePeak's docstring for why it cannot live in a daemon.
+    self._curve_peak = CurvePeak()
+    self._pose_k = None             # section 3.1: livePose-derived achieved curvature, this tick (signed)
+    self._str_tq = None             # section 3.6: driver steering torque (per-car scale), this tick
+    self._curve_err_t = None        # rule-2 throttle for the _curve_peak_step failure log
+    self._curve_err_n = 0           # failures since that log line
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -3203,6 +3497,12 @@ class CESController:
       self._stock_on = bool(car_state.cruiseState.enabled)
     except Exception:
       self._stock_set, self._stock_on = 0.0, False
+    # curvedbtel2pnw: the 100 Hz curvature/disqualifier accumulator every ces_events record drains.
+    # Unconditional (like _steer_event_step below) -- what the road did and whether the driver
+    # intervened are steering/localizer facts, not CES decisions. TELEMETRY ONLY; never raises.
+    # Placed AFTER the _str_prs sample above (the driver-override bit reads it) and BEFORE the two
+    # record writers below, so the record built on this tick includes this tick.
+    self._curve_peak_step(car_state, sm)
     # greenlight2pnw: always-on (independent of CESMode/_enabled — display/sound only)
     self._green_light_step(car_state, sm)
     # cessteerlog2pnw: unconditional steer/lane-centering breadcrumb — no-ops once _enabled is True
@@ -3313,6 +3613,93 @@ class CESController:
     if self._shadow:
       self._icbm_step(sig, active=(sig is not None and self._button == C.BTN_CES))
     return want and self._long_ok
+
+  # curvedbtel2pnw: the lateralControlState union members that carry a `saturated` field. The union
+  # also has two legacy SCALAR members (desiredLateralJerk, version) that do not, so the membership
+  # test -- rather than a try/except around the attribute -- is what keeps this branch free of a
+  # per-tick exception that would otherwise flood _curve_peak_step's rule-2 error log.
+  _SAT_UNION_MEMBERS = ("angleState", "torqueState", "pidState", "debugState",
+                        "lqrStateDEPRECATED", "curvatureStateDEPRECATED")
+
+  def _curve_peak_step(self, car_state, sm) -> None:
+    """curvedbtel2pnw sections 3.1 / 3.3 / 3.5: advance the 100 Hz accumulator by one tick.
+
+    TELEMETRY ONLY. Nothing here is read by any control path, and nothing here may raise into
+    selfdrived's loop (this process is restart_if_crash=False). Called unconditionally from
+    experimental_request BEFORE the `if not self._enabled` gate, because the facts it measures --
+    what the road did, what the wheel was asked to do, whether the driver intervened -- are
+    steering/localizer facts, not CES decisions, exactly like _steer_event_step's rationale.
+
+    Zero new subscriptions: carState arrives as the argument, and both controlsState and livePose
+    are already in selfdrived's SubMaster (selfdrived.py:117/119).
+
+    Rule 2: the failure path is LOGGED, throttled, with a count -- a silently dead accumulator is
+    the visK failure (a field logged forever and never computed) that section 3.7 exists to prevent.
+    kPeakN drops to 0 in every record while this is broken, so the log and the data agree."""
+    try:
+      v_ego = getattr(car_state, 'vEgo', None)
+      # Achieved, from CAN. DEAD ON THE TESLA by construction (D1) -- tesla/carstate.py never sets
+      # ret.yawRate and the Raven party DBC has no yaw signal -- which is why kPoseP exists.
+      k_actl = _curvature_from_yaw(getattr(car_state, 'yawRate', None), v_ego)
+      # Achieved, from the localizer. Alive on BOTH cars (section 3.1).
+      k_pose = _pose_curvature(sm['livePose'], v_ego)
+      self._pose_k = k_pose
+      # section 3.6: one getattr, per-car scale (Ford +-8 Nm, Tesla +-20.5 Nm).
+      str_tq = getattr(car_state, 'steeringTorque', None)
+      try:
+        self._str_tq = round(float(str_tq), 2) if str_tq is not None and math.isfinite(float(str_tq)) else None
+      except (TypeError, ValueError):
+        self._str_tq = None
+
+      cs = sm['controlsState']
+      k_cmd = float(cs.desiredCurvature)
+      if not math.isfinite(k_cmd):
+        k_cmd = None
+
+      # section 3.5 disqualifiers, OR'd at control rate wherever the fact is available at control rate.
+      dq = 0
+      if self._str_prs:                         # already sampled this tick by experimental_request
+        dq |= DQ_DRIVER
+      if getattr(car_state, 'leftBlinker', False) or getattr(car_state, 'rightBlinker', False):
+        dq |= DQ_BLINKER
+      # Lane change: modelV2.meta.laneChangeState is the same per-tick source _signals_from already
+      # uses. str() is required -- a capnp enum compares False against its own name otherwise
+      # ([[capnp-enum-str-trap]]: str(x) is the BARE name, "off", never "LaneChangeState.off").
+      try:
+        if str(sm['modelV2'].meta.laneChangeState) != "off":
+          dq |= DQ_LANECHG
+      except (KeyError, AttributeError):
+        pass                                    # no model this tick: the lcGate sample below still applies
+      if self._lc_gate == "lanechange":         # ~1 Hz sample, OR'd in as a second opinion
+        dq |= DQ_LANECHG
+      # Saturation, at 100 Hz: lac_log.saturated as controlsd itself computes it. Deliberately NOT
+      # taken only from the sl* fields -- those come from SteerLimitStatus, which controlsd publishes
+      # at 5 Hz and _read_map() samples at ~1 Hz, and section 3.3's whole argument is that a ~1 Hz
+      # sample of a 100 Hz fact aliases. slAngSat in particular is an instantaneous threshold test.
+      # The sampled flags are still OR'd in (union of sources, never a substitution): slCurvLim is
+      # the curvature half, which lac_log.saturated fuses but SteerLimitStatus isolates.
+      lcs = cs.lateralControlState
+      w = str(lcs.which())
+      if w in self._SAT_UNION_MEMBERS and getattr(lcs, w).saturated:
+        dq |= DQ_SAT
+      if self._sl_sat or self._sl_ang_sat or self._sl_curv_lim:
+        dq |= DQ_SAT
+
+      self._curve_peak.step(k_actl, k_cmd, k_pose, dq)
+    except Exception as e:
+      # Rule 2: never silent. Throttled to one line per CURVELEAD_ERR_LOG_S with a count, because
+      # this runs at 100 Hz and a persistent fault would otherwise flood the log it needs to be seen
+      # in. The accumulator simply misses this tick; kPeakN shows how many ticks it did see.
+      self._pose_k = None
+      self._curve_err_n += 1
+      try:
+        now = time.monotonic()
+        if self._curve_err_t is None or now - self._curve_err_t >= CURVELEAD_ERR_LOG_S:
+          n, self._curve_err_t, self._curve_err_n = self._curve_err_n, now, 0
+          cloudlog.exception(f"curvedbtel2pnw: _curve_peak_step FAILED ({type(e).__name__}) -- kPeak/kPose/dq are " +
+                             f"not accumulating; the curvedb Phase-1 corpus is degraded ({n} failure(s) since the last log)")
+      except Exception:
+        pass                    # an error handler that can itself raise is worse than none
 
   def _green_light_step(self, car_state, sm) -> None:
     """greenlight2pnw/greenlead2pnw: advance the pure GreenLightDetector one cycle and latch the
@@ -3457,7 +3844,10 @@ class CESController:
         "slAngDes": self._sl_ang_des, "slAngAct": self._sl_ang_act, "slAngErr": self._sl_ang_err,
         "slLatDem": self._sl_lat_dem, "slLatMax": self._sl_lat_max, "slCurvMax": self._sl_curv_max,
         "slSat": self._sl_sat, "slLatAct": self._sl_lat_active, "slAngSat": self._sl_ang_sat,
-        "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+        # curvedbtel2pnw section 3.2: slKActl exactly 0.0 is a DEAD SENSOR, not a straight road (it
+        # is 0.0 on 7,218 of 7,221 moving Tesla ticks) -> null. slKCmd/slKErr are left alone: a
+        # commanded exact zero is a genuine command, and slLatAct already says if lateral was active.
+        "slKCmd": self._sl_k_cmd, "slKActl": _zero_is_null(self._sl_k_actl), "slKErr": self._sl_k_err,
         # coopsteer-shadow2pnw: SHADOW torque-nudge fields (from SteerLimitStatus). Sign question:
         # sign(cpTq) vs sign(cpRate)/d(slAngAct) at light torque; cpOff is what we WOULD have added.
         "cpOff": self._cp_off, "cpTgt": self._cp_tgt, "cpCap": self._cp_cap, "cpWhy": self._cp_why,
@@ -3466,8 +3856,15 @@ class CESController:
         # heading, to measure the truck's true hands-off steering capability by direction. I4 review
         # fix: heading nulls (not "N") when there's no current GPS fix, rather than _compass()
         # silently reading a no-fix-defaulted 0.0 bearing as true north.
-        "achLat": round(ach_lat, 3) if ach_lat is not None else None,
+        # curvedbtel2pnw section 3.2: exact 0.0 -> null here too, same reason as slKActl above
+        # (achLat IS slKActl * vEgo^2, so a dead kActl produced a confident 0.00 m/s^2 lateral accel
+        # -- that is precisely the reading that voided the design's v1 proof of concept).
+        "achLat": _zero_is_null(round(ach_lat, 3) if ach_lat is not None else None),
         "heading": _heading_if_fixed(self._cur_bearing, gps_valid),
+        # curvedbtel2pnw sections 3.1/3.3/3.5/3.6: the curvature-peak fragment. mapLat/mapLon are
+        # null on this breadcrumb -- the CES-off record carries no map candidate (no mapDist) to
+        # match against; the section 3.7 check treats that as an expected-null population.
+        **_curve_tele(self, raw_vego, None),
         # leadrate2pnw: LOGGING ONLY — lead-car state alongside this breadcrumb, so offline analysis
         # can separate "driver holding a speed by choice" from "speed forced by a slow lead" even on
         # a CES-off drive (previously only the enabled tick/adopt path carried lead telemetry).
@@ -4308,7 +4705,11 @@ class CESController:
       # fordkappalog2pnw: commanded vs achieved curvature (1/m, Ford wire convention positive=left) —
       # the empirical saturation signal to characterize this truck's real curvature limit. Display/log
       # only, same as sl* above. See docs/STEERING-LIMITS.md "Ford curvature interface" section.
-      "slKCmd": self._sl_k_cmd, "slKActl": self._sl_k_actl, "slKErr": self._sl_k_err,
+      # curvedbtel2pnw section 3.2: slKActl exactly 0.0 is a DEAD SENSOR, not a straight road (it is
+      # 0.0 on 7,218 of 7,221 moving Tesla ticks, and non-zero on 1,097 of 1,136 Lightning ones) ->
+      # null. slKCmd/slKErr are deliberately untouched: a commanded exact zero is a genuine command,
+      # and slLatAct already distinguishes "lateral was not active".
+      "slKCmd": self._sl_k_cmd, "slKActl": _zero_is_null(self._sl_k_actl), "slKErr": self._sl_k_err,
       # coopsteer-shadow2pnw: SHADOW torque-nudge fields (from SteerLimitStatus) -- same fragment the
       # CES-off "steer" breadcrumb carries, so the sign question can be settled on any drive.
       "cpOff": self._cp_off, "cpTgt": self._cp_tgt, "cpCap": self._cp_cap, "cpWhy": self._cp_why,
@@ -4318,8 +4719,19 @@ class CESController:
       # near _ach_lat/_compass).
       # I4 review fix: null (not "N") when there's no current GPS fix, rather than _compass() reading
       # a no-fix-defaulted 0.0 bearing as true north.
-      "achLat": round(ach_lat, 3) if ach_lat is not None else None,
+      # curvedbtel2pnw section 3.2: exact 0.0 -> null, same reason as slKActl above (achLat IS
+      # slKActl * vEgo^2, so the dead Tesla sensor produced a confident 0.00 m/s^2 lateral accel --
+      # the reading that voided the design's own v1 proof of concept).
+      "achLat": _zero_is_null(round(ach_lat, 3) if ach_lat is not None else None),
       "heading": _heading_if_fixed(self._cur_bearing, self._cur_lat is not None and self._cur_lon is not None),
+      # curvedbtel2pnw sections 3.1/3.3/3.4/3.5/3.6 -- TELEMETRY ONLY, nothing reads these. The
+      # per-second curvature PEAK (kPeak/kPoseP, section 3.3) rather than the 1-in-100 sample, the
+      # localizer-derived achieved curvature that gives the Tesla one at all (kPose/achLatPose,
+      # section 3.1), the map candidate's OWN position (mapLat/mapLon, section 3.4 -- keyed on where
+      # the curve is, not where the truck is), the per-second disqualifier roll-up (dq/dqWhy,
+      # section 3.5) and driver steering torque (strTq, section 3.6). Keys pinned by CURVE_TELE_KEYS.
+      # mapDist is passed from `tele` so mapLat/mapLon resolve the SAME candidate the record names.
+      **_curve_tele(self, raw_vego, tele.get("mapDist")),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,

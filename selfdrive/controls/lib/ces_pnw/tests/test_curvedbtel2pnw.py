@@ -1,0 +1,608 @@
+"""curvedbtel2pnw — CURVEDB2PNW.md PHASE 1 telemetry. TELEMETRY ONLY; nothing here changes control.
+
+What each section of the design this file pins, and the mutation each test exists to kill
+(tools/../_scratch/mutate_curvedbtel.py applies them by literal source substitution):
+
+  3.1 P1-A  achieved curvature for BOTH cars from livePose, because CS.yawRate is dead on the Tesla
+            (measured: slKActl exactly 0.0 on 7,218 of 7,221 moving ticks, 2026-09-03 corpus).
+  3.2 P1-B  an exactly-zero curvature/lateral field logs as null -- M3 "zero logged as 0.0".
+  3.3 P1-C  kPeak is the per-second MAX of max(|achieved|, |commanded|) -- M1 "instantaneous sample
+            instead of the peak", M2 "achieved only instead of max(cmd, actl)".
+  3.4 P1-D  mapLat/mapLon are the CANDIDATE's coordinates -- M4 "taken from the truck".
+  3.5 P1-E  one per-second OR of the disqualifiers -- M5 "the OR is dropped".
+  3.6 P1-F  driver steering torque, and ONLY that (wiper/ambient are explicitly out of scope).
+(Section 3.8's archive path is the OTHER half of Phase 1 and is tested next to the rotation it
+changes, in test_event_log_rotation.py -- it retains bytes rather than writing fields, and it ships
+as its own commit.)
+
+The integration test at the bottom drives the REAL CESController.experimental_request at 100 Hz, so
+a mutation that survives the pure-unit tests by breaking the WIRING still dies: that is the class of
+defect (a field that is logged but never computed) section 3.7 exists to prevent, and which visK and
+icbmKVis both belonged to.
+"""
+import copy
+import json
+import math
+import types
+
+import pytest
+
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import FakeCP, LAT0, LON0, _model, _scene
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_ces_mode_read_failure_logged import (
+  LIGHTNING, MPH, TESLA, _P,
+)
+
+NS = types.SimpleNamespace
+
+
+# =====================================================================================================
+# 3.2 -- exact zero is null, never a measurement
+# =====================================================================================================
+class TestZeroIsNull:
+  def test_exact_zero_becomes_null(self):
+    assert m._zero_is_null(0.0) is None
+    assert m._zero_is_null(-0.0) is None          # -0.0 == 0.0: the dead-sensor case, not a reading
+
+  def test_a_real_reading_survives_unchanged(self):
+    assert m._zero_is_null(0.0021) == 0.0021
+    assert m._zero_is_null(-3.5) == -3.5
+    assert m._zero_is_null(1e-6) == 1e-6          # the smallest value the 1e-6 rounding can carry
+
+  def test_none_stays_none(self):
+    assert m._zero_is_null(None) is None
+
+
+# =====================================================================================================
+# 3.1 / 3.3 -- the curvature sources
+# =====================================================================================================
+class TestCurvatureFromYaw:
+  def test_it_is_yaw_over_speed(self):
+    assert m._curvature_from_yaw(0.2, 20.0) == pytest.approx(0.01)
+    assert m._curvature_from_yaw(-0.2, 20.0) == pytest.approx(-0.01)   # signed: direction is data
+
+  def test_the_speed_floor_matches_controlsd(self):
+    """CURVE_MIN_SPEED must stay equal to the constant controlsd divides by, or kPeak's achieved half
+    stops being comparable to the slKActl/achLat pair section 3.7's invariant checks it against."""
+    from openpilot.selfdrive.controls.lib.drive_helpers import MIN_SPEED
+    assert m.CURVE_MIN_SPEED == MIN_SPEED
+    assert m._curvature_from_yaw(0.2, 0.05) == pytest.approx(0.2 / m.CURVE_MIN_SPEED)
+
+  def test_bad_input_is_null_never_zero_and_never_raises(self):
+    assert m._curvature_from_yaw(None, 20.0) is None
+    assert m._curvature_from_yaw(0.2, None) is None
+    assert m._curvature_from_yaw(float("nan"), 20.0) is None
+    assert m._curvature_from_yaw(float("inf"), 20.0) is None
+    assert m._curvature_from_yaw("x", 20.0) is None
+
+
+class TestPoseCurvature:
+  """3.1 (P1-A): THE fix for defect D1 -- the Tesla has no yaw-rate CAN signal at all, so the only
+  achieved curvature it can ever have comes from the localizer."""
+
+  def test_it_reads_angular_velocity_device_z(self):
+    lp = NS(angularVelocityDevice=NS(x=0.0, y=0.0, z=0.25, valid=True))
+    assert m._pose_curvature(lp, 25.0) == pytest.approx(0.01)
+
+  def test_it_works_where_CS_yawRate_is_dead(self):
+    """The Tesla case, stated as an invariant: CAN says 0.0 (a lie), livePose says the truth."""
+    lp = NS(angularVelocityDevice=NS(z=0.25, valid=True))
+    assert m._curvature_from_yaw(0.0, 25.0) == 0.0            # what carState offers on the Raven
+    assert m._pose_curvature(lp, 25.0) == pytest.approx(0.01)  # what livePose offers instead
+
+  def test_an_invalid_pose_is_null_not_zero(self):
+    """An uninitialised/diverged localizer must NOT read as a perfectly straight road -- that is
+    exactly the reading that voided the design's v1 proof of concept."""
+    assert m._pose_curvature(NS(angularVelocityDevice=NS(z=0.25, valid=False)), 25.0) is None
+
+  def test_a_missing_message_is_null_and_never_raises(self):
+    assert m._pose_curvature(None, 25.0) is None
+    assert m._pose_curvature(NS(), 25.0) is None
+
+
+class TestCurvePeak:
+  """3.3 (P1-C). The record samples at ~1 Hz while control runs at 100 Hz -- 99 of every 100 readings
+  were being thrown away, and the ones that matter are the peaks."""
+
+  def test_it_reports_the_peak_not_the_last_sample(self):
+    """M1. A curve entered and exited inside one second must still be visible in that second."""
+    p = m.CurvePeak()
+    for k in (0.001, 0.004, 0.012, 0.004, 0.0005):     # tightens, then straightens again
+      p.step(k, None, None)
+    k_peak, _, n, _ = p.take()
+    assert k_peak == pytest.approx(0.012), "the per-second MAX, not the 0.0005 final sample"
+    assert n == 5
+
+  def test_max_of_commanded_and_achieved_not_achieved_alone(self):
+    """M2 / defect D2. Achieved is bounded by steering authority: on the 2026-09-08 19:44 PSCM
+    LimitReached event the REQUEST went 0.1225 -> 0.162 rad with the wheel flat. Where the truck
+    cannot follow, achieved under-reads the road -- precisely on the curves that matter."""
+    p = m.CurvePeak()
+    p.step(0.004, 0.011, None)                          # saturated: asked for much more than achieved
+    k_peak, _, _, _ = p.take()
+    assert k_peak == pytest.approx(0.011), "commanded must win when the truck could not follow"
+
+  def test_achieved_wins_when_it_exceeds_the_command(self):
+    p = m.CurvePeak()
+    p.step(0.011, 0.004, None)
+    assert p.take()[0] == pytest.approx(0.011)
+
+  def test_it_is_a_magnitude_so_a_right_hand_curve_counts(self):
+    p = m.CurvePeak()
+    p.step(-0.012, -0.004, None)
+    assert p.take()[0] == pytest.approx(0.012)
+
+  def test_the_pose_peak_is_accumulated_separately(self):
+    """3.1 at peak resolution. On the Tesla this is the ONLY achieved curvature there is, so it
+    cannot be folded into kPeak's CAN-derived half."""
+    p = m.CurvePeak()
+    p.step(0.0, 0.002, 0.009)                           # CAN dead (Tesla), localizer alive
+    k_peak, k_pose_peak, _, _ = p.take()
+    assert k_pose_peak == pytest.approx(0.009)
+    assert k_peak == pytest.approx(0.002), "kPeak stays the CAN+commanded pair (section 3.3's formula)"
+
+  def test_none_inputs_do_not_contribute_but_still_count_the_tick(self):
+    p = m.CurvePeak()
+    for _ in range(7):
+      p.step(None, None, None)
+    k_peak, k_pose_peak, n, _ = p.take()
+    assert (k_peak, k_pose_peak) == (0.0, 0.0)
+    assert n == 7, "a window that ran and saw nothing must be distinguishable from one that never ran"
+
+  def test_take_drains_so_the_next_window_starts_clean(self):
+    p = m.CurvePeak()
+    p.step(0.02, None, None)
+    assert p.take()[0] == pytest.approx(0.02)
+    assert p.take() == (0.0, 0.0, 0, 0), "a stale peak must never bleed into the next record"
+
+  def test_disqualifier_bits_or_over_the_window(self):
+    """3.5 (P1-E): the OR is over the whole window -- a 30 ms blinker flick inside the second still
+    disqualifies it, which a 1 Hz sample of the flag would miss."""
+    p = m.CurvePeak()
+    p.step(0.01, 0.01, 0.01, 0)
+    p.step(0.01, 0.01, 0.01, m.DQ_BLINKER)
+    p.step(0.01, 0.01, 0.01, 0)
+    assert p.take()[3] == m.DQ_BLINKER
+
+  def test_it_never_raises_on_garbage(self):
+    p = m.CurvePeak()
+    with pytest.raises(TypeError):
+      abs("x")                              # sanity: the thing we are asserting is NOT swallowed here
+    p.step(None, None, None, 0)             # the caller (_curve_peak_step) owns the guarding
+    assert p.n == 1
+
+
+class TestDqNames:
+  def test_each_bit_renders_and_the_order_is_stable(self):
+    assert m._dq_names(0) == ""
+    assert m._dq_names(m.DQ_SAT) == "sat"
+    assert m._dq_names(m.DQ_DRIVER | m.DQ_BLINKER) == "drv,blnk"
+    assert m._dq_names(m.DQ_SAT | m.DQ_DRIVER | m.DQ_LANECHG | m.DQ_BLINKER) == "sat,drv,lc,blnk"
+
+  def test_garbage_is_empty_never_an_exception(self):
+    assert m._dq_names(None) == ""
+    assert m._dq_names("x") == ""
+
+
+# =====================================================================================================
+# 3.4 -- where the CURVE is, not where the truck is
+# =====================================================================================================
+def _pt(north_m, east_m=0.0, v=0.0):
+  return {"latitude": LAT0 + north_m / 111320.0,
+          "longitude": LON0 + east_m / (111320.0 * math.cos(math.radians(LAT0))),
+          "velocity": v}
+
+
+class TestMapCandidatePoint:
+  def test_it_returns_the_candidate_not_the_truck(self):
+    """M4. Map/far ticks sit median 49 m / p90 129 m BEFORE the candidate, which is why clustering
+    truck positions smeared one 2026-09-08 episode across four or five "sites"."""
+    pts = [_pt(0.0), _pt(100.0), _pt(300.0), _pt(500.0)]
+    lat, lon = m.map_candidate_point(pts, LAT0, LON0, 300.0)
+    assert (lat, lon) != (None, None)
+    assert lat != LAT0, "the truck's own latitude is not an answer"
+    assert m._haversine_m(LAT0, LON0, lat, lon) == pytest.approx(300.0, abs=1.0)
+
+  def test_the_match_is_exact_for_a_distance_taken_from_the_same_list(self):
+    pts = [_pt(0.0), _pt(137.0), _pt(412.0)]
+    d = m._haversine_m(LAT0, LON0, pts[1]["latitude"], pts[1]["longitude"])
+    lat, lon = m.map_candidate_point(pts, LAT0, LON0, d)
+    assert (lat, lon) == pytest.approx((pts[1]["latitude"], pts[1]["longitude"]))
+
+  def test_no_candidate_this_tick_is_null(self):
+    """decision_telemetry renders an infinite mapDist as 0.0, so 0.0 means "no candidate"."""
+    pts = [_pt(100.0), _pt(300.0)]
+    assert m.map_candidate_point(pts, LAT0, LON0, 0.0) == (None, None)
+    assert m.map_candidate_point(pts, LAT0, LON0, None) == (None, None)
+    assert m.map_candidate_point(pts, LAT0, LON0, float("inf")) == (None, None)
+    assert m.map_candidate_point([], LAT0, LON0, 300.0) == (None, None)
+    assert m.map_candidate_point(pts, None, None, 300.0) == (None, None)
+
+  def test_a_match_outside_the_tolerance_is_null_not_a_wrong_coordinate(self):
+    """The point list changed underneath us -> say nothing, rather than name a point 300 m away."""
+    pts = [_pt(100.0)]
+    assert m.map_candidate_point(pts, LAT0, LON0, 400.0) == (None, None)
+    assert m.CURVE_CAND_TOL_M == 30.0     # section 3.7's own invariant bound
+
+  def test_malformed_points_are_skipped_and_it_never_raises(self):
+    pts = [{"latitude": "x", "longitude": 0.0}, {}, _pt(float("nan")), _pt(200.0)]
+    lat, lon = m.map_candidate_point(pts, LAT0, LON0, 200.0)
+    assert m._haversine_m(LAT0, LON0, lat, lon) == pytest.approx(200.0, abs=1.0)
+
+
+# =====================================================================================================
+# the record: does the value actually reach ces_events.jsonl
+# =====================================================================================================
+def _rec(tele=None, **over):
+  """Drive the REAL _event_record("tick", ...) with the permissive stub test_ces_record_fields
+  established (a `__getattr__` returning None, so unrelated fields this record grows over time do
+  not have to be tracked here)."""
+  class Stub:
+    def __getattr__(self, n):
+      return None
+
+  g = Stub()
+  g._vtsc_tele = {}
+  g._sa_tele = {}
+  g._map_targets = []
+  g._speed_limit = 11.2
+  g._button = C.BTN_CES
+  g._ces2_urg = 0.0
+  g._ces2_div = type("D", (), {"count": 0})()
+  g._gl = type("G", (), {"state": None, "status": lambda s: None})()
+  g._sm = type("S", (), {"state": None, "status": lambda s: None})()
+  g._icbm_k_at = g._icbm_k_at_d = g._icbm_k_at_n = g._icbm_k_at_gap = 0.0
+  g._icbm_k = g._icbm_k_dist = g._icbm_k_v = g._icbm_k_n = 0.0
+  g._icbm_k_ahead = True
+  g._icbm_floor_lim = 0.0
+  g._icbm_floor_hit = False
+  g._cur_lat, g._cur_lon = LAT0, LON0
+  g._curve_peak = m.CurvePeak()
+  for k, v in over.items():
+    setattr(g, k, v)
+  return m.CESController._event_record.__get__(g)("tick", tele or {"vEgo": 25.0})
+
+
+class TestRecordFields:
+  def test_every_declared_key_is_emitted(self):
+    """The CURVE_TELE_KEYS contract: a key declared but never emitted is a null column that reads as
+    "the feature did not trigger" -- this file's history has four of those (visK, icbmKVis,
+    waysel2pnw's eight, lcSpdA)."""
+    rec = _rec()
+    for k in m.CURVE_TELE_KEYS:
+      assert k in rec, f"{k} is declared in CURVE_TELE_KEYS but never reaches the record"
+
+  def test_the_peak_reaches_the_record_and_is_the_peak(self):
+    """M1 at the record level: the wiring must carry the accumulator's MAX, not a fresh sample."""
+    peak = m.CurvePeak()
+    for k in (0.001, 0.013, 0.002):
+      peak.step(k, None, None)
+    rec = _rec(_curve_peak=peak)
+    assert rec["kPeak"] == pytest.approx(0.013)
+    assert rec["kPeakN"] == 3
+
+  def test_the_record_drains_the_accumulator(self):
+    """Two records in a row must not both carry the first one's peak."""
+    peak = m.CurvePeak()
+    peak.step(0.02, None, None)
+    assert _rec(_curve_peak=peak)["kPeak"] == pytest.approx(0.02)
+    assert _rec(_curve_peak=peak)["kPeak"] is None, "a stale peak would fake a curve on straight road"
+
+  def test_a_measured_zero_logs_as_null_with_the_tick_count_intact(self):
+    """M3. kPeakN is what separates "measured, and it was zero/unmeasurable" from "never ran"."""
+    peak = m.CurvePeak()
+    for _ in range(100):
+      peak.step(0.0, 0.0, 0.0)
+    rec = _rec(_curve_peak=peak)
+    assert rec["kPeak"] is None and rec["kPoseP"] is None
+    assert rec["kPeakN"] == 100
+
+  def test_an_accumulator_that_never_ran_is_null_everywhere(self):
+    rec = _rec(_curve_peak=m.CurvePeak())
+    assert rec["kPeakN"] == 0
+    assert rec["kPeak"] is None and rec["kPoseP"] is None
+    assert rec["dq"] is None, "no ticks is not the same claim as 'clean second'"
+
+  def test_pose_curvature_and_its_lateral_accel_reach_the_record(self):
+    rec = _rec(_pose_k=0.008, tele={"vEgo": 25.0})
+    assert rec["kPose"] == pytest.approx(0.008)
+    assert rec["achLatPose"] == pytest.approx(0.008 * 25.0 ** 2, abs=0.01)   # k * v^2
+
+  def test_pose_fields_are_null_when_the_localizer_had_nothing(self):
+    rec = _rec(_pose_k=None)
+    assert rec["kPose"] is None and rec["achLatPose"] is None
+
+  def test_the_existing_achieved_pair_now_nulls_on_exact_zero(self):
+    """3.2 applied to the two fields defect D1 is actually about."""
+    rec = _rec(_sl_k_actl=0.0, tele={"vEgo": 25.0})
+    assert rec["slKActl"] is None, "0.0 reads as a perfectly straight road; it is a dead sensor"
+    assert rec["achLat"] is None
+    alive = _rec(_sl_k_actl=0.004, tele={"vEgo": 25.0})
+    assert alive["slKActl"] == pytest.approx(0.004) and alive["achLat"] == pytest.approx(2.5, abs=0.01)
+
+  def test_commanded_curvature_is_deliberately_left_alone(self):
+    """Scope discipline: slKCmd 0.0 is a genuine command (and slLatAct already says whether lateral
+    was active), so it must NOT be swept into the zero->null rule."""
+    assert _rec(_sl_k_cmd=0.0)["slKCmd"] == 0.0
+
+  def test_the_disqualifier_roll_up_reaches_the_record_with_its_reason(self):
+    """M5."""
+    peak = m.CurvePeak()
+    peak.step(0.01, 0.01, 0.01, m.DQ_SAT | m.DQ_DRIVER)
+    rec = _rec(_curve_peak=peak)
+    assert rec["dq"] is True
+    assert rec["dqWhy"] == "sat,drv"
+
+  def test_a_clean_second_is_false_not_null(self):
+    peak = m.CurvePeak()
+    peak.step(0.01, 0.01, 0.01, 0)
+    rec = _rec(_curve_peak=peak)
+    assert rec["dq"] is False and rec["dqWhy"] is None
+
+  def test_driver_steering_torque_reaches_the_record(self):
+    """3.6 (P1-F). Kept per-car: Ford SteeringColumnTorque is +-8 Nm, Tesla EPAS +-20.5 Nm."""
+    assert _rec(_str_tq=1.75)["strTq"] == pytest.approx(1.75)
+    assert _rec(_str_tq=-6.5)["strTq"] == pytest.approx(-6.5)
+    assert _rec(_str_tq=0.0)["strTq"] is None       # 3.2 again: zero torque or a dead signal?
+    assert _rec(_str_tq=None)["strTq"] is None
+
+  def test_the_candidate_position_reaches_the_record_and_is_not_the_truck(self):
+    """M4 at the record level."""
+    pts = [_pt(0.0), _pt(150.0), _pt(332.0)]
+    d = round(m._haversine_m(LAT0, LON0, pts[2]["latitude"], pts[2]["longitude"]), 0)
+    rec = _rec(_map_targets=pts, tele={"vEgo": 25.0, "mapDist": d})
+    assert rec["mapLat"] is not None and rec["mapLon"] is not None
+    assert rec["mapLat"] != rec["lat"], "logging the truck's own position answers nothing"
+    assert m._haversine_m(rec["lat"], rec["lon"], rec["mapLat"], rec["mapLon"]) == pytest.approx(d, abs=30.0)
+
+  def test_no_map_candidate_means_null_coordinates(self):
+    pts = [_pt(0.0), _pt(150.0)]
+    rec = _rec(_map_targets=pts, tele={"vEgo": 25.0, "mapDist": 0.0})
+    assert rec["mapLat"] is None and rec["mapLon"] is None
+
+  def test_the_record_never_raises_without_an_accumulator(self):
+    """A controller built before this feature (or the permissive stub) must degrade, not explode."""
+    rec = _rec(_curve_peak=None)
+    assert rec["kPeakN"] == 0 and rec["kPeak"] is None and rec["dq"] is None
+
+
+# =====================================================================================================
+# 3.7 -- the wiring, through the REAL 100 Hz call path
+# =====================================================================================================
+def _drive(monkeypatch, tmp_path, fp, brand, op_long, yaw_of, cmd_of, pose_of=None, ticks=250,
+           str_tq=0.0, blinker=False, steer_pressed=False, saturated=False, lane_change="off",
+           pose_valid=True, curve_at=None):
+  """Run the REAL CESController.experimental_request at 100 Hz and return every appended record.
+
+  This is the anti-visK test: it proves the value is COMPUTED on the shipped call path, not merely
+  that a key exists in a dict a unit test handed to _event_record."""
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "absent.json"))
+  monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "absent-rain.json"))
+  clock = [5000.0]
+  ns = types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0])
+  for mod in (C, m):
+    monkeypatch.setattr(mod, "time", ns)
+  C._ces_mode_hold_st.clear()
+
+  class Mem:
+    def __init__(self):
+      self.puts = []
+
+    def get(self, k, return_default=False):
+      if k == "MapTargetVelocities":
+        return _scene(curve_at, 180.0, 20.0) if curve_at is not None else []
+      if k == "LastGPSPosition":
+        return json.dumps({"latitude": LAT0, "longitude": LON0, "bearing": 0.0, "src": "device",
+                           "ts": clock[0], "fix_ts": clock[0] - 0.3})
+      if k == "MapSpeedLimit":
+        return str(60 * MPH)
+      return None
+
+    def put_nonblocking(self, k, v):
+      self.puts.append((k, copy.deepcopy(v)))
+
+  params = _P(clock, mode=lambda t: 2, extra={"CESButtonState": "0"})
+  c = m.CESController(FakeCP(fp, brand, op_long), params=params)
+  c.mem_params = Mem()
+  recs = []
+  c._event_log_ok = True
+  c._append_event = lambda rec: recs.append(copy.deepcopy(rec))
+  v_ego, stock = 25.0, 60 * MPH
+  for i in range(ticks):
+    clock[0] = 5000.0 + (i + 1) * 0.01
+    orz, vx, px, ts = _model(v_ego, curve_at if curve_at is not None else 1e9, 180.0)
+    model = NS(orientationRate=NS(z=orz, t=ts), velocity=NS(x=vx), position=NS(x=px),
+               action=NS(shouldStop=False), meta=NS(laneChangeState=lane_change))
+    yaw = yaw_of(i)
+    pose_z = pose_of(i) if pose_of is not None else yaw
+    sm = {"radarState": NS(leadOne=NS(status=False, vLead=0.0, dRel=0.0, aLeadK=0.0, vLeadK=0.0)),
+          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0]),
+          "livePose": NS(angularVelocityDevice=NS(x=0.0, y=0.0, z=pose_z, valid=pose_valid)),
+          "controlsState": NS(desiredCurvature=cmd_of(i),
+                              lateralControlState=NS(which=lambda: "angleState",
+                                                     angleState=NS(saturated=saturated)))}
+    cs = NS(vEgo=v_ego, aEgo=0.0, gasPressed=False, brakePressed=False,
+            leftBlinker=blinker, rightBlinker=False, vCruise=stock * 3.6, standstill=False,
+            steeringAngleDeg=0.0, steeringPressed=steer_pressed, leftBlindspot=False,
+            rightBlindspot=False, cruiseState=NS(speed=stock, enabled=True),
+            yawRate=yaw, steeringTorque=str_tq)
+    c.experimental_request(cs, sm)
+  return [r for r in recs if r.get("ev") in ("tick", "adopt")]
+
+
+class TestOnTheRealCallPath:
+  def test_the_accumulator_runs_every_tick_and_the_record_carries_the_peak(self, monkeypatch, tmp_path):
+    """One 20 ms spike inside the second. A 1 Hz sample would miss it 98 times out of 100; kPeak
+    must not. (yawRate 0.3 rad/s at 25 m/s = 0.012 1/m = 7.5 m/s^2 -- a genuinely tight moment.)"""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.3 if i % 100 == 50 else 0.02, cmd_of=lambda i: 0.0)
+    assert recs, "no tick/adopt records at all -- the harness, not the feature, is broken"
+    last = recs[-1]
+    assert last["kPeakN"] > 50, f"the accumulator is not running at control rate (kPeakN={last['kPeakN']})"
+    assert last["kPeak"] == pytest.approx(0.3 / 25.0, rel=0.02), "the spike must survive into the record"
+
+  def test_a_commanded_curvature_the_truck_cannot_follow_still_reaches_kPeak(self, monkeypatch, tmp_path):
+    """Defect D2 end to end: the wheel is flat (yaw ~0) while the planner asks for a real curve."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.0, cmd_of=lambda i: -0.009)
+    assert recs[-1]["kPeak"] == pytest.approx(0.009, rel=0.02)
+
+  def test_the_tesla_gets_an_achieved_curvature_where_CAN_gives_it_none(self, monkeypatch, tmp_path):
+    """THE point of P1-A / defect D1. carState.yawRate is 0.0 on every Raven tick (the party DBC has
+    no yaw signal at all), so slKActl/achLat read as a perfectly straight road forever. kPose/kPoseP
+    come from the localizer and must be alive on exactly the same drive."""
+    recs = _drive(monkeypatch, tmp_path, TESLA, "tesla", True,
+                  yaw_of=lambda i: 0.0,                      # what the Raven's CAN offers: nothing
+                  cmd_of=lambda i: 0.0,
+                  pose_of=lambda i: 0.25)                    # what the localizer measured: a real bend
+    last = recs[-1]
+    assert last["kPose"] == pytest.approx(0.01, rel=0.02)
+    assert last["kPoseP"] == pytest.approx(0.01, rel=0.02)
+    assert last["achLatPose"] == pytest.approx(0.25 * 25.0, rel=0.02)   # yaw * v = 6.25 m/s^2
+    assert last["kPeak"] is None, "the CAN-derived pair is still dead -- that is the fact being worked around"
+
+  def test_an_invalid_localizer_nulls_rather_than_claiming_a_straight_road(self, monkeypatch, tmp_path):
+    recs = _drive(monkeypatch, tmp_path, TESLA, "tesla", True, yaw_of=lambda i: 0.0,
+                  cmd_of=lambda i: 0.0, pose_of=lambda i: 0.25, pose_valid=False)
+    assert recs[-1]["kPose"] is None and recs[-1]["kPoseP"] is None
+
+  @pytest.mark.parametrize("kw, want", [
+    ({"steer_pressed": True}, "drv"),
+    ({"blinker": True}, "blnk"),
+    ({"lane_change": "laneChangeStarting"}, "lc"),
+    ({"saturated": True}, "sat"),
+  ])
+  def test_each_disqualifier_is_seen_on_the_real_call_path(self, monkeypatch, tmp_path, kw, want):
+    """M5 end to end -- and specifically that `sat` comes from controlsState at 100 Hz, not only
+    from the ~1 Hz SteerLimitStatus sample that section 3.3 shows aliases."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.02, cmd_of=lambda i: 0.0, **kw)
+    last = recs[-1]
+    assert last["dq"] is True
+    assert want in (last["dqWhy"] or "")
+
+  def test_a_clean_drive_disqualifies_nothing(self, monkeypatch, tmp_path):
+    """The negative control for the test above: without it, `dq = True` would also pass."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.02, cmd_of=lambda i: 0.0)
+    assert recs[-1]["dq"] is False and recs[-1]["dqWhy"] is None
+
+  def test_driver_torque_reaches_the_record_from_carState(self, monkeypatch, tmp_path):
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True, yaw_of=lambda i: 0.02,
+                  cmd_of=lambda i: 0.0, str_tq=2.5)
+    assert recs[-1]["strTq"] == pytest.approx(2.5)
+
+  def test_the_map_candidate_position_is_logged_on_a_real_map_tick(self, monkeypatch, tmp_path):
+    """M4 end to end, and section 3.7's invariant: mapLat/mapLon must sit mapDist away from the truck."""
+    # 150 m ahead: inside CES's own map horizon (v_ego * CURVE_MAP_LOOKAHEAD_S = 25 * 10 = 250 m),
+    # so upcoming_curve actually produces a candidate and mapDist is populated.
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True, yaw_of=lambda i: 0.02,
+                  cmd_of=lambda i: 0.0, curve_at=150.0)
+    withmap = [r for r in recs if r.get("mapDist")]
+    assert withmap, "the harness produced no map candidate -- nothing was actually tested"
+    for r in withmap:
+      assert r["mapLat"] is not None and r["mapLon"] is not None, "a candidate with no position logged"
+      d = m._haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"])
+      assert abs(d - r["mapDist"]) <= 30.0, f"mapLat/mapLon is {d:.0f} m out vs mapDist {r['mapDist']:.0f} m"
+
+  def test_a_broken_accumulator_is_logged_and_never_reaches_the_control_loop(self, monkeypatch, tmp_path):
+    """Rule 2. A silently dead accumulator is the visK failure; kPeakN going to 0 in the record and
+    the swaglog line must agree that it is dead."""
+    said = []
+    monkeypatch.setattr(m.cloudlog, "exception", lambda msg, *a, **k: said.append(msg))
+
+    def boom(*a, **k):
+      raise RuntimeError("accumulator down")
+    monkeypatch.setattr(m, "_pose_curvature", boom)
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.3, cmd_of=lambda i: 0.0, ticks=150)
+    assert any("_curve_peak_step FAILED" in s and "RuntimeError" in s for s in said)
+    assert recs and recs[-1]["kPeakN"] == 0, "the record must agree with the log that nothing was measured"
+    assert recs[-1]["kPeak"] is None
+
+
+# =====================================================================================================
+# 3.7 -- the CHECKER itself. A verification gate that cannot fail verifies nothing, which is the same
+# class of defect (something that looks like evidence and is not) as visK.
+# =====================================================================================================
+def _good_row(i, **over):
+  """One synthetic post-curvedbtel2pnw Lightning tick that satisfies every invariant."""
+  cand = _pt(200.0)
+  r = {"t": 1788000000.0 + i, "ev": "tick", "car": LIGHTNING, "vEgo": 25.0,
+       "lat": LAT0, "lon": LON0, "mapDist": round(m._haversine_m(LAT0, LON0, cand["latitude"],
+                                                                cand["longitude"]), 0),
+       "mapLat": cand["latitude"], "mapLon": cand["longitude"],
+       "kPeak": 0.0052, "kPeakN": 100, "kPoseP": 0.0051, "kPose": 0.005,
+       "achLatPose": 3.125, "achLat": 3.0, "slKActl": 0.0048, "strTq": 0.5,
+       "dq": False, "dqWhy": None, "strPrs": False, "blnk": False,
+       "slAngSat": False, "slSat": False, "slCurvLim": False, "lcGate": "ok"}
+  r.update(over)
+  return r
+
+
+def _corpus(tmp_path, rows, name="ces_events.jsonl"):
+  p = tmp_path / name
+  p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+  return str(p)
+
+
+def _run_check(path, *extra):
+  from openpilot.tools import curvedb_telemetry_check as chk
+  return chk.main([path, "--quiet", *extra])
+
+
+class TestTheCheckerItself:
+  def test_a_healthy_corpus_passes(self, tmp_path):
+    assert _run_check(_corpus(tmp_path, [_good_row(i) for i in range(60)])) == 0
+
+  def test_a_pre_feature_corpus_fails_rather_than_passing_vacuously(self, tmp_path):
+    """ABSENT is not "nothing to check": a pre-feature corpus and a dead writer look identical."""
+    rows = [{k: v for k, v in _good_row(i).items() if k not in m.CURVE_TELE_KEYS} for i in range(60)]
+    path = _corpus(tmp_path, rows)
+    assert _run_check(path) == 1
+    assert _run_check(path, "--allow-absent") == 0     # the documented escape hatch, and only that
+
+  def test_mapLat_taken_from_the_truck_is_caught(self, tmp_path):
+    """M4. The prototype that keyed on truck positions smeared one episode across 4-5 "sites"."""
+    rows = [_good_row(i, mapLat=LAT0, mapLon=LON0) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_peak_that_under_reads_the_instantaneous_sample_is_caught(self, tmp_path):
+    """M1. If kPeak were the last sample rather than the window max it would routinely sit below the
+    achLat measured at the record instant; I1 is what notices."""
+    rows = [_good_row(i, kPeak=0.0001) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_disqualifier_the_roll_up_missed_is_caught(self, tmp_path):
+    """M5. A sampled flag true while dq is false means the OR is not running."""
+    rows = [_good_row(i, strPrs=True) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_an_exact_zero_is_caught(self, tmp_path):
+    """M3, and this is the check that FAILS on today's real Tesla corpus -- by design."""
+    rows = [_good_row(i, kPose=0.0) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_sign_flipped_pose_source_is_caught(self, tmp_path):
+    """Non-zero and WRONG -- the units2pnw / capnp-enum class of defect that "is it non-zero" misses."""
+    rows = [_good_row(i, kPose=-0.005) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_ford_only_field_leaking_onto_a_tesla_is_caught(self, tmp_path):
+    rows = [_good_row(i, car=TESLA, slKActl=None, achLat=None,
+                      car_gps={"lat": LAT0, "lon": LON0}) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_tesla_whose_pose_curvature_is_dead_is_caught(self, tmp_path):
+    """The positive half of the negative control: if P1-A did not actually fix D1, say so."""
+    rows = [_good_row(i, car=TESLA, slKActl=None, achLat=None, kPose=None, kPoseP=None,
+                      achLatPose=None, kPeak=None) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_the_writer_check_names_the_real_emit_sites(self, tmp_path):
+    """Section 3.7 item 1: every field in the checker's table must be traceable to live source."""
+    from openpilot.tools import curvedb_telemetry_check as chk
+    assert set(chk.WRITERS) == set(m.CURVE_TELE_KEYS), \
+      "the checker's writer table and CURVE_TELE_KEYS must describe the same field set"

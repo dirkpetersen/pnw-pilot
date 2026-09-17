@@ -124,6 +124,15 @@ def _ces_pnw_globals():
   exec(compile(pts_src, "<pts>", "exec"), ns)
   exec(compile(_extract_func(src, tree, "_compass"), "<compass>", "exec"), ns)
   exec(compile(_extract_func(src, tree, "_heading_if_fixed"), "<heading_if_fixed>", "exec"), ns)
+  # curvedbtel2pnw: _steer_log_step now splices in **_curve_tele(...), so the extracted method needs
+  # that builder and its whole (pure) dependency chain in this namespace. Extracted from the real
+  # source like everything else here -- a stub would defeat the point of the AST harness.
+  for name in ("CURVE_MIN_SPEED", "CURVE_CAND_TOL_M", "DQ_SAT", "DQ_DRIVER", "DQ_LANECHG",
+               "DQ_BLINKER", "_DQ_NAMES"):
+    exec(compile(_extract_module_assign(src, tree, name), f"<{name}>", "exec"), ns)
+  for name in ("_dq_names", "_zero_is_null", "_curvature_from_yaw", "_round_or_none",
+               "_haversine_m", "map_candidate_point", "_curve_tele"):
+    exec(compile(_extract_func(src, tree, name), f"<{name}>", "exec"), ns)
   return src, tree, ns
 
 

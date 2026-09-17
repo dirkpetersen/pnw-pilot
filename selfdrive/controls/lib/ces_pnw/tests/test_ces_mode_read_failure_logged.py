@@ -322,15 +322,25 @@ def _ces_run(clock, fp, brand, op_long, mode, lead, curve0, v0, T=12.0):
     model = NS(orientationRate=NS(z=orz, t=ts), velocity=NS(x=vx), position=NS(x=px), action=NS(shouldStop=False),
                meta=NS(laneChangeState="off"))
     has = lead is not None
+    # curvedbtel2pnw: livePose + controlsState are in selfdrived's REAL SubMaster (selfdrived.py:117/119)
+    # and _curve_peak_step reads both every tick. Stubbing them here is not decoration -- leaving them
+    # out makes the harness's sm a dict that raises KeyError, which the rule-2 failure log then
+    # (correctly) reports as a broken accumulator, failing the "no errors" identity assertions.
     sm = {"radarState": NS(leadOne=NS(status=has, vLead=lead[1] if has else 0.0, dRel=lead[0] if has else 0.0,
                                       aLeadK=0.0, vLeadK=lead[1] if has else 0.0)),
-          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0])}
+          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0]),
+          "livePose": NS(angularVelocityDevice=NS(x=0.0, y=0.0, z=0.0, valid=True)),
+          "controlsState": NS(desiredCurvature=0.0,
+                              lateralControlState=NS(which=lambda: "angleState",
+                                                     angleState=NS(saturated=False)))}
     tgt = next((p for _, k, p in reversed(c.mem_params.puts) if k == "IcbmTarget"), None)
     if tgt and "target" in tgt and i % 30 == 0 and abs(tgt["target"] - st["stock"]) > 0.3:
       st["stock"] += MPH if tgt["target"] > st["stock"] else -MPH
     cs = NS(vEgo=v, aEgo=0.0, gasPressed=False, brakePressed=False, leftBlinker=False, rightBlinker=False,
             vCruise=st["stock"] * 3.6, standstill=False, steeringAngleDeg=0.0, steeringPressed=False,
-            leftBlindspot=False, rightBlindspot=False, cruiseState=NS(speed=st["stock"], enabled=True))
+            leftBlindspot=False, rightBlindspot=False, cruiseState=NS(speed=st["stock"], enabled=True),
+            # curvedbtel2pnw: both are real CarState fields _curve_peak_step reads every tick.
+            yawRate=0.0, steeringTorque=0.0)
     decisions.append(c.experimental_request(cs, sm))
     st["v"] = max(min(st["v"] + (min(st["stock"], 40.0) - st["v"]) * 0.002, 40.0), 5.0)
   return {"dec": decisions, "puts": c.mem_params.puts, "rec": records}
