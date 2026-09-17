@@ -109,10 +109,17 @@ class Report:
 
     ABSENT counts as a failure, deliberately: a field missing from every record cannot be
     distinguished from a dead writer by looking at the data, so "there was nothing to check" must
+    `self.rows` records every check so a caller can assert on the VERDICT rather than on the printed
+    prose. It was initialised and never appended -- a field that exists and is always empty, which is
+    the same "looks like evidence, is not" shape as visK (Fable 2026-09-16). Some of these checks are
+    only distinguishable by their STATUS (a far-only drive where I3 SKIPs because the far records were
+    filtered out exits 0 exactly like a healthy one), so this is the only sound hook for testing them.
+
     not exit 0. --allow-absent downgrades it to SKIP at the call site, which is the only way to run
     this against a pre-feature corpus."""
     if status in ("FAIL", "ABSENT"):
       self.failed = True
+    self.rows.append((status, name, detail))
     self.line(f"  [{status:6}] {name:38} {detail}")
 
 
@@ -400,7 +407,7 @@ def main(argv=None):
   ap.add_argument("--quiet", action="store_true")
   args = ap.parse_args(argv)
 
-  rep = Report(quiet=args.quiet)
+  rep = main.last_report = Report(quiet=args.quiet)   # last_report: the per-check verdicts, for tests
   rep.line("curvedbtel2pnw -- CURVEDB2PNW.md section 3.7 verification gate")
   rep.line("")
   check_writers(rep)

@@ -390,6 +390,21 @@ class TestRecordFields:
     frag = m._curve_tele(Stub(), 25.0, 320.0, (47.00269, -122.0))
     assert (frag["mapLat"], frag["mapLon"], frag["mapCandD"]) == (None, None, None)
 
+  def test_a_FAILED_latch_with_a_good_fix_also_nulls_rather_than_raising(self):
+    """The other half of the same guard (Fable round 4, F2). If the latch could not resolve a point
+    -- `map_candidate_point` returning (None, None) because the path list changed underneath it --
+    the record has a fix but no point. Guarding on the fix alone would then hand None to the
+    haversine and RAISE, out of a function whose callers do not wrap it: `_publish_status` is called
+    unwrapped from experimental_request, and selfdrived's own backstop would force chill for that
+    cycle and skip that cycle's ICBM publish. Near-unreachable by construction; still guarded."""
+    class Stub:
+      _cur_lat, _cur_lon = 47.0, -122.0
+
+      def __getattr__(self, n):
+        return None
+    frag = m._curve_tele(Stub(), 25.0, 320.0, (None, None))
+    assert (frag["mapLat"], frag["mapLon"], frag["mapCandD"]) == (None, None, None)
+
   def test_the_record_never_raises_without_an_accumulator(self):
     """A controller built before this feature (or the permissive stub) must degrade, not explode."""
     rec = _rec(_curve_peak=None)
@@ -765,9 +780,31 @@ class TestTheCheckerItself:
     This is exactly how the old I3 hid every far-candidate record -- `and r.get("mapDist")`.
 
     ONE orphan among 59 good rows, deliberately: nulling all 60 makes the field ALWAYS-NULL, the
-    presence check fails first, and I3c is never the deciding check (Fable, round 2)."""
-    rows = [_good_row(i) for i in range(59)] + [_good_row(59, mapCandD=None)]
+    presence check fails first, and I3c is never the deciding check (Fable, round 2).
+
+    The orphan also carries mapDist 0.0 (round 4). With a non-zero mapDist it was the row that killed
+    the "I3 filters on mapDist again" mutant -- but by CRASHING the checker (`float - NoneType`),
+    not by detecting anything. A crash is not a detection; the mutant is pinned properly by
+    test_a_far_only_drive_is_actually_CHECKED_not_skipped below."""
+    rows = [_good_row(i) for i in range(59)] + [_good_row(59, mapCandD=None, mapDist=0.0)]
     assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_far_only_drive_is_actually_CHECKED_not_skipped(self, tmp_path):
+    """I3's own row must be a PASS over all 60 records, not a SKIP.
+
+    This is the failure the exit code cannot see (Fable round 4): filtering `geo` on mapDist -- 0.0 on
+    every far record -- empties it, I3 reports SKIP, and the run still exits 0. A verification gate
+    that silently verified nothing is the same defect class as the field it is checking for."""
+    cand = _pt(400.0)
+    d = round(m._haversine_m(LAT0, LON0, cand["latitude"], cand["longitude"]), 0)
+    rows = [_good_row(i, icbmSrc="far", mapDist=0.0, mapCandD=d,
+                      mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
+    from openpilot.tools import curvedb_telemetry_check as chk
+    assert chk.main([_corpus(tmp_path, rows), "--quiet"]) == 0
+    i3 = [r for r in chk.main.last_report.rows if r[1].startswith("I3 ")]
+    assert len(i3) == 1, i3
+    assert i3[0][0] == "PASS", f"I3 did not check the far records: {i3[0]}"
+    assert "n=60" in i3[0][2], f"I3 checked only some of them: {i3[0]}"
 
   def test_a_peak_that_under_reads_the_instantaneous_sample_is_caught(self, tmp_path):
     """M1. If kPeak were the last sample rather than the window max it would routinely sit below the
