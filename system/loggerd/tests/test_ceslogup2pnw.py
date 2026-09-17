@@ -229,15 +229,22 @@ class TestDriveDataStillGoesFirst:
     assert got is not None, "listed but never chosen: the corpus would never reach S3"
     assert got[0] == GEN
 
-  def test_the_DRIVER_CAMERA_is_not_swept_up_by_the_new_tier(self, tmp_path):
+  def test_the_DRIVER_CAMERA_is_not_swept_up_by_the_new_tier(self, tmp_path, monkeypatch):
     """Fable 2026-09-16, and the reason the tier tests a KEY PREFIX rather than "whatever is left".
-    Pass 1 lists every non-firehose file in a segment, dcamera.hevc included; stock never picks it
-    because only immediate-priority names are chosen. This tier is the only thing keeping that true,
-    and mutating its predicate to `if True` used to survive the whole suite."""
+    Pass 1 lists every non-firehose file in a segment, dcamera.hevc included (FIREHOSE_FILES covers
+    only rlog/fcamera/ecamera); stock never picks it because only immediate-priority names are
+    chosen. This tier is the only thing keeping that true.
+
+    THE REVERSED ORDER IS THE TEST (Fable, round 2). list_upload_files yields the corpus BEFORE the
+    drive-file walk, so in natural order even `if True` returns GEN and this passed under the very
+    mutation it claims to catch -- the kill belonged entirely to the sibling test below. Feeding the
+    tier the reverse order asks the real question: is dcamera.hevc rejected wherever it sits?"""
     root = self._with_segment(tmp_path, "dcamera.hevc")
     d = _archive(tmp_path, GEN)
     u = _uploader(root, archive=d)
-    assert "dcamera.hevc" in [n for n, _, _ in _listed(u)], "the premise is gone; this proves nothing"
+    files = _listed(u)
+    assert [n for n, _, _ in files] == [GEN, "dcamera.hevc"], "premise: both listed, corpus FIRST"
+    monkeypatch.setattr(u, "list_upload_files", lambda metered, pass2=False: iter(reversed(files)))
     name, key, _ = u.next_file_to_upload(metered=False)
     assert name == GEN, f"the driver-facing camera was chosen over the corpus ({name})"
     assert key.startswith("pnwlogs/")
