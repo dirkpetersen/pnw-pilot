@@ -378,6 +378,18 @@ class TestRecordFields:
     rec = _rec(_map_targets=pts, tele={"vEgo": 25.0, "mapDist": 0.0})
     assert rec["mapLat"] is None and rec["mapLon"] is None
 
+  def test_a_point_with_no_fix_to_measure_it_from_nulls_BOTH(self):
+    """Fable round 3. ICBM latches a point up to 250 ms before the record is built, and _read_map can
+    null the fix in between -- _publish_status runs BEFORE _icbm_step in the same 100 Hz cycle. The
+    point branch used to emit coordinates with a null mapCandD, which is precisely the orphan this
+    feature's own checker (I3c) FAILS on: a false alarm from a GPS blip, in the acceptance instrument
+    for its first drive. Null both, exactly as map_candidate_point does with no fix."""
+    class Stub:
+      def __getattr__(self, n):
+        return None
+    frag = m._curve_tele(Stub(), 25.0, 320.0, (47.00269, -122.0))
+    assert (frag["mapLat"], frag["mapLon"], frag["mapCandD"]) == (None, None, None)
+
   def test_the_record_never_raises_without_an_accumulator(self):
     """A controller built before this feature (or the permissive stub) must degrade, not explode."""
     rec = _rec(_curve_peak=None)
@@ -556,6 +568,10 @@ class TestOnTheRealCallPath:
       # Pin the ABSOLUTE position of the candidate, which no origin mix-up can satisfy by accident.
       assert m._haversine_m(LAT0, LON0, r["mapLat"], r["mapLon"]) == pytest.approx(300.0, abs=2.0), \
         "the logged node is not the one ICBM bound to -- the distance was matched from the wrong origin"
+      # mapCandD is BY CONSTRUCTION the rounded fix->node haversine, so pin it to 1 m, not 30. At
+      # 30 m the check passes on ICBM's own (projected-origin) distance too -- it cleared by 2.3 m
+      # here, which is luck, not a pin (Fable X1).
+      assert abs(r["mapCandD"] - d) <= 1.0, f"mapCandD {r['mapCandD']} is not the logged node's distance {d:.1f}"
 
   def test_a_source_with_no_map_point_logs_no_candidate_distance(self, monkeypatch, tmp_path):
     """The negative control: _icbm_cand_d must be None for every non-map source, or mapLat/mapLon
@@ -596,6 +612,25 @@ class TestOnTheRealCallPath:
     _run(mgr, step, _sig(25.0, 60 * MPH))
     assert mgr._icbm_src == "restore"
     assert mgr._icbm_cand_d is None and mgr._icbm_cand_pt == (None, None)
+
+  def test_the_latched_point_is_the_RE_DECIDED_candidate_after_a_passed_point_is_dropped(self, monkeypatch, tmp_path):
+    """Fable X8. behindgate/behindrun remove a map point the truck has already driven past and
+    RE-DECIDE on what is left, so `far_dist` at the latch is not the one the first scan produced.
+    Latching the pre-gate number would put the record's coordinates on the curve ICBM explicitly
+    refused to act on -- and that curve is BEHIND the truck, which is the most misleading place for a
+    'where is the curve' field to point.
+
+    The road: a tight 5 m/s curve 60-100 m BEHIND (far more binding) and an 8 m/s one ~300 m ahead."""
+    mgr, step = _icbm_stub_at(monkeypatch, tmp_path, targets=[])
+    mgr._cur_bearing = 0.0                                    # heading north; the gate needs a heading
+    mgr._map_targets = [_pt_north(LAT0, LON0, -100.0, 5.0), _pt_north(LAT0, LON0, -60.0, 5.0),
+                        _pt_north(LAT0, LON0, 300.0, 8.0), _pt_north(LAT0, LON0, 340.0, 8.0)]
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert mgr._icbm_passed_state and mgr._icbm_passed_state[0] == "passed", \
+      f"the behind point was not dropped ({mgr._icbm_passed_state}) -- this test proves nothing"
+    assert mgr._icbm_src == "far" and mgr._icbm_cand_pt[0] is not None
+    assert mgr._icbm_cand_pt[0] > LAT0, "the latched point is BEHIND the truck -- the pre-gate candidate"
+    assert m._haversine_m(LAT0, LON0, *mgr._icbm_cand_pt) == pytest.approx(300.0, abs=2.0)
 
   def test_a_tick_that_BLEW_UP_does_not_leave_the_previous_candidate_behind(self, monkeypatch, tmp_path):
     """Why the latch is also CLEARED at the top of the tick. _icbm_step swallows (loudly) into its
@@ -702,6 +737,28 @@ class TestTheCheckerItself:
     rows = [_good_row(i, icbmSrc="far", mapCandD=200.0,
                       mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
     assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_far_only_drive_MEASURES_the_candidate_position_instead_of_excusing_it(self, tmp_path, capsys):
+    """Fable X10, and the assertion is on the REPORT, not the exit code -- which is the whole point.
+
+    mapLat/mapLon are null by design on most records, so they are only judged within the population
+    where a value is due. That population used to be keyed on `mapDist`, which is 0.0 on EVERY far
+    record: a far-only drive printed "no records with a map candidate on this drive -- nothing to
+    expect", and a human reading the acceptance output would conclude the field was fine when it had
+    never been exercised. The exit code cannot see the difference (a healthy corpus passes either
+    way); a reader can, and this is the instrument they read."""
+    cand = _pt(400.0)
+    d = round(m._haversine_m(LAT0, LON0, cand["latitude"], cand["longitude"]), 0)
+    rows = [_good_row(i, icbmSrc="far", mapDist=0.0, mapCandD=d,
+                      mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
+    from openpilot.tools import curvedb_telemetry_check as chk
+    assert chk.main([_corpus(tmp_path, rows)]) == 0
+    # "records carry it" disambiguates the PRESENCE row from the WRITER PATHS row, which also names
+    # mapLat -- matching on the field name alone silently picked the wrong line.
+    line = next(ln for ln in capsys.readouterr().out.splitlines()
+                if " mapLat " in ln and "records carry it" in ln)
+    assert "nothing to expect" not in line, f"the far population was excused, not measured: {line}"
+    assert "60/60 non-null" in line, line
 
   def test_coordinates_with_no_distance_to_check_them_against_are_caught(self, tmp_path):
     """Rule 2 (I3c): dropping the un-checkable records would shrink n silently and still print PASS.

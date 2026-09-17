@@ -50,9 +50,13 @@ WRITERS = {
   "dq":         ("_curve_tele", "CurvePeak.dq_bits <- _curve_peak_step disqualifier OR"),
   "dqWhy":      ("_curve_tele", "_dq_names(CurvePeak.dq_bits)"),
   "strTq":      ("_curve_tele", "carState.steeringTorque, sampled in _curve_peak_step"),
-  "mapLat":     ("_curve_tele", "map_candidate_point(_map_targets, truck, _icbm_cand_d or mapDist)"),
-  "mapLon":     ("_curve_tele", "map_candidate_point(_map_targets, truck, _icbm_cand_d or mapDist)"),
-  "mapCandD":   ("_curve_tele", "CESController._icbm_cand_d (icbmSrc's own distance), else mapDist"),
+  # map/far: the point _icbm_step already resolved from ICBM's PROJECTED position (_icbm_cand_pt) --
+  # it cannot be re-matched here, see map_candidate_point's docstring. Any other source: matched here
+  # from mapDist against the raw fix, which is the origin CES measured mapDist from.
+  "mapLat":     ("_curve_tele", "CESController._icbm_cand_pt, else map_candidate_point(.., truck, mapDist)"),
+  "mapLon":     ("_curve_tele", "CESController._icbm_cand_pt, else map_candidate_point(.., truck, mapDist)"),
+  # NOT _icbm_cand_d -- that is ICBM's distance from its projected position and is never emitted.
+  "mapCandD":   ("_curve_tele", "haversine(this record's fix -> mapLat/mapLon), else mapDist"),
 }
 
 # Section 3.2: these must NEVER contain an exact 0.0. A zero here is indistinguishable from a dead

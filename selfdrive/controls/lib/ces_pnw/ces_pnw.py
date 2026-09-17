@@ -529,11 +529,17 @@ def _curve_tele(ctl, raw_vego, map_dist, cand_pt=None) -> dict:
   pose_k = getattr(ctl, "_pose_k", None)
   la, lo = getattr(ctl, "_cur_lat", None), getattr(ctl, "_cur_lon", None)
   if cand_pt is not None:
-    # ICBM already resolved it, from the origin it measured the distance at. Re-derive the distance
-    # from THIS record's fix so mapCandD and mapLat/mapLon are the same claim.
     map_lat, map_lon = cand_pt
-    cand_d = (_haversine_m(la, lo, map_lat, map_lon)
-              if None not in (map_lat, map_lon, la, lo) else 0.0)
+    if None in (map_lat, map_lon, la, lo):
+      # No fix on THIS record (ICBM latched a point up to 250 ms ago and _read_map has since nulled
+      # the position), or no point. Null BOTH, exactly as map_candidate_point does with no fix.
+      # Emitting coordinates with a null mapCandD would be an I3c orphan -- this feature's own
+      # acceptance check FAILING on a legitimate GPS blip, on the first drive it is used for.
+      map_lat, map_lon, cand_d = None, None, 0.0
+    else:
+      # ICBM already resolved it, from the origin it measured the distance at. Re-derive the distance
+      # from THIS record's fix so mapCandD and mapLat/mapLon are the same claim.
+      cand_d = _haversine_m(la, lo, map_lat, map_lon)
   else:
     map_lat, map_lon = map_candidate_point(getattr(ctl, "_map_targets", None), la, lo, map_dist)
     # Same acceptance map_candidate_point applies (None / non-numeric / <=0 / inf all mean "no
@@ -3136,11 +3142,13 @@ class CESController:
     self._icbm_last_pub = 0.0
     self._icbm_last_target = None
     self._icbm_src = None                  # curveslow-lightning: "map"/"vis"/None for the drive log
-    # curvedbtel2pnw section 3.4: the candidate _icbm_src names -- its DISTANCE, and the (lat, lon)
-    # resolved at the position that distance was measured from (see _icbm_step). Latched beside
-    # _icbm_src so ces_events' mapLat/mapLon locate that point and not CES's nearer 10 s one. Null
-    # unless the source is an actual map point ("map"/"far"): vision/gpsHold/restore have no map
-    # coordinate, and inventing one for them would put a real node under a source that never used it.
+    # curvedbtel2pnw section 3.4: the candidate _icbm_src names. `_cand_pt` is the (lat, lon),
+    # resolved at the position the distance was measured from (see _icbm_step) -- that point is what
+    # reaches ces_events as mapLat/mapLon, so they locate ICBM's candidate and not CES's nearer 10 s
+    # one. `_cand_d` is ICBM's own distance and is a PRESENCE FLAG only: it is never emitted (mapCandD
+    # is re-derived from the record's own fix), it only says "a map candidate was latched this tick".
+    # Both null unless the source is an actual map point ("map"/"far"): vision/gpsHold/restore have
+    # no map coordinate, and inventing one would put a real node under a source that never used it.
     self._icbm_cand_d = None
     self._icbm_cand_pt: tuple = (None, None)
     # icbmrestore2pnw: the cap->clear->restore episode machine + the current direction for telemetry
