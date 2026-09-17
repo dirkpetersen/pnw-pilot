@@ -83,8 +83,18 @@ CES_EVENT_LOG_GENERATIONS = 8
 # dev host after pulling, not on the car.
 CES_ARCHIVE_DIR = "/data/pnw/ces_archive"
 # 2 GB. Heavy driving writes ~21 MB/day (measured, 2026-08-26 Olympic Peninsula trip), so this is a
-# ~95-day window -- comfortably past the 6-8 weeks section 3.9 asks for -- against the 8.9 GB free on
-# /data. Eviction is LOUD (cloudlog.error, see prune_ces_archive): silently dropping the oldest data
+# ~95-day window -- comfortably past the 6-8 weeks section 3.9 asks for.
+#
+# WHAT IT COSTS, stated plainly (Fable 2026-09-16 -- an earlier version of this comment justified the
+# size "against the 8.9 GB free on /data", which MISREAD that number). The free space on /data is not
+# headroom: deleterd pins it at max(5 GB, 10% of /data) by evicting the oldest DRIVE SEGMENTS, so it
+# reads ~8.9 GB no matter what else is stored. This archive lives outside Paths.log_root(), so the
+# deleter cannot reclaim it -- it can only reclaim segments instead. Every byte here therefore
+# displaces a drive segment 1:1, and 2 GB is roughly 150 segments (~2.5 h of driving) evicted
+# EARLIER than they otherwise would have been. That is the trade, and it is deliberate: a segment is
+# already uploaded by the time it is old enough to evict, whereas this corpus had no other copy.
+#
+# Eviction is LOUD (cloudlog.error, see prune_ces_archive): silently dropping the oldest data
 # is the exact failure this constant exists to prevent, so it must never happen unnoticed.
 CES_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 # stophold2pnw (D): the comma 3X RTC battery is dead (RTC reads 1970) — every cold boot writes
@@ -470,7 +480,7 @@ class CurvePeak:
 # silently produces a null column that reads as "the feature did not trigger" -- that has now
 # happened four times in this file's history (visK, icbmKVis, waysel2pnw's eight, lcSpdA).
 CURVE_TELE_KEYS = ("kPeak", "kPeakN", "kPoseP", "kPose", "achLatPose", "dq", "dqWhy", "strTq",
-                   "mapLat", "mapLon")
+                   "mapLat", "mapLon", "mapCandD")
 
 
 def _curve_tele(ctl, raw_vego, map_dist) -> dict:
@@ -483,9 +493,18 @@ def _curve_tele(ctl, raw_vego, map_dist) -> dict:
   the two callers are mutually exclusive per tick (_steer_log_step returns immediately once
   _enabled is True, and _publish_status builds either an adopt OR a tick record, never both).
 
-  `map_dist` is the record's own mapDist; None on the CES-off breadcrumb, which carries no map
-  candidate at all -- mapLat/mapLon are null there, and the section 3.7 check reports that as an
-  expected-null population rather than a defect.
+  `map_dist` is the distance of the candidate THIS RECORD'S icbmSrc names, and it is emitted beside
+  the coordinates as `mapCandD` so a consumer can see which distance was matched rather than having
+  to assume it was mapDist. None on the CES-off breadcrumb, which carries no map candidate at all --
+  mapLat/mapLon are null there, and the section 3.7 check reports that as an expected-null
+  population rather than a defect.
+
+  Fable I1 (2026-09-16): this used to be handed the record's `mapDist`, which is CES's own 10 s
+  candidate (`map_target_dist`, horizon ~308 m at 90 mph). ICBM's FAR source reaches
+  MAP_SOURCE_HORIZON_M (500 m), so on a far-candidate record mapDist was 0.0/null or named a
+  DIFFERENT, nearer curve -- i.e. mapLat/mapLon were wrong or absent on exactly the far-map
+  phantoms section 3.4 was added to locate. The caller now passes the latched
+  `_icbm_cand_d` (see _icbm_step) whenever ICBM's source is a map point.
 
   Never raises: a missing/absent accumulator (the permissive test stub, or a controller built before
   this feature) yields an all-null fragment with kPeakN 0, which is the honest reading."""
@@ -498,6 +517,12 @@ def _curve_tele(ctl, raw_vego, map_dist) -> dict:
   map_lat, map_lon = map_candidate_point(getattr(ctl, "_map_targets", None),
                                          getattr(ctl, "_cur_lat", None), getattr(ctl, "_cur_lon", None),
                                          map_dist)
+  # Same acceptance map_candidate_point applies (None / non-numeric / <=0 / inf all mean "no
+  # candidate this tick"), so mapCandD is null exactly when mapLat/mapLon are null for that reason.
+  try:
+    cand_d = float(map_dist) if map_dist is not None else 0.0
+  except (TypeError, ValueError):
+    cand_d = 0.0
   return {
     # section 3.3: the per-second PEAK of max(|achieved|, |commanded|). Null when the window
     # measured nothing at all -- read kPeakN first, never kPeak alone.
@@ -521,8 +546,11 @@ def _curve_tele(ctl, raw_vego, map_dist) -> dict:
     # Known limitation, stated rather than hidden: this is the 1 Hz SAMPLE the design asks for, not
     # a peak, so a short override can be sampled at zero. `dq`/`dqWhy` still flag that second.
     "strTq": _zero_is_null(getattr(ctl, "_str_tq", None)),
-    # section 3.4: where the CURVE is, not where the truck is.
+    # section 3.4: where the CURVE is, not where the truck is. mapCandD is the distance mapLat/mapLon
+    # were resolved AT -- without it, a null pair cannot be told apart from a pair matched against
+    # the wrong candidate, and checker I3 has nothing sound to measure the coordinates against.
     "mapLat": map_lat, "mapLon": map_lon,
+    "mapCandD": round(cand_d, 0) if cand_d > 0.0 and math.isfinite(cand_d) else None,
   }
 
 
@@ -3089,6 +3117,10 @@ class CESController:
     self._icbm_last_pub = 0.0
     self._icbm_last_target = None
     self._icbm_src = None                  # curveslow-lightning: "map"/"vis"/None for the drive log
+    # curvedbtel2pnw section 3.4: the DISTANCE of the candidate _icbm_src names, latched beside it so
+    # ces_events' mapLat/mapLon resolve that point and not CES's nearer 10 s one. None unless the
+    # source is an actual map point ("map"/"far") -- vision/gpsHold/restore have no map coordinate.
+    self._icbm_cand_d = None
     # icbmrestore2pnw: the cap->clear->restore episode machine + the current direction for telemetry
     self._icbm_ep = IcbmEpisode()
     self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
@@ -4151,6 +4183,7 @@ class CESController:
         self._icbm_ceiling = None
         self._icbm_last_target = None
         self._icbm_src = None
+        self._icbm_cand_d = None        # curvedbtel2pnw: cleared with the source it belongs to
         self._icbm_dir = None
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
@@ -4470,6 +4503,12 @@ class CESController:
       self._icbm_dir = direction
       if direction == "inc":
         self._icbm_src = "restore"      # telemetry: the restore phase is its own source label
+      # curvedbtel2pnw section 3.4 (Fable I1) -- TELEMETRY ONLY, nothing below reads it. Latched AFTER
+      # the restore relabel so it can never name a distance for a source that is no longer a map
+      # point, and taken from `src_dist`, which is the same distance the episode machine was just
+      # handed: the record's mapLat/mapLon then locate the curve ICBM is ACTUALLY reacting to,
+      # including a far candidate out at MAP_SOURCE_HORIZON_M that CES's own mapDist cannot see.
+      self._icbm_cand_d = src_dist if self._icbm_src in ("map", "far") else None
       self._icbm_last_target = round(pub_target, 2) if pub_target is not None else None
       if pub_target is not None:
         # JSON params take a DICT (params_pyx serializes it; a pre-dumped string raises TypeError —
@@ -4639,6 +4678,16 @@ class CESController:
     raw_vego = tele.get("vEgo")
     no_data = tele.get("reason") == "noData"
     ach_lat = None if (no_data or raw_vego is None) else _ach_lat(self._sl_k_actl, raw_vego)
+    # curvedbtel2pnw section 3.4 (Fable I1): the candidate distance mapLat/mapLon are resolved at.
+    # ICBM's own latched one whenever icbmSrc names a map point -- including a FAR candidate out past
+    # CES's ~308 m 10 s horizon, where `tele["mapDist"]` reads 0.0 and the coordinates came back null
+    # on exactly the far-map phantoms section 3.4 exists to locate. Falls back to mapDist for every
+    # other source, exactly as before.
+    # getattr, like its _icbm_rcap/_icbm_ep neighbours below: a controller built before this feature
+    # (or a permissive test stub) must degrade to the old mapDist behaviour, not raise mid-record.
+    cand_d = getattr(self, "_icbm_cand_d", None)
+    if cand_d is None:
+      cand_d = tele.get("mapDist")
     rec = {
       "t": round(now_wall, 1),
       "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
@@ -4730,8 +4779,9 @@ class CESController:
       # section 3.1), the map candidate's OWN position (mapLat/mapLon, section 3.4 -- keyed on where
       # the curve is, not where the truck is), the per-second disqualifier roll-up (dq/dqWhy,
       # section 3.5) and driver steering torque (strTq, section 3.6). Keys pinned by CURVE_TELE_KEYS.
-      # mapDist is passed from `tele` so mapLat/mapLon resolve the SAME candidate the record names.
-      **_curve_tele(self, raw_vego, tele.get("mapDist")),
+      # cand_d (above) is the candidate distance icbmSrc actually names, so mapLat/mapLon resolve the
+      # SAME candidate the record names; it is echoed back out as mapCandD.
+      **_curve_tele(self, raw_vego, cand_d),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,

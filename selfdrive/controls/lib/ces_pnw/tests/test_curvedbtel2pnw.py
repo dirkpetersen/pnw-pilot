@@ -373,7 +373,7 @@ class TestRecordFields:
 # =====================================================================================================
 def _drive(monkeypatch, tmp_path, fp, brand, op_long, yaw_of, cmd_of, pose_of=None, ticks=250,
            str_tq=0.0, blinker=False, steer_pressed=False, saturated=False, lane_change="off",
-           pose_valid=True, curve_at=None):
+           pose_valid=True, curve_at=None, curve_v=20.0):
   """Run the REAL CESController.experimental_request at 100 Hz and return every appended record.
 
   This is the anti-visK test: it proves the value is COMPUTED on the shipped call path, not merely
@@ -392,7 +392,7 @@ def _drive(monkeypatch, tmp_path, fp, brand, op_long, yaw_of, cmd_of, pose_of=No
 
     def get(self, k, return_default=False):
       if k == "MapTargetVelocities":
-        return _scene(curve_at, 180.0, 20.0) if curve_at is not None else []
+        return _scene(curve_at, 180.0, curve_v) if curve_at is not None else []
       if k == "LastGPSPosition":
         return json.dumps({"latitude": LAT0, "longitude": LON0, "bearing": 0.0, "src": "device",
                            "ts": clock[0], "fix_ts": clock[0] - 0.3})
@@ -507,6 +507,43 @@ class TestOnTheRealCallPath:
       d = m._haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"])
       assert abs(d - r["mapDist"]) <= 30.0, f"mapLat/mapLon is {d:.0f} m out vs mapDist {r['mapDist']:.0f} m"
 
+  def test_a_FAR_candidate_past_CES_own_horizon_is_still_located(self, monkeypatch, tmp_path):
+    """Fable I1 end to end -- the defect this fix exists for.
+
+    A 8 m/s curve whose binding point sits ~330 m out. CES's own map window is
+    v_ego * CURVE_MAP_LOOKAHEAD_S = 25 * 10 = 250 m, so `mapDist` is 0.0 on every record: CES cannot
+    see this curve at all. ICBM's FAR source reaches ICBM_MAP_HORIZON_M (500 m) and does, and it is
+    the source ICBM acts on (icbmSrc == "far"). Keying the coordinates off mapDist therefore logged
+    mapLat/mapLon as NULL on exactly the far-map records section 3.4 was added to locate -- and a
+    null reads as "there was no candidate", not as "the wrong distance was asked for".
+
+    op_long=False because ICBM is the stock-ACC path: with openpilot longitudinal ON there is no
+    ICBM episode at all and icbmSrc is None on every record (verified -- the first draft of this
+    test passed `True` and measured nothing)."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", False, yaw_of=lambda i: 0.02,
+                  cmd_of=lambda i: 0.0, curve_at=300.0, curve_v=8.0)
+    far = [r for r in recs if r.get("icbmSrc") == "far"]
+    assert far, "the harness produced no far-source record -- nothing was actually tested"
+    assert all(not r.get("mapDist") for r in far), \
+      "CES saw this curve after all, so the far-only case is not being exercised"
+    for r in far:
+      assert r["mapLat"] is not None and r["mapLon"] is not None, \
+        "a far candidate with no position logged -- this is the Fable I1 defect"
+      assert r["mapCandD"] > 250.0, f"mapCandD {r['mapCandD']} is inside CES's own horizon"
+      d = m._haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"])
+      assert abs(d - r["mapCandD"]) <= 30.0, f"coordinates {d:.0f} m out vs mapCandD {r['mapCandD']:.0f} m"
+
+  def test_a_source_with_no_map_point_logs_no_candidate_distance(self, monkeypatch, tmp_path):
+    """The negative control: _icbm_cand_d must be None for every non-map source, or mapLat/mapLon
+    would be resolved at a vision/restore distance and land on a map point by coincidence."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", False, yaw_of=lambda i: 0.02,
+                  cmd_of=lambda i: 0.0, curve_at=300.0, curve_v=8.0)
+    assert any(r.get("icbmSrc") not in ("map", "far") for r in recs), "no non-map record to check"
+    for r in recs:
+      if r.get("icbmSrc") not in ("map", "far"):
+        assert r.get("mapCandD") in (None, r.get("mapDist") or None), \
+          f"icbmSrc={r.get('icbmSrc')} carried a map candidate distance {r.get('mapCandD')}"
+
   def test_a_broken_accumulator_is_logged_and_never_reaches_the_control_loop(self, monkeypatch, tmp_path):
     """Rule 2. A silently dead accumulator is the visK failure; kPeakN going to 0 in the record and
     the swaglog line must agree that it is dead."""
@@ -530,9 +567,12 @@ class TestOnTheRealCallPath:
 def _good_row(i, **over):
   """One synthetic post-curvedbtel2pnw Lightning tick that satisfies every invariant."""
   cand = _pt(200.0)
+  d = round(m._haversine_m(LAT0, LON0, cand["latitude"], cand["longitude"]), 0)
   r = {"t": 1788000000.0 + i, "ev": "tick", "car": LIGHTNING, "vEgo": 25.0,
-       "lat": LAT0, "lon": LON0, "mapDist": round(m._haversine_m(LAT0, LON0, cand["latitude"],
-                                                                cand["longitude"]), 0),
+       "lat": LAT0, "lon": LON0, "mapDist": d,
+       # mapCandD is what I3 measures the coordinates against; here the source is "map", so it and
+       # mapDist agree. The far-candidate row below is the case where they do NOT.
+       "mapCandD": d, "icbmSrc": "map",
        "mapLat": cand["latitude"], "mapLon": cand["longitude"],
        "kPeak": 0.0052, "kPeakN": 100, "kPoseP": 0.0051, "kPose": 0.005,
        "achLatPose": 3.125, "achLat": 3.0, "slKActl": 0.0048, "strTq": 0.5,
@@ -567,6 +607,30 @@ class TestTheCheckerItself:
   def test_mapLat_taken_from_the_truck_is_caught(self, tmp_path):
     """M4. The prototype that keyed on truck positions smeared one episode across 4-5 "sites"."""
     rows = [_good_row(i, mapLat=LAT0, mapLon=LON0) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_a_far_candidate_beyond_CES_own_horizon_PASSES(self, tmp_path):
+    """Fable I1, the checker half. A far candidate at 400 m is past CES's 10 s window, so mapDist is
+    0.0 while the coordinates are genuinely 400 m out. Measured against mapDist (the old I3) this
+    correct record was either skipped or failed; measured against mapCandD it passes."""
+    cand = _pt(400.0)
+    d = round(m._haversine_m(LAT0, LON0, cand["latitude"], cand["longitude"]), 0)
+    rows = [_good_row(i, icbmSrc="far", mapDist=0.0, mapCandD=d,
+                      mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 0
+
+  def test_coordinates_resolved_at_the_WRONG_candidate_are_still_caught(self, tmp_path):
+    """The negative control for the test above -- otherwise "check against mapCandD" would pass
+    anything. Coordinates 400 m out while mapCandD says 200 m is the defect I3 exists to find."""
+    cand = _pt(400.0)
+    rows = [_good_row(i, icbmSrc="far", mapCandD=200.0,
+                      mapLat=cand["latitude"], mapLon=cand["longitude"]) for i in range(60)]
+    assert _run_check(_corpus(tmp_path, rows)) == 1
+
+  def test_coordinates_with_no_distance_to_check_them_against_are_caught(self, tmp_path):
+    """Rule 2 (I3c): dropping the un-checkable records would shrink n silently and still print PASS.
+    This is exactly how the old I3 hid every far-candidate record -- `and r.get("mapDist")`."""
+    rows = [_good_row(i, mapCandD=None) for i in range(60)]
     assert _run_check(_corpus(tmp_path, rows)) == 1
 
   def test_a_peak_that_under_reads_the_instantaneous_sample_is_caught(self, tmp_path):

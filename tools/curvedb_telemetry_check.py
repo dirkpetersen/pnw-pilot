@@ -50,8 +50,9 @@ WRITERS = {
   "dq":         ("_curve_tele", "CurvePeak.dq_bits <- _curve_peak_step disqualifier OR"),
   "dqWhy":      ("_curve_tele", "_dq_names(CurvePeak.dq_bits)"),
   "strTq":      ("_curve_tele", "carState.steeringTorque, sampled in _curve_peak_step"),
-  "mapLat":     ("_curve_tele", "map_candidate_point(_map_targets, truck, mapDist)"),
-  "mapLon":     ("_curve_tele", "map_candidate_point(_map_targets, truck, mapDist)"),
+  "mapLat":     ("_curve_tele", "map_candidate_point(_map_targets, truck, _icbm_cand_d or mapDist)"),
+  "mapLon":     ("_curve_tele", "map_candidate_point(_map_targets, truck, _icbm_cand_d or mapDist)"),
+  "mapCandD":   ("_curve_tele", "CESController._icbm_cand_d (icbmSrc's own distance), else mapDist"),
 }
 
 # Section 3.2: these must NEVER contain an exact 0.0. A zero here is indistinguishable from a dead
@@ -257,18 +258,35 @@ def check_invariants(rep, recs, min_speed):
               f"n={len(pairs)} median ratio {rel:+.3f} (expect ~+1.0; sign flip or |ratio-1|>0.25 " +
               "means the device frame needs calibrating)")
 
-  # I3 -- section 3.4: mapLat/mapLon must be mapDist away from the truck, or they are not the
+  # I3 -- section 3.4: mapLat/mapLon must be mapCandD away from the truck, or they are not the
   # candidate's coordinates at all.
+  # mapCandD, NOT mapDist (Fable I1, 2026-09-16): mapDist is CES's own 10 s candidate, while the
+  # coordinates are resolved at the distance ICBM's icbmSrc names -- which for a FAR candidate reaches
+  # 500 m, well past CES's ~308 m at 90 mph. Measuring the coordinates against mapDist therefore
+  # FAILED the far-candidate records for being correct, and silently skipped them when mapDist was 0.
   geo = [r for r in recs if r.get("mapLat") is not None and r.get("lat") is not None
-         and r.get("mapDist")]
+         and r.get("mapCandD")]
+  # Rule 2: coordinates with no distance to check them against are not "no candidate" -- they are a
+  # hole in this check, and it has to say so rather than quietly shrink n.
+  orphan = sum(1 for r in recs if r.get("mapLat") is not None and not r.get("mapCandD"))
+  if orphan:
+    rep.check("FAIL", "I3c every coordinate pair carries its distance",
+              f"{orphan} records have mapLat/mapLon but no mapCandD -- I3 cannot check those")
   if not geo:
-    rep.check("SKIP", "I3 mapLat/mapLon vs mapDist", "no record carries both a candidate and a fix")
+    rep.check("SKIP", "I3 mapLat/mapLon vs mapCandD", "no record carries both a candidate and a fix")
   else:
-    errs = [abs(haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) - r["mapDist"]) for r in geo]
+    errs = [abs(haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) - r["mapCandD"]) for r in geo]
     bad = sum(1 for e in errs if e > 30.0)
-    rep.check("PASS" if bad == 0 else "FAIL", "I3 mapLat/mapLon vs mapDist",
+    rep.check("PASS" if bad == 0 else "FAIL", "I3 mapLat/mapLon vs mapCandD",
               f"n={len(geo)} p50={statistics.median(errs):.1f} m max={max(errs):.1f} m; " +
-              f"{bad} outside mapDist +-30 m")
+              f"{bad} outside mapCandD +-30 m")
+    # INFO, not FAIL: a corpus with no far candidate in it is a real (short/urban) drive, not a
+    # defect. But it does mean section 3.4's far-phantom case went UNMEASURED, and that has to be
+    # printed rather than inferred from a passing I3 that only ever saw "map" records.
+    far = [r for r in geo if r.get("icbmSrc") == "far"]
+    rep.check("INFO", "I3d far-map candidates located",
+              f"n={len(far)} of {len(geo)}" if far else
+              "0 -- no far-source record in this corpus, so the phantom case is unmeasured here")
     at_truck = sum(1 for r in geo if haversine_m(r["lat"], r["lon"], r["mapLat"], r["mapLon"]) < 1.0)
     rep.check("PASS" if at_truck == 0 else "FAIL", "I3b candidate is not the truck",
               "distinct" if at_truck == 0 else f"{at_truck} records put the candidate ON the truck")
