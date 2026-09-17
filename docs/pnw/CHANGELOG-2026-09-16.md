@@ -103,9 +103,8 @@ data always goes first, with a `.zst` key on a plain file so `do_upload` compres
 directory, a required filename prefix, **and** a regular-file test. The third gate is not belt-and-braces —
 Fable defeated the first two with a symlink wearing the right name, which `open()` follows.
 
-## In flight at the time of writing
-Both halves of curvedb Phase 1 are **built and in Fable review, none pushed**: `curvedbtel2pnw`
-(`e6918f5a50`) and `ceslogup2pnw` (`f0911ba3d8`, stacked on it). Fable returned **SHIP WITH CHANGES** on the
-first commit of each; the must-fix commits are what is under review now. `mapdcargps2pnw` **shipped** (see
-above). `icbmfalsify2pnw` is finished and held, by recommendation, as an owner decision. Each ship gets its
-own reboot and health check, as always.
+## In flight at the time of writing → **all of it SHIPPED, see [`CHANGELOG-2026-09-17.md`](CHANGELOG-2026-09-17.md)**
+Both halves of curvedb Phase 1 were built and in Fable review overnight: `curvedbtel2pnw` and
+`ceslogup2pnw` (stacked on it). They went through **four** review rounds and shipped together at 07:2x PT
+on 09-17 as `4b901737b2`. `mapdcargps2pnw` **shipped** (see above). `icbmfalsify2pnw` is finished and, on
+the owner's "ship everything", is now in its first Fable review rather than held.
