@@ -51,6 +51,43 @@ PASS2_PRIORITY_FILES = {"rlog", "rlog.zst"}
 WIDE_CAMERA_FILES = {"ecamera.hevc"}
 SKIP_WIDE_PARAM = "SkipWideCameraUpload"
 
+# ceslogup2pnw: THE DEVICE'S OWN LOGS, not just the drive files.
+#
+# The CES event stream is the corpus every tuning decision on this fork is made from, and
+# curvedbtel2pnw's Phase-1 gate wants 6-8 weeks of it retained AND REACHABLE. Nothing ever pulled it
+# off the device: /data/pnw/ces_archive is WRITE-ONLY. It is budgeted at 2 GB (~95 days at the
+# measured 21 MB/day) and a generation that falls off the old end is simply gone -- prune_ces_archive
+# says so loudly, but saying so does not bring the data back. Uploading makes the device's disk a
+# cache instead of the only copy.
+#
+# These files live OUTSIDE Paths.log_root(), which is deliberate and load-bearing: the deleter only
+# ever walks the log root, so it can never reclaim them, and their space stays governed by the
+# archive's own budget. Nothing here copies, hardlinks or moves a byte -- the file is uploaded where
+# it lies and marked with the same `user.upload` xattr as a drive file.
+#
+# >>> ALLOWLIST, NEVER A SWEEP. /data/pnw also holds the Waze proxy API KEY at
+# location/police_proxy.json. An "upload everything under /data/pnw" rule would have published that
+# key to S3 on its first run. So eligibility needs TWO independent gates -- a named directory AND a
+# required filename prefix inside it -- both of which a newly-added secret would have to defeat to
+# leave the device. Add a source here only after checking what else shares its directory.
+#
+# (dir, key prefix, required filename prefix)
+PNW_LOG_SOURCES: tuple[tuple[str, str, str], ...] = (
+  ("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),
+)
+# The archive names each generation by its own mtime (ces_events.jsonl.20260916T191100Z, with a .N
+# suffix on collision), so these keys are unique for the life of the dongle and no upload can
+# overwrite an earlier one in S3.
+#
+# Uploaded as .zst: do_upload compresses on the fly whenever the KEY ends in .zst and the file does
+# not, and this is plain JSONL -- ~10x off a 20 MB generation, which is the difference between a
+# tolerable and an intolerable amount of traffic on the hotspot.
+PNW_LOG_SUFFIX = ".zst"
+# How next_file_to_upload recognises one of ours in the merged listing. Derived from the table above
+# so a new source cannot be added to one and forgotten in the other (which would list a file forever
+# and never choose it -- a silent no-op, the exact failure mode Rule 2 is about).
+PNW_LOG_PREFIXES: tuple[str, ...] = tuple(f"{prefix}/" for _, prefix, _ in PNW_LOG_SOURCES)
+
 
 def uploadable_firehose_files(params=None) -> set[str]:
   """uploadprio2pnw: the pass-2 files the uploader is EVER going to send, given the permanent-skip
@@ -367,6 +404,7 @@ class Uploader:
     # 412 apart from a systemic outbreak" comment above RETRY_COOLDOWN_S for why and how it's rebased
     # into the current wall-clock frame at comparison time.
     self._412_streak_start: float | None = None
+    self._pnw_log_state: tuple | None = None   # ceslogup2pnw: change-only state for _pnw_log_note
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -445,6 +483,64 @@ class Uploader:
     except Exception:
       cloudlog.exception("failed to clear upload error")
 
+  def _pnw_log_note(self, state: str, **kw) -> None:
+    """ceslogup2pnw (Rule 2): change-only note about the pnw-log source. The listing runs many times a
+    minute, so an unconditional log would be noise -- but a source that has become unreadable must not
+    read the same as a source with nothing in it, which is exactly the "0 of 2,612 files uploaded"
+    class of false conclusion this project has been bitten by. Errors go to cloudlog.error, the
+    healthy summary to cloudlog.event, and both carry what was SCANNED."""
+    key = (state, tuple(sorted((k, str(v)) for k, v in kw.items())))
+    if self._pnw_log_state == key:
+      return
+    self._pnw_log_state = key
+    try:
+      if state == "error":
+        cloudlog.error(f"ceslogup2pnw: pnw log source UNREADABLE {kw} -- these logs are NOT reaching S3 and " +
+                       "the on-device archive is now the only copy; it evicts oldest-first at its budget")
+      else:
+        cloudlog.event("pnw_log_upload", state=state, **kw)
+    except Exception:
+      pass   # logging must never be the thing that breaks the uploader
+
+  def _list_pnw_log_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
+    """ceslogup2pnw: the device's own logs, in the same (name, key, fn) shape as a drive file so they
+    ride the whole existing pipeline -- xattr marking, retry cooldown, 412 handling, the lot.
+
+    Deliberately NOT a sweep of /data/pnw; see PNW_LOG_SOURCES for why that would have published the
+    Waze API key. Yields nothing on a metered link: these are never worth money."""
+    if metered:
+      return
+    now = time.monotonic()
+    for src, prefix, want in PNW_LOG_SOURCES:
+      try:
+        names = sorted(os.listdir(src))
+      except FileNotFoundError:
+        # Nothing has rotated into it yet. Normal on a fresh device and on any device that has not
+        # yet filled 8 generations -- NOT an error, and explicitly not logged as one.
+        self._pnw_log_note("absent", src=src)
+        continue
+      except OSError as e:
+        self._pnw_log_note("error", src=src, err=type(e).__name__)
+        continue
+      eligible = done = 0
+      for name in names:
+        if not name.startswith(want):
+          continue          # second gate: a file that is not a rotated generation never leaves
+        eligible += 1
+        fn = os.path.join(src, name)
+        try:
+          if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
+            done += 1
+            continue
+        except OSError:
+          # Same contract as the drive-file loop: it may have been pruned out from under us.
+          cloudlog.event("uploader_getxattr_failed", key=name, fn=fn)
+          continue
+        if self._retry_after.get(fn, 0.0) > now:
+          continue
+        yield name, f"{prefix}/{name}{PNW_LOG_SUFFIX}", fn
+      self._pnw_log_note("scanned", src=src, eligible=eligible, uploaded=done, pending=eligible - done)
+
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
@@ -462,6 +558,11 @@ class Uploader:
     now = time.monotonic()
     if self._retry_after:
       self._retry_after = {f: t for f, t in self._retry_after.items() if t > now}
+
+    # ceslogup2pnw: pass 1 only. A pnw log is a small file and must never be treated as a firehose
+    # file -- pass 2 runs only on a priority network, which would strand the corpus for weeks.
+    if not pass2:
+      yield from self._list_pnw_log_files(metered)
 
     for logdir in listdir_by_creation(self.root):
       path = os.path.join(self.root, logdir)
@@ -533,6 +634,15 @@ class Uploader:
 
     for name, key, fn in upload_files:
       if name in self.immediate_priority:
+        return name, key, fn
+
+    # ceslogup2pnw: LAST tier, deliberately. The drive data still goes first -- a pnw log only moves
+    # when there is no crash/boot file and no qlog/qcamera waiting -- so this cannot slow the upload
+    # of the segment that is being driven right now. The corpus is days-to-weeks old by the time it
+    # is archived; it can wait for a gap. (Without this tier the files would be listed and never
+    # chosen: pass 1 returns ONLY immediate-folder and immediate-priority names.)
+    for name, key, fn in upload_files:
+      if key.startswith(PNW_LOG_PREFIXES):
         return name, key, fn
 
     return None
