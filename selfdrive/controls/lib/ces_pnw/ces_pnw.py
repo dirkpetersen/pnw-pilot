@@ -68,6 +68,25 @@ CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
 # >=147 MB of ROTATED history: 8 generations x 20 MB = 160 MB clears it, 7 would NOT (140 MB).
 # Worst case 180 MB including the live file — 0.2% of the 89 GB /data.
 CES_EVENT_LOG_GENERATIONS = 8
+# curvedbtel2pnw (docs/CURVEDB2PNW.md section 3.8): WITHOUT THIS DIRECTORY PHASE 1 IS POINTLESS.
+# The rotation above retains 8 x 20 MB = 160 MB, i.e. ~17.6 driving hours at the measured 9.1 MB/h.
+# The Phase-1 exit criteria (section 3.9 item 3) need 6-8 WEEKS of corridor driving RETAINED, so as
+# shipped the log would generate exactly the dataset the go/no-go decision needs and then delete it
+# weeks before that decision could be taken. Nothing on 3devpnw archives ces_events off-device.
+#
+# The fix is the cheapest of the two options section 3.8 offers, implemented as a MOVE rather than a
+# copy: the generation the rotation is about to DESTROY (path.N) is os.replace()d into this directory
+# instead. Same filesystem (/data), so it is a rename -- O(1), atomic, no extra bytes, and no CPU.
+# That matters: rotate_event_log() runs synchronously inside _append_event(), which runs inside
+# selfdrived's 100 Hz loop. A shutil.copy of 20 MB (~100-200 ms on this eMMC) or a gzip (seconds)
+# would stall the control loop for tens of frames, so neither is acceptable here -- compress on the
+# dev host after pulling, not on the car.
+CES_ARCHIVE_DIR = "/data/pnw/ces_archive"
+# 2 GB. Heavy driving writes ~21 MB/day (measured, 2026-08-26 Olympic Peninsula trip), so this is a
+# ~95-day window -- comfortably past the 6-8 weeks section 3.9 asks for -- against the 8.9 GB free on
+# /data. Eviction is LOUD (cloudlog.error, see prune_ces_archive): silently dropping the oldest data
+# is the exact failure this constant exists to prevent, so it must never happen unnoticed.
+CES_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 # stophold2pnw (D): the comma 3X RTC battery is dead (RTC reads 1970) — every cold boot writes
 # event records with a garbage wall clock until NTP/GPS sync (a 2025-11-25-stamped record polluted
 # the 2026-07-12 gap analysis). Records written before the clock is plausibly valid are MARKED
@@ -83,10 +102,117 @@ def clock_bad(t_wall: float) -> bool:
     return True
 
 
+def prune_ces_archive(archive_dir: str | None = None, max_bytes: int | None = None) -> int:
+  """curvedbtel2pnw (section 3.8): keep the archive under `max_bytes` by deleting the OLDEST files
+  first. Returns how many were deleted (0 = under budget, nothing to do).
+
+  Rule 2: an eviction is DATA LOSS against the Phase-1 retention window, so it logs at error level
+  rather than silently making room. Every failure path logs its own specific errno too -- a
+  permission problem or a vanished directory must not read as "the archive is fine, 0 evicted".
+  Never raises: this runs on the rotation path inside selfdrived's 100 Hz loop."""
+  # Resolved here, not as default arguments: a default is bound at def time, so the module constants
+  # could not be overridden (by a test, or by a future param) without editing this signature.
+  archive_dir = CES_ARCHIVE_DIR if archive_dir is None else archive_dir
+  max_bytes = CES_ARCHIVE_MAX_BYTES if max_bytes is None else max_bytes
+  entries = []
+  try:
+    for name in os.listdir(archive_dir):
+      fp = os.path.join(archive_dir, name)
+      try:
+        if not os.path.isfile(fp):
+          continue
+        st = os.stat(fp)
+      except OSError as e:
+        cloudlog.error(f"ces_pnw: ces_archive stat failed for {fp} ({type(e).__name__}) -- it is not counted " +
+                       f"against the {max_bytes} byte budget, so the archive may overshoot")
+        continue
+      entries.append((st.st_mtime, st.st_size, fp))
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: ces_archive listdir FAILED ({type(e).__name__}) at {archive_dir} -- the budget is " +
+                   "NOT being enforced; /data can fill up")
+    return 0
+  total = sum(sz for _, sz, _ in entries)
+  if total <= max_bytes:
+    return 0
+  entries.sort()                       # oldest mtime first
+  removed, freed = 0, 0
+  for _, size, fp in entries:
+    if total <= max_bytes:
+      break
+    try:
+      os.remove(fp)
+    except OSError as e:
+      cloudlog.error(f"ces_pnw: ces_archive could not delete {fp} ({type(e).__name__}) -- still over budget")
+      continue
+    total -= size
+    freed += size
+    removed += 1
+  if removed:
+    cloudlog.error(f"ces_pnw: ces_archive OVER BUDGET -- deleted the {removed} oldest generation(s) ({freed} bytes). " +
+                   f"The curvedb Phase-1 retention window has been TRUNCATED at the old end; pull {archive_dir} " +
+                   "to the dev host before the next eviction.")
+  return removed
+
+
+def archive_rotated_generation(path: str, generations: int, archive_dir: str | None = None,
+                               max_bytes: int | None = None):
+  """curvedbtel2pnw (section 3.8): rescue the generation rotate_event_log is about to destroy.
+
+  rotate_event_log shifts .1->.2 ... .(N-1)->.N, which OVERWRITES the pre-existing .N. That file is
+  the oldest driving history the device holds, and at 8 generations it is only ~17.6 driving hours
+  old -- far short of the 6-8 weeks the Phase-1 gate needs. Move it into `archive_dir` first.
+
+  os.replace, not copy: /data/pnw and /data/pnw/ces_archive are the same filesystem, so this is a
+  rename -- constant time, atomic, and it does not double the bytes on a /data that is at 90 %.
+  A cross-device archive_dir would raise EXDEV, which is logged (loudly) rather than swallowed.
+
+  Returns the destination path, or None when there was nothing to archive / the archive failed.
+  Never raises -- the live log must keep rotating even if archiving is broken."""
+  archive_dir = CES_ARCHIVE_DIR if archive_dir is None else archive_dir   # see prune_ces_archive
+  oldest = f"{path}.{max(int(generations), 1)}"
+  try:
+    st = os.stat(oldest)
+  except FileNotFoundError:
+    return None                        # fewer than N rotations so far -- nothing is being destroyed yet
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: ces_archive could not stat {oldest} ({type(e).__name__}) -- that generation is " +
+                   "about to be DESTROYED by the rotation and is NOT archived")
+    return None
+  try:
+    os.makedirs(archive_dir, exist_ok=True)
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: ces_archive mkdir FAILED ({type(e).__name__}) at {archive_dir} -- ces_events history " +
+                   "is being DESTROYED on every rotation; the curvedb Phase-1 corpus is not accumulating")
+    return None
+  # Name by the file's own mtime (when it last rotated out of live), not by "now": the archive is
+  # then sorted by content time, which is what prune_ces_archive's oldest-first eviction needs.
+  base = os.path.basename(path)
+  stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(st.st_mtime))
+  dest = os.path.join(archive_dir, f"{base}.{stamp}")
+  n = 1
+  while os.path.exists(dest):          # two rotations inside one second (or a re-run) must not collide
+    dest = os.path.join(archive_dir, f"{base}.{stamp}.{n}")
+    n += 1
+  try:
+    os.replace(oldest, dest)
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: ces_archive move FAILED ({type(e).__name__}) {oldest} -> {dest} -- that generation " +
+                   "is about to be DESTROYED by the rotation; the curvedb Phase-1 corpus is NOT accumulating")
+    return None
+  prune_ces_archive(archive_dir, max_bytes)
+  return dest
+
+
 def rotate_event_log(path: str, generations: int) -> None:
   """cesretain2pnw: shift path.1..path.(N-1) down one and move path -> path.1, keeping `generations`
   rotated files. Oldest (path.N) is dropped. Each step is an atomic os.replace, so a crash mid-rotate
-  loses at most one generation and never the live file. Caller has already checked the size."""
+  loses at most one generation and never the live file. Caller has already checked the size.
+
+  curvedbtel2pnw (section 3.8): "dropped" now means "moved to CES_ARCHIVE_DIR" -- see
+  archive_rotated_generation. It runs FIRST, before the shift that would overwrite path.N, and it
+  never raises, so a broken archive degrades to exactly the pre-curvedbtel2pnw behaviour (the
+  generation is lost) with a loud swaglog line instead of silence."""
+  archive_rotated_generation(path, generations)
   for i in range(max(int(generations), 1) - 1, 0, -1):
     try:
       os.replace(f"{path}.{i}", f"{path}.{i + 1}")
