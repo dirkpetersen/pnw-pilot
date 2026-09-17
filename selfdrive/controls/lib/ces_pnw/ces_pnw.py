@@ -1744,7 +1744,15 @@ def icbm_falsify_tick(min_d, prev_d, held, dt, cand_dist, target, ach_lat, v_ego
     t = float(target)
   except (TypeError, ValueError):
     t = None
-  if t is None or not math.isfinite(t) or t <= 0.0:
+  # `not (t * t > 0.0)` rather than `t <= 0.0`, so the "Never raises" in this function's docstring is
+  # actually TRUE (Fable 2026-09-17): a target below ~2.2e-162 underflows t*t to 0.0 while passing
+  # `t > 0`, which is a ZeroDivisionError on the next line. That -- and ONLY that -- is what this
+  # closes; a target around 1e-160 still passes and still yields k_map = inf. Both are unreachable
+  # (targets are m/s, and the caller's max(..., 0.0) yields exactly 0.0), and the gate's own except
+  # is fail-open, so this changes no reachable behaviour. It is here because a docstring that
+  # promises more than the code delivers is what the next person will rely on -- which is also why
+  # this comment does not claim the inf case is fixed when it is not.
+  if t is None or not math.isfinite(t) or not (t * t > 0.0):
     return min_d, d, 0.0, False, "noTarget", None, None
   k_map = ICBM_FALSIFY_A_LAT / (t * t)
   try:

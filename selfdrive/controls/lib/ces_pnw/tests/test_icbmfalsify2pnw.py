@@ -47,6 +47,16 @@ class TestMeasuredCurvature:
   def test_it_is_a_lat_over_v_squared(self):
     assert m.icbm_measured_curvature(2.5, 25.0) == pytest.approx(2.5 / 625.0)
 
+  def test_a_RIGHT_hand_curve_measures_the_same_as_a_left(self):
+    """Fable 2026-09-17. achLat is SIGNED -- negative is a right-hand bend on both cars. Without the
+    abs() every right-hand curve reads a negative k_meas, `k_meas * RATIO < k_map` is then true for
+    any map claim at all, and the rule falsifies EVERY right-hand curve after its 2 s hold: it would
+    cancel real slowdowns, on one side of the road only, which is the single worst thing this rule
+    could do. The abs() was the only line preventing it and nothing pinned it -- every synthetic
+    test used positive curvature, and no fixture window arrives-and-measures on a right-hander."""
+    assert m.icbm_measured_curvature(-2.5, 25.0) == pytest.approx(2.5 / 625.0)
+    assert m.icbm_measured_curvature(-2.5, 25.0) == m.icbm_measured_curvature(2.5, 25.0)
+
   def test_it_is_speed_independent_which_is_the_whole_argument(self):
     """The same bend taken at 69 mph and at 44 mph reads as the same curvature -- which is why "I measured a gentle
     curve" cannot be explained away by "the slowdown worked"."""
@@ -336,10 +346,15 @@ class TestItEndsACapTheTruckHasMeasuredWrong:
     assert any(r[2].get("target") is not None for r in base[:k]), "no cap before the node -- proves nothing"
     assert [r[2] for r in gated[:k]] == [r[2] for r in base[:k]]
 
-  def test_a_real_curve_at_the_same_node_is_never_aborted(self):
-    """The same road, the same map claim, the same drive -- only the truck actually measures the bend. Identical."""
-    base, _, _ = _scene(ONE_NODE, 14.0, REAL, falsify=False)
-    gated, ev, _ = _scene(ONE_NODE, 14.0, REAL)
+  @pytest.mark.parametrize("k", [REAL, -REAL], ids=["left", "right"])
+  def test_a_real_curve_at_the_same_node_is_never_aborted(self, k):
+    """The same road, the same map claim, the same drive -- only the truck actually measures the bend. Identical.
+
+    BOTH DIRECTIONS (Fable 2026-09-17): achLat is signed, and a rule that cancelled real slowdowns on
+    right-handers only would be a one-sided failure nobody would think to look for. The `right` case
+    fails if the abs() in icbm_measured_curvature is ever dropped."""
+    base, _, _ = _scene(ONE_NODE, 14.0, k, falsify=False)
+    gated, ev, _ = _scene(ONE_NODE, 14.0, k)
     assert _capped(base), "nothing capped -- proves nothing"
     assert [r[2] for r in gated] == [r[2] for r in base]
     assert _falsify_ev(ev, "end") == []
@@ -648,10 +663,19 @@ class TestPreemptedByBehindrun:
   The design's 35-abort / 759 s replay corpus was recorded 2026-09-11..13, BEFORE behindrun2pnw existed."""
 
   @pytest.mark.parametrize("w", _windows(), ids=lambda w: w["name"])
-  def test_on_the_shipped_code_the_rule_changes_nothing(self, w):
+  def test_on_the_shipped_code_the_rule_changes_nothing(self, w, monkeypatch):
     base, _ = _replay(w, falsify=False)
+    # Count the ticks the rule actually EVALUATED. Without this the class passes vacuously the day a
+    # change makes the gate unreachable -- "it changed nothing" would then be true for the wrong
+    # reason and the tripwire would have stopped being one without saying so (Fable 2026-09-17).
+    # It fails in the safe direction, but a tripwire that cannot trip is not a tripwire.
+    reached = []
+    real_tick = m.icbm_falsify_tick
+    monkeypatch.setattr(m, "icbm_falsify_tick",
+                        lambda *a, **k: (reached.append(1), real_tick(*a, **k))[1])
     gated, ev = _replay(w, falsify=True)
     assert _rcapped(base), f'{w["when_pt"]}: nothing caps here -- proves nothing'
+    assert reached, f'{w["when_pt"]}: the rule was never evaluated -- this window proves nothing'
     assert [(t, p) for t, p, *_ in gated] == [(t, p) for t, p, *_ in base], \
       f'{w["when_pt"]}: the rule acted with behindrun2pnw live -- re-read this class and re-measure the overlap'
     assert _falsify_ev(ev, "end") == []
