@@ -76,8 +76,17 @@ PNW_LOG_SOURCES: tuple[tuple[str, str, str], ...] = (
   ("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),
 )
 # The archive names each generation by its own mtime (ces_events.jsonl.20260916T191100Z, with a .N
-# suffix on collision), so these keys are unique for the life of the dongle and no upload can
-# overwrite an earlier one in S3.
+# suffix while a same-second file is still present, and a random `.b<hex>` token when the clock is
+# pre-2020), so these keys do not collide in S3.
+#
+# That last clause is load-bearing and was NOT true at first (Fable 2026-09-16). The gateway presigns
+# a plain put_object with no IfNoneMatch, so it returns no 412 and a repeated key silently
+# OVERWRITES. The device-side `.N` loop only disambiguates while the earlier file still exists, and
+# the dead RTC made 1970-stamped generations -- which prune_ces_archive, sorting by mtime, always
+# evicts first, freeing the name. Worse than the overwrite: xattr_cache memoises "uploaded" against
+# the PATH, so inside one uploader process a reused name inherits the previous file's b'1' and is
+# never sent at all. Fixed in archive_rotated_generation, not here, because that is where the name
+# is chosen; see the CLOCK_VALID_EPOCH branch there.
 #
 # Uploaded as .zst: do_upload compresses on the fly whenever the KEY ends in .zst and the file does
 # not, and this is plain JSONL -- ~10x off a 20 MB generation, which is the difference between a
@@ -522,12 +531,30 @@ class Uploader:
       except OSError as e:
         self._pnw_log_note("error", src=src, err=type(e).__name__)
         continue
-      eligible = done = 0
+      eligible = done = notfile = 0
       for name in names:
         if not name.startswith(want):
           continue          # second gate: a file that is not a rotated generation never leaves
-        eligible += 1
         fn = os.path.join(src, name)
+        # THIRD gate, and the one that makes the second a real gate rather than a name check (Fable
+        # 2026-09-16): `startswith` matches a NAME, and a name is not a file. A symlink
+        # `ces_events.jsonl.link -> /data/pnw/location/police_proxy.json` dropped in this directory
+        # passes the prefix test, and open() follows it -- the Waze API key uploads to S3 under a
+        # pnwlogs/ key. Planting it needs write access here, which already implies read access to the
+        # secret, so this is defense-in-depth rather than a live hole; it costs two lines, and the
+        # commit that added the allowlist SELLS two independent gates, so the second one has to be
+        # real. islink() is checked separately from isfile() because isfile() FOLLOWS the link and
+        # would say True for exactly the case being excluded.
+        # Same check fixes a non-security bug: a DIRECTORY named `ces_events.jsonl.somedir` was
+        # yielded, getsize() returned 4096, and open() raised IsADirectoryError -> upload_failed ->
+        # a 15-minute retry cooldown, re-entered forever with no error code and so no UP ERR.
+        if os.path.islink(fn) or not os.path.isfile(fn):
+          # Counted, not logged per-name: _pnw_log_note is change-only on (state, kwargs), so two
+          # differently-named rejects would alternate the key and log on EVERY listing. The count
+          # rides the `scanned` summary below, which is already aggregate and change-only.
+          notfile += 1
+          continue
+        eligible += 1
         try:
           if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
             done += 1
@@ -539,7 +566,11 @@ class Uploader:
         if self._retry_after.get(fn, 0.0) > now:
           continue
         yield name, f"{prefix}/{name}{PNW_LOG_SUFFIX}", fn
-      self._pnw_log_note("scanned", src=src, eligible=eligible, uploaded=done, pending=eligible - done)
+      # `notfile` is reported even when it is 0: a name that passed the prefix gate and was then
+      # rejected for not being a regular file is exactly the case worth seeing, and a field that
+      # only appears when non-zero cannot be told from a field that stopped being written.
+      self._pnw_log_note("scanned", src=src, eligible=eligible, uploaded=done,
+                         pending=eligible - done, notfile=notfile)
 
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -641,6 +672,15 @@ class Uploader:
     # of the segment that is being driven right now. The corpus is days-to-weeks old by the time it
     # is archived; it can wait for a gap. (Without this tier the files would be listed and never
     # chosen: pass 1 returns ONLY immediate-folder and immediate-priority names.)
+    #
+    # The key-prefix test is NOT decoration, and it must not be loosened to "return the first thing
+    # left" (Fable 2026-09-16). list_upload_files yields every non-firehose file in a segment,
+    # INCLUDING dcamera.hevc -- the driver-facing camera. Stock never picks it because only
+    # immediate-priority names are chosen; this tier is the only thing that keeps that true. A
+    # loosening would proactively upload driver-cam video over any unmetered WiFi, and
+    # next_file_to_upload would stop ever returning None while a segment had any leftover file, so
+    # the idle 60 s backoff would never engage. Both halves are pinned by
+    # TestDriveDataStillGoesFirst.
     for name, key, fn in upload_files:
       if key.startswith(PNW_LOG_PREFIXES):
         return name, key, fn

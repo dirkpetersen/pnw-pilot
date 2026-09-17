@@ -212,6 +212,39 @@ class TestArchive:
     assert any("ces_archive move FAILED" in s and "DESTROYED" in s for s in said)
     assert (tmp_path / "ces_events.jsonl.1").read_text() == "live\n", "the rotation itself still ran"
 
+  def test_a_dead_clock_generation_cannot_REUSE_a_name_after_the_first_was_evicted(self, tmp_path):
+    """ceslogup2pnw (Fable 2026-09-16). The 3X's RTC battery is dead, so a pre-NTP rotation stamps
+    1970. The `.N` collision loop only disambiguates while the earlier file still EXISTS -- and
+    prune_ces_archive sorts by mtime, so 1970 files are the first evicted, which frees the name.
+
+    Once these generations go to S3 that is silent data loss twice over: the gateway presigns a
+    plain put_object (no 412), so the earlier object is overwritten; and xattr_cache memoises
+    "uploaded" against the PATH, so a reused name inherits the previous file's mark and the new
+    file is never sent at all. The name must therefore be unique on its own, not by coincidence."""
+    live = tmp_path / "ces_events.jsonl"
+    live.write_text("live\n")
+    arc = tmp_path / "arc"
+    seen = set()
+    for i in range(6):
+      _gen(tmp_path, "ces_events.jsonl.8", size=10 + i, mtime=60.0)   # 1970-01-01T00:01:00Z
+      dest = m.archive_rotated_generation(str(live), 8, str(arc), max_bytes=10 ** 9)
+      assert dest is not None
+      seen.add(os.path.basename(dest))
+      os.unlink(dest)             # what prune_ces_archive does to the oldest file -- 1970 sorts first
+    assert len(seen) == 6, f"a dead-clock name was reused after eviction: {sorted(seen)}"
+    for n in seen:
+      assert n.startswith("ces_events.jsonl."), f"{n} no longer passes the uploader's prefix gate"
+      assert n.startswith("ces_events.jsonl.19700101T000100Z."), n
+
+  def test_a_good_clock_still_gets_the_plain_mtime_name(self, tmp_path):
+    """The negative control: the random token is for the dead-clock case ONLY. A normal name is the
+    sortable mtime stamp, which is what makes the uploader's lexical oldest-first walk chronological."""
+    live = tmp_path / "ces_events.jsonl"
+    live.write_text("live\n")
+    _gen(tmp_path, "ces_events.jsonl.8", mtime=1789000000.0)      # 2026-09-10T00:26:40Z
+    dest = m.archive_rotated_generation(str(live), 8, str(tmp_path / "arc"), max_bytes=10 ** 9)
+    assert os.path.basename(dest) == "ces_events.jsonl.20260910T002640Z", os.path.basename(dest)
+
   def test_the_archive_directory_is_on_data_so_the_move_is_a_rename(self):
     """Not decoration: a cross-filesystem destination would make os.replace raise EXDEV, and the
     fallback would then have to be a 20 MB copy inside selfdrived's 100 Hz loop."""

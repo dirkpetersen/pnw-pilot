@@ -198,6 +198,18 @@ def archive_rotated_generation(path: str, generations: int, archive_dir: str | N
   # then sorted by content time, which is what prune_ces_archive's oldest-first eviction needs.
   base = os.path.basename(path)
   stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(st.st_mtime))
+  if st.st_mtime < CLOCK_VALID_EPOCH:
+    # ceslogup2pnw (Fable 2026-09-16): the 3X's RTC battery is dead, so every cold boot stamps
+    # pre-NTP files 1970. The `.N` collision loop below only disambiguates while the EARLIER file
+    # still exists -- and prune_ces_archive sorts by mtime, so 1970 files are always the first
+    # evicted, which frees the name again. Once these generations are uploaded (ceslogup2pnw) a
+    # reused name is an S3 key collision, and the failure is silent twice over: the Lambda presigns
+    # a plain put_object, so the earlier object is simply overwritten; and xattr_cache keys its
+    # "already uploaded" memo on the PATH, so within one uploader process the new file inherits the
+    # old one's b'1' and is never sent at all.
+    # Random, not a counter or a clock: there is no trustworthy clock here by definition, and a
+    # counter would have to persist across the reboot that caused the problem.
+    stamp = f"{stamp}.b{os.urandom(4).hex()}"
   dest = os.path.join(archive_dir, f"{base}.{stamp}")
   n = 1
   while os.path.exists(dest):          # two rotations inside one second (or a re-run) must not collide

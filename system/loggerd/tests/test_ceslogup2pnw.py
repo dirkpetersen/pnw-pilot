@@ -96,6 +96,42 @@ class TestTheSecretNeverLeaves:
     u = _uploader(tmp_path / "realdata", archive=d)
     assert [n for n, _, _ in _listed(u)] == [GEN]
 
+  def test_a_symlink_wearing_the_right_name_does_NOT_carry_the_key_out(self, tmp_path):
+    """Fable 2026-09-16: `startswith` matches a NAME, and a name is not a file. open() follows a
+    symlink, so without the islink test this uploads the Waze API key under a pnwlogs/ key."""
+    secret = tmp_path / "police_proxy.json"
+    secret.write_text('{"key": "SECRET-DO-NOT-UPLOAD"}')
+    d = _archive(tmp_path, GEN)
+    (d / "ces_events.jsonl.link").symlink_to(secret)
+    u = _uploader(tmp_path / "realdata", archive=d)
+    listed = _listed(u)
+    assert [n for n, _, _ in listed] == [GEN]
+    for _, key, fn in listed:
+      assert "link" not in key and os.path.realpath(fn) != str(secret)
+
+  def test_a_directory_wearing_the_right_name_is_not_offered(self, tmp_path):
+    """Not security -- a permanent failure loop. getsize() returns 4096 and open() raises
+    IsADirectoryError, so it retried every 15 minutes forever with no error code and no UP ERR."""
+    d = _archive(tmp_path, GEN)
+    (d / "ces_events.jsonl.somedir").mkdir()
+    u = _uploader(tmp_path / "realdata", archive=d)
+    assert [n for n, _, _ in _listed(u)] == [GEN]
+
+  def test_the_rejected_names_are_COUNTED_not_silently_dropped(self, tmp_path, monkeypatch):
+    """Rule 2: a name that passed the prefix gate and was then rejected is exactly what someone
+    needs to see, and the scan summary is where they would look."""
+    d = _archive(tmp_path, GEN)
+    (d / "ces_events.jsonl.somedir").mkdir()
+    (d / "ces_events.jsonl.link").symlink_to(d / GEN)
+    u = _uploader(tmp_path / "realdata", archive=d)
+    ev = []
+    monkeypatch.setattr(uploader.cloudlog, "event", lambda n, **kw: ev.append((n, kw)))
+    _listed(u)
+    scanned = [kw for n, kw in ev if n == "pnw_log_upload" and kw.get("state") == "scanned"]
+    assert len(scanned) == 1
+    assert scanned[0]["notfile"] == 2, scanned[0]
+    assert scanned[0]["eligible"] == 1, "the rejects must not be counted as eligible either"
+
   def test_the_real_shipped_source_list_is_a_single_named_archive_directory(self):
     assert PNW_LOG_SOURCES == (("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),)
     for src, _, want in PNW_LOG_SOURCES:
@@ -193,6 +229,27 @@ class TestDriveDataStillGoesFirst:
     assert got is not None, "listed but never chosen: the corpus would never reach S3"
     assert got[0] == GEN
 
+  def test_the_DRIVER_CAMERA_is_not_swept_up_by_the_new_tier(self, tmp_path):
+    """Fable 2026-09-16, and the reason the tier tests a KEY PREFIX rather than "whatever is left".
+    Pass 1 lists every non-firehose file in a segment, dcamera.hevc included; stock never picks it
+    because only immediate-priority names are chosen. This tier is the only thing keeping that true,
+    and mutating its predicate to `if True` used to survive the whole suite."""
+    root = self._with_segment(tmp_path, "dcamera.hevc")
+    d = _archive(tmp_path, GEN)
+    u = _uploader(root, archive=d)
+    assert "dcamera.hevc" in [n for n, _, _ in _listed(u)], "the premise is gone; this proves nothing"
+    name, key, _ = u.next_file_to_upload(metered=False)
+    assert name == GEN, f"the driver-facing camera was chosen over the corpus ({name})"
+    assert key.startswith("pnwlogs/")
+
+  def test_with_no_corpus_the_leftovers_are_NOT_uploaded_and_the_queue_goes_idle(self, tmp_path):
+    """The other half: next_file_to_upload must still return None so the 60 s idle backoff engages.
+    A loosened predicate would make it return a leftover forever and the uploader would never rest."""
+    root = self._with_segment(tmp_path, "dcamera.hevc")
+    u = _uploader(root, archive=tmp_path / "never_created")
+    assert "dcamera.hevc" in [n for n, _, _ in _listed(u)]
+    assert u.next_file_to_upload(metered=False) is None
+
   def test_the_oldest_generation_goes_first(self, tmp_path):
     root = tmp_path / "realdata"
     root.mkdir()
@@ -235,6 +292,22 @@ class TestRule2:
     for _ in range(25):
       _listed(u)
     assert len(logged) == 1, "the listing runs many times a minute; this would flood the log"
+
+  def test_a_generation_whose_upload_MARK_cannot_be_read_is_not_skipped_in_silence(self, tmp_path, monkeypatch):
+    """The per-file half of the same rule. An unreadable xattr is an ERROR, not the answer "already
+    uploaded" -- and the file is skipped either way, so the log line is the only difference between
+    a healthy scan and a corpus that is quietly going nowhere."""
+    d = _archive(tmp_path, GEN)
+    u = _uploader(tmp_path / "realdata", archive=d)
+    ev = []
+    monkeypatch.setattr(uploader.cloudlog, "event", lambda n, **kw: ev.append((n, kw)))
+
+    def boom(_fn, _attr):
+      raise OSError("nope")
+    monkeypatch.setattr(uploader, "getxattr", boom)
+    assert _listed(u) == []
+    failed = [kw for n, kw in ev if n == "uploader_getxattr_failed"]
+    assert len(failed) == 1 and failed[0]["key"] == GEN, ev
 
   def test_the_summary_says_what_was_scanned(self, tmp_path, monkeypatch):
     d = _archive(tmp_path, GEN, "ces_events.jsonl.20260101T000000Z", "notes.txt")
