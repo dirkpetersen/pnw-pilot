@@ -96,6 +96,7 @@ def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=
   params_script = dict(params_script or {})
   holder = {"prev_t": None}
   sent = []
+  pubs = []   # mapdcargps2pnw: the services of every PubMaster main() creates, in creation order
 
   def fake_params(path=None):
     return memp if path == "/dev/shm/params" else params
@@ -121,18 +122,22 @@ def run(monkeypatch, steps, persistent=None, mem=None, mem_script=None, on_step=
     holder["sm"] = sm
     return sm
 
+  def fake_pubmaster(services):
+    pubs.append(list(services))
+    return SimpleNamespace(send=lambda s, m: sent.append((clock.t, s, m)))
+
   fake_time = SimpleNamespace(monotonic=lambda: clock.t, time=lambda: 1.8e9 + clock.t, sleep=lambda s: None)
   monkeypatch.setattr(mapd_configd, "Params", fake_params)
   monkeypatch.setattr(mapd_configd, "cloudlog", log)
   monkeypatch.setattr(mapd_configd, "time", fake_time)
   monkeypatch.setattr(mapd_configd.messaging, "SubMaster", fake_submaster)
-  monkeypatch.setattr(mapd_configd.messaging, "PubMaster", lambda services: SimpleNamespace(send=lambda s, m: sent.append((clock.t, s, m))))
+  monkeypatch.setattr(mapd_configd.messaging, "PubMaster", fake_pubmaster)
   monkeypatch.setattr(mapd_configd, "_maps_on_disk", lambda: False)
   try:
     mapd_configd.main()
   except _ReplayDone:
     pass
-  return SimpleNamespace(mem=memp, params=params, log=log, sm=holder.get("sm"), sent=sent)
+  return SimpleNamespace(mem=memp, params=params, log=log, sm=holder.get("sm"), sent=sent, pubs=pubs)
 
 
 def positions(res):

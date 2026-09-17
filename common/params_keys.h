@@ -95,6 +95,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // mapd2pnw: settings store for the official pfeiferj mapd v2.0.6 binary (JSON; the binary
     // reads/writes this directly and reloads it on a mapdIn reloadSettings message).
     {"MapdSettings", {PERSISTENT, JSON}},
+    // mapdcargps2pnw: relay the GPS fix mapd_configd already SELECTED (truck CAN fix or comma modem
+    // fix) onto gpsLocationExternal, so the mapd binary navigates from the same position as the rest
+    // of the system instead of always from the modem. mapd polls gpsLocationExternal first and LATCHES
+    // to it for the life of the process -- it can never fall back -- which is why this is opt-in.
+    // Lightning only (PnwVehicle.car_gps); on the Tesla it is not even read.
+    {"MapdUseCarGps", {PERSISTENT, BOOL, "0"}},
     // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, JSON}},

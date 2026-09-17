@@ -133,6 +133,13 @@ CAR_GPS_DR_EXIT_S = 5.0
 # is its CAN receipt (`ts` minus the publish-time `age`). The truck position is itself ~0.2 s older than
 # its receipt (GPS_TRUCK_VS_COMMA.md s2, per boot -0.08..+0.62 s); no constant is applied for that.
 DEVICE_GPS_FIX_LATENCY_S = 0.57   # fix epoch -> gpsLocation publish, p1/50/99 0.43/0.57/0.67 s, 23,410 fixes
+# mapdcargps2pnw: once the relay has started, the ONE routine way it can stop is that neither receiver
+# produced a fix. That has to be logged: a starved mapd does not go quiet, it keeps publishing mapdOut
+# at 20 Hz with FROZEN speedLimit/highwayClass and tileLoaded=true, `sm.alive` stays True, and nothing
+# downstream can tell. Both feeds run at ~1 Hz and the truck's own silence threshold is
+# CAR_GPS_SILENT_S = 2.5 s, so 5 s cannot flap on ordinary decimation while still landing the line
+# near the start of the outage.
+EXT_STALL_S = 5.0
 
 
 class CarGpsSource:
@@ -242,6 +249,64 @@ class CarGpsSource:
     else:
       self.kind, self.detail = "ok", f"CAN frame age {age:.2f} s, HDOP {hdop}"
     return {"latitude": lat, "longitude": lon, "bearing": hdg % 360.0, "speed": spd_ms}
+
+
+def device_gps_ext_msg(g):
+  """mapdcargps2pnw: the DEVICE fix, copied VERBATIM onto `gpsLocationExternal` for mapd.
+
+  Verbatim and not re-derived, because the point of the relay is that mapd navigates from EXACTLY the
+  position the rest of this process just chose. Re-deriving even one field would put a number on the
+  wire that no receiver produced -- and `horizontalAccuracy` in particular is mapd's way-matching
+  tolerance (see car_gps_ext_msg), so a substituted value changes which road mapd thinks we are on."""
+  # valid=True to match the real publishers (ubloxd.py:178, qcomgpsd.py:366). Nothing on the car
+  # reads sm.valid for this service today -- a mutant proving that SURVIVED Fable's pass -- but a
+  # relayed Event that claims to be invalid would mislead any future consumer or replay.
+  msg = messaging.new_message('gpsLocationExternal', valid=True)
+  msg.gpsLocationExternal = g
+  return msg
+
+
+def car_gps_ext_msg(cg: dict, fix: dict):
+  """mapdcargps2pnw: the truck's CAN fix as a `gpsLocationExternal` message, for mapd.
+
+  `fix` is what CarGpsSource.update() just returned, so its lat/lon/bearing are range-checked and its
+  `speed` is ALREADY m/s -- CarGps `spd` is MPH per the DBC and MPH_TO_MS is applied there. Taking the
+  speed from the raw blob instead would publish MPH into an m/s field. `cg` is that same raw blob, for
+  the two timestamps the selection itself does not keep.
+
+  Everything this feed does not carry (flags, altitude, vNED, the accuracies) is left at its capnp
+  default: an invented value would make an absent measurement look taken. Two of those defaults are
+  load-bearing rather than tidy, and BOTH were wrong in the first draft of this feature:
+
+  * `horizontalAccuracy` must stay 0. mapd uses it as its WAY-MATCHING TOLERANCE --
+    `max_dist := max(location.HorizontalAccuracy(), 5) + w.Width()` (pfeiferj mapd maps/way.go:361).
+    Anything above 5 widens matching; a plausible-looking `hdop * 5` would widen it by 6-18 m at the
+    HDOP 1.2-3.6 the truck reports entering a tunnel, making adjacent-ramp mis-matching MORE likely --
+    the exact phantom-slowdown class this work exists to fight. qcomgpsd publishes 0 here too.
+  * `satelliteCount` must stay 0. `GPS_Sat_num_in_view` is 5 bits, range [0|29], with
+    `VAL_ 31 "Invalid" 30 "Unknown"` (ford_lincoln_base_pt.dbc VAL_ 1124), and across every ces_events
+    log under drives/ the truck sent 31 on 83,084 publishes, 30 on 133, and a real count on none. The
+    "31 satellites" that helped motivate this feature is a sentinel, not a measurement."""
+  # valid=True to match the real publishers (ubloxd.py:178, qcomgpsd.py:366). Nothing on the car
+  # reads sm.valid for this service today -- a mutant proving that SURVIVED Fable's pass -- but a
+  # relayed Event that claims to be invalid would mislead any future consumer or replay.
+  msg = messaging.new_message('gpsLocationExternal', valid=True)
+  g = msg.gpsLocationExternal
+  g.latitude, g.longitude = fix["latitude"], fix["longitude"]
+  g.bearingDeg = fix["bearing"]
+  g.speed = fix["speed"]          # m/s
+  g.hasFix = True                 # only ever built at the car write site, i.e. the selection chose it
+  g.source = 'car'
+  # The FIX is `age` older than the publish: CarGps `ts` is the publisher's wall clock when it wrote
+  # the blob, and `age` is how old the CAN frame already was by then (0.0-1.03 s measured). Stamping
+  # `ts` would date the fix to when we heard about it. CarGpsSource compares `ts` for change but never
+  # range-checks it, so a non-finite or absurd clock must not reach int() and raise in this daemon; the
+  # wall clock is also bogus for the first 7-68 s of a boot, before it syncs (qcomgpsd has the same
+  # caveat, and nothing in mapd reads this field).
+  fix_epoch = float(cg["ts"]) - float(cg["age"])
+  if math.isfinite(fix_epoch) and 0.0 <= fix_epoch < 4.1e9:   # epoch seconds, through 2099; inside Int64 ms
+    g.unixTimestampMillis = int(fix_epoch * 1000.0)
+  return msg
 
 
 def car_gps_capability(params, prev_bytes, prev_capable: bool) -> tuple[bool, bytes | None]:
@@ -505,6 +570,15 @@ def main():
   pm = messaging.PubMaster(['mapdIn'])
   gps_service = get_gps_location_service(params)
   sm = messaging.SubMaster(['mapdExtendedOut', 'mapdOut', gps_service])
+  # mapdcargps2pnw: a u-blox device makes get_gps_location_service() return the VERY service the relay
+  # publishes on, so this process would read its own writes back as the "device" fix and compare the
+  # truck against itself. Not the case on the 3X (no /dev/ttyHS0, so UbloxAvailable is False and the
+  # device fix is gpsLocation), but refuse loudly rather than close that loop silently if the hardware
+  # ever changes.
+  ext_self_feed = gps_service == 'gpsLocationExternal'
+  if ext_self_feed:
+    cloudlog.error("mapd_configd: the device GPS service IS gpsLocationExternal (u-blox present) -- the car-GPS " +
+                   "relay is DISABLED, it would feed this process its own publishes")
 
   last_covered = None
   mapd_down = 0            # consecutive loops mapd (mapdExtendedOut) has been silent — debounces "down"
@@ -522,6 +596,11 @@ def main():
   cp_bytes = None                # gpssel2pnw: the CarParams bytes car_gps_capable was judged from
   cp_checked_at = None           # gpssel2pnw: monotonic time of the last CarParams read
   gps_source = None              # gpssel2pnw: last LOGGED (src, car kind, truck DR flag)
+  ext_pm = None                  # mapdcargps2pnw: gpsLocationExternal publisher, created on the FIRST relay
+  ext_on = False
+  ext_param_warned = False                 # mapdcargps2pnw: the selected fix is currently being relayed to mapd
+  ext_sent_at = 0.0              # mapdcargps2pnw: monotonic time of the last successful relay publish
+  ext_send_failed = False        # mapdcargps2pnw: one-shot guard so a broken publish warns once, not at 1 Hz
 
   while True:
     sm.update(1000)  # paces the loop (blocks up to 1 s); no extra sleep
@@ -563,15 +642,17 @@ def main():
           cloudlog.event("mapd_configd_car_gps_capability", capable=capable)
           # never carry feed state across cars; the next source state is logged afresh
           car_gps_capable, car_gps, gps_source = capable, CarGpsSource(), None
-      car_fix = None
+      car_fix = car_gps_blob = None
       if car_gps_capable:
         dev_speed = float(sm[gps_service].speed) if cur_fix_state == "fix" else None
-        car_fix = car_gps.update(mem.get("CarGps", return_default=True), now_fix, dev_speed)
+        car_gps_blob = mem.get("CarGps", return_default=True)   # kept: mapdcargps2pnw re-reads `ts`/`age` off it
+        car_fix = car_gps.update(car_gps_blob, now_fix, dev_speed)
       # gpsdr2pnw: a degraded truck fix yields to a FRESH device fix (and takes over again the moment
       # the device fix is not fresh: a dead-reckoned truck beats no position at all).
       # gpsdrgate2pnw: only while moving, and only to a device fix steady for CAR_GPS_DR_ENTER_S.
       device_steady = cur_fix_state == "fix" and now_fix - fix_state_since >= CAR_GPS_DR_ENTER_S
       use_car = car_gps_capable and car_gps.usable and not (car_gps.dr_yields(now_fix) and device_steady)
+      ext_src = None   # mapdcargps2pnw: which of the two write sites below produced a fix, for the relay
       if sm.updated[gps_service]:
         g = sm[gps_service]
         if not g.hasFix:
@@ -586,12 +667,14 @@ def main():
             "src": "device",
             "ts": t_arr,  # system-wide monotonic clock: lets the police gate reject stale speed
             "fix_ts": t_arr - DEVICE_GPS_FIX_LATENCY_S}))  # gpslag2pnw
+          ext_src = "device"   # mapdcargps2pnw relay site 1 -- and it inherits the hasFix gate above
       if use_car and car_fix is not None:
         # One write per NEW healthy publish (~1 Hz), stamped when this process first saw it; the fix
         # itself is CAN-frame `age` older (0.0-1.03 s). bearing = the truck's heading, which held
         # within 2.6 deg at every stop where the device's wandered >10 deg at 22 of 46.
         mem.put_nonblocking("LastGPSPosition", json.dumps({**car_fix, "src": "car", "ts": now_fix,
                                                            "fix_ts": now_fix - car_gps.age}))  # gpslag2pnw: CAN receipt
+        ext_src = "car"   # mapdcargps2pnw relay site 2
       if car_gps_capable:
         # Rule 2: every source switch, and every change in WHY the car is not used, is logged once.
         src = "car" if use_car else ("device" if cur_fix_state == "fix" else "none")
@@ -602,6 +685,89 @@ def main():
                          car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
                          device_fix_s=round(now_fix - fix_state_since, 1), truck_dr=car_gps.truck_dr)
           gps_source = (src, car_gps.kind, car_gps.truck_dr)
+      # mapdcargps2pnw: RELAY the fix the two write sites above just selected onto gpsLocationExternal,
+      # so MAPD navigates from exactly the position the rest of this process chose. No mapd patch is
+      # needed and none is possible without a fork: pfeiferj's cereal/gps.go polls gpsLocationExternal
+      # FIRST and LATCHES to it permanently on the first successful read. The service is otherwise
+      # unused on this hardware -- 0 messages against gpsLocation's 60 in segment 0000018a--0740249822--8
+      # (and on three further local rlogs), because ubloxd and pigeond are not running at all
+      # (managerState 0/120 each against qcomgpsd's 120/120).
+      #
+      # WHY: the Chestnut GPU install is expected to interfere with the comma's own GPS, and mapd does
+      # not check `hasFix` at all, so it would pick tiles, speed limits and curve candidates off a
+      # degraded fix while the Python consumers above already fail over to the truck (gpssel2pnw) --
+      # two halves navigating from different positions, with only one of them aware of it.
+      #
+      # WHY RELAY BOTH BRANCHES rather than only the car's (the v1 design):
+      #  - mapd then stalls only when BOTH receivers are dead, which is exactly today's behaviour. A
+      #    car-only publish stalled it on every ordinary truck-feed hiccup, and that stall is NOT
+      #    benign: a starved mapd keeps publishing mapdOut at 20 Hz with frozen speedLimit/highwayClass
+      #    and tileLoaded=true, so nothing downstream can tell -- including the MapHighwayClassTs the
+      #    nudgeless-lane-change freeway gate reads, which would never expire.
+      #  - it inherits gpsfix2pnw's `hasFix` gate for free (relay site 1 sits under it). mapd never
+      #    checks hasFix itself; at the 2026-09-12 06:28:57 PT cold start it would have consumed four
+      #    no-fix positions 2.18-2.42 km from the truck.
+      #  - both halves stay in one coordinate frame at all times, which was the entire motivation.
+      # Accepted trade-off: post-Chestnut, a tick where the truck feed is unhealthy hands mapd the
+      # possibly-degraded device fix instead of stalling -- the same exposure the Python consumers
+      # already accept whenever use_car is False, and a hasFix-gated degraded position beats a frozen
+      # one. For the same reason the gate is the param and the capability ONLY: a liveness or
+      # dead-reckoning gate the selection above does not have would make the two halves diverge again,
+      # which is the problem this feature exists to remove. The selection already encodes liveness.
+      #
+      # The gate is read HERE, after the writes above, so that a raise out of it (UnknownKeyName on a
+      # device whose params_pyx.so was not rebuilt for the new key) can only cost this loop its relay
+      # and its mapd->CES bridge, never the LastGPSPosition write every other consumer depends on.
+      # Short-circuit order matters too: on a car without the capability the param is never even read.
+      try:
+        ext_ok = car_gps_capable and not ext_self_feed and params.get_bool("MapdUseCarGps")
+      except Exception:
+        # Fable 2026-09-16: the commit understated this. An UnknownKeyName here (params_keys.h carries the
+        # new key but params_pyx.so was not rebuilt) does NOT cost "this loop" -- it fires EVERY loop at
+        # 20 Hz and takes the whole mapd->CES bridge with it (MapSpeedLimit / MapHighwayClass /
+        # MapTargetVelocities) until the rebuild. Only reachable by a hot-patch without a rebuild, which
+        # the pre-drive sync rule already forbids, but the containment costs three lines: the relay turns
+        # OFF and says why, once, and the bridge below keeps running.
+        if not ext_param_warned:
+          cloudlog.exception("mapd_configd: MapdUseCarGps unreadable -- car-GPS relay OFF; rebuild params_pyx.so")
+          ext_param_warned = True
+        ext_ok = False
+      if ext_src is not None and ext_ok:
+        try:
+          # Built here, inside the guard, so a malformed blob cannot escape into the outer bridge try
+          # and cost this loop its MapSpeedLimit / RoadName / MapHighwayClass writes.
+          msg = car_gps_ext_msg(car_gps_blob, car_fix) if ext_src == "car" else device_gps_ext_msg(sm[gps_service])
+          if ext_pm is None:
+            # Created on the FIRST relay, never at startup: a publisher in main()'s PubMaster would own
+            # the gpsLocationExternal msgq queue from boot even with the param OFF, so "the default is
+            # inert" would be true of the message count but not of the queue. Nothing contends for it
+            # here (ubloxd/pigeond are not running) -- this just keeps OFF meaning OFF.
+            ext_pm = messaging.PubMaster(['gpsLocationExternal'])
+          ext_pm.send('gpsLocationExternal', msg)
+          ext_sent_at, ext_send_failed = now_fix, False
+          if not ext_on:
+            cloudlog.event("mapd_cargps_ext_start", src=ext_src, car=car_gps.kind, car_detail=car_gps.detail,
+                           device=cur_fix_state, truck_dr=car_gps.truck_dr)
+            ext_on = True
+        except Exception:
+          # Rule 2: never silent, and never fatal to the bridge below. The realistic cause is
+          # MultiplePublishersError -- ubloxd nominally owns this service and msgq gives the queue to
+          # whichever process connected last. One line per failure RUN, not one per publish; ext_on
+          # drops so a recovery logs a fresh start.
+          if not ext_send_failed:
+            cloudlog.exception("mapd_configd: gpsLocationExternal publish FAILED -- the selected fix is NOT " +
+                               "reaching mapd, which keeps navigating from whatever it last latched onto")
+            ext_send_failed = True
+          ext_on = False
+      elif ext_on and (not ext_ok or now_fix - ext_sent_at > EXT_STALL_S):
+        cloudlog.event("mapd_cargps_ext_stop",
+                       reason=("the car_gps capability is gone (CarParams cleared, or moved to the other car)"
+                               if not car_gps_capable else
+                               "MapdUseCarGps off" if not ext_ok else
+                               f"neither receiver produced a fix for {now_fix - ext_sent_at:.1f} s"),
+                       car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
+                       note="mapd will NOT fall back to gpsLocation -- it is now stalled on its last position")
+        ext_on = False
       if sm.alive['mapdOut']:
         mapd_out_down = 0
         mo = sm['mapdOut']

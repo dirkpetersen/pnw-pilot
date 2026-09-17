@@ -133,7 +133,13 @@ procs = [
   # names and is silently deaf+mute all session (no speed limit / map curves / road context; seen
   # I-82 2026-07-06). Forcing the prefix matches this tree's msgq (msgq.cc uses /dev/shm/msgq_<name>).
   NativeProcess("mapd", "selfdrive", ["/usr/bin/env", "USE_MSGQ_PREFIX=true", MAPD_BINARY], mapd_running),
-  PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI),
+  # mapdcargps2pnw: restart_if_crash — with MapdUseCarGps on, mapd_configd is mapd's SOLE GPS source
+  # (mapd latches to gpsLocationExternal on the first message and never reads gpsLocation again for the
+  # life of the process). A crash here would therefore starve mapd for the rest of the boot — frozen
+  # speed limits and map curves, with mapdOut still publishing at 20 Hz so nothing downstream notices —
+  # where before this feature a crash left mapd on its own subscription, untouched. Non-control daemon,
+  # same reasoning as `ui`/`card` above.
+  PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI, restart_if_crash=True),
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   # update2pnw: run the updater onroad too (stock is only_offroad) — downloads/finalize only STAGE
