@@ -2,8 +2,8 @@
 
 Continues [`CHANGELOG-2026-09-16.md`](CHANGELOG-2026-09-16.md). That file's overnight work lands here.
 
-**Channel tip:** `origin/3devpnw` = `4b901737b2` (pushed 07:2x PT) · **on the truck:** `23f0f47d59`, `BootCount`
-249 — the truck is **9 code commits + 2 docs commits behind** until the next fetch+reboot.
+**Channel tip:** `origin/3devpnw` = `267f665604` · **on the truck:** `23f0f47d59`, `BootCount` 249 — the truck
+is **11 code commits + 2 docs commits behind** until the next fetch+reboot, and they will all install together.
 
 > ⚠️ **This ship could NOT be verified on the car.** The comma is on **Starlink** — LAN `192.168.1.79`, public
 > `98.97.43.186`, behind CGNAT — so there is no inbound route from the dev host and SSH is impossible, not
@@ -85,8 +85,41 @@ they were measured 09-11..13, before `behindrun2pnw` existed. Residual value is 
 **2 of 23,828** moving weekend ticks, and honestly ">= 0.008 %" rather than exactly it, because
 `icbm_passed_points` has six decline reasons and that study observed three.
 
-The owner has been told this and has said ship anyway. **It is in Fable review now** — it has never had one,
-and Rule 8 does not bend for an owner instruction to hurry. Status will land in the next changelog entry.
+The owner has been told this and has said ship anyway, so it **SHIPPED as `267f665604`** (2 commits) after
+its first Fable review — Rule 8 does not bend for an instruction to hurry, so the review happened first.
+
+### ⚠️ That review found the one bug that would have mattered, and it was in the TESTS
+
+`achLat` is **signed** — negative is a right-hand bend. `icbm_measured_curvature` takes `abs()` of it before
+dividing by v². **Drop that one call and every right-hand curve reads a NEGATIVE `k_meas`**, which makes
+`k_meas * RATIO < k_map` true for *any* map claim at all: the rule would then falsify every right-hand curve
+after its 2 s hold, cancelling real slowdowns **on one side of the road only**.
+
+The code was correct. Nothing pinned it. The `abs_dropped` mutant **survived all 21 original mutants and all
+930 tests** — every synthetic case used positive curvature, and although 6 of the 7 fixture windows contain
+negative `kActl`, none of them arrives-and-measures on a right-hander. Pinned two ways now (a direct
+both-signs assertion, and the real-curve integration test parametrized over both directions); 22nd mutant
+added; **932 tests, 22/22 killed**. A one-sided failure is exactly the kind nobody thinks to go looking for,
+and it took an adversarial mutant to find it rather than a reading of the code.
+
+Fable's safety verdict on the rule itself: it **cannot end a cap for a node the truck has not yet reached** —
+checked over 300 synthetic two-node scenes through the real `_icbm_step` (5 velocity pairs × 5 spacings ×
+6 speeds × behindrun on/off) plus all 7 real windows, with a geometric reason rather than an absence of
+counterexamples: after a 5 m-behind removal the next node is within `15 + v·dt`, so the "arrived" window
+lasts ≤ `4/v + dt` ≤ 0.75 s at the 8 m/s floor and can never reach the 2 s hold. Fable also retracted its own
+interim "confirmed hole" — that was a harness bug, a second node placed off the 20 m point grid.
+
+Two smaller Rule 2 items taken: `icbm_falsify_tick`'s "Never raises" docstring was false for a denormal
+target (`t*t` underflows to 0.0 while `t > 0` passes → `ZeroDivisionError`), and `TestPreemptedByBehindrun` —
+whose entire job is to fail the day preemption stops being true — did not assert the gate was ever
+**reached**, so it would have passed vacuously once a change made the gate unreachable. Both fixed. A
+tripwire that cannot trip is not a tripwire.
+
+> **Both pushes land in ONE install.** The device had not fetched `4b901737b2` before `267f665604` went out,
+> so the next reboot installs 11 commits at once and per-change attribution is lost — normally against the
+> one-change-per-install rule. Accepted here because Phase 1 is recording-only and this rule is
+> measured-inert, so neither can change how the truck drives; and because there is no route to the device to
+> stage them separately anyway.
 
 ## Corrections to things this workbench believed
 
@@ -120,4 +153,5 @@ why "ship everything" does not reach them.
 
 ## In flight
 
-`icbmfalsify2pnw` (`e8678635fb`, rebased, in its first Fable review). Nothing else is built and waiting.
+Nothing. Everything built is shipped; the four branches with real unshipped work need re-porting (table above),
+which is work rather than a push.
