@@ -2373,6 +2373,201 @@
    "mean_str_ang": 0.8,
    "n_ticks": 11,
    "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#159",
+   "t": 1783821198.8,
+   "gps": [
+    47.46378,
+    -121.71405
+   ],
+   "v_entry_ms": 31.2,
+   "cap_ms": 37.9,
+   "binding": false,
+   "dir": "left",
+   "mean_str_ang": -4.4,
+   "n_ticks": 1,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#160",
+   "t": 1783821202.8,
+   "gps": [
+    47.46359,
+    -121.71228
+   ],
+   "v_entry_ms": 38.4,
+   "cap_ms": 34.6,
+   "binding": true,
+   "dir": "left",
+   "mean_str_ang": -10.5,
+   "n_ticks": 13,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#161",
+   "t": 1783821463.2,
+   "gps": [
+    47.42495,
+    -121.59979
+   ],
+   "v_entry_ms": 37.7,
+   "cap_ms": 36.9,
+   "binding": true,
+   "dir": "left",
+   "mean_str_ang": -12.7,
+   "n_ticks": 7,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#162",
+   "t": 1783821624.2,
+   "gps": [
+    47.39596,
+    -121.53373
+   ],
+   "v_entry_ms": 37.9,
+   "cap_ms": null,
+   "binding": false,
+   "dir": "left",
+   "mean_str_ang": -4.6,
+   "n_ticks": 3,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#163",
+   "t": 1783821634.3,
+   "gps": [
+    47.39509,
+    -121.52927
+   ],
+   "v_entry_ms": 25.6,
+   "cap_ms": 39.7,
+   "binding": false,
+   "dir": "left",
+   "mean_str_ang": -4.4,
+   "n_ticks": 1,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#164",
+   "t": 1783821781.2,
+   "gps": [
+    47.39473,
+    -121.52485
+   ],
+   "v_entry_ms": 39.7,
+   "cap_ms": null,
+   "binding": false,
+   "dir": "left",
+   "mean_str_ang": -0.9,
+   "n_ticks": 16,
+   "shadow": true
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#165",
+   "t": 1783821883.8,
+   "gps": [
+    47.39325,
+    -121.47257
+   ],
+   "v_entry_ms": 38.6,
+   "cap_ms": 25.8,
+   "binding": true,
+   "dir": "right",
+   "mean_str_ang": 17.3,
+   "n_ticks": 3,
+   "shadow": true
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#166",
+   "t": 1783821930.0,
+   "gps": [
+    47.39682,
+    -121.45035
+   ],
+   "v_entry_ms": 39.4,
+   "cap_ms": 24.95,
+   "binding": true,
+   "dir": "right",
+   "mean_str_ang": 17.3,
+   "n_ticks": 4,
+   "shadow": true
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#167",
+   "t": 1783822012.5,
+   "gps": [
+    47.42286,
+    -121.43168
+   ],
+   "v_entry_ms": 39.0,
+   "cap_ms": 23.0,
+   "binding": true,
+   "dir": "left",
+   "mean_str_ang": -12.0,
+   "n_ticks": 16,
+   "shadow": true
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#168",
+   "t": 1783822035.7,
+   "gps": [
+    47.42753,
+    -121.42475
+   ],
+   "v_entry_ms": 28.8,
+   "cap_ms": null,
+   "binding": false,
+   "dir": "right",
+   "mean_str_ang": 1.8,
+   "n_ticks": 2,
+   "shadow": true
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#169",
+   "t": 1783822605.9,
+   "gps": [
+    47.41765,
+    -121.41171
+   ],
+   "v_entry_ms": 36.5,
+   "cap_ms": 21.6,
+   "binding": true,
+   "dir": "left",
+   "mean_str_ang": -3.0,
+   "n_ticks": 11,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#170",
+   "t": 1783822629.0,
+   "gps": [
+    47.41086,
+    -121.40997
+   ],
+   "v_entry_ms": 31.0,
+   "cap_ms": 30.3,
+   "binding": true,
+   "dir": "right",
+   "mean_str_ang": 20.1,
+   "n_ticks": 3,
+   "shadow": false
+  },
+  {
+   "id": "2026-07-11/lightning-icbm-nofire#171",
+   "t": 1783822661.2,
+   "gps": [
+    47.40331,
+    -121.40422
+   ],
+   "v_entry_ms": 35.8,
+   "cap_ms": 30.1,
+   "binding": true,
+   "dir": "left",
+   "mean_str_ang": -1.9,
+   "n_ticks": 21,
+   "shadow": false
   }
  ]
 }

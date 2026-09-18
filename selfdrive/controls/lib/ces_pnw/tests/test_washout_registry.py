@@ -45,6 +45,16 @@ def test_fixture_present_and_covers_the_drive():
   # the driver-cited 18:12 washout (77 mph vs cap 71, downhill LEFT) must be in the registry
   assert any(abs(w["v_entry_ms"] - 34.5) < 0.5 and w["dir"] == "left" and w["binding"]
              for w in binding)
+  # icbmslow2pnw (2026-09-17): the fixture as first checked in ENDED at 18:17 PT, because
+  # ces_events_1917.jsonl was pulled off the device after it was generated. That silently left out
+  # the 19:16-19:18 PT downhill-LEFT washouts -- the two events descentcurve2pnw's left_factor and
+  # descent_gain were BUILT from (CURVESLOW2PNW.md "two DOWNHILL LEFT washouts ... 19:17-18"), so
+  # the regression below had never actually been run against them. Regenerated with tools/washouts.py
+  # over the full folder: 158 -> 171 clusters, 27 -> 35 binding. Nothing else changed.
+  assert max(w["t"] for w in washouts) > 1783822200, \
+    "the fixture stops before the 19:10+ PT washouts -- regenerate it with tools/washouts.py"
+  evening_lefts = [w for w in binding if w["t"] > 1783822200 and w["dir"] == "left"]
+  assert len(evening_lefts) >= 2, "the two 19:17 downhill-LEFT washouts are not in the registry"
 
 
 def test_new_pipeline_caps_at_least_3mph_below_every_recorded_entry(tmp_path, monkeypatch):
