@@ -51,10 +51,13 @@ def _run_gate_off(mp):
   """the SHIPPED behindgate2pnw code: the passed-point gate on STARTS only, a running episode ungated."""
   real = m._icbm_passed_gate
 
-  def start_only(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis, ceiling=None, running=False):
+  def start_only(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis,
+                 ceiling=None, running=False):
+    # icbmslow2pnw threaded far_raw through the gate; this stand-in mirrors the real signature.
     if running:
-      return target, sig, far_v, far_dist
-    return real(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis, ceiling=ceiling, running=running)
+      return target, sig, far_v, far_dist, far_raw
+    return real(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis,
+                ceiling=ceiling, running=running)
   mp.setattr(m, "_icbm_passed_gate", start_only)
 
 

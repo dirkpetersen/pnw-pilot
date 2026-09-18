@@ -854,7 +854,7 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
                            firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M):
   """descentcurve2pnw: FULL-horizon map candidate for ICBM. Scans every mapd path point out to
   `horizon_m` (mapd's 500 m publish cap — vs the old 10 s time window, ~400 m at 90 mph) and
-  returns (apex_eff m/s, dist m) of the MOST-BINDING candidate — the one whose decel-limited brake
+  returns (apex_eff m/s, dist m, apex_RAW m/s) of the MOST-BINDING candidate — the one whose decel-limited brake
   cap is lowest right now (same selection idea as VTSC's most_binding_map_curve, so a far sharp
   curve can't shadow a nearer curve that needs action first). Candidates apply the shared tiered
   scale (scale_fn) AND the Lightning map-speed discount `map_scale` (<= 1.0, from PnwVehicle — OSM
@@ -862,11 +862,17 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   and use can't disagree. The per-point envelope uses the same drop-scaled icbm_approach_decel the
   downstream binding test uses. Returns (0.0, inf) if none. The actual DEC-only binding decision
   stays in icbm_curve_target/_icbm_binding_apex. NaN- and curvature-noise-guarded like upcoming_curve
-  (icbmonset: `_map_v_sane` rejects implausible finite reads, not just NaN). Pure."""
+  (icbmonset: `_map_v_sane` rejects implausible finite reads, not just NaN). Pure.
+
+  icbmslow2pnw: the third element is the winning point's UNSCALED mapd velocity. The floor that
+  bounds the Lightning curve penalty needs the candidate's own rating, and this is the only place
+  that number is known for certain — re-deriving it later by matching on `best_d` would re-open the
+  neighbouring-node trap map_candidate_point's docstring warns about, and inverting the scale would
+  silently rot the day icbm_map_eff_scale changes again (it already has, 2026-08-11)."""
   if not points or cur_lat is None or cur_lon is None or ref <= 0.0:
-    return 0.0, float('inf')
+    return 0.0, float('inf'), 0.0
   best_cap = float('inf')
-  best_v, best_d = 0.0, float('inf')
+  best_v, best_d, best_raw = 0.0, float('inf'), 0.0
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
@@ -883,8 +889,8 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
     a = icbm_approach_decel(v_ego, eff, firm_decel)
     cap = math.sqrt(eff * eff + 2.0 * a * max(d - ICBM_MARGIN_M, 0.0))   # decel envelope from here
     if cap < best_cap:
-      best_cap, best_v, best_d = cap, eff, d
-  return best_v, best_d
+      best_cap, best_v, best_d, best_raw = cap, eff, d, tv
+  return best_v, best_d, best_raw
 
 
 def icbm_map_reach(points, cur_lat, cur_lon, horizon_m=ICBM_MAP_HORIZON_M) -> float:
@@ -1579,9 +1585,11 @@ def _icbm_passed_log(ctl, state, **kw) -> None:
     cloudlog.event("ces_icbm_passed", state=state, **kw)
 
 
-def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, vis, ceiling=None, running=False):
+def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis, ceiling=None, running=False):
   """behindgate2pnw: the passed-point gate. Called whenever a map/far candidate would bind. Returns
-  (target, sig, far_v, far_dist), updating ctl._icbm_src / _icbm_gate.
+  (target, sig, far_v, far_dist, far_raw), updating ctl._icbm_src / _icbm_gate. icbmslow2pnw carries
+  far_raw (the far candidate's own unscaled mapd rating) through unchanged on every early return, so
+  the penalty floor downstream can never be applied against a candidate this gate replaced.
 
   The binding point was passed exactly when that source's candidate CHANGES once the passed points are removed:
   upcoming_curve keeps the first lowest point and icbm_far_map_candidate the lowest cap, so removing other points
@@ -1603,16 +1611,16 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
     mask, why = icbm_passed_points(points, plat, plon, getattr(ctl, "_cur_bearing", None), sig["v_ego"])
     if mask is None:
       _icbm_passed_log(ctl, "unknown", why=why, src=src, **run)
-      return target, sig, far_v, far_dist
+      return target, sig, far_v, far_dist, far_raw
     ahead = [p for p, gone in zip(points, mask, strict=True) if not gone]
     near = (sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf")))
-    far = (far_v, far_dist)
+    far = (far_v, far_dist, far_raw)
     veh = ctl._veh
     if src == "map":
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
       if a_near == near:
         _icbm_passed_log(ctl, "clear", src=src, **run)
-        return target, sig, far_v, far_dist
+        return target, sig, far_v, far_dist, far_raw
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
                                      veh.icbm_map_scale, veh.icbm_firm_decel)
     else:
@@ -1620,7 +1628,7 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
                                      veh.icbm_map_scale, veh.icbm_firm_decel)
       if a_far == far:
         _icbm_passed_log(ctl, "clear", src=src, **run)
-        return target, sig, far_v, far_dist
+        return target, sig, far_v, far_dist, far_raw
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
     new_sig = {**sig, "map_target_v": a_near[0], "map_target_dist": a_near[1]}
     new_target, _, new_src = icbm_curve_target(
@@ -1635,12 +1643,12 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, v
                             if running else "ICBM starts WITHOUT it (a passed curve can start a slowdown)"))
     except Exception:
       pass                        # logging must not become the thing that raises
-    return target, sig, far_v, far_dist
+    return target, sig, far_v, far_dist, far_raw
   ctl._icbm_gate = "mapPassedRun" if running else "mapPassed"
   ctl._icbm_src = new_src
   _icbm_passed_log(ctl, "passed", src=src, dist=round(float(near[1] if src == "map" else far[1]), 1),
                    passed=sum(mask), started=new_src, **run)
-  return new_target, new_sig, a_far[0], a_far[1]
+  return new_target, new_sig, a_far[0], a_far[1], a_far[2]
 
 
 # --- icbmfalsify2pnw ------------------------------------------------------------------------------------------
@@ -3409,6 +3417,12 @@ class CESController:
     # no map coordinate, and inventing one would put a real node under a source that never used it.
     self._icbm_cand_d = None
     self._icbm_cand_pt: tuple = (None, None)
+    # icbmslow2pnw: the map-rating floor applied this tick (m/s; 0.0 = none) and whether it
+    # actually gave penalty back. Telemetry-visible as icbmMapFlr / icbmMapFlrHit for the same
+    # reason icbmFlr/icbmFlrHit are: without both, a drive log cannot tell "the floor never
+    # applied" from "the floor applied and changed nothing".
+    self._icbm_map_flr = 0.0
+    self._icbm_map_flr_hit = False
     # icbmrestore2pnw: the cap->clear->restore episode machine + the current direction for telemetry
     self._icbm_ep = IcbmEpisode()
     self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
@@ -4489,6 +4503,9 @@ class CESController:
         self._icbm_floor_lim = 0.0
         self._icbm_floor_pend = None
         self._icbm_floor_hit = False
+        # icbmslow2pnw: same reason -- never publish a stale map-rating floor beside icbmT=None
+        self._icbm_map_flr = 0.0
+        self._icbm_map_flr_hit = False
         self._icbm_rcap_state = None    # icbmrestorecap2pnw: no stale limit across a Chill interlude
         self._icbm_rcap = 0.0
         # icbmconsist2pnw: never publish a stale point-match alongside icbmT=None
@@ -4544,9 +4561,9 @@ class CESController:
       ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
       # icbmtrack2pnw: ICBM-only capped scale (19:58:37Z root cause — the tiered sweeper end
       # inflated a raw 64.9 mph curve to an effective 107 mph, so it never bound vs set 90).
-      far_v, far_dist = icbm_far_map_candidate(self._map_targets, plat, plon,
-                                               sig["v_ego"], ref, icbm_map_eff_scale,
-                                               self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
+      far_v, far_dist, far_raw = icbm_far_map_candidate(
+        self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
+        self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
       # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
       # START a new episode — a running cap episode (phase 'cap', incl. its S-gap clear debounce)
       # continues with the full candidate set exactly as before ("an episode may continue").
@@ -4597,8 +4614,8 @@ class CESController:
         vis_gate = (vis_v, vis_dist)
         if starting and not icbm_vision_may_start(vis_dist, ttc, map_reach):
           vis_gate = (0.0, float("inf"))
-        target, sig, far_v, far_dist = _icbm_passed_gate(
-          self, now, target, sig, plat, plon, ref, far_v, far_dist, vis_gate,
+        target, sig, far_v, far_dist, far_raw = _icbm_passed_gate(
+          self, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis_gate,
           ceiling=ep_ceiling, running=not starting)
       # gpsdrgate2pnw: whether the running cap episode was ever bound by the MAP (stale hold). Sticky within the
       # episode (Fable B1): on a real approach vision joins the map/far candidate for the same curve, and a
@@ -4616,6 +4633,10 @@ class CESController:
       #               left-positive convention). Unknown direction / no pitch -> neutral (no-op).
       # Multipliers only ever RAISE the penalty (>= 1, clamped), so the target only moves DOWN:
       # DEC-only/ceiling semantics untouched.
+      # icbmslow2pnw: cleared EVERY tick before the block below, so a tick with no target can never
+      # publish the previous tick's floor as if it were live (the same staleness trap
+      # _icbm_floor_hit documents).
+      self._icbm_map_flr, self._icbm_map_flr_hit = 0.0, False
       if target is not None:
         is_left = False
         try:
@@ -4628,8 +4649,43 @@ class CESController:
                                          sig.get("map_target_dist", float("inf"))) > 0
         except Exception:
           is_left = False
-        target = max(target - self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
-                                                               is_left=is_left), 0.0)
+        # icbmslow2pnw: THE MAP-RATING FLOOR. The Lightning curve penalty may not push a MAP/FAR
+        # target below that candidate's own raw mapd rating (scaled by icbm_map_floor_frac, default
+        # 1.0). See the knob's comment in pnw_vehicle.py for the full why: the penalty was
+        # calibrated 2026-07-11 against a 1.242x-inflated candidate, icbmcurve2pnw (2026-08-11)
+        # made the composite scale 1.012x for tight/moderate curves, and nothing re-calibrated the
+        # penalty against that — so it has been eating a margin that is no longer there.
+        #
+        # Deliberately NOT a change to curve_speed_penalty_ms itself: that function is SHARED with
+        # VTSC (the op-long path), and the 2026-07-11 washout evidence the penalty exists for is
+        # entirely op-long/VTSC — ICBM published no target at any of the 27 binding washouts. A
+        # knob change would silently weaken the washout protection the moment Alpha Long is
+        # switched back on; this floor leaves op-long byte-identical.
+        #
+        # VISION candidates get NO floor: icbm_vision_apex is already a physics-derived safe speed
+        # with no map rating behind it, so there is nothing to floor against.
+        # `min(floor, target)` uses the PRE-penalty candidate, so the floor can only ever give back
+        # penalty — it can never raise the target above what the curve candidate itself allowed
+        # (and that value is already reduce-only vs `ref`). Rain is applied AFTER, so the driver's
+        # wet-weather margin still bites through the floor (rain2pnw is not the EPS penalty).
+        #
+        # THE FLOOR BOUNDS THE *BASE* HUMP ONLY. The descent guard and the left-curve factor model
+        # risk mapd's rating does NOT contain (adverse crown on a left; a descent eating the decel
+        # budget) -- both came from the two downhill-LEFT washouts of 2026-07-11 -- so their EXTRA
+        # over the flat-right penalty is still subtracted, below the floor. Flooring the multiplied
+        # penalty instead would make left_factor and descent_gain silently do nothing on every
+        # map/far curve the floor touches, which on this corpus is most of them.
+        raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(self._icbm_src, 0.0)
+        self._icbm_map_flr = self._veh.icbm_map_floor_ms(raw_rating)
+        pen_base = self._veh.curve_speed_penalty_ms(target)
+        pen_full = self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
+                                                    is_left=is_left)
+        penalised = max(target - pen_full, 0.0)
+        # max(pen_full - pen_base, 0.0): curve_speed_penalty_ms's multipliers are clamped >= 1, so
+        # this is already non-negative -- the max() is a guard against a future edit, not live state.
+        target = max(max(target - pen_base, min(self._icbm_map_flr, target))
+                     - max(pen_full - pen_base, 0.0), 0.0)
+        self._icbm_map_flr_hit = target > penalised + 1e-9
         # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
         target = max(target - self._veh.rain_penalty_ms(), 0.0)
       # curvefloor2pnw: POSTED-LIMIT FLOOR for the ICBM path, low limits only.
@@ -4957,6 +5013,9 @@ class CESController:
       tele["icbmKAtN"] = int(self._icbm_k_at_n)
       tele["icbmKAtGap"] = round(float(self._icbm_k_at_gap), 0)
       tele["icbmFlr"] = round(float(self._icbm_floor_lim), 1)
+      # icbmslow2pnw: the map-rating floor (m/s) and whether it gave penalty back this tick.
+      tele["icbmMapFlr"] = round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2)
+      tele["icbmMapFlrHit"] = bool(getattr(self, "_icbm_map_flr_hit", False))
       tele["icbmRCap"] = round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1)   # icbmrestorecap2pnw: 0 = no cap
       # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
       # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
@@ -5162,6 +5221,10 @@ class CESController:
       "icbmKAtN": int(self._icbm_k_at_n), "icbmKAtGap": round(float(self._icbm_k_at_gap), 0),
 
       "icbmFlr": round(float(self._icbm_floor_lim), 1), "icbmFlrHit": bool(self._icbm_floor_hit),
+      # icbmslow2pnw: the map-rating floor bounding the Lightning curve penalty on a MAP/FAR
+      # candidate (m/s; 0.0 = no floor this tick) and whether it actually raised the target.
+      "icbmMapFlr": round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2),
+      "icbmMapFlrHit": bool(getattr(self, "_icbm_map_flr_hit", False)),
       "icbmRCap": round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1),   # icbmrestorecap2pnw: restore cap, 0 = none
       "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore
       "icbmZoneWhy": getattr(getattr(self, "_icbm_ep", None), "zone_why", None),      # sazoneset2pnw: prop/limit5/None

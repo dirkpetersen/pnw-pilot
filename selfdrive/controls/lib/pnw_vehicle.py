@@ -95,6 +95,23 @@ _CURVE_DEFAULTS = {
                                 #   generous for the Lightning.
   "icbm_firm_decel": 1.4,       # m/s^2 assumed approach decel for LARGE speed drops (stock ACC does
                                 #   the actual braking; this only shapes the tap-start envelope)
+  # icbmslow2pnw (driver 2026-09-17 "button control management also took me down to 38 mph... it's
+  # going too slow"): the fraction of a MAP candidate's OWN rated speed that the Lightning curve
+  # penalty may not push the ICBM target below. 1.0 = "ICBM never commands below mapd's rating for
+  # this curve"; 0.0 = floor off (the pre-icbmslow2pnw behaviour).
+  #
+  # WHY: the penalty above was field-calibrated 2026-07-11 when the ICBM map path used a FLAT 1.35
+  # effective scale, so a map candidate arrived as 1.35 * 0.92 = 1.242x its raw rating and the
+  # penalty ate part of that inflation -- on tight/moderate curves the July target still landed
+  # ABOVE the raw rating. icbmcurve2pnw (2026-08-11) then dropped the tight end of that scale to
+  # 1.10 for a different and correct reason (a 50 mph curve inflated past a 55 mph cruise was being
+  # rejected as a candidate), which makes the composite 1.10 * 0.92 = 1.012 -- essentially raw. The
+  # penalty was never re-calibrated against that, so since 2026-08-11 it has been subtracting a
+  # 5 mph inflation margin from a number that no longer carries one. Measured across 88 replayable
+  # ICBM episodes (drives 2026-08-12..09-17, curvature from slKActl): the truck was commanded to a
+  # median 1.41 m/s^2 of lateral accel where mapd's own rating implies 1.67 and the design target is
+  # 2.50. This floor restores the pre-08-11 property WITHOUT restoring the pre-08-11 candidacy bug.
+  "icbm_map_floor_frac": 1.0,
   # curvelead2pnw: the lateral load ICBM may let a tracked lead car pace the truck to through a curve
   # (v <= sqrt(this / curvature), curvature = the TIGHTER of map geometry and vision). 2.5 is what the
   # driver himself chose on the 2026-09-13 ramps (2.32 / 2.96 m/s^2 measured). 0.0 turns lead pacing off.
@@ -126,6 +143,10 @@ _CURVE_BOUNDS = {
   "overspeed_margin_mph": (0.5, 10.0),
   "map_scale": (0.5, 1.0),
   "icbm_firm_decel": (0.8, 1.5),
+  # icbmslow2pnw: [0, 1] -- the floor can never sit ABOVE the map's own rating for the curve (1.0),
+  # and 0.0 is the documented off switch. A bad config therefore degrades toward "more slowing",
+  # never toward "less than mapd asked for".
+  "icbm_map_floor_frac": (0.0, 1.0),
   # curvelead2pnw: [0, 3.0] -- 0 disables lead pacing; the ceiling sits at the driver's own p90 on country
   # roads (2.96 m/s^2): a bad config can never let a lead pace the truck above his own p90.
   "icbm_lead_lat_accel": (0.0, 3.0),
@@ -554,6 +575,28 @@ class PnwVehicle:
     """Assumed approach decel (m/s^2) ICBM may plan with for LARGE speed drops (stock ACC does the
     actual braking). 0.0 on non-Lightning -> callers fall back to the base comfort decel."""
     return self._curve_cfg["icbm_firm_decel"] if self.lightning_curve_slow else 0.0
+
+  def icbm_map_floor_ms(self, raw_map_v) -> float:
+    """icbmslow2pnw: the speed (m/s) the Lightning curve penalty may not push an ICBM MAP/FAR curve
+    target below -- `icbm_map_floor_frac` times that candidate's OWN raw mapd rating.
+
+    Returns 0.0 (no floor) for every non-Lightning car, for a missing/NaN/non-positive rating, and
+    when the fraction is configured to 0. 0.0 is safe by construction: the caller applies it with
+    max(), so "no floor" is exactly the pre-icbmslow2pnw behaviour.
+
+    Provably inert where the penalty is 0 anyway: a non-Lightning car has
+    curve_speed_penalty_ms() == 0.0 AND icbm_map_scale == 1.0, so its target is
+    icbm_map_eff_scale(raw) * raw >= 1.10 * raw, already above any floor this could return. The
+    lightning_curve_slow gate is kept regardless so the Tesla path stays byte-identical."""
+    if not self.lightning_curve_slow:
+      return 0.0
+    try:
+      v = float(raw_map_v)
+    except (TypeError, ValueError):
+      return 0.0
+    if not math.isfinite(v) or v <= 0.0:
+      return 0.0
+    return v * self._curve_cfg["icbm_map_floor_frac"]
 
   @property
   def icbm_lead_lat_accel(self) -> float:

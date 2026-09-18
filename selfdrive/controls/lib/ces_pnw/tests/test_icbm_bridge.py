@@ -192,9 +192,11 @@ def test_far_map_90_to_65_at_450m_binds_where_before_it_didnt():
   assert t is None and s is None
 
   # AFTER: full-horizon candidate (identity tiered scale, Lightning map_scale 0.92) binds at 450 m
-  far_v, far_dist = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0,
-                                           map_scale=0.92, firm_decel=1.4)
+  far_v, far_dist, far_raw = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0,
+                                                    map_scale=0.92, firm_decel=1.4)
   assert math.isclose(far_v, apex_eff, rel_tol=1e-6) and math.isclose(far_dist, 450.0, rel_tol=0.01)
+  # icbmslow2pnw: the third element is the point's UNSCALED rating (eff == raw * 0.92 here)
+  assert math.isclose(far_raw, apex_eff / 0.92, rel_tol=1e-6)
   t, c, s = icbm_curve_target(v, vset, 0.0, float('inf'), None, lambda x: 1.0,
                               map_scale=0.92, firm_decel=1.4, far_v=far_v, far_dist=far_dist)
   assert t is not None and s == "far" and math.isclose(t, apex_eff, rel_tol=1e-6)
@@ -206,8 +208,10 @@ def test_far_map_dec_only_above_ceiling_ignored():
   v = vset = 90 * MPH
   lat, lon = 47.0, -122.0
   points = [_pt_north(lat, lon, 300.0, 110 * MPH)]      # mapV ~110 mph (the I-90 sweeper readings)
-  far_v, far_dist = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0, map_scale=0.92)
+  far_v, far_dist, far_raw = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0,
+                                                    map_scale=0.92)
   assert far_v == 0.0 and far_dist == float('inf')      # reduce-only: no target, no speed-up path
+  assert far_raw == 0.0                                 # icbmslow2pnw: no candidate -> no rating
 
 
 def test_far_map_most_binding_wins_not_lowest():
@@ -216,8 +220,10 @@ def test_far_map_most_binding_wins_not_lowest():
   lat, lon = 47.0, -122.0
   near = _pt_north(lat, lon, 120.0, 55 * MPH)           # needs action now
   far = _pt_north(lat, lon, 490.0, 40 * MPH)            # sharper but far (envelope not binding yet)
-  far_v, far_dist = icbm_far_map_candidate([far, near], lat, lon, v, vset, lambda x: 1.0)
+  far_v, far_dist, far_raw = icbm_far_map_candidate([far, near], lat, lon, v, vset, lambda x: 1.0)
   assert math.isclose(far_dist, 120.0, rel_tol=0.01)    # the near curve is the binding one
+  # icbmslow2pnw: the rating must belong to the SAME point the distance does (55 mph, not 40)
+  assert math.isclose(far_raw, 55 * MPH, rel_tol=1e-6)
 
 
 def test_far_map_nan_and_bad_points_skipped():
@@ -225,10 +231,10 @@ def test_far_map_nan_and_bad_points_skipped():
   points = [{"latitude": float('nan'), "longitude": lon, "velocity": 20.0},
             {"latitude": lat + 0.001, "longitude": lon, "velocity": float('nan')},
             {"bogus": True}]
-  assert icbm_far_map_candidate(points, lat, lon, 30.0, 30.0, lambda x: 1.0) == (0.0, float('inf'))
-  assert icbm_far_map_candidate([], lat, lon, 30.0, 30.0, lambda x: 1.0) == (0.0, float('inf'))
+  assert icbm_far_map_candidate(points, lat, lon, 30.0, 30.0, lambda x: 1.0) == (0.0, float('inf'), 0.0)
+  assert icbm_far_map_candidate([], lat, lon, 30.0, 30.0, lambda x: 1.0) == (0.0, float('inf'), 0.0)
   assert icbm_far_map_candidate([_pt_north(lat, lon, 100, 10.0)], None, None, 30.0, 30.0,
-                                lambda x: 1.0) == (0.0, float('inf'))
+                                lambda x: 1.0) == (0.0, float('inf'), 0.0)
 
 
 def test_far_map_rejects_curvature_noise_spike():
@@ -240,10 +246,10 @@ def test_far_map_rejects_curvature_noise_spike():
   lat, lon = 47.0, -122.0
   v = vset = 46 * MPH
   noise_only = [_pt_north(lat, lon, 71.0, 77.8), _pt_north(lat, lon, 288.0, 128.6)]
-  assert icbm_far_map_candidate(noise_only, lat, lon, v, vset, lambda x: 1.0) == (0.0, float('inf'))
+  assert icbm_far_map_candidate(noise_only, lat, lon, v, vset, lambda x: 1.0) == (0.0, float('inf'), 0.0)
   # a sane, genuinely binding point further out is still found even with noise sitting closer
   points = noise_only + [_pt_north(lat, lon, 199.0, 14.6)]
-  far_v, far_dist = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0)
+  far_v, far_dist, _ = icbm_far_map_candidate(points, lat, lon, v, vset, lambda x: 1.0)
   assert math.isclose(far_v, 14.6, rel_tol=1e-6) and math.isclose(far_dist, 199.0, rel_tol=0.02)
 
 

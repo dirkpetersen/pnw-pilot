@@ -705,7 +705,12 @@ class TestClosedLoopThroughTheFordExecutor:
       curve_at = 700.0 if t < self.APPEAR_S else 185.0 - 24.0 * (t - self.APPEAR_S)
       lead = None if (lose_lead_at is not None and t >= lose_lead_at) else (50.0, 22.0)
       c._stock_set = stock
-      pub = _tick(c, step, max(curve_at, 70.0), 24.0, stock, lead)
+      # icbmslow2pnw: map_v 18.0 (was the 20.0 default). The map-rating floor means ICBM's own
+      # target is now the candidate's OWN rating rather than rating-minus-penalty, so the raw
+      # rating that makes this scenario "a curve ICBM rates ~40 mph" is 18.0 m/s, not 20.0.
+      # The scenario (and the gap to the 47.4 mph lead pace these tests exist to show) is
+      # preserved; only the input that produces it moved.
+      pub = _tick(c, step, max(curve_at, 70.0), 24.0, stock, lead, map_v=18.0)
       cmd = None
       if pub and pub.get("target") is not None:
         cmd = IcbmCommand(target_ms=pub["target"], ceiling_ms=pub["ceiling"], ts=pub["ts"], dir=pub.get("dir", "dec"))
