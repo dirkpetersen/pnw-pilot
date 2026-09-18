@@ -232,6 +232,28 @@ Also captured: 310 s of angle saturation and 350 s of driver steering override a
 seconds (4.6 % / 5.2 %) — the driver's steering warning is real but **not root-caused**; it needs the
 exact time or the matching qlog.
 
+## 🟡 Evening — "the truck changed lane itself in a curve" — it did NOT, and the owner declined the fix
+
+Driver at 18:31 PT, recalling **no blinker**. The log disagrees, and the difference matters for how
+you drive the thing. **Three lane changes in forty seconds, blinker on before every one** (`blnk` is
+`leftBlinker OR rightBlinker` straight off CAN). The third committed **with the bend already loaded**:
+`achLat` −1.5 → **−2.14 m/s²**, steering angle −12.6° → **−17.2°**.
+
+**Nudgeless lane change has no curve gate.** `desire_helper.py` arms on toggle (opt-out, ON by
+default) + no blindspot + `on_highway` + blinker-hold + >20 mph. No curvature, no lateral-load term.
+The ~4 s arming delay is what makes it feel unprompted — signal, nothing, then it goes as the curve
+arrives.
+
+**⛔ Owner: NO CHANGE NEEDED.** A lateral-load gate reusing `icbm_in_curve` (defer, not block) was
+offered and declined. Recorded in `docs/PENDING-WORK.md` so a later session does not re-discover the
+defect and act on it unasked.
+
+**Separately, same drive: low sun measurably degrades lane confidence.** Nine `lcGate=lowconf`
+episodes in five minutes around 18:31, lane-width estimate collapsing 3.5 → **2.76 m**, position
+uncertainty 0.04 → 0.12 — driving into a sunset. No lane change there; not acted on. Worth knowing.
+
+Full evidence: [`drives/2026-09-17/curvedb-first-capture/DRIVE_REPORT.md`](../../../../drives/2026-09-17/curvedb-first-capture/DRIVE_REPORT.md)
+
 ## In flight
 
 Nothing. Everything built is shipped; the four branches with real unshipped work need re-porting (table above),
