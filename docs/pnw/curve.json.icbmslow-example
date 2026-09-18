@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "REFERENCE TEMPLATE ONLY -- icbmslow2pnw, 2026-09-17. NOT INSTALLED ON ANY DEVICE.",
+    "Install path would be /data/pnw/curve.json (read ONCE at PnwVehicle construction -- a change",
+    "needs a reboot, not an ignition cycle). Unknown keys are ignored; every known key is clamped to",
+    "_CURVE_BOUNDS in selfdrive/controls/lib/pnw_vehicle.py, so a bad value degrades toward the",
+    "shipped default rather than inverting. Keys omitted here keep their source defaults.",
+    "",
+    "A) THE RECOMMENDED SETTING -- and it is the DEFAULT in source on this branch, so this file is",
+    "   NOT needed to get it. icbm_map_floor_frac 1.0 = 'ICBM never commands a MAP/FAR curve below",
+    "   mapd's own rating for that curve' (the descent guard and left-curve factor still apply below",
+    "   it). Set 0.0 here to turn the whole change OFF in the field without a code revert.",
+    "",
+    "B) THE ZERO-CODE INTERIM, if the owner wants something before this branch is reviewed: lower",
+    "   penalty_max_mph. MEASURE EXPECTATIONS -- replayed over 88 ICBM episodes (drives 2026-08-12",
+    "   .. 2026-09-17) 5 -> 3 buys a median +0.64 mph and 5 -> 2 buys +0.96 mph, neither of which",
+    "   fixes the 2026-09-17 14:25 class of event (43.6 mph rated, 38.2 commanded). It also lowers",
+    "   the SHARED penalty, so it weakens VTSC / op-long's washout margin the moment Alpha Long is",
+    "   switched back on. Uncomment the penalty_max_mph line below to use it.",
+    "",
+    "DO NOT set map_scale to 1.0 as a fix: it raises the EFFECTIVE speed the reduce-only candidacy",
+    "test is applied to, and 18 of those same 88 episodes then stop binding at all (no slowdown,",
+    "not a gentler one) for a median +2.36 mph."
+  ],
+  "lightning": {
+    "icbm_map_floor_frac": 1.0
+  }
+}

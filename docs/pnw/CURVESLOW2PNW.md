@@ -71,8 +71,20 @@ e.g. `left_factor` ∈ [1.0, 1.5], `map_scale` ≤ 1.0, penalties ∈ [0, 15] mp
                "low_v_mph": 30, "peak_lo_v_mph": 45, "peak_hi_v_mph": 62, "taper_v_mph": 75,
                "descent_gain": 8.0, "descent_pitch_cap": 0.12, "penalty_cap_mph": 15,
                "left_factor": 1.15, "overspeed_margin_mph": 2.0,
-               "map_scale": 0.92, "icbm_firm_decel": 1.4}}
+               "map_scale": 0.92, "icbm_firm_decel": 1.4,
+               "icbm_map_floor_frac": 1.0}}
 ```
+
+> **`icbm_map_floor_frac` (icbmslow2pnw, 2026-09-17 — NOT DEPLOYED, branch `icbmslow2pnw`).** The
+> fraction of a MAP/FAR candidate's own raw mapd rating that the penalty above may not push an
+> **ICBM** target below; clamped `[0, 1]`, `0.0` = off (pre-icbmslow2pnw behaviour). It exists
+> because this penalty was calibrated on 2026-07-11 against a candidate inflated 1.35 × 0.92 =
+> **1.242×**, and `icbmcurve2pnw` (2026-08-11) made that composite **1.012×** for tight/moderate
+> curves without re-calibrating the penalty — so since then it has been subtracting an inflation
+> margin that is no longer there. The floor bounds the BASE hump only: `descent_gain` and
+> `left_factor` still subtract their extra below it. **VTSC / op-long is untouched** — this is an
+> ICBM-path floor, not a change to `curve_speed_penalty_ms`. Full evidence:
+> [`ICBMSLOW2PNW.md`](ICBMSLOW2PNW.md).
 
 Read once at construction; unknown keys ignored. **The field-calibrated iteration-3 values are now
 the source DEFAULTS** (`_CURVE_DEFAULTS` in `pnw_vehicle.py`) — the device-local `curve.json` used
@@ -83,8 +95,11 @@ strict); curve.json is a *tuning* override whose calibrated end state belongs IN
 ## Washout regression registry (validation-only, never feeds control)
 
 `tools/washouts.py` scans `drives/*/lightning-*/ces_events*.jsonl` for steering-override clusters
->55 mph; checked-in fixture from the 2026-07-11 logs (158 clusters, 27 with a binding cap, incl.
-the driver-cited 18:12 washout). Regression test: for every binding washout, penalty + descent(4%)
+>55 mph; checked-in fixture from the 2026-07-11 logs (**171 clusters, 35 with a binding cap** since
+the 2026-09-17 regeneration — it was 158/27, generated before `ces_events_1917.jsonl` was pulled off
+the device, and therefore stopped at 18:17 PT and silently excluded **the 19:16/19:17 downhill-LEFT
+washouts `descent_gain` and `left_factor` were built from**; the shipped pipeline passes all 35
+unchanged), incl. the driver-cited 18:12 washout. Regression test: for every binding washout, penalty + descent(4%)
 + left factor must yield a cap ≥3 mph below the recorded entry speed. Registry sign convention:
 raw Ford `StePinComp` `strAng < 0` = left on this truck.
 

@@ -23,6 +23,7 @@ the deeper per-feature design/rationale docs.
 | [UPSTREAM2PNW.md](UPSTREAM2PNW.md) | Upstream (commaai) sync / rebase notes |
 | [CES2PNW.md](CES2PNW.md) | Initial CES+VTSC+mapd port onto the pnw line (+ its 5 Gemini safety fixes) — port history |
 | [ICBM2PNW.md](ICBM2PNW.md) | Lightning stock-ACC curve slow-downs via SET−/SET+ taps (map-first, set-tracking, guarded restore) |
+| [ICBMSLOW2PNW.md](ICBMSLOW2PNW.md) | ⛔ NOT DEPLOYED — ICBM over-slows for curves: the map-rating floor (the 2026-08-11 penalty/scale double count), + the widened n=3,087-tick evidence |
 | [LATACCEL2PNW.md](LATACCEL2PNW.md) | Speed-scheduled, JSON-hot-reloadable max-lateral-accel cap for `clip_curvature()` (low-speed authority up, highway stays ISO 3.0) |
 | [FORDREGEN2PNW.md](FORDREGEN2PNW.md) | EV regen over-decel design (Ford long PID damping Fix A + regen-bite Fix B) |
 | [MAPD-SYSTEM.md](MAPD-SYSTEM.md) | **As-deployed mapd** — pfeiferj binary (stock pin v2.3.1; device runs override build `77bad867`), `mapd_configd`, `MapdOut`, full param table |
