@@ -1,0 +1,26 @@
+corpus (drive)                                 files   ticks  icbm  map      kPeak  slKActl   achLat   strAng    icbmK  srcs
+----------------------------------------------------------------------------------------------------------------------------
+2026-07-11/lightning-icbm-nofire 07-10 22:52       3   13496   116    8          0        0        0    13496        0  ?:78,vis:30,map:8
+2026-07-12/ellensburg-snoqualmie-westbound 07-12 09:47     1     535    28    6          0        0        0      535        0  vis:22,map:6
+2026-07-12/snoqualmie-ellensburg-icbm 07-12 10:24     2    3478   209   63          0        0        0     3478        0  vis:89,map:63,restore:39,far:18
+2026-07-13/aurora-ave-curves 07-13 09:59           1     715     0    0          0        0        0      715        0  
+2026-07-13/lightning-hwy99 07-13 07:41             1     692     0    0          0        0        0      692        0  
+2026-07-14/lightning-left-curve-toofast 07-14 07:20     1     216     0    0          0        0        0      216        0  
+2026-07-14/stop-jolt-and-jumpy-limitdrop 07-14 20:51     1     367     0    0          0        0        0      367        0  
+2026-07-15 07-15 22:10                             1     234     0    0          0        0        0      234        0  
+2026-07-18/lightning-icbm-curve 07-18 15:56        4     624    80   52          0        0        0      624        0  map:52,far:19,vis:9
+2026-07-19/lightning-angle-faithful 07-19 06:22     1    1530   226  126          0        0        0     1530        0  map:126,restore:50,far:34,vis:16
+2026-08-10/_alldrives 08-10 10:45                  1    2444   258  149          0        0        0     2444        0  map:149,far:87,restore:12,vis:10
+2026-08-10/lanecenter-first-drive 08-10 19:01      1     325    12    9          0        0        0      325        0  map:9,restore:3
+2026-08-12 08-12 08:46                             2    1182     0    0          0     1173     1173        0        0  
+2026-08-12/crown-hill-both-directions 08-11 05:51     3    2110   180  137          0     2110        0      761        0  map:137,far:24,restore:19
+2026-08-13/crownhill-tesla-loop 08-12 11:41        1    4285    56   36          0     4278     4278     1407        0  map:36,far:14,restore:5,vis:1
+2026-08-18/i5-southbound-curve-takeover 08-16 14:55     1     722    82   58          0      716      716      716        0  map:58,far:22,vis:2
+2026-08-21/starlink-leg 08-21 17:23                1     724    25    8          0      724      724      724        0  far:17,map:8
+2026-08-26/olympic-peninsula 07-28 08:07           1    1046     1    1          0     1046     1046     1046        0  map:1
+2026-09-08/i5-evening-police-miss-and-onramp-steer 09-08 19:21     2    3743    69   54          0     3719     3719     3719     3719  map:54,far:13,vis:2
+2026-09-12/central-oregon-weekend 07-28 08:05      7   23501  1522 1047          0    23414    23414    23414    23414  map:1047,far:438,restore:31,vis:6
+2026-09-13/corvallis-resume-55 09-13 21:15         1     102     0    0          0       99       99       99       99  
+2026-09-17/curvedb-first-capture 09-17 08:40       2    7220   223  128       6930     6908     6908     7201     7201  map:128,far:70,restore:20,vis:5
+----------------------------------------------------------------------------------------------------------------------------
+TOTAL                                                  69291  3087 1882       6930    44187    42077    63743    34433

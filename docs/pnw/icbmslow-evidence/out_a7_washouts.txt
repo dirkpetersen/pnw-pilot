@@ -1,0 +1,64 @@
+registry: 171 clusters, 35 with a binding recorded cap
+
+washout time PT     entry    cap   dir  icbmT?   mapV   mapD   set   ship  floor    k_est a@entry
+re#123  17:07:18      76     71 right      no     51    184    87     47     51  0.00226    2.60
+re#124  17:07:30      76     71  left      no     51    221    87     46     51  0.00198    2.27
+re#125  17:28:14      80     29  left      no     65    101    87     79     79  0.00762    9.77
+re#126  17:28:26      84     65 right      no     75     32    83      0      0  0.00119    1.67
+re#128  17:30:25      73     47 right      no     30     71    84     29     30  0.00355    3.77
+re#130  17:31:38      71     70  left      no     51    271    82     46     51  0.00175    1.78
+re#131  17:32:39      81     40  left      no     20     50    82     19     20  0.00280    3.71
+re#133  17:33:40      66     65  left      no     54     67    82     53     54  0.00098    0.84
+re#134  17:33:56      72     70  left      no     82    140    82      0      0  0.00084    0.88
+re#135  17:46:11      86     49  left      no     30     87    82     29     30  0.00214    3.14
+re#136  17:46:31      74     55 right      no     70    114    85      0      0  0.00053    0.58
+re#137  17:47:22      69     64  left      no     51    253    85     46     51  0.00142    1.33
+re#138  17:48:59      83     58  left      no     65     65    85     79     79  0.00398    5.47
+re#140  17:50:02      72     57  left      no     54     78    78     53     54  0.00104    1.07
+re#141  17:52:55      86     45 right      no     30     76    78     29     30  0.00390    5.72
+re#142  17:53:15      72     62 right      no     70    118    86      0      0  0.00086    0.90
+re#143  17:53:53      68     63 right      no     51    146    86     47     51  0.00206    1.88
+re#145  17:54:06      68     59  left      no     51    237    86     46     51  0.00155    1.43
+re#146  17:55:08      72     35  left      no     75    300    86      0      0  0.00277    2.88
+re#148  17:56:05      77     73  left      no     54    205    84     53     54  0.00156    1.87
+re#149  17:56:10      68     67  left      no     54     30    84     53     54  0.00106    0.97
+re#150  18:05:44      82     70  left      no     78     13    90      0      0  0.00102    1.39
+re#152  18:09:09      88     83  left      no     92    212    90      0      0  0.00044    0.69
+re#155  18:12:00      74     53 right      no     38     95    91     35     38  0.00072    0.80
+re#156  18:12:16      77     71  left      no     60    219    86     71     71  0.00053    0.63
+re#157  18:13:13      83     81 right      no     78    117    90      0      0  0.00130    1.81
+re#158  18:17:06      87     76 right      no     82    307    90      0      0  0.00128    1.92
+re#160  18:53:22      86     77  left      no     83    333    90      0      0  0.00025    0.37
+re#161  18:57:43      84     83  left      no     73    230    90      0      0  0.00130    1.85
+re#165  19:04:43      86     58 right     yes     73     11    83      0      0  0.00113    1.68
+re#166  19:05:30      88     56 right     yes     73    275    86      0      0  0.00033    0.52
+re#167  19:06:52      87     51  left     yes     49    170    89     44     49  0.00087    1.33
+re#169  19:16:45      82     48  left      no     30     37    89     29     30  0.00343    4.58
+re#170  19:17:09      69     68 right      no     70     92    89      0      0  0.00049    0.47
+re#171  19:17:41      80     67  left      no     51    208    89     46     51  0.00193    2.47
+
+binding washouts where ICBM was PUBLISHING a target within +-12 s: 3 of 35
+binding washouts with a usable map candidate to replay:            35 of 35
+FLOOR vs shipped at those sites: median +0.96 mph, max +5.16 mph
+a_lat the FLOOR target implies at each site (strAng-derived k, +-60% p90):
+  re#123   entry  75.8 mph  ship  46.8 floor  50.6  a@ship  0.99  a@floor  1.15  a@entry  2.60
+  re#124   entry  75.8 mph  ship  46.1 floor  50.6  a@ship  0.84  a@floor  1.01  a@entry  2.27
+  re#125   entry  80.1 mph  ship  78.8 floor  78.8  a@ship  9.47  a@floor  9.47  a@entry  9.77
+  re#128   entry  72.9 mph  ship  29.4 floor  30.2  a@ship  0.61  a@floor  0.65  a@entry  3.77
+  re#130   entry  71.4 mph  ship  46.1 floor  50.6  a@ship  0.74  a@floor  0.89  a@entry  1.78
+  re#131   entry  81.4 mph  ship  19.5 floor  20.4  a@ship  0.21  a@floor  0.23  a@entry  3.71
+  re#133   entry  65.8 mph  ship  53.1 floor  53.7  a@ship  0.55  a@floor  0.56  a@entry  0.84
+  re#135   entry  85.7 mph  ship  29.2 floor  30.2  a@ship  0.37  a@floor  0.39  a@entry  3.14
+  re#137   entry  68.7 mph  ship  46.1 floor  50.6  a@ship  0.60  a@floor  0.72  a@entry  1.33
+  re#138   entry  83.0 mph  ship  78.8 floor  78.8  a@ship  4.94  a@floor  4.94  a@entry  5.47
+  re#140   entry  71.8 mph  ship  53.1 floor  53.7  a@ship  0.59  a@floor  0.60  a@entry  1.07
+  re#141   entry  85.7 mph  ship  29.4 floor  30.2  a@ship  0.67  a@floor  0.71  a@entry  5.72
+  re#143   entry  67.6 mph  ship  46.8 floor  50.6  a@ship  0.90  a@floor  1.05  a@entry  1.88
+  re#145   entry  68.0 mph  ship  46.1 floor  50.6  a@ship  0.66  a@floor  0.79  a@entry  1.43
+  re#148   entry  77.4 mph  ship  53.1 floor  53.7  a@ship  0.88  a@floor  0.90  a@entry  1.87
+  re#149   entry  67.6 mph  ship  53.1 floor  53.7  a@ship  0.60  a@floor  0.61  a@entry  0.97
+  re#155   entry  74.3 mph  ship  35.4 floor  38.3  a@ship  0.18  a@floor  0.21  a@entry  0.80
+  re#156   entry  77.2 mph  ship  70.9 floor  70.9  a@ship  0.53  a@floor  0.53  a@entry  0.63
+  re#167   entry  87.2 mph  ship  44.3 floor  49.4  a@ship  0.34  a@floor  0.43  a@entry  1.33
+  re#169   entry  81.6 mph  ship  29.2 floor  30.2  a@ship  0.59  a@floor  0.63  a@entry  4.58
+  re#171   entry  80.1 mph  ship  46.1 floor  50.6  a@ship  0.82  a@floor  0.99  a@entry  2.47

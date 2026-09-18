@@ -1,0 +1,5 @@
+ticks with BOTH strAng and slKActl, v>8 m/s: n=33568
+unambiguous ticks (|ang|>5deg, |k|>5e-4): n=7663  same sign: 7598 (99.2%)
+|k_from_angle| / |slKActl| : p10 0.924  median 1.319  p90 2.053
+implied effective steerRatio: median 22.28 (opendbc CarSpecs 16.9)
+curve-band (|k| 1e-3..1e-2, n=6380) relative error: median 0.335 p90 0.845

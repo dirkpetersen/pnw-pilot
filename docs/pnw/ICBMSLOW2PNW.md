@@ -5,7 +5,8 @@ status: unreviewed     # current | drifted | superseded | unreviewed
 
 # ICBMSLOW2PNW — ICBM over-slows for curves: the map-rating floor
 
-> **⛔ NOT DEPLOYED, NOT PUSHED, NOT REVIEWED.** Branch `icbmslow2pnw` off `origin/3devpnw`
+> **⛔ NOT DEPLOYED, NOT PUSHED.** Fable-reviewed 2026-09-17 (**SHIP WITH CHANGES**; every
+> required change is applied — see *Verification*). Branch `icbmslow2pnw` off `origin/3devpnw`
 > (`7c40d8003b`). This is control-path code that changes how the truck brakes. The owner decides.
 > Nothing was written to `/data/pnw/curve.json` on the device.
 
@@ -54,8 +55,10 @@ Swept **every** `ces_events` corpus under `drives/` (92 files, 730,887 records, 
 70 unparseable lines). 373,244 Lightning records; **69,291 deduped Lightning moving ticks**;
 **3,087 ticks where ICBM published a target** (1,882 map-sourced, 756 far, 192 vision, 179 restore).
 
-Per-corpus field availability is reported in full (`_scratch/icbmslow/a1_capability.py`) precisely so
-that a corpus contributing nothing is visible rather than silent:
+Per-corpus field availability is reported in full — committed at
+[`icbmslow-evidence/out_a1_capability.txt`](icbmslow-evidence/out_a1_capability.txt), produced by
+`/home/dp/gh/comma/_scratch/icbmslow/a1_capability.py` — precisely so that a corpus contributing
+nothing is visible rather than silent:
 
 | witness | first corpus that has it | Lightning moving ticks with it |
 |---|---|---|
@@ -173,46 +176,117 @@ reboot.
 
 ## Would this have re-created the 2026-07-11 washouts?
 
-**No, and the reason is structural, not a margin argument.**
+**No — but the first version of this section was wrong, and the corrected argument is narrower and
+better.** (Two independent adversarial reviews, 2026-09-17, caught the same hole: the claim
+"ICBM was publishing a target at 0 of 27" was computed against the **old** 158/27 fixture and never
+re-run after this branch regenerated it to 171/35. It is true of those 27, and false of the 35.)
 
-1. **ICBM was silent at every one of them.** Replaying the registry's 27 binding washout clusters
-   against the telemetry recorded within ±12 s: ICBM was publishing a target at **0 of 27**.
-   Independently corroborated by that drive's own report — *"ICBM published a target only 81 times
-   all drive, all at 7–52 mph … 0/493 sharp vision curves at >55 mph."* Those washouts happened under
-   **op-long/VTSC**, whose path this change does not touch.
-2. **The shared penalty is unchanged**, so `test_washout_registry.py` passes unmodified: every
-   binding washout still gets a cap ≥ 3 mph below the speed the truck actually carried in.
-3. **Even replayed onto those sites with today's ICBM**, the floor moves the commanded target by a
-   median **+0.85 mph** (max +4.5), on targets of 19–54 mph against entry speeds of **66–88 mph**.
-   At 9 of the 27 sites today's ICBM publishes no target at all, and at 3 more (the candidates rated
-   ≥ 60 mph raw, where the 1.35 end of the ICBM scale inflates far more than the penalty removes) the
-   floor sits below the penalised target and never binds. 15 sites move, none by more than 4.5 mph.
-4. **Where the floor acts is disjoint from where the washouts happened.** The floor only binds when
-   `pen > raw·(scale − 1)`, i.e. for curves rated below **≈ 55 mph**. Every binding washout was an
-   entry above 65 mph.
+**32 of the 35 binding washouts: ICBM was silent.** Replaying every cluster against the telemetry
+within ±12 s (full coverage at each — 23–26 records, `icbmT` present as a key in 100 % of them, and
+non-null 119 times elsewhere in the drive, so a null is a null and not a missing field): 32 clusters
+have no ICBM target at all, all `shadow: false`, i.e. **op-long/VTSC was the actor**. This change
+does not touch that path.
 
-**Registry gap found and closed (independent of the fix).** The checked-in
-`washouts_2026_07_11.json` stopped at **18:17 PT** because `ces_events_1917.jsonl` was pulled off the
-device *after* it was generated. It therefore never contained the **19:16 / 19:17 PT downhill-LEFT
-washouts that `descentcurve2pnw`'s `left_factor` and `descent_gain` were built from** — the
-regression test has never been run against them. Regenerated with `tools/washouts.py` over the full
-folder: **158 → 171 clusters, 27 → 35 binding**, and the shipped penalty pipeline passes all 35 with
-no change. The coverage assertion now fails if the fixture ever stops short again.
+**3 of the 35 were stock-ACC with ICBM live** — 19:04:43 / 19:05:30 / 19:06:52 PT, `shadow: true`,
+in the evening `ces_events_1917.jsonl` session. `tools/washouts.py` records their `cap_ms` as *the
+lowest ICBM target*, so by the tool's own definition these are ICBM washouts. Replayed tick by tick:
+
+| cluster | entry | ICBM source | what the floor does |
+|---|---|---|---|
+| #165 19:04:43 | 86.3 mph | **vision on all 5 ticks** | nothing — the map candidate does not exist (`mapV` 72.9 raw → eff 90.5 mph ≥ the 88 mph set, so it is rejected as not reduce-only) |
+| #166 19:05:30 | 88.1 mph | **vision on all 6 ticks** | nothing — same shape (`mapV` 73.1 → eff 90.8 ≥ 89) |
+| #167 19:06:52 | 87.2 mph | **map on 1 tick, vision on 10** | on that one tick the candidate is 50.0 mph, shipped commands 44.3, floored commands **48.7** |
+
+So the floor's entire effect across the washout evidence is **+4.4 mph, on one tick, at one site** —
+and one second later vision takes that same curve over and demands 51 → 53 mph with **no floor
+applied at all** (vision candidates are never floored, and the lowest binding candidate wins, so a
+vision candidate that disagrees with the map always overrides it downward).
+
+**At all three, the target was never the binding constraint.** The truck entered at 86–89 mph
+against ICBM targets of 51–58: it was ~30–36 mph over, and what limits the approach there is the
+executor's **1 mph per 0.4 s** SET− walk-down, not the level the target sits at. A 4.4 mph change to
+one tick of that walk is not what decides whether the driver takes the wheel at 89 mph.
+
+**Bounded, not argued.** `test_icbm_sourced_caps_survive_the_map_rating_floor` asserts it rather than
+reasoning about it: for every ICBM-sourced binding washout, `cap + penalty_cap_mph` (15 mph — the
+hard cap on the whole hump, hence an upper bound on anything the floor can give back whatever the
+candidate's rating was) still sits ≥ 3 mph below the entry speed. All three pass with 11–19 mph of
+margin.
+
+**The shared penalty is unchanged**, so `test_new_pipeline_caps_at_least_3mph_below_every_recorded_entry`
+passes unmodified over all 35, and VTSC / op-long is byte-identical.
+
+**Where the floor can act is bounded by the scale.** It binds only when the base hump exceeds what
+the ICBM scale inflated, i.e. for candidates rated below **53.6 mph raw** (pinned by
+`test_the_floor_binding_range_is_bounded_by_the_scale`). Every binding washout is an entry above
+65 mph; 32 of 35 have no ICBM candidate at all.
+
+**A retracted corroboration.** The 2026-07-11 drive report's *"ICBM published a target only 81 times
+all drive, all at 7–52 mph"* and *"0/493"* are **not** independent corroboration: that report was
+written at 16:40 PT, before three of the four `ces_events` files existed, and recomputing its figure
+from `ces_events.jsonl` alone reproduces it exactly (81 records, 6.9–51.7 mph). Twenty-nine ICBM
+ticks that day carry targets above 52 mph, all in the file the report never saw. The claims above are
+measured directly instead.
+
+### Registry gap found and closed (independent of the fix)
+
+The checked-in `washouts_2026_07_11.json` stopped at **18:17 PT** because `ces_events_1917.jsonl` was
+pulled off the device *after* it was generated. It therefore never contained the **19:16 / 19:17 PT
+downhill-LEFT washouts that `descentcurve2pnw`'s `left_factor` and `descent_gain` were built from** —
+the regression test had never been run against them — nor the three ICBM-live clusters above.
+Regenerated with `tools/washouts.py` over the full folder: **158 → 171 clusters, 27 → 35 binding**,
+and the shipped penalty pipeline passes all 35 with no change. The coverage assertion now fails if
+the fixture ever stops short again.
+
+## Known limits of this analysis
+
+* **One corpus dominates.** 64 of the 88 replayable episodes are the 2026-09-12 central-Oregon
+  weekend. Excluding it (n = 24) the median lateral accel at the commanded target is 0.58 m/s² and
+  the floor's median gain is +0.79 mph — those 24 are mostly near-straight urban episodes
+  (a_lat at `mapV` 0.44 on Crown Hill). The two corpora with real curvature agree with each other:
+  central Oregon 1.57 / 1.81 / 1.70 (ship / mapV / floor) and 2026-09-17 1.54 / 1.84 / 1.88.
+* **The replay treats every curve as flat and right-handed.** `icbmDir` in `ces_events` is the
+  episode direction (`dec`/`inc`), not the curve's, and `vtscPitch` is only published on the op-long
+  path — so neither the descent guard nor the left factor is represented. The *delta* is unaffected
+  (the floor gives back exactly the base hump either way), but the absolute lateral accels quoted are
+  slight OVER-estimates on downhill lefts, i.e. conservative.
+* **Pre-2026-08-11 corpora cannot be scored.** 68 of the 251 episodes have no curvature witness.
+* **`penalty_min_mph` / `penalty_max_mph` lose most of their leverage on the ICBM map path** once
+  this ships: below 53.6 mph raw the base hump is capped at `eff − raw` (~0.5 mph at a 44 mph rating),
+  and only `left_factor` / `descent_gain` extras remain. Lowering `map_scale` does **not** restore
+  base penalty there — below 0.909 the candidate simply drops under its own raw rating and the floor
+  becomes the candidate. VTSC keeps the full hump. This is the intended effect; it is written down
+  because a future tuning session that reaches for `penalty_max` on this path will find nothing.
 
 ## Verification
 
-* `selfdrive/controls/lib`: **1,714 passed**, 0 failed (934 in `ces_pnw/tests`, of which 22 new).
+* `selfdrive/controls/lib`: **1,714 passed**, 0 failed, of which 956 in `ces_pnw/tests` and **24 new
+  in `test_icbmslow2pnw.py`** plus 1 new in `test_washout_registry.py`.
 * `selfdrive/car` (excluding the network-dependent `test_models.py`): 362 passed, **2 failed + 1
   import error that are PRE-EXISTING on `origin/3devpnw`** — verified by running the same three files
   in a clean worktree at `7c40d8003b` (`test_oplong_carswap.py::TestOpLongResetFailureRetry` ×2,
   `test_cruise_speed.py` ImportError). Not caused by this change.
 * Mutation testing (`_scratch/icbmslow/mutate.py`, every mutant anchor-checked for exactly one match
-  and `compile()`-checked before counting): **24 mutants, 23 killed, 0 invalid, 1 survivor** — M23
-  ("outer zero clamp removed"), proven **equivalent**: the `rain2pnw` line two statements later
-  re-applies `max(…, 0.0)` to the same variable. The clamp is kept as a local double-clamp and the
-  verdict is recorded in the harness rather than the mutant deleted.
+  and `compile()`-checked before counting; an inapplicable mutant is reported INVALID, never
+  "killed"): **26 mutants, 25 killed, 0 invalid, 1 survivor** — M23 ("outer zero clamp removed"),
+  proven **equivalent**: the `rain2pnw` line two statements later re-applies `max(…, 0.0)` to the
+  same variable. The clamp is kept as a local double-clamp and the verdict is recorded in the
+  harness rather than the mutant deleted.
 * `ruff`: no new findings (the 4 in `ces_pnw.py` and 3 in `test_icbm_bridge.py` are byte-identical
   to `origin/3devpnw`).
+* **Reviewed by Fable, 2026-09-17: SHIP WITH CHANGES.** No code defect found in `_icbm_step`; a
+  numeric sweep over `map_scale` {0.5…1.0} × `penalty_max` {2,5,15} × raw 10–88 mph × pitch × left
+  found 0 invariant violations. Its required change was to the washout evidence in this document
+  (F1), which has been rewritten above; F2 became
+  `test_icbm_sourced_caps_survive_the_map_rating_floor`, F3 the last bullet of *Known limits*, F4 the
+  53.6 mph figure (now pinned by a test), F5 the evidence appendix below. F6 (a stale
+  `icbmMapFlr` if `_icbm_step` raises between the floor and the publish) is noted and unchanged —
+  it is the identical exposure `_icbm_floor_hit` already carries.
+* **Evidence appendix:** the raw output of every analysis step is committed at
+  [`icbmslow-evidence/`](icbmslow-evidence/) so the numbers above are auditable from the repo. The
+  harness that produced them lives in the workbench at `/home/dp/gh/comma/_scratch/icbmslow/`
+  (per the project's "harness in `_scratch/`" rule) with its own `README.md` — including the three
+  method errors it caught in itself.
 
 ## Open, for the owner
 

@@ -1,0 +1,22 @@
+map-sourced ticks modelled: 1841
+  skipped    27: model says no candidate
+  skipped    14: no mapV/mapDist (far/stale candidate)
+
+residual (model - logged), m/s: p10 -2.23  median +0.02  p90 +0.34   |res|<0.3 m/s: 59.0%
+
+per-corpus median residual (m/s)  [code version differences are expected here]
+  2026-07-11/lightning-icbm-nofire                   n=    8  median -6.04  p10 -10.85 p90 -6.04
+  2026-07-12/ellensburg-snoqualmie-westbound         n=    5  median -2.26  p10 -2.43 p90 -2.26
+  2026-07-12/snoqualmie-ellensburg-icbm              n=   62  median -2.07  p10 -3.04 p90 -0.80
+  2026-07-18/lightning-icbm-curve                    n=   52  median -2.26  p10 -2.35 p90 -1.65
+  2026-07-19/lightning-angle-faithful                n=  125  median -1.65  p10 -2.23 p90 -1.40
+  2026-08-10/_alldrives                              n=  147  median -1.85  p10 -2.42 p90 -1.58
+  2026-08-10/lanecenter-first-drive                  n=    8  median -1.77  p10 -1.77 p90 -1.77
+  2026-08-12/crown-hill-both-directions              n=  136  median +0.03  p10 -0.03 p90 +0.14
+  2026-08-13/crownhill-tesla-loop                    n=   35  median +0.08  p10 -0.03 p90 +0.28
+  2026-08-18/i5-southbound-curve-takeover            n=   58  median +0.09  p10 -0.03 p90 +0.27
+  2026-08-21/starlink-leg                            n=    8  median +0.05  p10 +0.05 p90 +0.11
+  2026-08-26/olympic-peninsula                       n=    1  median +0.10  p10 +0.10 p90 +0.10
+  2026-09-08/i5-evening-police-miss-and-onramp-steer n=   53  median +0.03  p10 -0.65 p90 +0.42
+  2026-09-12/central-oregon-weekend                  n= 1015  median +0.07  p10 -0.03 p90 +0.43
+  2026-09-17/curvedb-first-capture                   n=  128  median -0.01  p10 -4.48 p90 +0.48

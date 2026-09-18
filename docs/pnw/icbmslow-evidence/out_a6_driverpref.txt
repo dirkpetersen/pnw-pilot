@@ -1,0 +1,24 @@
+Lightning moving ticks with a lateral witness: 44187 of 69291
+
+[>25 mph] |a_lat|, ICBM silent (driver's own speed)  n= 31464  p50 0.10  p90 0.95  p99 2.30  max 5.64
+[>25 mph] |a_lat|, ICBM commanding                   n=  1295  p50 0.22  p90 1.26  p99 2.37  max 3.14
+[>25 mph] |a_lat| > 0.5 only (in a bend), ICBM silent n=  5781  p50 1.01  p90 1.88  p99 3.29  max 5.64
+
+[>45 mph] |a_lat|, ICBM silent (driver's own speed)  n= 19462  p50 0.10  p90 0.82  p99 1.77  max 5.58
+[>45 mph] |a_lat|, ICBM commanding                   n=   188  p50 0.28  p90 2.01  p99 2.82  max 3.13
+[>45 mph] |a_lat| > 0.5 only (in a bend), ICBM silent n=  3038  p50 0.97  p90 1.63  p99 2.52  max 5.58
+
+[>60 mph] |a_lat|, ICBM silent (driver's own speed)  n=  8154  p50 0.09  p90 0.73  p99 1.69  max 2.96
+[>60 mph] |a_lat|, ICBM commanding                   n=    21  p50 0.38  p90 1.02  p99 2.41  max 2.41
+[>60 mph] |a_lat| > 0.5 only (in a bend), ICBM silent n=  1129  p50 0.92  p90 1.60  p99 2.07  max 2.96
+
+|a_lat| while slAngSat is TRUE                       n=  2160  p50 0.27  p90 1.85  p99 3.44  max 5.64
+|a_lat| while slSat is TRUE                          n=0   (NO DATA -- not a zero result)
+|a_lat| while slCurvLim is TRUE                      n=0   (NO DATA -- not a zero result)
+|a_lat| while the driver has the wheel at >55 mph    n=   333  p50 0.20  p90 1.20  p99 2.44  max 2.72
+  ticks >25 mph with |a_lat| > 2.0:    512 / 32759 (1.563%)
+  ticks >25 mph with |a_lat| > 2.5:    239 / 32759 (0.730%)
+  ticks >25 mph with |a_lat| > 3.0:     88 / 32759 (0.269%)
+  ticks >25 mph with |a_lat| > 3.5:     43 / 32759 (0.131%)
+  ticks >25 mph with |a_lat| > 4.0:     13 / 32759 (0.040%)
+  ticks >25 mph with |a_lat| > 4.5:      9 / 32759 (0.027%)

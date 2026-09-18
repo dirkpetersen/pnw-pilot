@@ -74,6 +74,36 @@ def test_new_pipeline_caps_at_least_3mph_below_every_recorded_entry(tmp_path, mo
   assert checked >= 20
 
 
+def test_icbm_sourced_caps_survive_the_map_rating_floor(tmp_path, monkeypatch):
+  """icbmslow2pnw (Fable F2): the regression above applies `curve_speed_penalty_ms` to `cap_ms`, which
+  is the VTSC pipeline. For clusters where `cap_ms` came from ICBM instead (tools/washouts.py:91-93
+  falls back to the lowest ICBM target when no VTSC cap was recorded — the `shadow` clusters, i.e.
+  stock-ACC drives), the applicable pipeline now also contains the map-rating floor, which that test
+  does not model.
+
+  Bounded here without needing the mapd rating, which the fixture does not carry: the floor can give
+  back at most the BASE hump, and the hump is hard-capped at `penalty_cap_mph`. So `cap + 15 mph` is
+  an upper bound on anything the floored pipeline can command at that site, whatever the candidate's
+  rating was. Assert that bound still sits 3 mph below the speed the truck actually carried in.
+
+  The three sites this covers are 2026-07-11 19:04:43 / 19:05:30 / 19:06:52 PT, entries 86-88 mph
+  against caps of 51-58 mph: the truck was ~30 mph over ICBM's target, so the target was never the
+  binding constraint there (the executor's 1 mph-per-tap walk-down was). They are deliberately NOT
+  exempted on that argument — the bound is asserted."""
+  veh = _veh(tmp_path, monkeypatch)
+  with open(FIXTURE) as f:
+    washouts = json.load(f)["washouts"]
+  checked = 0
+  for w in washouts:
+    if not w["binding"] or not w.get("shadow"):
+      continue
+    upper = w["cap_ms"] + veh._curve_cfg["penalty_cap_mph"] * MPH
+    assert upper <= w["v_entry_ms"] - 3.0 * MPH, \
+      f"{w['id']}: floored bound {upper / MPH:.1f} mph not 3 below entry {w['v_entry_ms'] / MPH:.1f}"
+    checked += 1
+  assert checked >= 3, f"only {checked} ICBM-sourced binding washouts found -- the fixture is short"
+
+
 def test_registry_never_used_for_control():
   """Guard: no control module may import/read the washout fixture (validation-only, driver rule)."""
   import glob

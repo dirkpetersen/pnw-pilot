@@ -34,6 +34,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetec
 # ces2core2pnw: the CES2 decision core (CES2-STUDY.md adoptions) — runs SHADOW every tick, decides
 # live only when the Ces2Core param is set (default OFF => v1 path below is byte-identical).
 from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, DivergenceCounter
+from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
@@ -860,7 +861,7 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   scale (scale_fn) AND the Lightning map-speed discount `map_scale` (<= 1.0, from PnwVehicle — OSM
   curve speeds are calibrated for stronger-steering cars) BEFORE the reduce-only test, so selection
   and use can't disagree. The per-point envelope uses the same drop-scaled icbm_approach_decel the
-  downstream binding test uses. Returns (0.0, inf) if none. The actual DEC-only binding decision
+  downstream binding test uses. Returns (0.0, inf, 0.0) if none. The actual DEC-only binding decision
   stays in icbm_curve_target/_icbm_binding_apex. NaN- and curvature-noise-guarded like upcoming_curve
   (icbmonset: `_map_v_sane` rejects implausible finite reads, not just NaN). Pure.
 
@@ -3397,6 +3398,13 @@ class CESController:
     #   _shadow  -> CES runs shadow with ICBM as the actuator (stock-ACC buttons, no op-long)
     veh = PnwVehicle(CP)
     self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
+    # icbmslow2pnw / Rule 2: _load_curve_config() is silent, so a /data/pnw/curve.json that sets
+    # icbm_map_floor_frac to 0 would turn the map-rating floor off with nothing anywhere saying so.
+    # One line per selfdrived start, only on the cars the floor can act on. Not put in
+    # _load_curve_config itself: PnwVehicle is constructed by UI code too, repeatedly.
+    if veh.lightning_curve_slow:
+      cloudlog.event("ces_icbm_map_floor_cfg", frac=veh._curve_cfg["icbm_map_floor_frac"],
+                     map_scale=veh.icbm_map_scale, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
     self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
     self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
     self._long_ok = veh.op_long
@@ -4657,10 +4665,11 @@ class CESController:
         # penalty against that — so it has been eating a margin that is no longer there.
         #
         # Deliberately NOT a change to curve_speed_penalty_ms itself: that function is SHARED with
-        # VTSC (the op-long path), and the 2026-07-11 washout evidence the penalty exists for is
-        # entirely op-long/VTSC — ICBM published no target at any of the 27 binding washouts. A
-        # knob change would silently weaken the washout protection the moment Alpha Long is
-        # switched back on; this floor leaves op-long byte-identical.
+        # VTSC (the op-long path), and 32 of the 35 binding 2026-07-11 washouts the penalty exists
+        # for had no ICBM target at all (op-long/VTSC did the braking). A knob change would silently
+        # weaken that protection the moment Alpha Long is switched back on; this floor leaves
+        # op-long byte-identical. The 3 that WERE stock-ACC are analysed in docs/pnw/ICBMSLOW2PNW.md:
+        # two are vision-sourced (unfloored), the third is map-sourced on one tick of eleven.
         #
         # VISION candidates get NO floor: icbm_vision_apex is already a physics-derived safe speed
         # with no map rating behind it, so there is nothing to floor against.

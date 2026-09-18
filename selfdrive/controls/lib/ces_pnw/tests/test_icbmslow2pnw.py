@@ -404,3 +404,56 @@ def test_the_passed_point_gate_returns_the_REPLACEMENT_candidates_raw(shipped_cf
     mod.icbm_passed_points = real_passed
   assert len(out) == 5
   assert out[4] == pytest.approx(19.0), f"the gate handed back a stale far rating ({out[4]})"
+
+
+def test_the_effective_floor_config_is_logged_once_at_startup(shipped_cfg, monkeypatch):
+  """Rule 2: `_load_curve_config` is silent, so a curve.json setting icbm_map_floor_frac to 0 would
+  turn this whole change off with nothing anywhere saying so. The CES controller names the effective
+  value once per start -- and only on cars the floor can act on, so the Tesla stays quiet."""
+  import inspect
+  events = []
+  monkeypatch.setattr(m.cloudlog, "event", lambda name, **kw: events.append((name, kw)))
+  cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
+
+  class CP:
+    carFingerprint = LIGHTNING
+    brand = "ford"
+    openpilotLongitudinalControl = False
+    alphaLongitudinalAvailable = True
+  try:
+    cls(CP())
+  except Exception:
+    pass                      # construction may need more of the world; the log fires before that
+  hit = [kw for name, kw in events if name == "ces_icbm_map_floor_cfg"]
+  assert len(hit) == 1, f"the floor config was not logged exactly once: {events}"
+  assert hit[0]["frac"] == pytest.approx(1.0) and hit[0]["map_scale"] == pytest.approx(0.92)
+
+  # ...and the Tesla, which the floor can never act on, must not log it at all
+  events.clear()
+
+  class TeslaCP:
+    carFingerprint = "TESLA_MODEL_S_HW3"
+    brand = "tesla"
+    openpilotLongitudinalControl = True
+    alphaLongitudinalAvailable = True
+  try:
+    cls(TeslaCP())
+  except Exception:
+    pass
+  assert not [kw for name, kw in events if name == "ces_icbm_map_floor_cfg"], \
+    "the ICBM floor config was logged on a car the floor cannot act on"
+
+
+def test_the_floor_binding_range_is_bounded_by_the_scale(shipped_cfg):
+  """Pins the "only curves rated below ~53 mph" claim the safety argument rests on: above the
+  crossover the ICBM scale inflates more than the base hump removes, so the floor cannot bind."""
+  veh = _veh()
+  binds = []
+  for tenth in range(50, 900):
+    raw = tenth * 0.1 * MPH
+    eff = m.icbm_map_eff_scale(raw) * raw * 0.92
+    binds.append((tenth * 0.1, veh.curve_speed_penalty_ms(eff) > eff - raw))
+  crossovers = [mph for (mph, b), (_, pb) in zip(binds[1:], binds[:-1], strict=True) if b != pb]
+  assert crossovers == [pytest.approx(53.6, abs=0.15)], f"binding range changed: {crossovers}"
+  assert all(b for mph, b in binds if mph <= 53.0)
+  assert not any(b for mph, b in binds if mph >= 54.0)

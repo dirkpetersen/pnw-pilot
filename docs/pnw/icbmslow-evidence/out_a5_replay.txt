@@ -1,0 +1,30 @@
+DEC episodes: 251
+episodes analysed: 107
+  excluded   70: below 8 m/s at episode start, or no target
+  excluded   68: no slKActl witness in window (corpus predates 2026-08-11)
+  excluded    6: apex radius < 30 m -- window caught a junction/parking turn
+
+--- apex-window sensitivity (a_lat at ICBM's commanded target, m/s^2) ---
+  tight  n= 107  p10 0.11  median 1.39  p90 2.02  max 4.82
+  base   n= 107  p10 0.27  median 1.39  p90 2.02  max 4.49
+  wide   n= 107  p10 0.56  median 1.62  p90 2.33  max 4.49
+
+--- episodes above 25 mph: n=93 ---
+  a_lat @ ICBM target      n=  93  p10 0.20  median 1.34  p90 2.01
+  a_lat @ map raw speed    n=  91  p10 0.29  median 1.67  p90 2.47
+  a_lat @ ceiling (set)    n=  93  p10 0.73  median 2.78  p90 7.59
+  a_lat actually pulled    n=  93  p10 0.33  median 1.50  p90 2.11
+
+--- knob counterfactual on episodes above 25 mph with a replayable MAP tick ---
+  replayable: 88 of 93  (rest: far/vision-sourced or missing mapV/mapDist)
+  variant               d_target mph  a_lat median  a_lat p90  >2.5  >4.5  lost
+  shipped                      +0.00          1.41       2.06     4     0     0
+  mapscale_1.00                +2.36          1.78       2.69    12     0    18
+  penmax_3.0                   +0.64          1.50       2.15     4     0     0
+  penmax_2.0                   +0.96          1.55       2.21     5     0     0
+  hump_shift_65_80             +0.43          1.50       2.15     4     0     0
+  penmax3_shift                +0.84          1.53       2.20     4     0     0
+  combo_scale1_pen3            +3.30          1.89       2.74    15     0    18
+  FLOOR_mapV                   +1.31          1.65       2.32     4     0     0
+  FLOOR+penmax_3.0             +1.80          1.65       2.34     4     0     0
+  pre0811_flat135              +6.51          2.19       3.07    31     1    32
