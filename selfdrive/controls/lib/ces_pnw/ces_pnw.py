@@ -38,6 +38,10 @@ from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, Diverge
 # 93.7% of the archived ces_events corpus was a PARKED truck; see park_tick_gate.py for the measurement.
 from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import (ParkTickGate, SUPPRESS as PARK_SUPPRESS,
                                                                       LOG as PARK_LOG)
+# curvedbshadow2pnw: CURVEDB2PNW.md Phase 2, SHADOW ONLY. The learned curve database predicts and
+# logs what it WOULD have done; no control path reads its answer, and that is enforced by
+# tests/test_curvedb_read_boundary.py rather than by this comment.
+from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_shadow import CurveDBShadow, curvedb_tele
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -3521,6 +3525,12 @@ class CESController:
     # icbmfalsify2pnw: the running cap's arrival evidence (min_d / prev_d / held / measurement age).
     _icbm_falsify_reset(self)
     self._icbm_falsify_err = None
+    # curvedbshadow2pnw (CURVEDB2PNW.md Phase 2, SHADOW ONLY): the learned curve database says what
+    # it WOULD have done on every ICBM map/far decision and writes a log line. NOTHING READS THE
+    # ANSWER -- `_cdb` is touched in exactly two places below (the 100 Hz `tick` feed, whose return
+    # is discarded, and the `**`-splat of `record()` into _event_record's dict) and
+    # tests/test_curvedb_read_boundary.py fails if that ever stops being true.
+    self._cdb = CurveDBShadow(self._car)
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -4093,6 +4103,11 @@ class CESController:
         dq |= DQ_SAT
 
       self._curve_peak.step(k_actl, k_cmd, k_pose, dq)
+      # curvedbshadow2pnw: the same three curvatures and the same disqualifier roll-up feed the
+      # shadow's own accumulator (its own, not this one -- `take()` is destructive, and coupling two
+      # features through it would make each one's window depend on whether the other ran).
+      # RETURNS NOTHING: this is a statement, never an expression, and the boundary test enforces it.
+      self._cdb.tick(k_actl, k_cmd, k_pose, dq, v_ego, bool(self._str_prs))
     except Exception as e:
       # Rule 2: never silent. Throttled to one line per CURVELEAD_ERR_LOG_S with a count, because
       # this runs at 100 Hz and a persistent fault would otherwise flood the log it needs to be seen
@@ -5207,6 +5222,13 @@ class CESController:
     cand_pt = getattr(self, "_icbm_cand_pt", None) if cand_d is not None else None
     if cand_d is None:
       cand_d = tele.get("mapDist")
+    # curvedbshadow2pnw: the SAME candidate point _curve_tele resolves for mapLat/mapLon, computed
+    # once here so the shadow's site and the record's coordinates can never name different curves
+    # (pinned by test_curvedbshadow2pnw.py::test_the_site_is_the_records_own_mapLat_mapLon). The
+    # branch is _curve_tele's, verbatim: ICBM's latched point when it has one, else CES's own
+    # mapDist-matched candidate.
+    cdb_pt = cand_pt if cand_pt is not None else map_candidate_point(
+      getattr(self, "_map_targets", None), self._cur_lat, self._cur_lon, cand_d)
     rec = {
       "t": round(now_wall, 1),
       "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
@@ -5307,6 +5329,13 @@ class CESController:
       # cand_pt/cand_d (above) name the candidate icbmSrc actually used, so mapLat/mapLon locate the
       # SAME candidate the record names; mapCandD is the distance from this record's fix to it.
       **_curve_tele(self, raw_vego, cand_d, cand_pt),
+      # curvedbshadow2pnw -- CURVEDB2PNW.md Phase 2, SHADOW ONLY. What the learned curve database
+      # WOULD have commanded at this candidate, whether a row existed for it at all (cdbRow -- the
+      # one number section 12 says decides whether Phase 2 is viable), and why it declined when it
+      # declined. THE RETURN VALUE IS SPLATTED STRAIGHT INTO THIS RECORD AND BOUND TO NO NAME: that
+      # is the read boundary, and tests/test_curvedb_read_boundary.py fails if it is ever loosened.
+      **curvedb_tele(self, site_pt=cdb_pt, now_wall=now_wall, v_ego=raw_vego,
+                     v_set=tele.get("vSet")),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
