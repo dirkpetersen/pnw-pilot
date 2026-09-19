@@ -91,6 +91,29 @@ DELIBERATE DEVIATIONS FROM THE DESIGN, ALL FLAGGED
    code *branching* on a fingerprint; this is a data table lookup with no branch, and it must be the
    table the offline replay uses or the replay validates nothing. The boundary test asserts this
    module contains no comparison against a fingerprint string.
+6. **Sites are discovered from ICBM's OWN latched candidate, not from every map candidate.** A
+   sizing decision with a measurement behind it -- see `curvedb_tele`'s docstring for the 13x.
+
+KNOWN, DELIBERATE DIVERGENCES FROM `tools/curvedb/ingest.py`
+============================================================
+The matcher, the update rules and the authority gate are literally the same code (`store.py`), and
+the constants, the disqualifier bits, the PT date function and the odometer integration are pinned
+equal by tests. These four remain, each small and each in the direction of a WEAKER row rather than
+a stronger one, and none of them is worth a second implementation of the ingest pipeline on the car:
+
+* **The extent's back edge.** Ingest takes `[s_p - 25, s_p + 150]` by bisecting a completed track;
+  a forward-only tracker cannot look back, so the window opens at the first record within
+  `extent_back_m` of the candidate (approximately the same place at highway speed, later at low
+  speed). The forward 150 m -- where mapd's point sits 56-125 m before the bend, i.e. where the
+  signal is -- is exact, and the close is at `s_p + extent_fwd_m` exactly as ingest does.
+* **`posted` and `hwy` are last-seen over the extent**, not ingest's median and most-common. Both
+  are context on the observation, never part of the key.
+* **`drive_id`** is `platform:first_record_epoch`; ingest's first tick can be a CES-off `steer`
+  record, so the two spellings differ for the same drive. Harmless unless the car's JSONL and an
+  ingest run over the same period are ever MERGED, at which point one pass would count as two drives
+  and satisfy half of D6 on its own. **Do not merge the two corpora.**
+* **Which sites exist at all** (deviation 6 above): ingest's `find_sites` takes every map candidate,
+  the car takes ICBM's.
 
 Rule 2 throughout: every refusal carries a reason, every failure is counted and logged, and
 `cdbOn`/`cdbErr`/`cdbRows` make "the shadow is dead" impossible to confuse with "no site here".
@@ -130,13 +153,26 @@ CURVEDB_DIR = "/data/pnw"
 OBS_PATH = os.path.join(CURVEDB_DIR, "curvedb_obs.jsonl")
 CONFIG_PATH = os.path.join(CURVEDB_DIR, "curvedb.json")
 
-# Hard stop on the corpus, because the load is superlinear in its size (measured: 3,000 obs -> 1.0 s,
-# 9,000 -> 5.4 s, 15,000 -> 11.9 s on the dev host; CurveDB.build matches each observation against
-# every row built so far). 12 MB is ~30,000 observations, past which the boot load would be minutes.
+# THE CAP IS A LATENCY BUDGET, NOT A DISK BUDGET (Fable S3).
+#
+# `CurveDB.build` matches each observation against every row built so far, so it is superlinear:
+# measured on the dev host, 2,000 rows -> 0.55 s, 5,000 -> 1.1 s, 10,000 -> 6.5 s, 20,000 -> 24 s.
+# The load runs on a background thread, but a CPU-bound Python thread CONTENDS THE GIL at the 5 ms
+# switch interval -- measured +5.2 ms p50 on every main-thread wakeup while a build runs -- and
+# `selfdrivedLagging` is SOFT_DISABLE + NO_ENTRY above 11.1 ms average. A multi-minute build could
+# therefore soft-disable the car on a manager restart mid-drive, which is the one way this
+# authority-free feature could ever affect anything.
+#
+# 1.5 MB is ~4,000 observations / ~2,000 rows: a sub-second build and ~0.6 ms per lookup. And it is
+# not a tight budget at the measured site rate: on a real 46-minute Phase-1 drive, ICBM named a
+# map/far candidate at **6 distinct sites** (~8/h), so the cap is ~500 driving hours. (Discovering
+# sites from ANY map candidate instead would have been 77 sites in the same 46 minutes -- ~13x --
+# which is exactly why the write half is gated on ICBM's own candidate; see `curvedb_tele`.)
+#
 # At the cap the writer STOPS and says so, loudly and repeatedly: a frozen corpus that announces
 # itself is recoverable, a silently rotated one destroys the >= 2-dates history that is the entire
 # point of collecting it.
-OBS_MAX_BYTES = 12 * 1024 * 1024
+OBS_MAX_BYTES = 1536 * 1024
 # Below this the boot load is inline; above it, a background thread. ~256 KB is ~800 observations,
 # which groups in well under 0.1 s. See the comment at the call site for why a thread is not always
 # used -- a background load makes `cdbOn` nondeterministic for the first fraction of a second.
@@ -160,9 +196,16 @@ K_MIN_USABLE = 1e-4          # below this a row is degenerate (R > 10 km). Never
 # "driven past". One 1 Hz record is ~25 m at highway speed, so this is sub-record and only exists to
 # stop GPS jitter at the apex from latching a passage early.
 PASS_HYSTERESIS_M = 5.0
+# The comma 3X's RTC battery is dead, so every cold boot stamps records 1970 until NTP/GPS sync.
+# A bogus timestamp manufactures a distinct *date*, which is half of D6's authority key -- the same
+# integrity concern that makes a missing tzdata disable the writer. Mirrors ces_pnw's
+# CLOCK_VALID_EPOCH (L2 forbids importing ces_pnw); pinned equal by the test module.
+CLOCK_VALID_EPOCH = 1577836800.0   # 2020-01-01T00:00Z
 # Ceiling on simultaneously-tracked sites. ICBM names one candidate per tick, so this is never
 # approached in practice; if it ever is, the eviction is loud (Rule 2) rather than a silent drop.
 MAX_TRACKED = 16
+# Ceiling on the per-drive dedup memory (two floats each). See `_arm`.
+MAX_ARMED_PER_DRIVE = 4000
 
 # Section 3.5's disqualifier bits, identical to ces_pnw's DQ_SAT/DQ_DRIVER/DQ_LANECHG/DQ_BLINKER and
 # to ingest's DQ_SAT/DQ_DRV/DQ_LC/DQ_BLNK. Pinned equal to both by the test module.
@@ -244,14 +287,17 @@ def _load_config(path: str = CONFIG_PATH) -> tuple[CurveDBParams, bool, str]:
       return PROVISIONAL_PARAMS, True, f"{path} is a {type(data).__name__}, not an object"
     if "enabled" in data:
       enabled = bool(data["enabled"])
-    for key in ("site_radius_m", "heading_tol_deg", "approach_bearing_ref_m",
-                "extent_back_m", "extent_fwd_m", "down_trigger_a_lat_ms2", "min_speed_ms",
-                "a_lat_comfort_ms2"):
+    # ONLY the matching half (Fable S8). The measurement half (`extent_*`,
+    # `approach_bearing_ref_m`, `down_trigger_a_lat_ms2`, `min_speed_ms`) decides what a stored row
+    # MEANS, and an `Observation` carries no record of the params it was measured under -- so a
+    # hand edit would silently make new rows non-comparable with old ones and with the replay's.
+    # `a_lat_comfort_ms2`/`min_passes`/`min_dates` are policy and belong in reviewed Python.
+    for key in ("site_radius_m", "heading_tol_deg"):
       if key in data:
         overrides[key] = float(data[key])
-    for key in ("min_passes", "min_dates"):
-      if key in data:
-        overrides[key] = int(data[key])
+    unknown = sorted(set(data) - {"enabled", "site_radius_m", "heading_tol_deg"})
+    if unknown:
+      note = f"{path}: ignoring {unknown} -- only the matching half is tunable"
   except FileNotFoundError:
     return PROVISIONAL_PARAMS, True, ""
   except Exception as e:
@@ -269,7 +315,7 @@ def _load_config(path: str = CONFIG_PATH) -> tuple[CurveDBParams, bool, str]:
 
 class _Site:
   """One map candidate being followed from the tick that named it until 150 m past it."""
-  __slots__ = ("lat", "lon", "s_armed", "bearing", "bearing_d", "min_d",
+  __slots__ = ("lat", "lon", "s_armed", "bearing", "bearing_d", "min_d", "s_min",
                "open_s", "k_peak", "dq_bits", "n_ticks", "down_k", "posted", "hwy", "t")
 
   def __init__(self, lat: float, lon: float, s: float, t: float):
@@ -281,6 +327,7 @@ class _Site:
     self.bearing: float | None = None
     self.bearing_d: float | None = None       # distance the approach bearing was sampled at
     self.min_d = float("inf")
+    self.s_min: float | None = None           # odometer at closest approach = ingest's `s_p`
     self.open_s: float | None = None          # s at which the extent opened, None = not yet
     self.k_peak = 0.0
     self.dq_bits = 0
@@ -313,6 +360,7 @@ class CurveDBShadow:
   _enabled = False
   _obs_path = OBS_PATH
   _write_stopped = True
+  _load_done = True
   _err_t = 0.0
   _k_peak = 0.0
   _dq_bits = 0
@@ -322,7 +370,8 @@ class CurveDBShadow:
   _last_v = None
   _drive_id = None
   _drive_t0 = None
-  _ev_pending = None
+  _armed = ()
+  _ev_pending = ()
 
   def __init__(self, platform: str, obs_path: str | None = None, config_path: str | None = None,
                load_async: bool = True):
@@ -359,13 +408,15 @@ class CurveDBShadow:
     # missing tzdata and `cdbOn` would read "on" while the write half was silently dead.
     self._state = "off" if not self._enabled else "loading"
     self._sites: list[_Site] = []
+    self._armed: list[tuple] = []      # every site armed this drive, for `find_sites`-style dedup
     self._s = 0.0                      # cumulative odometer, integrated exactly as split_drives does
     self._last_t: float | None = None
     self._last_v: float | None = None
     self._drive_id: str | None = None
     self._drive_t0: float | None = None
-    self._ev_pending: str | None = None
+    self._ev_pending: list[str] = []
     self._write_stopped = False
+    self._load_done = False
     self._err_t = 0.0
 
     # 100 Hz accumulator, drained by `record`. Its own, deliberately: sharing ces_pnw's `_curve_peak`
@@ -401,13 +452,17 @@ class CurveDBShadow:
     if self._enabled and not os.path.isdir(os.path.dirname(self._obs_path) or "."):
       self._state = "noStore"
       self._write_stopped = True
-      # Rule 2 is satisfied by `cdbOn == "noStore"`, which rides EVERY record into the uploaded
-      # corpus -- a strictly louder and more durable channel than a boot-time swaglog line, and one
-      # that cannot be missed by anyone actually reading the data. No swaglog line here on purpose:
-      # on a dev host (no /data at all) this fires on every single CESController construction, and
-      # ces_pnw's OWN invariant tests assert that a healthy drive emits no log records -- so logging
-      # it would make this feature degrade another one's signal to say something the record already
-      # says. ces_pnw's own event-log setup fails the same way on a dev host, equally quietly.
+      # Rule 2, corrected (Fable S5). `cdbOn == "noStore"` was argued to be the loud channel
+      # because it rides every record -- but on the CAR the only way /data/pnw is missing is
+      # `os.makedirs` failing in CESController.__init__, which sets `_event_log_ok = False`, and
+      # `_append_event` then writes NOTHING. In precisely the failure case, the claimed channel is
+      # dead. So: log an ERROR where there is a /data at all (a device), and stay quiet where there
+      # is not (a dev host, where this would fire on every CESController construction and trip
+      # ces_pnw's own "a healthy drive logs no errors" invariants -- this feature degrading
+      # another's signal).
+      if os.path.isdir("/data"):
+        cloudlog.error(f"curvedb_shadow: {os.path.dirname(self._obs_path)} does not exist -- " +
+                       "the WRITE half is disabled; no passes will be recorded this boot")
 
     if self._enabled:
       size = 0
@@ -429,8 +484,9 @@ class CurveDBShadow:
   # -- boot load ------------------------------------------------------------------------------
 
   def _load(self) -> None:
-    """Parse the append-only observation log and group it into rows. Off the constructor's thread:
-    measured 11.9 s for 15,000 observations on the dev host, and selfdrived must not wait for it.
+    """Parse the append-only observation log and group it into rows. Off the constructor's thread
+    when the corpus is large enough to be worth it (see OBS_MAX_BYTES for the measured cost, and for
+    why the cap on that cost is a LATENCY budget).
 
     A torn last line is DISCARDED (section 8.1's append-only idiom); anything else that cannot be
     parsed is counted and named. Failing to a database of zero rows is correct; failing to one
@@ -444,7 +500,11 @@ class CurveDBShadow:
         size = 0
       try:
         with open(self._obs_path) as f:
-          for line in f:
+          # EXACTLY the bytes that existed at the stat above (Fable C2). The control thread may be
+          # appending while this runs, and a line that landed DURING the load would enter the live
+          # database -- this drive judged against itself, which is the one property section 3.9
+          # item 6 asks for. (A torn tail is still handled: it simply fails to parse.)
+          for line in f.read(size).splitlines(True):
             n_lines += 1
             if len(line) > OBS_MAX_LINE:
               bad += 1
@@ -488,14 +548,18 @@ class CurveDBShadow:
       self.err += 1
       cloudlog.exception(f"curvedb_shadow: boot load FAILED ({type(e).__name__}: {e}) -- " +
                          "the shadow database is EMPTY for this drive, cdbRow will read null")
+    finally:
+      # Set LAST and unconditionally: `cdbWhy` reads "loading" until this flips, so a load that
+      # died would otherwise read as "still working on it" forever.
+      self._load_done = True
 
   def wait_loaded(self, timeout: float = 30.0) -> bool:
     """Test/diagnostic helper: block until the boot load thread has settled. NOT called by any
     control code -- the boundary test asserts `ces_pnw.py` never names it."""
     deadline = time.monotonic() + timeout
-    while self._state == "loading" and time.monotonic() < deadline:
+    while not self._load_done and time.monotonic() < deadline:
       time.sleep(0.01)
-    return self._state != "loading"
+    return self._load_done
 
   # -- the 100 Hz half ------------------------------------------------------------------------
 
@@ -514,9 +578,17 @@ class CurveDBShadow:
     try:
       if self._state == "off":
         return
-      k_any = None        # max over all three: section 3.3's estimator
-      k_ach = None        # max over the ACHIEVED pair only: the lateral-accel witness DOWN wants
-      for k, achieved in ((k_actl, True), (k_cmd, False), (k_pose, True)):
+      # `k_peak` is `max(|achieved-from-CAN|, |commanded|)` and DELIBERATELY excludes `k_pose`
+      # (Fable S2). That is exactly the quantity ces_pnw logs as `kPeak` and the ONLY quantity
+      # ingest's `_tick_k` reads, and a stored row is labelled `estimator="kPeak100"` -- so folding
+      # the localizer in would make the car's rows and the replay's rows two different numbers
+      # under one label, on the Tesla in particular (where `k_actl` is dead by construction and the
+      # row would have been pose-only on the car and commanded-only in the replay).
+      # `k_pose` still feeds `k_ach`, the lateral-accel WITNESS section 6.2's trigger needs -- which
+      # is the Tesla's only achieved reading (P1-A) and is not stored in any row.
+      k_peak = None       # max(|k_actl|, |k_cmd|): section 3.3's estimator, == ces_pnw's kPeak
+      k_ach = None        # max over the ACHIEVED pair: the lateral-accel witness DOWN wants
+      for k, achieved, stored in ((k_actl, True, True), (k_cmd, False, True), (k_pose, True, False)):
         if k is None:
           continue
         try:
@@ -525,11 +597,12 @@ class CurveDBShadow:
           continue
         if not math.isfinite(a):
           continue
-        k_any = a if k_any is None else max(k_any, a)
+        if stored:
+          k_peak = a if k_peak is None else max(k_peak, a)
         if achieved:
           k_ach = a if k_ach is None else max(k_ach, a)
-      if k_any is not None and k_any > self._k_peak:
-        self._k_peak = k_any
+      if k_peak is not None and k_peak > self._k_peak:
+        self._k_peak = k_peak
       if dq_bits:
         self._dq_bits |= int(dq_bits)
       # Section 6.2's trigger: a steering override taken while the road was ACTUALLY loading the
@@ -550,7 +623,7 @@ class CurveDBShadow:
         if v is None or kc is None:
           return
         kc = abs(kc)
-        a_lat = (k_ach if k_ach is not None else k_any or 0.0) * v * v
+        a_lat = (k_ach if k_ach is not None else k_peak or 0.0) * v * v
         if (v >= self.params.min_speed_ms and math.isfinite(a_lat)
             and a_lat >= self.params.down_trigger_a_lat_ms2 and kc >= K_MIN_USABLE):
           self._down_k = kc
@@ -591,9 +664,12 @@ class CurveDBShadow:
     stale = True
     if t is not None:
       dt = None if self._last_t is None else t - self._last_t
-      if dt is not None and 0.0 <= dt <= MAX_TICK_DT_S and v is not None:
-        self._s += 0.5 * (max(self._last_v or 0.0, 0.0) + max(v, 0.0)) * dt
-        stale = False
+      if dt is not None and dt >= 0.0 and v is not None:
+        # CLAMPED, not skipped (Fable C3): ingest's `split_drives` adds `0.5*(v_a+v_b)*min(dt, 5)`
+        # across a gap, so skipping it entirely would put the car's `s` and the replay's `s`
+        # permanently out of step after the first missed record.
+        self._s += 0.5 * (max(self._last_v or 0.0, 0.0) + max(v, 0.0)) * min(dt, MAX_TICK_DT_S)
+        stale = dt > MAX_TICK_DT_S
       # A gap longer than a traffic light and shorter than a charging stop is a new DRIVE, and
       # `n_passes` counts distinct drives (D6) -- so without this a single un-rebooted session could
       # never accumulate the two passes authority requires.
@@ -602,6 +678,7 @@ class CurveDBShadow:
         self._drive_t0 = t
         self._drive_id = f"{self.platform}:{t:.2f}"
         self._sites.clear()
+        self._armed.clear()
       self._last_t = t
       self._last_v = v
 
@@ -617,15 +694,25 @@ class CurveDBShadow:
       peak, dq_bits, down_k = 0.0, 0, None
 
     pt = _pt(site_pt)
+    # NORMALISED ONCE (Fable S1). `Observation.__post_init__` rejects a bearing outside [0, 360), and
+    # a GPS fix reporting exactly 360.0 would make `_finish` raise inside `_advance` -- unwinding
+    # before the `self._sites = keep` rebuild, so the offending site is never removed and EVERY
+    # subsequent record re-raises, killing the write half for the rest of the drive segment.
+    # `ingest.normalise` does `bearing %= 360.0`; so does this, now.
+    brg = _f(bearing)
+    if brg is not None:
+      brg %= 360.0
 
     # -- WRITE: advance every tracked site, then arm a new one if this record names one -----------
     if la is not None and lo is not None and v is not None:
-      self._advance(now_wall=t, lat=la, lon=lo, bearing=_f(bearing), v_ego=v, peak=peak,
+      self._advance(now_wall=t, lat=la, lon=lo, bearing=brg, v_ego=v, peak=peak,
                     dq_bits=dq_bits, down_k=down_k, posted_ms=_f(posted_ms), hwy_class=hwy_class)
       if pt is not None and v >= self.params.min_speed_ms:
         self._arm(pt, t)
-    out["cdbEv"] = self._ev_pending
-    self._ev_pending = None
+    # A record can complete more than one passage; joining rather than overwriting means the second
+    # verdict is not silently dropped (Fable C5).
+    out["cdbEv"] = ";".join(self._ev_pending) if self._ev_pending else None
+    self._ev_pending = []
 
     # -- READ: the prediction ---------------------------------------------------------------------
     if pt is None:
@@ -636,21 +723,41 @@ class CurveDBShadow:
     # is atomic in CPython; two reads of it are not one observation.
     db = self._db
     if db is None:
-      out["cdbWhy"] = "loading" if self._state == "loading" else self._state
+      # `_load_done` distinguishes "still parsing" from a terminal state that happens to have no
+      # database (Fable C5): `noTz` disables only the WRITE half, so reporting it here would tell an
+      # analyst the read half was off when it was merely not ready yet.
+      out["cdbWhy"] = self._state if self._load_done else "loading"
       return out
-    brg = _f(bearing)
-    if brg is None:
+    # THE APPROACH BEARING, SYMMETRICALLY (Fable S6). The write half keys a row on the bearing
+    # sampled at `approach_bearing_ref_m`; looking it up on the truck's heading HERE -- which in the
+    # bend differs by the curve's sweep (median 19 deg, p90 62 deg per section 6.3) -- would make the
+    # same site match on the approach and miss inside the bend, biasing `cdbRow`, the one number this
+    # whole feature exists to measure, LOW. When the candidate is one the tracker is already
+    # following, its own sampled approach bearing is used; `cdbBrgD` then reports the distance THAT
+    # bearing was taken at, so the two cases stay distinguishable in the data. Section 12 flagged
+    # that section 6.3 never states the reference distance; this at least makes both ends agree.
+    #
+    # Once the passage completes the site stops being followed and the lookup falls back to the
+    # instantaneous heading. By then the candidate is `extent_fwd_m` behind the truck and ICBM is
+    # not acting on it (behindgate2pnw), so the fallback only affects records that were never going
+    # to be adjudicated -- and `cdbBrgD` still says which bearing was used.
+    lk_brg, lk_d = brg, (None if la is None or lo is None
+                         else round(haversine_m(la, lo, pt[0], pt[1]), 1))
+    for site in self._sites:
+      if site.bearing is not None and haversine_m(site.lat, site.lon, pt[0], pt[1]) <= self.params.site_radius_m:
+        lk_brg, lk_d = site.bearing, (None if site.bearing_d is None else round(site.bearing_d, 1))
+        break
+    if lk_brg is None:
       # Rule 2: direction is half the key, so no fix is a REFUSAL with a reason -- never a lookup
       # that silently used north.
       out["cdbWhy"] = "no bearing"
       return out
-    if la is not None and lo is not None:
-      out["cdbBrgD"] = round(haversine_m(la, lo, pt[0], pt[1]), 1)
-    row = db.match(pt[0], pt[1], brg)
+    out["cdbBrgD"] = lk_d
+    row = db.match(pt[0], pt[1], lk_brg)
     out["cdbRow"] = row is not None
     if row is not None:
       out["cdbD"] = round(haversine_m(pt[0], pt[1], row.site_lat, row.site_lon), 1)
-      out["cdbBrg"] = round(bearing_diff_deg(brg, row.bearing_deg), 1)
+      out["cdbBrg"] = round(bearing_diff_deg(lk_brg, row.bearing_deg), 1)
       out["cdbK"] = _r6(row.k_eff)
       out["cdbKUp"] = _r6(row.k_up)
       out["cdbKDn"] = _r6(row.k_down)
@@ -678,18 +785,30 @@ class CurveDBShadow:
   # -- the passage tracker --------------------------------------------------------------------
 
   def _arm(self, pt, t) -> None:
-    """Start following a candidate, deduplicated at the matcher's OWN radius.
+    """Start following a candidate, deduplicated at the matcher's OWN radius, against every site
+    armed SO FAR IN THIS DRIVE -- not merely the ones still in flight.
 
-    Deduplicating at `site_radius_m` is deliberate and mirrors ingest's `find_sites`: two points the
-    matcher would treat as one row must contribute ONE pass, or a single drive manufactures the
-    multiple passes D6 requires."""
-    for s in self._sites:
-      if haversine_m(s.lat, s.lon, pt[0], pt[1]) <= self.params.site_radius_m:
+    Deduplicating at `site_radius_m` mirrors ingest's `find_sites`: two points the matcher would
+    treat as one row must contribute ONE pass, or a single drive manufactures the multiple passes D6
+    requires. Doing it against the whole drive (as `find_sites` does) rather than the in-flight list
+    is what stops a candidate the truck has just finished measuring from being re-armed the moment
+    the passage closes -- which produced a SECOND observation of the same site from one drive, made
+    of nothing but that curve's run-out. `_armed` is cleared with the drive."""
+    for la, lo in self._armed:
+      if haversine_m(la, lo, pt[0], pt[1]) <= self.params.site_radius_m:
         return
     if len(self._sites) >= MAX_TRACKED:
       dropped = self._sites.pop(0)
       cloudlog.error(f"curvedb_shadow: {MAX_TRACKED} sites in flight, evicting the oldest " +
                      f"({dropped.lat:.5f},{dropped.lon:.5f}) -- passes are being lost")
+    if len(self._armed) >= MAX_ARMED_PER_DRIVE:
+      # Rule 2: at ~8 ICBM sites/hour this is ~500 driving hours in one un-rebooted session, so it
+      # is unreachable in practice -- but a silently forgotten prefix would let the drive re-arm
+      # sites it already measured, which is the exact defect the dedup above exists to prevent.
+      cloudlog.error(f"curvedb_shadow: {MAX_ARMED_PER_DRIVE} sites armed in one drive; the " +
+                     "oldest is being forgotten and may be re-armed and re-measured")
+      del self._armed[0]
+    self._armed.append((pt[0], pt[1]))
     self._sites.append(_Site(pt[0], pt[1], self._s, t if t is not None else 0.0))
 
   def _advance(self, *, now_wall, lat, lon, bearing, v_ego, peak, dq_bits, down_k,
@@ -704,6 +823,7 @@ class CurveDBShadow:
         s.bearing, s.bearing_d = bearing, d
       if d < s.min_d:
         s.min_d = d
+        s.s_min = self._s                   # ingest's `s_p`: the odometer at closest approach
         if now_wall is not None:
           s.t = now_wall                    # timestamp the pass at closest approach, as ingest does
       # The extent opens either at section 6.3's back edge, or -- for a candidate the truck passes
@@ -724,12 +844,26 @@ class CurveDBShadow:
             s.posted = posted_ms
           if hwy_class:
             s.hwy = hwy_class
-        if self._s - s.open_s >= self.params.extent_back_m + self.params.extent_fwd_m:
-          self._finish(s)
+        # Closed at `s_p + extent_fwd_m`, where `s_p` is CLOSEST APPROACH -- ingest's own extent
+        # (Fable C3). Measuring `extent_back + extent_fwd` forward from the OPEN instead made a
+        # wide pass (one that opens late, on recession) cover [s_p+5, s_p+180] rather than
+        # [s_p-25, s_p+150]: a different stretch of road under the same rule. `s_min` keeps moving
+        # until the truck starts receding, which is exactly when it should stop.
+        if s.s_min is not None and self._s - s.s_min >= self.params.extent_fwd_m:
+          try:
+            self._finish(s)
+          except Exception as e:
+            # A raise here (a rejected Observation, a bad date) would unwind BEFORE the
+            # `self._sites = keep` rebuild below, leaving the offending site in flight so every
+            # later record re-raises -- killing the write half, and every OTHER site with it, for
+            # the rest of the drive segment (Fable S1). The site is dropped and the failure is
+            # counted and named instead.
+            self._fail("finish", e)
+            self._ev_pending.append("finishFailed")
           continue
       elif self._s - s.s_armed > PASSAGE_SCAN_M:
         # Rule 2: a pass that never reached its candidate is a COUNTED drop, never a measurement.
-        self._ev_pending = f"notReached:{s.min_d:.0f}m"
+        self._ev_pending.append(f"notReached:{s.min_d:.0f}m")
         cloudlog.event("curvedb_shadow_pass", verdict="notReached",
                        min_d=round(s.min_d, 1), lat=round(s.lat, 6), lon=round(s.lon, 6))
         continue
@@ -749,7 +883,17 @@ class CurveDBShadow:
       # `datetime.fromtimestamp(t, None)` does NOT raise -- it returns LOCAL time, which on this
       # UTC device would file every row under the wrong PT date and silently corrupt
       # leave-one-date-out. Refuse here rather than write a plausible lie.
-      self._ev_pending = "noTz"
+      self._ev_pending.append("noTz")
+      return
+    if s.t < CLOCK_VALID_EPOCH:
+      # Same integrity argument as `noTz`, for the other way the date can be wrong (Fable S7): the
+      # 3X's RTC battery is dead, so a cold boot stamps 1970 until NTP/GPS sync -- and a bogus
+      # timestamp manufactures a distinct DATE, which is half of D6's authority key. ces_pnw MARKS
+      # such records (`clockBad`) rather than dropping them, because a record's other fields are
+      # still real; a row's date is not one of its fields, it is its identity.
+      self._ev_pending.append("clockBad")
+      cloudlog.event("curvedb_shadow_pass", verdict="clockBad", t=s.t,
+                     lat=round(s.lat, 6), lon=round(s.lon, 6))
       return
     common = dict(car=self.platform, drive_id=self._drive_id or "unknown",
                   site_lat=s.lat, site_lon=s.lon, site_src="logged",
@@ -762,10 +906,13 @@ class CurveDBShadow:
     elif s.dq_bits & DQ_ALL:
       verdicts.append("dirty:" + _dq_names(s.dq_bits))
     else:
-      self._write(Observation(date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.k_peak,
-                              kind="up", estimator="kPeak100", source="curvedb_shadow",
-                              n_ticks=s.n_ticks, dq_state="clean", **common))
-      verdicts.append("up")
+      # The verdict reports whether the observation was actually WRITTEN (Fable S4). Saying "up"
+      # while the writer is frozen at its cap -- the very state section 8.1 says must be loud --
+      # would make the per-record channel lie about the one thing it exists to report.
+      verdicts.append("up" if self._write(Observation(
+        date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.k_peak, kind="up",
+        estimator="kPeak100", source="curvedb_shadow", n_ticks=s.n_ticks,
+        dq_state="clean", **common)) else f"upDropped:{self._drop_why()}")
     # -- section 6.2 DOWN, evaluated regardless of the above ------------------------------------
     if s.down_k is not None:
       if s.bearing is None:
@@ -775,12 +922,12 @@ class CurveDBShadow:
         # measurement, so it is not a disqualifier OF ITSELF. DOWN raises k_eff and therefore only
         # ever LOWERS the derived speed (section 6.2's hard constraint), which is why `CurveRow`
         # can express "DOWN is never overwritten by UP" (D8) as a plain max.
-        self._write(Observation(date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.down_k,
-                                kind="down", estimator="slKCmd_at_override",
-                                source="curvedb_shadow", n_ticks=1, dq_state="clean", **common))
-        verdicts.append("down")
+        verdicts.append("down" if self._write(Observation(
+          date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.down_k, kind="down",
+          estimator="slKCmd_at_override", source="curvedb_shadow", n_ticks=1,
+          dq_state="clean", **common)) else f"downDropped:{self._drop_why()}")
     verdict = "+".join(verdicts) if verdicts else "none"
-    self._ev_pending = verdict
+    self._ev_pending.append(verdict)
     cloudlog.event("curvedb_shadow_pass", verdict=verdict,
                    lat=round(s.lat, 6), lon=round(s.lon, 6),
                    bearing=(None if s.bearing is None else round(s.bearing, 1)),
@@ -793,30 +940,41 @@ class CurveDBShadow:
   def _date(self, t: float) -> str:
     return pt_date(t, self._tz)
 
-  def _write(self, obs: Observation) -> None:
+  def _write(self, obs: Observation) -> bool:
     """Append one observation. Section 8.1's append-only JSONL: a torn last line is discarded on
     read, history is never rewritten.
 
     The new observation is deliberately NOT added to the live database. A pass must never be judged
     against itself (section 3.9 item 6), and "the database is as of the last boot" is a property
-    that can be stated and checked rather than reasoned about."""
+    that can be stated and checked rather than reasoned about.
+
+    Returns whether it wrote, so the caller's verdict cannot claim an observation that never
+    reached the disk."""
     if self._tz is None or self._write_stopped:
-      return
+      return False
     try:
       if os.path.getsize(self._obs_path) > OBS_MAX_BYTES:
         self._write_stopped = True
         cloudlog.error(f"curvedb_shadow: {self._obs_path} reached the {OBS_MAX_BYTES} B cap -- " +
                        "the WRITE half has STOPPED. Frozen, not rotated: the >= 2-dates history " +
                        "is the whole point of the corpus. Pull it and truncate deliberately.")
-        return
+        return False
     except OSError:
       pass                                  # no file yet / stat race -> just append
     try:
       with open(self._obs_path, "a") as f:
         f.write(json.dumps(vars(obs)) + "\n")
       self.obs_written += 1
+      return True
     except Exception as e:
       self._fail("write", e)
+      return False
+
+  def _drop_why(self) -> str:
+    """Why `_write` refused, in one word, so a dropped pass names its own cause."""
+    if self._state == "noStore":
+      return "noStore"
+    return "stopped" if self._write_stopped else "err"
 
   # -- plumbing -------------------------------------------------------------------------------
 
@@ -846,6 +1004,20 @@ def curvedb_tele(ctl, *, site_pt, now_wall, v_ego, v_set) -> dict:
   this feature) degrades to an all-null fragment instead of raising mid-record. A missing `_cdb`
   yields `cdbOn: "absent"`, which is deliberately NOT the same string as any live state -- "the
   feature is not installed" and "the feature found no site" must never read alike.
+
+  **`site_pt` IS ICBM'S OWN LATCHED CANDIDATE, NOT EVERY MAP CANDIDATE, AND THAT IS A SIZING
+  DECISION WITH A MEASUREMENT BEHIND IT.** `upcoming_curve` returns the slowest point in the next
+  ~300 m, which exists on most highway records and advances continuously -- so discovering sites
+  from it would arm a new site every few records. Measured on a real 46-minute Phase-1 drive
+  (`drives/2026-09-17/curvedb-first-capture/`): 77 distinct sites from any map candidate versus
+  **6** from ICBM's own, a 13x difference. At the broad rate an 8-week corpus is ~11,000 rows, where
+  a lookup costs ~2.2 ms and the boot build ~6.5 s (dev host); at the ICBM rate it is ~900 rows,
+  ~0.3 ms and well under a second.
+
+  It is also the right POPULATION, not merely the affordable one: a row can only ever cancel an ICBM
+  map/far slowdown, so a site ICBM never reacts to needs no row, and section 12's recurrence question
+  was itself measured over ICBM episodes. The cost is that a pass over a site on a day when ICBM did
+  NOT react there contributes nothing -- flagged, not hidden.
 
   **This function's return value has exactly one permitted destination: a `**` splat into
   `_event_record`'s record dict.** Enforced by tests/test_curvedb_read_boundary.py."""

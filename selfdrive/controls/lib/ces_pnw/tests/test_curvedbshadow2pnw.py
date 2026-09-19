@@ -47,6 +47,10 @@ from openpilot.tools.curvedb.store import PROVISIONAL_PARAMS, CurveDB, Observati
 NS = types.SimpleNamespace
 
 M_PER_DEG_LAT = 111320.0
+# A REAL epoch (2026-09-18 PT). `_finish` refuses to file a row stamped before
+# CLOCK_VALID_EPOCH, because the dead RTC makes a cold boot read 1970 and a bogus
+# timestamp manufactures a distinct DATE -- half of D6's authority key.
+T0 = 1788300000.0
 
 
 def _north(lat, metres):
@@ -55,6 +59,7 @@ def _north(lat, metres):
 
 def _shadow(tmp_path, platform=LIGHTNING, config=None, obs=()):
   """A shadow with its files under tmp_path, loaded SYNCHRONOUSLY so the test is deterministic."""
+  tmp_path.mkdir(parents=True, exist_ok=True)
   obs_path = tmp_path / "obs.jsonl"
   obs_path.write_text("".join(json.dumps(vars(o)) + "\n" for o in obs))
   cfg_path = tmp_path / "curvedb.json"
@@ -65,7 +70,7 @@ def _shadow(tmp_path, platform=LIGHTNING, config=None, obs=()):
 
 
 def _obs(**over):
-  base = dict(date="2026-09-10", t=1.0e9, car=LIGHTNING, drive_id="d0",
+  base = dict(date="2026-09-10", t=T0, car=LIGHTNING, drive_id="d0",
               site_lat=LAT0, site_lon=LON0, bearing_deg=0.0, k=0.01, kind="up",
               estimator="kPeak100", site_src="logged", source="test", posted_ms=26.8,
               highway_class="motorway", n_ticks=10, dq_state="clean", dq_src="rollup100")
@@ -85,7 +90,7 @@ def _site(north_m=SITE_M, east_m=0.0):
   return (lat, LON0 + east_m / (M_PER_DEG_LAT * math.cos(math.radians(lat))))
 
 
-def _drive_past(sh, site, *, n=80, step_m=10.0, v=25.0, t0=1.0e9, bearing=0.0,
+def _drive_past(sh, site, *, n=80, step_m=10.0, v=25.0, t0=T0, bearing=0.0,
                 bearing_per_tick=None,
                 k_per_tick=None, dq_per_tick=None, str_prs_at=None, k_cmd=0.004,
                 posted=26.8, hwy="motorway", arm=True):
@@ -200,7 +205,7 @@ class TestUp:
         # a 0.03 spike AND a blinker, both confined to record 41 -- inside site 1's extent only
         sh.tick(0.03 if (i, j) == (41, 5) else 0.001, None, None,
                 cs.DQ_BLNK if i == 41 else 0, 25.0, False)
-      sh.record(now_wall=1.0e9 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
+      sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
                 v_ego=25.0, site_pt=(s1 if i < 60 else s2), posted_ms=26.8, hwy_class="motorway",
                 icbm_src=None, icbm_target_ms=None, ref_ms=None)
     ups = [r for r in _written(sh) if r["kind"] == "up"]
@@ -230,12 +235,12 @@ class TestUp:
                   v_ego=25.0, site_pt=site, posted_ms=26.8, hwy_class="motorway",
                   icbm_src=None, icbm_target_ms=None, ref_ms=None)
 
-    drive(0, 46, 1.0e9)                        # CES on: site armed, extent open, gentle road
+    drive(0, 46, T0)                        # CES on: site armed, extent open, gentle road
     assert sh._sites, "the site was not still in flight; the test would prove nothing"
     for _ in range(6000):                      # 60 s of CES-OFF ticking, tight and blinkered
       sh.tick(0.05, None, None, cs.DQ_BLNK, 25.0, False)
     assert 0.0 < cs.DRIVE_GAP_S and 60.0 < cs.DRIVE_GAP_S   # short enough that sites survive
-    drive(46, 80, 1.0e9 + 60.0)                # CES back on, same passage finishes
+    drive(46, 80, T0 + 60.0)                # CES back on, same passage finishes
 
     ups = [r for r in _written(sh) if r["kind"] == "up"]
     assert len(ups) == 1, "the passage was contaminated by the CES-off window and disqualified"
@@ -251,7 +256,7 @@ class TestUp:
     speeds = [30.0, 28.0, 24.0, 18.0, 12.0, 12.0, 16.0, 22.0]
     dt = 1.0
     for i, v in enumerate(speeds):
-      sh.record(now_wall=1.0e9 + i * dt, lat=LAT0, lon=LON0, bearing=0.0, v_ego=v, site_pt=None,
+      sh.record(now_wall=T0 + i * dt, lat=LAT0, lon=LON0, bearing=0.0, v_ego=v, site_pt=None,
                 posted_ms=26.8, hwy_class="motorway", icbm_src=None, icbm_target_ms=None,
                 ref_ms=None)
     expect = sum(0.5 * (a + b) * dt for a, b in zip(speeds, speeds[1:], strict=False))
@@ -402,11 +407,93 @@ class TestKeying:
     for i in range(40):
       for _ in range(40):
         sh.tick(0.003, None, None, 0, 25.0, False)
-      rec.append(sh.record(now_wall=1.0e9 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0,
+      rec.append(sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0,
                            bearing=5.0, v_ego=25.0, site_pt=site, posted_ms=26.8,
                            hwy_class="motorway", icbm_src=None, icbm_target_ms=None, ref_ms=None))
     rows = _written(sh)
     assert rows and rows[0]["bearing_deg"] == pytest.approx(5.0)
+
+  def test_a_bearing_of_exactly_360_does_not_wedge_the_tracker(self, tmp_path):
+    """`Observation` rejects a bearing outside [0, 360), and a raise inside `_finish` unwinds
+    `_advance` BEFORE its `self._sites = keep` rebuild -- so the offending site is never removed,
+    every later record re-raises, and the write half dies for the rest of the drive segment along
+    with every other site in flight. `ingest.normalise` does `bearing %= 360.0`; so does this."""
+    sh = _shadow(tmp_path)
+    _drive_past(sh, _site(), bearing=360.0)
+    rows = [r for r in _written(sh) if r["kind"] == "up"]
+    assert len(rows) == 1 and rows[0]["bearing_deg"] == pytest.approx(0.0)
+    assert sh.err == 0 and not sh._sites, "the site was stranded in flight"
+
+  def test_the_stored_peak_is_the_quantity_ingest_reads_not_a_wider_one(self, tmp_path):
+    """A row is labelled `estimator="kPeak100"`, and ingest's `_tick_k` reads the record's `kPeak`,
+    which is `max(|k_actl|, |k_cmd|)` -- `kPose` is a SEPARATE column. Folding the localizer into
+    the stored peak would make the car's rows and the replay's rows two different numbers under one
+    label, on the Tesla in particular (dead `k_actl`, so the row would be pose-only on the car and
+    commanded-only in the replay)."""
+    sh = _shadow(tmp_path)
+    site = _site()
+    for i in range(80):
+      for _ in range(40):
+        # localizer reads a tight bend; CAN and the planner both read a gentle one
+        sh.tick(0.001, 0.001, 0.05, 0, 25.0, False)
+      sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
+                v_ego=25.0, site_pt=site, posted_ms=26.8, hwy_class="motorway",
+                icbm_src=None, icbm_target_ms=None, ref_ms=None)
+    rows = [r for r in _written(sh) if r["kind"] == "up"]
+    assert len(rows) == 1
+    assert rows[0]["k"] == pytest.approx(0.001), "kPose was folded into the stored peak"
+    assert rows[0]["estimator"] == "kPeak100"
+
+  def test_a_wide_pass_measures_ingests_extent_not_a_shifted_one(self, tmp_path):
+    """The extent closes at `s_p + extent_fwd_m`, where `s_p` is CLOSEST APPROACH -- ingest's own
+    rule. Measuring `extent_back + extent_fwd` forward from the OPEN instead shifts a WIDE pass's
+    window (one that opens late, on recession) by the whole back extent: [s_p+5, s_p+180] rather
+    than [s_p-25, s_p+150]. A spike 165 m past the apex is outside the real extent and inside the
+    shifted one, so it is what tells them apart."""
+    sh = _shadow(tmp_path)
+    site = _site(north_m=400.0, east_m=60.0)      # 60 m off the line: > extent_back_m, < PASSAGE_MAX_M
+    for i in range(90):
+      for _ in range(40):
+        # apex at record 40 (s=400); the spike sits at s=565, i.e. 165 m past it
+        sh.tick(0.02 if i == 56 else 0.001, None, None, 0, 25.0, False)
+      sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
+                v_ego=25.0, site_pt=site, posted_ms=26.8, hwy_class="motorway",
+                icbm_src=None, icbm_target_ms=None, ref_ms=None)
+    rows = [r for r in _written(sh) if r["kind"] == "up"]
+    assert len(rows) == 1, rows
+    assert rows[0]["k"] == pytest.approx(0.001), \
+      "the extent reached 165 m past the apex -- it is measured from the open, not the apex"
+
+  def test_the_lookup_uses_the_APPROACH_bearing_not_the_heading_in_the_bend(self, tmp_path):
+    """`cdbRow` is the one number this feature exists to measure, and keying the lookup on the
+    truck's instantaneous heading biases it LOW: the write half keyed the row on the bearing sampled
+    at `approach_bearing_ref_m`, so inside the bend (sweep median 19 deg, p90 62 deg) the same site
+    stops matching. When the candidate is one the tracker is already following, its own sampled
+    approach bearing is used -- and `cdbBrgD` then reports where THAT bearing was taken."""
+    site = _site()
+    obs = [_obs(site_lat=site[0], site_lon=site[1], bearing_deg=0.0, k=0.004,
+                date=f"2026-09-1{d}", drive_id=f"d{d}") for d in range(2)]
+    sh = _shadow(tmp_path, obs=obs)
+    hits = []
+    for i in range(60):
+      for _ in range(40):
+        sh.tick(0.004, None, None, 0, 25.0, False)
+      # heading 0 on the approach, swinging to 90 deg through the bend -- far outside heading_tol
+      brg = 0.0 if i < 38 else 90.0
+      frag = sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=brg,
+                       v_ego=25.0, site_pt=site, posted_ms=26.8, hwy_class="motorway",
+                       icbm_src="far", icbm_target_ms=18.0, ref_ms=26.8)
+      if frag["cdbSite"]:
+        # `tracked` is read AFTER the call, and the passage is closed inside it -- so it says
+        # exactly which bearing that record's lookup used. Once the passage completes the site is
+        # no longer followed and the lookup falls back to the instantaneous heading; by then the
+        # candidate is 150 m behind the truck and ICBM is not acting on it.
+        hits.append((i, frag["cdbRow"], frag["cdbBrg"], bool(sh._sites)))
+    in_bend = [h for h in hits if h[0] >= 40 and h[3]]
+    assert len(in_bend) >= 5, f"the test never drove the bend with the site tracked: {hits}"
+    assert all(h[1] for h in in_bend), \
+      "the row stopped matching inside the bend -- the lookup used the instantaneous heading"
+    assert all(h[2] == pytest.approx(0.0) for h in in_bend)
 
   def test_a_pass_that_never_reaches_the_candidate_is_a_counted_drop_not_a_measurement(self, tmp_path):
     """Rule 2. A site the truck turned away from must not silently vanish -- a silent no-action is
@@ -428,7 +515,7 @@ class TestKeying:
       pt = site if i % 2 else near
       for _ in range(40):
         sh.tick(0.002, None, None, 0, 25.0, False)
-      sh.record(now_wall=1.0e9 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
+      sh.record(now_wall=T0 + i * 0.4, lat=_north(LAT0, i * 10.0), lon=LON0, bearing=0.0,
                 v_ego=25.0, site_pt=pt, posted_ms=26.8, hwy_class="motorway",
                 icbm_src=None, icbm_target_ms=None, ref_ms=None)
     assert len([r for r in _written(sh) if r["kind"] == "up"]) == 1
@@ -474,7 +561,7 @@ class TestAuthorityRefusals:
     must never exceed the reference the driver already chose."""
     obs = [_obs(k=0.001, date=f"2026-09-1{d}", drive_id=f"d{d}") for d in range(2)]
     sh = _shadow(tmp_path, obs=obs)
-    tele = sh.record(now_wall=1.0e9, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0, v_ego=27.0,
+    tele = sh.record(now_wall=T0, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0, v_ego=27.0,
                      site_pt=(LAT0, LON0), posted_ms=26.8, hwy_class="motorway",
                      icbm_src="far", icbm_target_ms=18.0, ref_ms=26.8)
     assert tele["cdbRow"] is True
@@ -483,7 +570,7 @@ class TestAuthorityRefusals:
     assert tele["cdbWould"] <= 26.8
 
     # ...and with a reference BELOW the row's speed it is the reference that binds, never the row.
-    tele2 = sh.record(now_wall=1.0e9 + 1, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0,
+    tele2 = sh.record(now_wall=T0 + 1, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0,
                       v_ego=20.0, site_pt=(LAT0, LON0), posted_ms=26.8, hwy_class="motorway",
                       icbm_src="far", icbm_target_ms=18.0, ref_ms=19.0)
     assert tele2["cdbWould"] == pytest.approx(19.0)
@@ -497,7 +584,7 @@ class TestAuthorityRefusals:
     speed, justified by nothing but a row that says "this road is straight"."""
     obs = [_obs(k=0.001, date=f"2026-09-1{d}", drive_id=f"d{d}") for d in range(2)]
     sh = _shadow(tmp_path, obs=obs)
-    tele = sh.record(now_wall=1.0e9, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0, v_ego=35.0,
+    tele = sh.record(now_wall=T0, lat=_north(LAT0, -300.0), lon=LON0, bearing=0.0, v_ego=35.0,
                      site_pt=(LAT0, LON0), posted_ms=26.8, hwy_class="motorway",
                      icbm_src="far", icbm_target_ms=18.0, ref_ms=40.0)
     assert tele["cdbVRow"] == pytest.approx(26.8), "v_row was not capped at the posted limit"
@@ -528,7 +615,7 @@ class TestNonCircularityAndLiveness:
     `cdbOn == "on"` is "no candidate here"; `cdbOn == "err"` is "the shadow is broken"; and
     `cdbOn == "loading"` is "ask again in a second" -- none of which may look like the others."""
     sh = _shadow(tmp_path)
-    quiet = sh.record(now_wall=1.0e9, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0, site_pt=None,
+    quiet = sh.record(now_wall=T0, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0, site_pt=None,
                       posted_ms=26.8, hwy_class="motorway", icbm_src=None, icbm_target_ms=None,
                       ref_ms=None)
     assert quiet["cdbOn"] == "on" and quiet["cdbSite"] is False and quiet["cdbRow"] is None
@@ -536,7 +623,7 @@ class TestNonCircularityAndLiveness:
 
     sh._state = "loading"
     sh._db = None
-    loading = sh.record(now_wall=1.0e9 + 1, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0,
+    loading = sh.record(now_wall=T0 + 1, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0,
                         site_pt=(LAT0, LON0), posted_ms=26.8, hwy_class="motorway",
                         icbm_src=None, icbm_target_ms=None, ref_ms=None)
     assert loading["cdbSite"] is True and loading["cdbRow"] is None
@@ -547,9 +634,9 @@ class TestNonCircularityAndLiveness:
     appears only sometimes is a null column that reads as "the feature did not trigger"."""
     sh = _shadow(tmp_path)
     paths = [
-      sh.record(now_wall=1.0e9, lat=None, lon=None, bearing=None, v_ego=None, site_pt=None,
+      sh.record(now_wall=T0, lat=None, lon=None, bearing=None, v_ego=None, site_pt=None,
                 posted_ms=None, hwy_class=None, icbm_src=None, icbm_target_ms=None, ref_ms=None),
-      cs.curvedb_tele(NS(), site_pt=None, now_wall=1.0e9, v_ego=25.0, v_set=26.8),
+      cs.curvedb_tele(NS(), site_pt=None, now_wall=T0, v_ego=25.0, v_set=26.8),
     ]
     for frag in paths:
       assert set(frag) == set(cs.CURVEDB_TELE_KEYS), set(frag) ^ set(cs.CURVEDB_TELE_KEYS)
@@ -570,6 +657,53 @@ class TestNonCircularityAndLiveness:
     evs = [t["cdbEv"] for t in tele if t["cdbEv"]]
     assert evs == ["noTz"], evs
 
+  def test_a_dead_rtc_timestamp_is_refused_not_filed_under_1970(self, tmp_path):
+    """The 3X's RTC battery is dead, so a cold boot stamps records 1970 until NTP/GPS sync -- and a
+    bogus timestamp manufactures a distinct DATE, which is half of D6's authority key. ces_pnw MARKS
+    such records (`clockBad`) rather than dropping them, because a record's other fields are still
+    real; a row's date is not one of its fields, it is its identity."""
+    sh = _shadow(tmp_path)
+    tele = _drive_past(sh, _site(), t0=1.0e9)          # 2001: before CLOCK_VALID_EPOCH
+    assert not _written(sh)
+    assert [t["cdbEv"] for t in tele if t["cdbEv"]] == ["clockBad"]
+    # ...and the SAME drive with a real clock does produce a row, or this proves only that the
+    # harness is broken.
+    sh2 = _shadow(tmp_path / "ok")
+    _drive_past(sh2, _site(), t0=T0)
+    assert [r for r in _written(sh2) if r["kind"] == "up"]
+
+  def test_the_clock_epoch_is_the_one_ces_pnw_uses(self):
+    assert cs.CLOCK_VALID_EPOCH == m.CLOCK_VALID_EPOCH
+
+  def test_a_frozen_writer_never_reports_a_row_it_did_not_write(self, tmp_path):
+    """Rule 2. At the cap -- the state section 8.1 says must be loud -- the per-record verdict must
+    not read "up". A channel that lies about the one thing it exists to report is worse than none."""
+    sh = _shadow(tmp_path)
+    sh._write_stopped = True
+    tele = _drive_past(sh, _site())
+    assert not _written(sh) and sh.obs_written == 0
+    evs = [t["cdbEv"] for t in tele if t["cdbEv"]]
+    assert evs == ["upDropped:stopped"], evs
+
+  def test_two_passages_finishing_on_one_record_both_report(self, tmp_path):
+    """`cdbEv` is one field and a record can close more than one passage; overwriting would drop a
+    verdict silently."""
+    sh = _shadow(tmp_path)
+    sh._ev_pending = ["up", "dirty:blnk"]
+    frag = sh.record(now_wall=T0, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0, site_pt=None,
+                     posted_ms=26.8, hwy_class="motorway", icbm_src=None, icbm_target_ms=None,
+                     ref_ms=None)
+    assert frag["cdbEv"] == "up;dirty:blnk"
+
+  def test_a_site_is_not_re_armed_after_its_passage_completes(self, tmp_path):
+    """Ingest's `find_sites` dedups over the WHOLE drive. Deduping only against the in-flight list
+    let a candidate the truck had just finished measuring be re-armed the instant the passage
+    closed, producing a SECOND observation of the same site from one drive made of nothing but that
+    curve's run-out."""
+    sh = _shadow(tmp_path)
+    _drive_past(sh, _site(), n=140)               # long enough for a re-arm to complete too
+    assert len([r for r in _written(sh) if r["kind"] == "up"]) == 1
+
   def test_a_corrupt_observation_line_is_discarded_and_counted(self, tmp_path):
     """Section 8.1: a torn last line is discarded (append-only), and the store must fail SAFE to
     "no database" -- but it must SAY SO."""
@@ -585,6 +719,24 @@ class TestNonCircularityAndLiveness:
     cfg.write_text("{not json")
     params, enabled, note = cs._load_config(str(cfg))
     assert params is PROVISIONAL_PARAMS and enabled and "unreadable" in note
+
+  def test_the_config_cannot_retune_what_a_stored_row_MEANS(self, tmp_path):
+    """Only the MATCHING half is tunable. The measurement half (`extent_*`,
+    `approach_bearing_ref_m`, `down_trigger_a_lat_ms2`, `min_speed_ms`) decides what a stored row
+    means, and an `Observation` carries no record of the params it was measured under -- so a hand
+    edit would silently make new rows non-comparable with old ones and with the replay's."""
+    cfg = tmp_path / "curvedb.json"
+    cfg.write_text(json.dumps({"extent_fwd_m": 400.0, "min_speed_ms": 1.0,
+                               "a_lat_comfort_ms2": 9.0, "min_passes": 1,
+                               "site_radius_m": 55.0}))
+    params, enabled, note = cs._load_config(str(cfg))
+    assert params.site_radius_m == 55.0, "the matching half must still be tunable"
+    assert params.extent_fwd_m == PROVISIONAL_PARAMS.extent_fwd_m
+    assert params.min_speed_ms == PROVISIONAL_PARAMS.min_speed_ms
+    assert params.a_lat_comfort_ms2 == PROVISIONAL_PARAMS.a_lat_comfort_ms2
+    assert params.min_passes == PROVISIONAL_PARAMS.min_passes
+    # Rule 2: ignoring a key the owner deliberately typed must not be silent.
+    assert "ignoring" in note and "extent_fwd_m" in note, note
 
   def test_an_out_of_range_override_is_rejected_with_a_reason(self, tmp_path):
     cfg = tmp_path / "curvedb.json"
@@ -602,7 +754,7 @@ class TestNonCircularityAndLiveness:
   def test_disabled_means_disabled(self, tmp_path):
     sh = _shadow(tmp_path, config={"enabled": False})
     assert sh._state == "off"
-    frag = sh.record(now_wall=1.0e9, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0,
+    frag = sh.record(now_wall=T0, lat=LAT0, lon=LON0, bearing=0.0, v_ego=25.0,
                      site_pt=(LAT0, LON0), posted_ms=26.8, hwy_class="motorway",
                      icbm_src="far", icbm_target_ms=18.0, ref_ms=26.8)
     assert frag["cdbOn"] == "off" and frag["cdbSite"] is False and frag["cdbWould"] is None
@@ -612,8 +764,8 @@ class TestNonCircularityAndLiveness:
     site on two days and still count as one pass -- and authority would never be reachable."""
     site = _site()
     sh = _shadow(tmp_path)
-    _drive_past(sh, site, t0=1.0e9)
-    _drive_past(sh, site, t0=1.0e9 + 86400)
+    _drive_past(sh, site, t0=T0)
+    _drive_past(sh, site, t0=T0 + 86400)
     rows = [r for r in _written(sh) if r["kind"] == "up"]
     assert len(rows) == 2
     assert len({r["drive_id"] for r in rows}) == 2
@@ -718,7 +870,7 @@ class TestOnTheRealCallPath:
   def test_a_loaded_row_is_found_and_reported_with_its_match_geometry(self, monkeypatch, tmp_path):
     """`cdbRow` is the number section 12 says decides whether Phase 2 is viable at all, and
     `cdbD`/`cdbBrg`/`cdbBrgD` are what let the keying be tuned from real data rather than argued."""
-    obs = [Observation(date=f"2026-09-1{d}", t=1.0e9 + d, car=LIGHTNING, drive_id=f"d{d}",
+    obs = [Observation(date=f"2026-09-1{d}", t=T0 + d, car=LIGHTNING, drive_id=f"d{d}",
                        site_lat=_north(LAT0, 300.0), site_lon=LON0, bearing_deg=0.0, k=0.004,
                        kind="up", estimator="kPeak100", site_src="logged", source="t",
                        posted_ms=26.8, highway_class="motorway", n_ticks=12,

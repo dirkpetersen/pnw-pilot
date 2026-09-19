@@ -50,6 +50,9 @@ from openpilot.tools.curvedb.store import PROVISIONAL_PARAMS, CurveDB, Observati
 
 NS = types.SimpleNamespace
 
+# A real epoch: see test_curvedbshadow2pnw.py's T0.
+T0 = 1788300000.0
+
 CES_PNW_PATH = pathlib.Path(m.__file__).resolve()
 SHADOW_PATH = pathlib.Path(cs.__file__).resolve()
 def _repo_root() -> pathlib.Path:
@@ -75,6 +78,21 @@ def _parents(tree: ast.AST) -> dict[int, ast.AST]:
   for node in ast.walk(tree):
     for child in ast.iter_child_nodes(node):
       out[id(child)] = node
+  return out
+
+
+def _docstring_ids(tree) -> set[int]:
+  """Docstrings are `ast.Constant` nodes too, and these modules' own prose EXPLAINS the rules being
+  enforced -- so a naive string scan fails on the explanation of the rule it is enforcing (it did,
+  on `tools/curvedb_telemetry_check.py` appearing in a comment about a different feature). Code
+  strings are still scanned; only the prose is exempt."""
+  out = set()
+  for node in ast.walk(tree):
+    if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+      body = getattr(node, "body", None) or []
+      if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+         and isinstance(body[0].value.value, str):
+        out.add(id(body[0].value))
   return out
 
 
@@ -128,6 +146,33 @@ class TestL1CesPnwSyntacticPositions:
       n_tick += 1
     assert (n_ctor, n_tick) == (1, 1), f"expected exactly one ctor and one tick, got {n_ctor}/{n_tick}"
 
+  def test_the_shadow_cannot_be_reached_by_a_name_the_ast_walk_would_miss(self):
+    """L1's other tests walk `ast.Attribute`, so `getattr(self, "_cdb")` or `self.__dict__["_cdb"]`
+    would slip past them -- and so would a SECOND CurveDBShadow under a different attribute name, or
+    a second import of the module under an alias (Fable C1).
+
+    Closed by three counts, all on the parsed tree: no string literal may spell any of the shadow's
+    identifiers, there is exactly one `CurveDBShadow(...)` construction, and exactly one import of
+    the module."""
+    tree = _tree(CES_PNW_PATH)
+    docs = _docstring_ids(tree)
+    for node in ast.walk(tree):
+      if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+        for name in ("_cdb", "curvedb_tele", "CurveDBShadow", "curvedb_shadow"):
+          assert name not in node.value, (
+            f"ces_pnw.py spells {name!r} in a STRING at line {node.lineno} -- a getattr/setattr " +
+            "or an importlib reach that the attribute walk cannot see")
+    ctors = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "CurveDBShadow"]
+    assert len(ctors) == 1, f"{len(ctors)} CurveDBShadow constructions; exactly one is allowed"
+    imports = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+               and (n.module or "").endswith("curvedb_shadow")]
+    assert len(imports) == 1, f"{len(imports)} imports of curvedb_shadow; exactly one is allowed"
+    names = {(a.name, a.asname) for n in imports for a in n.names}
+    assert names == {("CurveDBShadow", None), ("curvedb_tele", None)}, \
+      f"ces_pnw.py imports {names} from curvedb_shadow -- only the two entry points, unaliased"
+
   def test_the_telemetry_builder_is_only_ever_splatted_into_a_dict_literal(self):
     """`curvedb_tele(...)`'s return may be bound to NO name. It goes straight into `{**...}`.
 
@@ -170,9 +215,16 @@ class TestL1CesPnwSyntacticPositions:
     tree = _tree(CES_PNW_PATH)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "_icbm_step")
-    src = ast.unparse(fn)
-    for name in ("_cdb", "curvedb", "cdb_pt", "CurveDBShadow"):
-      assert name not in src, f"_icbm_step mentions {name!r}"
+    # Parsed, not grepped on the unparsed text: `"_c" + "db"` defeats a substring scan (Fable C1).
+    attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+    names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    for name in ("_cdb", "curvedb_tele", "CurveDBShadow", *cs.CURVEDB_TELE_KEYS):
+      assert name not in attrs | names, f"_icbm_step reaches {name!r}"
+    for node in ast.walk(fn):
+      if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        for frag in ("cdb", "curvedb"):
+          assert frag not in node.value, \
+            f"_icbm_step builds the string {node.value!r} at line {node.lineno}"
 
 
 # =====================================================================================================
@@ -204,20 +256,6 @@ class TestL2ShadowModuleIsSealed:
           assert mod in self.ALLOWED_OPENPILOT_IMPORTS, \
             f"curvedb_shadow imports {mod!r}; allowed: {sorted(self.ALLOWED_OPENPILOT_IMPORTS)}"
 
-  @staticmethod
-  def _docstring_ids(tree) -> set[int]:
-    """Docstrings are `ast.Constant` nodes too, and this module's own prose explains WHY it does not
-    branch on a fingerprint -- so a naive string scan fails on the explanation of the rule it is
-    enforcing."""
-    out = set()
-    for node in ast.walk(tree):
-      if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-        body = getattr(node, "body", None) or []
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
-           and isinstance(body[0].value.value, str):
-          out.add(id(body[0].value))
-    return out
-
   def test_it_never_branches_on_a_car_fingerprint(self):
     """The capability-view rule (driver directive 2026-07-11): feature code reads a capability, it
     never compares a fingerprint string.
@@ -227,7 +265,7 @@ class TestL2ShadowModuleIsSealed:
     and which the offline replay must share or the replay validates nothing. A comparison would be
     the thing the rule forbids."""
     tree = _tree(SHADOW_PATH)
-    docs = self._docstring_ids(tree)
+    docs = _docstring_ids(tree)
     for node in ast.walk(tree):
       if isinstance(node, ast.Compare):
         src = ast.unparse(node)
@@ -288,6 +326,24 @@ class TestL3NobodyElseImportsIt:
       "selfdrive/controls/lib/ces_pnw/tests/test_curvedbshadow2pnw.py",
     }
     assert importers == expected, f"unexpected references to curvedb_shadow: {importers ^ expected}"
+
+  def test_nobody_else_reads_the_store_files_either(self):
+    """L1-L4 all reason about the MODULE. A second control-path reader of
+    `/data/pnw/curvedb_obs.jsonl` -- a daemon, a UI panel, a different controller -- would bypass
+    every one of them and could feed a row to something that acts on it (Fable C1)."""
+    offenders = {}
+    for path in _py_files():
+      try:
+        text = path.read_text()
+      except (OSError, UnicodeDecodeError):
+        continue
+      if "curvedb_obs" in text or "curvedb.json" in text:
+        offenders[path.relative_to(REPO).as_posix()] = True
+    assert set(offenders) == {
+      "selfdrive/controls/lib/ces_pnw/curvedb_shadow.py",
+      "selfdrive/controls/lib/ces_pnw/tests/test_curvedb_read_boundary.py",
+      "selfdrive/controls/lib/ces_pnw/tests/test_curvedbshadow2pnw.py",
+    }, f"unexpected readers of the curvedb store files: {sorted(offenders)}"
 
   def test_no_control_path_module_reaches_into_tools_curvedb(self):
     """`tools/curvedb` is the offline half. Exactly one control-path module may import it (the
@@ -365,7 +421,7 @@ def _row_that_would_cancel_everything(tmp_path):
   obs = []
   for i in range(6):
     obs.append(Observation(
-      date=f"2026-09-{10 + i:02d}", t=1.0e9 + i, car=LIGHTNING, drive_id=f"d{i}",
+      date=f"2026-09-{10 + i:02d}", t=T0 + i, car=LIGHTNING, drive_id=f"d{i}",
       site_lat=LAT0 + 300.0 / 111320.0, site_lon=LON0, bearing_deg=0.0,
       k=1e-3, kind="up", estimator="kPeak100", site_src="logged", source="test",
       posted_ms=60 * MPH, highway_class="motorway", n_ticks=20,
@@ -402,6 +458,13 @@ def _run(monkeypatch, tmp_path, observations, ticks=400):
                            "ts": clock[0], "fix_ts": clock[0] - 0.3})
       if k == "MapSpeedLimit":
         return str(60 * MPH)
+      if k == "MapHighwayClass":
+        # WITHOUT THIS, L5 IS VACUOUS (Fable M1). `authority()` refuses on an unknown highway class
+        # -- "a ramp we cannot see is still a ramp" -- so run B's row would be REFUSED, cdbWould
+        # would equal icbmT, and a wiring like `pub_target = max(pub_target, cdbWould)` would be a
+        # behavioural no-op. The test would then pass while proving nothing at all, which is the
+        # exact class of defect this file exists to prevent.
+        return "motorway"
       return None
 
     def put_nonblocking(self, k, v):
@@ -456,9 +519,17 @@ class TestL5TheDatabaseChangesNothing:
     assert a_icbm == b_icbm, "the curve database moved the published IcbmTarget"
     assert a_dec == b_dec, "the curve database moved the CES decision"
 
-    # ...and the database WAS loaded and DID say something different, or the comparison is vacuous.
+    # ...and the database WAS loaded, DID match, and DID GRANT -- so a wiring that read `cdbWould`
+    # would MEASURABLY change the target. Matching alone is not enough: an authority refusal makes
+    # cdbWould == icbmT and every boundary mutant a no-op (Fable M1).
     assert any(r.get("cdbRow") for r in b_rec), "run B never matched a row; the test proves nothing"
     assert not any(r.get("cdbRow") for r in a_rec), "run A matched a row with an empty database"
+    granted = [r for r in b_rec if r.get("cdbVRow") is not None]
+    assert granted, ("run B never GRANTED authority (cdbWhy: " +
+                     f"{ {r.get('cdbWhy') for r in b_rec if r.get('cdbSite')} }) -- " +
+                     "with no grant, cdbWould == icbmT and this test cannot detect a wiring")
+    assert any((r.get("cdbGive") or 0.0) > 1.0 for r in granted), \
+      "run B's database would not have moved the target by more than 1 m/s; nothing to detect"
 
     assert len(a_rec) == len(b_rec)
     keys = set(cs.CURVEDB_TELE_KEYS)
@@ -466,6 +537,34 @@ class TestL5TheDatabaseChangesNothing:
       assert {k: v for k, v in ra.items() if k not in keys} == \
              {k: v for k, v in rb.items() if k not in keys}, \
         "a non-cdb* record field differs between the two databases"
+
+  def test_L5_alone_catches_a_wiring_L1_TO_L4_CANNOT_SEE(self, monkeypatch, tmp_path):
+    """L5's advertised role is "catches a hole in L1's allow-list". That claim is itself tested here.
+
+    Every boundary mutant applied to the SOURCE is caught by L1 or L2, so until now nothing proved
+    L5 could catch anything on its own (Fable M1). This wires the database into the published target
+    at RUNTIME -- no new `_cdb` attribute, no new `curvedb_tele` call site, no `cdb*` string, nothing
+    for an AST walk of `ces_pnw.py` to find -- and asserts the run-twice comparison still fails.
+
+    If this test ever stops failing-then-passing, L5 has become decorative."""
+    real = m.CESController._icbm_step
+
+    def wired(self, sig, active):
+      real(self, sig, active)
+      frag = cs.curvedb_tele(self, site_pt=getattr(self, "_icbm_cand_pt", None),
+                             now_wall=1.8e9, v_ego=sig["v_ego"], v_set=sig["v_set"])
+      if frag.get("cdbWould") is not None and self._icbm_last_target is not None:
+        self._icbm_last_target = max(self._icbm_last_target, frag["cdbWould"])
+        if self.mem_params is not None:
+          self.mem_params.put_nonblocking("IcbmTarget", {"target": self._icbm_last_target,
+                                                         "ceiling": sig["v_set"], "ts": 0.0})
+
+    monkeypatch.setattr(m.CESController, "_icbm_step", wired)
+    a_icbm, _, _ = _run(monkeypatch, tmp_path / "wa", [])
+    b_icbm, _, _ = _run(monkeypatch, tmp_path / "wb", _row_that_would_cancel_everything(tmp_path))
+    assert a_icbm != b_icbm, (
+      "the database was wired into IcbmTarget at runtime and L5's comparison did NOT notice -- " +
+      "L5 is decorative and the boundary rests on L1's static allow-list alone")
 
   def test_a_shadow_that_raises_on_every_call_changes_nothing(self, monkeypatch, tmp_path):
     """Rule 2's other half: the shadow failing must cost telemetry, never control.
