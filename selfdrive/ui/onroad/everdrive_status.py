@@ -7,10 +7,12 @@ the middle of the screen. That is the driver's hard layout constraint, inherited
 box docstring; the width is fixed from exemplars (below) precisely so it cannot creep toward centre as
 digits change.
 
-Driver-approved formats (2026-09-19):
-    charging, moving:    ED: 1.4 kW   112 -> 117 mi
-    charging, stopped:   ED: 1.4 kW   112 mi  +2.7 mi/h
-    not charging:        ED: --       112 mi
+Driver-approved formats (2026-09-19, revised to the COMPACT shapes at _FS 48 on 2026-09-19 so the
+box matches the font size of the CES box stacked directly above it -- ces_status._FS_SM is 48):
+    charging, moving:    ED:1.4kw,112mi->117mi
+    charging, stopped:   ED:1.4kw,112mi,+2.7mi/h
+    not charging:        ED:--,112mi
+    effOk False:         ED:1.4kw,112mi
 
 `->` is ASCII on purpose. The device font atlas is built by selfdrive/assets/fonts/process.py from
 `chr(32..126)` plus a short EXTRA_CHARS list that does NOT contain U+2192 "→" — a unicode arrow would
@@ -51,12 +53,15 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
                           #   a RED alarm that must not false-fire during spin-up. This box has no
                           #   alarm — its stale action is "hide", which is also its state before the
                           #   first publish — so a grace timer would change nothing here.)
-_FS = 40                  # font size. Chosen as the largest size at which the WIDEST exemplar box
-                          #   (text + 2*_PAD) still fits the driver's ~700 px budget: 649.3 px at 40 vs
-                          #   709.5 px at 44 (measured against the real Inter-Medium .fnt metrics at the
-                          #   device's FONT_SCALE=1.16). Keeping the roomy driver-approved format at a
-                          #   slightly smaller size beat falling back to the compact form at a larger one.
-_LINE_H = 50              # _FS * 1.25, the same line-height ratio ces_status.py uses
+_FS = 48                  # font size == ces_status._FS_SM, so this box does not read noticeably smaller
+                          #   than the CES box stacked directly on top of it (owner decision 2026-09-19,
+                          #   which is also why the COMPACT format above replaced the roomy one).
+                          #   Measured against the real Inter-Medium .fnt metrics at the device's
+                          #   FONT_SCALE=1.16: the widest COMPACT exemplar is 633.1 px of text -> a
+                          #   681.1 px box, inside the driver's ~700 px budget. (The roomy format at 48
+                          #   would have been 721.6 px of text / 769.6 px of box -- over budget, which is
+                          #   the trade the compact shapes buy back.)
+_LINE_H = 60              # _FS * 1.25, the same line-height ratio ces_status.py uses
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
@@ -84,11 +89,13 @@ _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple o
 
 # STABLE WIDTH: measured ONCE from these fixed worst-case strings with the real font — never from live
 # values — so the box cannot dance left/right as digits change (the same discipline ces_status.py's
-# standstill card uses). Worst case is 2 integer digits of kW, 3 of miles, 2 of mi/h.
+# standstill card uses). DIGIT-WIDTH ASSUMPTION, unchanged by the compact reshape: at most 2 integer
+# digits of kW, 3 of miles, 2 of mi/h. A 4-digit mileage would overflow the fixed box and clip — which
+# is why _PROJ_MAX_RATIO clamps the projection rather than letting it print whatever it computes.
 _EXEMPLARS = (
-  "ED: 00.0 kW   000 -> 000 mi",        # charging + moving  (projection)
-  "ED: 00.0 kW   000 mi  +00.0 mi/h",   # charging + stopped (gain rate)  <- widest
-  "ED: --       000 mi",                # not charging
+  "ED:00.0kw,000mi->000mi",        # charging + moving  (projection)
+  "ED:00.0kw,000mi,+00.0mi/h",     # charging + stopped (gain rate)  <- widest, 633.1 px at _FS 48
+  "ED:--,000mi",                   # not charging
 )
 
 
@@ -198,14 +205,14 @@ class EverDriveStatusRenderer(Widget):
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
     if not st.get("acSeen") or ac_kw <= _AC_ZERO_KW:
-      return f"ED: --       {rng} mi"
+      return f"ED:--,{rng}mi"
 
-    kw = f"ED: {ac_kw:.1f} kW"
+    kw = f"ED:{ac_kw:.1f}kw"
     # effOk False == effWhKm is sitting at its -100 encoding floor, i.e. the truck is not telling us its
     # reference efficiency. No projection and no gain rate then, and NO substituted default efficiency:
     # a made-up constant would produce a confident number out of a signal we do not have.
     if not st.get("effOk") or eff_wh_km <= 0.0 or range_mi <= 0.0:
-      return f"{kw}   {rng} mi"
+      return f"{kw},{rng}mi"
 
     # The projection deliberately uses the truck's OWN efficiency constant rather than a measured
     # consumption, so the projected figure stays internally consistent with the range printed beside it.
@@ -213,13 +220,13 @@ class EverDriveStatusRenderer(Widget):
     if p_assumed > ac_kw * _PROJ_HEADROOM:
       proj = range_mi * p_assumed / (p_assumed - ac_kw)
       if proj <= range_mi * _PROJ_MAX_RATIO:
-        return f"{kw}   {range_mi:.0f} -> {proj:.0f} mi"
+        return f"{kw},{range_mi:.0f}mi->{proj:.0f}mi"
     # Crawling (the projection diverges) or the clamp tripped -> the stopped form. gainMiPerH is
     # EverDrive's CONTRIBUTION to range, not the rate the pack's state of charge rises: measured on this
     # truck the truck's own awake load ate about 1.0 kW of a 1.36 kW input while parked, so SoC climbed
     # far more slowly than this figure. The contribution is still the right number to show a driver,
     # because that awake load would be drawn anyway.
-    return f"{kw}   {range_mi:.0f} mi  +{ac_kw / (eff_wh_mi / 1000.0):.1f} mi/h"
+    return f"{kw},{range_mi:.0f}mi,+{ac_kw / (eff_wh_mi / 1000.0):.1f}mi/h"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
