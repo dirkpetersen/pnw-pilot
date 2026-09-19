@@ -440,9 +440,12 @@ return 10 more is the N that puts a real bend at 5.80 m/s².
 
 Not proposed, recorded because the measurement points at them:
 
-1. **N = 2 as a pure comfort trim, gated to `icbmKVis` and a known posted limit.** Safe on this corpus
-   (max unchanged at 3.81 cruise-ON), fires ~0.6×/hour, returns 1.5 mph. Honest description: it is not
-   worth control-path risk.
+1. **N = 2, gated to `icbmKVis` and a known posted limit**, is the safest shape measured: max a_lat
+   unchanged at 3.81 in the cruise-ON population. But on the only corpus that carries `icbmKVis`
+   alongside ICBM decisions it engages on **1 of 33 cruise-ON episodes** (≈ 0.05 / driving hour) for
+   +2.0 mph. Using the broad `visLat` witness instead raises that to 11 of 33 (≈ 0.6 / hour, +1.5 mph
+   median) at the cost of acting on a reading that says "no curve at all" 73 % of the time. Either
+   way: not worth control-path risk.
 2. **Log `icbmKVis` + `mdlEndX` on every tick** and re-ask in six weeks. Cost is bytes; it converts the
    one-drive column of §4 into a real measurement.
 3. **The behind-the-truck test is the better lever on this corpus** — it fires on the 09-08 phantom
