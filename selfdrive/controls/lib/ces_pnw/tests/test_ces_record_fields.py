@@ -23,6 +23,7 @@ import pytest
 
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import ParkTickGate
 
 
 def _record(**over):
@@ -66,6 +67,11 @@ def _record(**over):
   g._icbm_k_ahead = True
   g._lc_spd_a = 0.55
   g._car_gps = {"lat": 47.672952, "lon": -122.365067}
+  # parkgate2pnw: the record now reads the gear + the park gate's verdict. A REAL ParkTickGate (not
+  # a None-returning stub attribute): `park` must be a genuine bool on every record, so a stub that
+  # silently produced None here would hide exactly the field this feature exists to add.
+  g._gear_name = "drive"
+  g._park_gate = ParkTickGate()
   for k, v in over.items():
     setattr(g, k, v)
   return cls._event_record.__get__(g)("tick", {"vEgo": 11.0})

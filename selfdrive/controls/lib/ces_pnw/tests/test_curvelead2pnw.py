@@ -25,6 +25,7 @@ import pytest
 from opendbc.car.ford.icbm_pnw import (IcbmCommand, PressGovernor, STEP_MS, arbitrate, decide_press)
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (
   CURVELEAD_TELE_KEYS, ICBM_LEAD_CONT_S, ICBM_RATCHET_CONFIRM_S, IcbmEpisode, IcbmLeadTrack,
   icbm_lead_pace, icbm_map_sanity, icbm_path_behind, icbm_vision_curvature, upcoming_curve,
@@ -677,7 +678,8 @@ class TestThroughTheController:
         return getattr(c, n) if n in vars(c) else None
     r = Rec()
     for k, v in dict(_vtsc_tele={}, _sa_tele={}, _speed_limit=0.0, _button=0, _ces2_urg=0.0, _icbm_k_dist=0.0,
-                     _icbm_k_v=0.0, _ces2_div=types.SimpleNamespace(count=0), _gl=types.SimpleNamespace(state=None)).items():
+                     _icbm_k_v=0.0, _ces2_div=types.SimpleNamespace(count=0), _gl=types.SimpleNamespace(state=None),
+                     _gear_name=None, _park_gate=park_tick_gate.ParkTickGate()).items():   # parkgate2pnw
       object.__setattr__(r, k, v)
     rec = cls._event_record.__get__(r)("tick", {"vEgo": 24.0})
     assert set(CURVELEAD_TELE_KEYS) <= set(rec), "a curvelead key never reached the ces_events record"

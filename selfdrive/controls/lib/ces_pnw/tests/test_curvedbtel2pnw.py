@@ -29,6 +29,7 @@ import pytest
 
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import FakeCP, LAT0, LON0, _model, _scene
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_ces_mode_read_failure_logged import (
@@ -290,6 +291,8 @@ def _rec(tele=None, **over):
   g._icbm_floor_hit = False
   g._cur_lat, g._cur_lon = LAT0, LON0
   g._curve_peak = m.CurvePeak()
+  g._gear_name = "drive"                                 # parkgate2pnw
+  g._park_gate = park_tick_gate.ParkTickGate()           # parkgate2pnw (real gate -- `park` is a bool)
   for k, v in over.items():
     setattr(g, k, v)
   return m.CESController._event_record.__get__(g)("tick", tele or {"vEgo": 25.0})

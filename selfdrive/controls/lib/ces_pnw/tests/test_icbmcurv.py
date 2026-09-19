@@ -26,6 +26,7 @@ import pytest
 
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import A_LAT_TARGET, MAP_SOURCE_HORIZON_M
 
 _LAT0, _LON0 = 47.60, -122.30
@@ -293,6 +294,11 @@ class TestOverlayFeed:
     # icbmconsist2pnw: the POINT-MATCHED reading rides the same feeds. The permissive
     # `__getattr__ -> None` would otherwise reach float(None) and take the whole publish down.
     g._icbm_k_at, g._icbm_k_at_d, g._icbm_k_at_n, g._icbm_k_at_gap = 0.0021, 210.0, 4, 30.0
+    # parkgate2pnw: _publish_status's tick branch now consults the park gate (a REAL one -- the
+    # permissive `__getattr__ -> None` would raise inside the publish and hide every overlay key).
+    g._park_gate = park_tick_gate.ParkTickGate()
+    g._park_gate_on = True
+    g._gear = g._gear_name = g._v_ego_raw = None      # no carState here -> fails open, logs as before
     for k, v in over.items():
       setattr(g, k, v)
     cls._publish_status.__get__(g)(None, False)

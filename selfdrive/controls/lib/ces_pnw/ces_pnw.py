@@ -34,6 +34,9 @@ from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetec
 # ces2core2pnw: the CES2 decision core (CES2-STUDY.md adoptions) — runs SHADOW every tick, decides
 # live only when the Ces2Core param is set (default OFF => v1 path below is byte-identical).
 from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, DivergenceCounter
+# parkgate2pnw: the ~1 Hz breadcrumb's GEAR gate (not speed, not IsOnroad — CLAUDE.md Rule 3).
+# 93.7% of the archived ces_events corpus was a PARKED truck; see park_tick_gate.py for the measurement.
+from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import ParkTickGate, SUPPRESS as PARK_SUPPRESS
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -3382,6 +3385,23 @@ class CESController:
     self._last_decide_t = None      # monotonic stamp of last state-machine step (for real dt)
     self._bs_l = False              # bsm2pnw: last-seen blind-spot booleans (telemetry only —
     self._bs_r = False              #   proves BSM liveness in ces_events; never gates control here)
+    # parkgate2pnw: the gear, sampled once per cycle in experimental_request(), used for TWO things:
+    #   (1) the `gear`/`park` fields now on every record -- ces_events carried NO gear/park field at
+    #       all, which is exactly why 93.7% parked content went unnoticed for months, and why a red-
+    #       light stop (gear drive, vEgo 0) read the same as a charging session (gear park, vEgo 0);
+    #   (2) the ~1 Hz breadcrumb gate below. Live carState, not the GearPark param: this IS the
+    #       control path (CLAUDE.md Rule 3 prefers carState here), and the param would add a file
+    #       read per tick to fetch a fact already in hand.
+    self._gear = None               # capnp gearShifter enum, or None until a carState has been seen
+    self._gear_name = None          # str(enum) -- the BARE name ('park'). A LOG field, never compared.
+    self._v_ego_raw = None          # raw carState vEgo (None = unread), for the gate's moving interlock
+    self._park_gate = ParkTickGate()
+    # True = the gate may suppress. Starts False so that until RecordWhileParked has been read even
+    # once, the log keeps its old full-rate behaviour (Rule 2: an unread kill switch must not cost
+    # telemetry). _read_params() sets it on the very first cycle (frame 0).
+    self._park_gate_on = False
+    self._rwp_err_t = None          # monotonic time of the last logged RecordWhileParked read failure
+    self._rwp_err_n = 0             # RecordWhileParked read failures since that log line
     self._event_log_ok = False      # persistent "each adoption" trail (CES_EVENT_LOG)
     self._append_fail = 0           # stophold2pnw (C): consecutive _append_event failures (0 = healthy)
     try:
@@ -3526,6 +3546,23 @@ class CESController:
                              f"while this lasts ({self._rain_err_n} failure(s) since the last log)")
           self._rain_err_t = now
           self._rain_err_n = 0
+      # parkgate2pnw: the kill switch, read OUTSIDE the `if self._enabled:` block below because the
+      # CES-off "steer" breadcrumb (_steer_log_step) is gated too and runs precisely when CES is off.
+      # parknorec2pnw registered RecordWhileParked as the one switch for "record in Park anyway", so
+      # no new param key is added here (a new key would need a params_pyx.so rebuild on the car).
+      try:
+        self._park_gate_on = not self.params.get_bool("RecordWhileParked")
+      except Exception as e:
+        # Rule 2: keep the LAST known value -- on the first-ever failure that is False, i.e. the gate
+        # stays open and the breadcrumb logs at full rate exactly as it did before this feature.
+        self._rwp_err_n += 1
+        now = time.monotonic()
+        if self._rwp_err_t is None or now - self._rwp_err_t >= CURVELEAD_ERR_LOG_S:
+          cloudlog.exception(f"ces_pnw: RecordWhileParked unreadable ({type(e).__name__}) -- the ces_events park " +
+                             f"gate holds its last state (may_suppress={self._park_gate_on}) " +
+                             f"({self._rwp_err_n} failure(s) since the last log)")
+          self._rwp_err_t = now
+          self._rwp_err_n = 0
       # CES is meaningful only when openpilot owns longitudinal (same gate as ExperimentalMode) —
       # except in Lightning shadow mode, where the pipeline runs for telemetry/display only.
       self._enabled = (self._long_ok or self._shadow) and C.ces_enabled(self._mode)
@@ -3835,6 +3872,16 @@ class CESController:
     # override per record — quantifies left-pull, curve-tracking failures and override clusters.
     self._str_ang = round(float(getattr(car_state, 'steeringAngleDeg', 0.0)), 1)
     self._str_prs = bool(getattr(car_state, 'steeringPressed', False))
+    # parkgate2pnw: sample the gear + raw speed ONCE per cycle, here, so both per-tick record writers
+    # below (_steer_log_step for CES-off, _publish_status for CES-on) see the same reading. Defaults
+    # of None -- an absent carState or a car with no gearShifter reads "unknown", never "park", so
+    # the gate below fails OPEN and the log keeps running. str() on a capnp enum yields the BARE
+    # name ('park'), which is exactly what we want in a LOG field; the capnp-enum-str-trap is about
+    # COMPARING that string, which ParkTickGate deliberately never does.
+    self._gear = getattr(car_state, 'gearShifter', None)
+    self._gear_name = str(self._gear) if self._gear is not None else None
+    raw_v = getattr(car_state, 'vEgo', None)
+    self._v_ego_raw = raw_v if isinstance(raw_v, (int, float)) else None
     # icbm2pnw closed-loop trace: the STOCK ACC's reported set speed + engagement — with the
     # published target (icbmT below) this shows every executor tap landing (set stepping down).
     try:
@@ -4122,6 +4169,12 @@ class CESController:
     if now - self._steer_tick_last < C.TICK_S:
       return
     self._steer_tick_last = now
+    # parkgate2pnw: same gear gate as the CES-on tick path, on the SAME shared ParkTickGate instance
+    # (the two writers are mutually exclusive per tick, so the hysteresis survives CESMode flipping
+    # mid-session). Evaluated BEFORE _read_map() so a suppressed tick costs nothing at all.
+    park_d = self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
+    if park_d == PARK_SUPPRESS:
+      return
     try:
       self._read_map()   # refresh sl*/lc*/vtsc*/GPS fields that _read_params() skips while CES is off
       # N1 review fix: keep the RAW read separate from the display-friendly v_ego -- a failed/absent
@@ -4169,6 +4222,10 @@ class CESController:
         # cesOff: True means self._enabled is False here — this can include CESMode 1/2 (Light/
         # Standard) when the car has neither op-long nor shadow (see _enabled's definition).
         "ev": "steer", "cesOff": True, "cesMode": self._mode, "car": self._car, "vEgo": v_ego,
+        # parkgate2pnw: gear name + the gate's own "in Park" verdict (which also folds in the
+        # moving interlock, so it is NOT simply gear=="park"). Same two keys as the tick/adopt
+        # record, by the same one-builder discipline the other shared fragments follow.
+        "gear": self._gear_name, "park": self._park_gate.parked,
         "gps": gps_valid,
         "lat": self._cur_lat, "lon": self._cur_lon, "bearing": self._cur_bearing,
         "spdLim": round(self._speed_limit, 1) if self._speed_limit else 0.0,
@@ -4219,6 +4276,7 @@ class CESController:
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
+      rec.update(self._park_gate.record_fields(park_d))   # parkgate2pnw: hold/release marker
       self._append_event(rec)
     except Exception:
       pass
@@ -5054,7 +5112,15 @@ class CESController:
       now2 = time.monotonic()
       if now2 - self._tick_last >= C.TICK_S:
         self._tick_last = now2
-        self._append_event(self._event_record("tick", tele))
+        # parkgate2pnw: suppress the breadcrumb while the shifter is in PARK -- and only then. A
+        # red-light stop is vEgo 0 in DRIVE and still logs at full rate. While suppressing, one
+        # marked record per PARK_HEARTBEAT_S is still written (carrying parkGate/parkSupp), so the
+        # window can never be misread as a dead logger. Adopt records above are never gated.
+        park_d = self._park_gate.update(self._gear, self._v_ego_raw, now2, self._park_gate_on)
+        if park_d != PARK_SUPPRESS:
+          rec = self._event_record("tick", tele)
+          rec.update(self._park_gate.record_fields(park_d))
+          self._append_event(rec)
 
     # ~5 Hz publish to /dev/shm/params (put a dict -> JSON; nonblocking so the safety loop never waits)
     if self.mem_params is None:
@@ -5112,6 +5178,12 @@ class CESController:
       "stp": tele.get("stp"),
       # stophold2pnw (D): car identity (shadow is no longer a car discriminator — alpha-long A/B)
       "car": self._car,
+      # parkgate2pnw: THE GEAR, on every record. Before this the log had no gear/park field at all,
+      # so a red-light stop and a truck parked in a driveway charging were the same row (vEgo 0) --
+      # which is how 93.7% parked content hid for months. `park` is the gate's verdict (gear==park
+      # AND not moving), not a restatement of `gear`: the two differ exactly when the gear decode is
+      # wrong, which is the case worth being able to see.
+      "gear": self._gear_name, "park": self._park_gate.parked,
       "curvePct": tele.get("curvePct"), "curveSrc": tele.get("curveSrc"),
       # lowspeedcurve2pnw: raw vision-curve trigger inputs (why did curvePct stay 0? — Hwy 99
       # 2026-07-13). None on the noData path, same as every other tele passthrough.

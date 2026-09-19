@@ -42,6 +42,8 @@ import textwrap
 import time
 from pathlib import Path
 
+from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
+
 REPO_ROOT = Path(__file__).resolve().parents[5]
 CES_PNW_PATH = REPO_ROOT / "selfdrive/controls/lib/ces_pnw/ces_pnw.py"
 CONTROLSD_PATH = REPO_ROOT / "selfdrive/controls/controlsd.py"
@@ -133,6 +135,10 @@ def _ces_pnw_globals():
   for name in ("_dq_names", "_zero_is_null", "_curvature_from_yaw", "_round_or_none",
                "_haversine_m", "map_candidate_point", "_curve_tele"):
     exec(compile(_extract_func(src, tree, name), f"<{name}>", "exec"), ns)
+  # parkgate2pnw: _steer_log_step's park gate compares against the module-level PARK_SUPPRESS alias.
+  # Taken from the real park_tick_gate module, not redefined here -- a hand-typed copy would let the
+  # two drift and quietly turn the gate check into a comparison that is never true.
+  ns["PARK_SUPPRESS"] = park_tick_gate.SUPPRESS
   return src, tree, ns
 
 
@@ -177,6 +183,12 @@ class _SteerLogHarness:
     # published / no capability; the real class seeds these in __init__).
     self._cp_off = self._cp_tgt = self._cp_cap = self._cp_why = None
     self._cp_tq = self._cp_rate = self._cp_cmd = None
+    # parkgate2pnw: _steer_log_step now asks the park gate before it does any work. A real gate,
+    # seeded with no gear at all -- which is the FAIL-OPEN case, so this harness keeps logging and
+    # every assertion below is about the record's content exactly as before.
+    self._park_gate = park_tick_gate.ParkTickGate()
+    self._park_gate_on = True
+    self._gear = self._gear_name = self._v_ego_raw = None
     self.captured: list = []
     self.read_map_calls = 0
 
