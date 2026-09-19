@@ -276,7 +276,11 @@ def migrate_pandaStates(msgs):
   safety_param_migration = {
     "TOYOTA_PRIUS": EPS_SCALE["TOYOTA_PRIUS"] | ToyotaSafetyFlags.STOCK_LONGITUDINAL,
     "TOYOTA_RAV4": EPS_SCALE["TOYOTA_RAV4"] | ToyotaSafetyFlags.ALT_BRAKE,
-    "KIA_EV6": HyundaiSafetyFlags.EV_GAS | HyundaiSafetyFlags.CANFD_LKA_STEERING,
+    # CANFD_LKA_STEERING -> CANFD_LKA_STEER_MSG: our opendbc pin carries the renamed flag and this
+    # reference was never updated, so importing this module raised AttributeError. That is process
+    # replay, not Hyundai -- every replay_process_with_name consumer in the fork depends on it, so
+    # "inert for our cars" was true of car behaviour and false of the test infrastructure.
+    "KIA_EV6": HyundaiSafetyFlags.EV_GAS | HyundaiSafetyFlags.CANFD_LKA_STEER_MSG,
     "CHEVROLET_VOLT": GMSafetyFlags.EV,
     "CHEVROLET_BOLT_EUV": GMSafetyFlags.EV | GMSafetyFlags.HW_CAM,
   }

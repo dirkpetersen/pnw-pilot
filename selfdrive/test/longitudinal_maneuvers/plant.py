@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import collections
 import time
 import numpy as np
 
@@ -9,6 +10,37 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+
+
+class _PlantSubMaster(dict):
+  """A dict that also answers `.alive` and `.valid`, like the SubMaster the planner expects.
+
+  Deliberately a dict SUBCLASS so every existing `sm['carState']` access in the planner keeps
+  working unchanged. `alive`/`valid` report True for exactly the keys this harness publishes, which
+  is the honest answer -- the harness synthesises each one every step.
+  """
+
+  # True for every key the harness publishes, FALSE (not KeyError) for anything else. That is what a
+  # real SubMaster reports for a subscribed service it has not received -- e.g. `mapdOut`, which this
+  # harness does not synthesise, so tightfollow2pnw's `sm.alive['mapdOut']` correctly reads False and
+  # the planner takes its no-map path. Returning a plain dict here instead raises KeyError and turns
+  # "no map data" into a crash, which is the opposite of the fail-open the feature was written with.
+  @property
+  def alive(self) -> dict[str, bool]:
+    return collections.defaultdict(bool, {k: True for k in self})
+
+  @property
+  def valid(self) -> dict[str, bool]:
+    return collections.defaultdict(bool, {k: True for k in self})
+
+  def __getitem__(self, key):
+    # A missing key here would otherwise be a KeyError deep inside the planner. Say which key, and
+    # say that it is the HARNESS that does not publish it -- not the planner that is wrong.
+    try:
+      return super().__getitem__(key)
+    except KeyError:
+      raise KeyError(f"{key!r} is not published by the longitudinal plant harness; add it to the sm "
+                     f"dict in plant.py rather than making the planner tolerate its absence") from None
 
 
 class Plant:
@@ -134,6 +166,17 @@ class Plant:
           'selfdriveState': ss.selfdriveState,
           'liveParameters': lp.liveParameters,
           'modelV2': model.modelV2}
+    # The planner is handed a plain dict here, but pnw code reads SubMaster's `alive`/`valid` maps on
+    # it -- longitudinal_planner.py:222 `sm.alive['mapdOut']` (tightfollow2pnw) and :132
+    # `sm.valid['carState']` (leadlossgate2pnw). A dict has neither, so every one of the 18
+    # test_following_distance variants died with `AttributeError: 'dict' object has no attribute
+    # 'alive'` -- i.e. the test that validates our own follow distance had been dead since those
+    # features landed, and it read as an upstream harness problem.
+    #
+    # Give the dict the two maps rather than teaching the planner to cope without a SubMaster: this
+    # is a test harness, and the planner's assumption is correct in production. Every key present in
+    # `sm` is alive and valid; anything absent is neither, which is what a real SubMaster would say.
+    sm = _PlantSubMaster(sm)
     self.planner.update(sm)
     self.acceleration = self.planner.output_a_target
     if self.planner.output_should_stop:
