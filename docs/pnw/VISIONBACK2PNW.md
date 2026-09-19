@@ -52,10 +52,11 @@ Three findings matter more than the table:
    real curve — it fires on both. All of the rule's safety is in the bound N, none of it in the
    evidence.
 2. **It cannot fix the event it was invented for.** The 2026-09-08 20:28 phantom IS in the corpus
-   (§6): 70 → 43.6 mph on a straight 60 mph motorway, and vision read `visLat` 1.36–1.48 m/s² —
+   (§6): 69.1 → 43.2 mph on a straight 60 mph motorway, and vision read `visLat` 1.36–1.48 m/s² —
    *below* the 1.9 curve-enter threshold — on 3 of the 4 in-window ticks. The rule engages, correctly.
-   At the only N that is safe it returns **2 of the 26 mph** that event gave away. At the N that would
-   return 10 of them, the same rule puts a real R = 87 m bend at 5.80 m/s².
+   But **the already-shipped map-rating floor takes 4.4 of those 25.9 mph back on its own**, and the
+   most a bounded give-back can safely add on top is **2 mph**. The N that would add 10 is the N that
+   puts a real R = 87 m bend at 5.80 m/s².
 3. **A give-back confined to 50–150 m delivers nothing.** Released at the 50 m edge, the executor's
    own 1 mph / 0.4 s SET− walk re-takes the whole give-back before the apex: **zero of 88 episodes
    engage at N ≤ 5** (§3.4). The numbers above therefore assume the give-back **latches** through the
@@ -359,25 +360,33 @@ than 2× on one in six of the ticks it acts on.
 
 ## 6. The motivating phantom, tested directly
 
-`drives/2026-09-08/…` does contain the 20:28 event. The give-back's behaviour there, tick by tick:
+`drives/2026-09-08/…` does contain the 20:28 event. It also gives the forward model a third
+independent check: the logged `icbmT` held **44.1–44.9 mph** across the episode and the model with the
+floor OFF returns **45.3** — a +0.5 mph residual on a live phantom.
 
-| PT | `stockOn` | vEgo | set | mapV | `mapDist` | model target | `visLat` | vision verdict |
+| PT | `stockOn` | vEgo | stock set | `mapDist` | logged `icbmT` | model, floor ON | `visLat` | vision verdict |
 |---|---|---|---|---|---|---|---|---|
-| 20:28:57 | True | 60 | 70 | 50 | 144 m | 49.7 | 2.06 | curve, safe at 66 mph |
-| 20:28:58 | True | 57 | 70 | 50 | 113 m | 49.7 | **1.48** | **no curve** |
-| 20:28:59 | True | 54 | 70 | 50 | 84 m | 49.7 | **1.48** | **no curve** |
-| 20:29:00 | True | 51 | 70 | 50 | 57 m | 49.7 | **1.36** | **no curve** |
+| 20:28:52 | True | 68.5 | 65 | 300 m | 44.9 | 49.7 | — | *(outside the window)* |
+| **20:28:57** | True | 59.9 | 53 | **144 m** | 44.2 | 49.7 | 2.06 | a curve, safe at 66 mph |
+| **20:28:58** | True | 57.0 | 50 | **113 m** | 44.3 | 49.7 | **1.48** | **no curve at all** |
+| **20:28:59** | True | 54.1 | 48 | **84 m** | 44.4 | 49.7 | **1.48** | **no curve at all** |
+| **20:29:00** | True | 51.2 | 45 | **57 m** | 44.4 | 49.7 | **1.36** | **no curve at all** |
+| 20:29:02 | True | 45.9 | 44 | 6 m | 44.3 | 49.7 | 1.05 | *(inside 50 m)* |
 
-The rule engages, in the right direction, on the right event — vision was reading below the 1.9 m/s²
-curve-enter threshold while the map dragged the set from 70 toward 44.
+The rule engages, in the right direction, on the right event — vision was reading *below* the 1.9 m/s²
+curve-enter threshold on 3 of the 4 in-window ticks while the map dragged the set 70 → 44.
 
-**And at the only N the data permits it returns 2 of the 26 mph.** The event cost 34 s and 26 mph; a
-2 mph give-back is a rounding error against it. The N that would return 10 of those 26 mph is the N
-that puts a real bend at 5.80 m/s².
+**But the shipped map-rating floor has already taken the large bite.** On this exact event the floor
+moves the modelled command **45.3 → 49.7 mph (+4.4)** — against the 44.4 the truck was actually
+commanded that day, +5.3 — i.e. it alone removes about a fifth of the 25.9 mph the truck gave away
+(69.1 → 43.2 mph). What a bounded vision give-back could add on top is
+**2 mph at the only N the data permits** — a rounding error against what is left. The N that would
+return 10 more is the N that puts a real bend at 5.80 m/s².
 
-*(Aside, not this analysis's subject: `mapDist` at 20:29:00 → 20:29:07 runs 57 → 62 → 84 → 104 m — it
-GROWS at v_ego. That is `icbm_path_behind`'s behind-the-truck signature, which `behindgate2pnw` /
-`behindrun2pnw` already ship for. It is a stronger discriminator on this event than vision is.)*
+*(Aside, not this analysis's subject, but it is the sharper tool on this event: `mapDist` runs
+**6 → 17 → 40 → 62 → 84 → 104 m** over 20:29:02–20:29:07 while `mapV` never moves — it GROWS at
+`v_ego`. That is `icbm_path_behind`'s behind-the-truck signature, which `behindgate2pnw` /
+`behindrun2pnw` already ship for, and unlike vision it has no under-read tail.)*
 
 ---
 

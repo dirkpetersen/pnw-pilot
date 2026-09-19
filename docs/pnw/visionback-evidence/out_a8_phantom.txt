@@ -25,3 +25,59 @@ ICBM ticks on 09-08: 69
   20:29:05 stockOn=True v=44 set=70 mapV=50 d=62 modelT=49.7 visLat=0.95 -> v_vis=inf why=straight
   20:29:06 stockOn=True v=43 set=70 mapV=50 d=84 modelT=49.7 visLat=0.89 -> v_vis=inf why=straight
   20:29:07 stockOn=True v=43 set=70 mapV=50 d=104 modelT=49.7 visLat=0.90 -> v_vis=inf why=straight
+
+FLOOR vs NO-FLOOR on the phantom's map ticks (mph):
+  19:25:20 d=  72 logged icbmT  24.0 | model floor-OFF  22.5 | model floor-ON  23.3 | floor gives +0.7
+  19:25:21 d=  60 logged icbmT  24.0 | model floor-OFF  22.5 | model floor-ON  23.3 | floor gives +0.7
+  19:25:22 d=  48 logged icbmT  24.0 | model floor-OFF  22.5 | model floor-ON  23.3 | floor gives +0.7
+  19:25:23 d=  43 logged icbmT  24.0 | model floor-OFF  22.5 | model floor-ON  23.3 | floor gives +0.7
+  19:25:24 d=  34 logged icbmT  24.0 | model floor-OFF  22.5 | model floor-ON  23.3 | floor gives +0.7
+  19:28:53 d= 194 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:54 d= 175 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:55 d= 156 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:56 d= 136 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:56 d= 136 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:57 d= 113 logged icbmT  34.2 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:58 d=  92 logged icbmT  34.5 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:28:59 d=  71 logged icbmT  34.6 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:29:00 d=  51 logged icbmT  34.7 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:29:01 d=  33 logged icbmT  34.9 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:29:02 d=  18 logged icbmT  34.9 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:29:03 d=   5 logged icbmT  34.9 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:29:04 d=  16 logged icbmT  34.9 | model floor-OFF  34.9 | model floor-ON  37.6 | floor gives +2.7
+  19:36:58 d=  85 logged icbmT  25.2 | model floor-OFF  25.3 | model floor-ON  25.9 | floor gives +0.7
+  19:36:59 d=   8 logged icbmT  25.2 | model: does NOT bind
+  19:37:32 d=  42 logged icbmT  24.0 | model floor-OFF  21.2 | model floor-ON  21.9 | floor gives +0.7
+  19:37:33 d=  33 logged icbmT  24.0 | model floor-OFF  21.2 | model floor-ON  21.9 | floor gives +0.7
+  19:37:42 d=  15 logged icbmT  24.0 | model floor-OFF  21.2 | model floor-ON  21.9 | floor gives +0.7
+  19:37:43 d=  13 logged icbmT  24.0 | model floor-OFF  21.2 | model floor-ON  21.9 | floor gives +0.7
+  19:37:47 d=  22 logged icbmT  21.1 | model floor-OFF  21.2 | model floor-ON  21.9 | floor gives +0.7
+  19:44:10 d= 124 logged icbmT  43.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:10 d= 124 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:11 d=  98 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:12 d=  72 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:13 d=  49 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:15 d=   7 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:16 d=  18 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:17 d=  42 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:18 d=  65 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:19 d=  90 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:19 d=  90 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:20 d= 114 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  19:44:21 d= 139 logged icbmT  34.0 | model floor-OFF  34.1 | model floor-ON  36.5 | floor gives +2.4
+  20:28:52 d= 300 logged icbmT  44.9 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:53 d= 268 logged icbmT  44.7 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:54 d= 237 logged icbmT  44.5 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:55 d= 205 logged icbmT  44.2 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:56 d= 173 logged icbmT  44.1 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:57 d= 144 logged icbmT  44.2 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:58 d= 113 logged icbmT  44.3 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:28:59 d=  84 logged icbmT  44.4 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:00 d=  57 logged icbmT  44.4 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:01 d=  31 logged icbmT  44.5 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:02 d=   6 logged icbmT  44.3 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:03 d=  17 logged icbmT  44.4 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:04 d=  40 logged icbmT  44.3 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:05 d=  62 logged icbmT  44.3 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:06 d=  84 logged icbmT  44.3 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4
+  20:29:07 d= 104 logged icbmT  44.5 | model floor-OFF  45.3 | model floor-ON  49.7 | floor gives +4.4

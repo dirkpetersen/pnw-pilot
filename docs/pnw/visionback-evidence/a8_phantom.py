@@ -29,3 +29,21 @@ for r in icb:
         f"v={ve / MPH:.0f} set={ref / MPH:.0f} mapV={mv / MPH:.0f} d={d:.0f} "
         f"modelT={p / MPH if p else float('nan'):.1f} visLat={fnum(r.get('visLat')):.2f} "
         f"-> v_vis={vs} why={why}")
+
+# The floor's own contribution on this event: what the SHIPPED map-rating floor already gives back,
+# so the give-back's marginal value is measured against today's car and not against 2026-09-08's.
+print("\nFLOOR vs NO-FLOOR on the phantom's map ticks (mph):")
+for r in sel:
+  ve, mv, d = fnum(r.get("vEgo")), fnum(r.get("mapV")), fnum(r.get("mapDist"))
+  ref = fnum(r.get("icbmC")) or fnum(r.get("stockSet"))
+  if r.get("icbmSrc") != "map" or not (mv and d and d > 0 and ve and ref):
+    continue
+  on = A3.model_target(V, mv, d, ref, ve, None, False, floor_raw=True)
+  off = A3.model_target(V, mv, d, ref, ve, None, False, floor_raw=False)
+  if on is None or off is None:      # the candidate does not bind from here -- not a skip, a fact
+    print(f"  {datetime.datetime.fromtimestamp(r['t'], PT):%H:%M:%S} d={d:>4.0f} "
+          f"logged icbmT {(fnum(r.get('icbmT')) or 0) / MPH:5.1f} | model: does NOT bind")
+    continue
+  print(f"  {datetime.datetime.fromtimestamp(r['t'], PT):%H:%M:%S} d={d:>4.0f} "
+        f"logged icbmT {(fnum(r.get('icbmT')) or 0) / MPH:5.1f} | model floor-OFF {off / MPH:5.1f} "
+        f"| model floor-ON {on / MPH:5.1f} | floor gives +{(on - off) / MPH:.1f}")
