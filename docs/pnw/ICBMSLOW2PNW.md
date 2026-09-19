@@ -1,13 +1,13 @@
 ---
 updated: 2026-09-17
-status: unreviewed     # current | drifted | superseded | unreviewed
+status: current     # current | drifted | superseded | unreviewed
 ---
 
 # ICBMSLOW2PNW — ICBM over-slows for curves: the map-rating floor
 
 > **⛔ NOT DEPLOYED, NOT PUSHED.** Fable-reviewed 2026-09-17 (**SHIP WITH CHANGES**; every
 > required change is applied — see *Verification*). Branch `icbmslow2pnw` off `origin/3devpnw`
-> (`7c40d8003b`). This is control-path code that changes how the truck brakes. The owner decides.
+> (`cfcbf1cf4c`). This is control-path code that changes how the truck brakes. The owner decides.
 > Nothing was written to `/data/pnw/curve.json` on the device.
 
 ## The complaint
@@ -195,7 +195,7 @@ lowest ICBM target*, so by the tool's own definition these are ICBM washouts. Re
 |---|---|---|---|
 | #165 19:04:43 | 86.3 mph | **vision on all 5 ticks** | nothing — the map candidate does not exist (`mapV` 72.9 raw → eff 90.5 mph ≥ the 88 mph set, so it is rejected as not reduce-only) |
 | #166 19:05:30 | 88.1 mph | **vision on all 6 ticks** | nothing — same shape (`mapV` 73.1 → eff 90.8 ≥ 89) |
-| #167 19:06:52 | 87.2 mph | **map on 1 tick, vision on 10** | on that one tick the candidate is 50.0 mph, shipped commands 44.3, floored commands **48.7** |
+| #167 19:06:52 | 87.2 mph | **map on 1 tick, vision on 10** | on that one tick the candidate is 50.0 mph, shipped commands 45.0, floored commands **49.4** |
 
 So the floor's entire effect across the washout evidence is **+4.4 mph, on one tick, at one site** —
 and one second later vision takes that same curve over and demands 51 → 53 mph with **no floor
@@ -260,11 +260,11 @@ the fixture ever stops short again.
 
 ## Verification
 
-* `selfdrive/controls/lib`: **1,714 passed**, 0 failed, of which 956 in `ces_pnw/tests` and **24 new
+* `selfdrive/controls/lib`: **1,717 passed**, 0 failed, of which 956 in `ces_pnw/tests` and **24 new
   in `test_icbmslow2pnw.py`** plus 1 new in `test_washout_registry.py`.
 * `selfdrive/car` (excluding the network-dependent `test_models.py`): 362 passed, **2 failed + 1
   import error that are PRE-EXISTING on `origin/3devpnw`** — verified by running the same three files
-  in a clean worktree at `7c40d8003b` (`test_oplong_carswap.py::TestOpLongResetFailureRetry` ×2,
+  in a clean worktree at `cfcbf1cf4c` (`test_oplong_carswap.py::TestOpLongResetFailureRetry` ×2,
   `test_cruise_speed.py` ImportError). Not caused by this change.
 * Mutation testing (`_scratch/icbmslow/mutate.py`, every mutant anchor-checked for exactly one match
   and `compile()`-checked before counting; an inapplicable mutant is reported INVALID, never
