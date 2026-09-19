@@ -201,6 +201,10 @@ class CesStatusRenderer(Widget):
                                  #   takes precedence over _cached_layout when non-None
     self._card_metrics = None    # dumpui2pnw: (box_w_inner, label_w, col_w) — fixed, computed once
                                  #   from exemplars so the card width never jitters as values change
+    self._bottom_offset = 0.0    # everdrive2pnw: px to lift this box off the bottom edge so the
+                                 #   EverDrive box can stack BELOW it. Set per frame by
+                                 #   augmented_road_view; EXACTLY 0.0 whenever EverDrive is hidden,
+                                 #   so this box renders where it does today (x - 0.0 == x).
     # rain2pnw: read the configured rain magnitudes once (mph); defaults 3/5 if unavailable
     self._rain_mph = {1: 3.0, 2: 5.0}
     if _rain_cfg_loader is not None:
@@ -793,7 +797,7 @@ class CesStatusRenderer(Widget):
       return
     entries, box_w, box_h, fs, line_h = self._cached_layout
     bx = rect.x + rect.width - box_w - _MARGIN
-    by = rect.y + rect.height - box_h - _MARGIN
+    by = rect.y + rect.height - box_h - _MARGIN - self._bottom_offset  # everdrive2pnw: stack above ED
 
     rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), 0.12, 8, _C.BG)
     right = bx + box_w - _PAD
@@ -822,7 +826,7 @@ class CesStatusRenderer(Widget):
     rows, box_w, box_h, l_label_w, l_col_w, r_label_w, r_col_w = layout
     fs = _FS_SM
     bx = rect.x + rect.width - box_w - _MARGIN
-    by = rect.y + rect.height - box_h - _MARGIN
+    by = rect.y + rect.height - box_h - _MARGIN - self._bottom_offset  # everdrive2pnw: stack above ED
     rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), 0.10, 8, _C.BG)
     x0 = bx + _PAD
     right = bx + box_w - _PAD

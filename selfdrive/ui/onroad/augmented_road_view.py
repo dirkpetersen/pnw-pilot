@@ -13,6 +13,7 @@ from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitRenderer  # mapd2xnor
 from openpilot.selfdrive.ui.onroad.ces_status import CesStatusRenderer  # ces2xnor
 from openpilot.selfdrive.ui.onroad.location_services_status import LocationServicesStatusRenderer  # location2pnw
+from openpilot.selfdrive.ui.onroad.everdrive_status import EverDriveStatusRenderer  # everdrive2pnw
 from openpilot.selfdrive.ui.onroad.confidence_ball import ConfidenceBallRenderer  # ball2pnw
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -55,6 +56,7 @@ class AugmentedRoadView(CameraView):
     self.speed_limit_renderer = SpeedLimitRenderer()  # mapd2xnor
     self.ces_status_renderer = CesStatusRenderer()  # ces2xnor
     self.location_services_renderer = LocationServicesStatusRenderer()  # location2pnw (lower-left)
+    self.everdrive_status_renderer = EverDriveStatusRenderer()  # everdrive2pnw (lower-right, below CES)
     self.confidence_ball_renderer = ConfidenceBallRenderer()  # ball2pnw (right edge, behind CES overlay)
 
     # debug
@@ -96,7 +98,14 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.render(self._content_rect)
     self.confidence_ball_renderer.render(self._content_rect)  # ball2pnw (right edge, BEHIND ces_status)
     self.speed_limit_renderer.render(self._content_rect)  # mapd2xnor
+    # everdrive2pnw: the EverDrive box sits directly BELOW the CES box, so lift CES by its height
+    # (+ gap). stack_height is EXACTLY 0.0 whenever EverDrive is hidden — which is the steady state on
+    # the Tesla and on a Lightning with no module fitted — so CES then renders exactly where it does
+    # today. Set before the CES draw; the ED box itself draws after it, in the same z-band as CES so an
+    # openpilot alert covers it the same way it already covers the CES box.
+    self.ces_status_renderer._bottom_offset = self.everdrive_status_renderer.stack_height
     self.ces_status_renderer.render(self._content_rect)  # ces2xnor
+    self.everdrive_status_renderer.render(self._content_rect)  # everdrive2pnw (lower-right, below CES)
     self.location_services_renderer.render(self._content_rect)  # location2pnw (lower-left)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)

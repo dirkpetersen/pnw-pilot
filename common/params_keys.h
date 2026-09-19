@@ -263,6 +263,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SpeedAdjustStatus", {CLEAR_ON_MANAGER_START, JSON}}, // satele2pnw telemetry: PURE OBSERVATION per-tick speedadjust internals (mode/sl/slRef/ratio/cap/out/vSet/lastSet/eng/polLatch/polSupp/polKey + `ovr`, the manual-override verdict) (plannerd -> CES event logger), ~5 Hz. mem-param, /dev/shm/params, same pattern as SteerLimitStatus.
     {"SteerEvent", {CLEAR_ON_MANAGER_START, JSON}}, // steerevent2pnw: edge-triggered flight-recorder burst (controlsd -> CES event logger), published ONLY on a rare steer-saturation/under-turn edge (a handful of times per drive), never at a steady rate. See docs/pnw/LANE-DEPARTURE-LOGGING-PROPOSALS.md Proposal 1.
     {"VtscMapCurves", {PERSISTENT, BOOL, "1"}},  // ces-i90-2pnw: fold pfeiferj map curve speeds into VTSC for earlier/sharper-curve braking (MTSC). Default ON (the new pfeiferj mapd is reliable; lean into the longer map horizon so braking + the 1-mph cue start BEFORE the curve); decel-limited + V_MIN-floored so even a wrong map speed can never slam.
+    // everdrive2pnw: EverDrive auxiliary-charger input power + range, display-only, lower-right below the CES box.
+    {"EverDriveStatus", {CLEAR_ON_MANAGER_START, JSON}},  // everdrive2pnw: mem-param the producer publishes at ~5 Hz ({ts,acKw,acSeen,rangeKm,effWhKm,effOk,socPct,vMs}). ABSENT is the NORMAL steady state on the Tesla and on a Lightning with no EverDrive fitted -- the producer publishes nothing until the EverDrive CAN message is actually received, so the UI must treat a missing key as "hide", never as an error. Registration is MANDATORY: an unregistered key raises UnknownKeyName and crash-loops the UI.
+    // everdrive2pnw / toggles-invert2pnw: opt-OUT visibility toggle, same idiom as DisableLocationServices
+    // (the other lower-corner onroad info line, also shown by default). Default OFF = the box shows
+    // whenever there IS EverDrive data. No migration entry: this key is new, it has no positive-sense
+    // predecessor on any device, so TogglesInvertedMigrated does not apply to it.
+    {"DisableEverDrive", {PERSISTENT, BOOL, "0"}},
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
     {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // LEGACY (toggles-invert2pnw): superseded by DisableLocationServices below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
     // toggles-invert2pnw: opt-out sibling of LocationServicesEnabled -- default OFF = NOT disabled,

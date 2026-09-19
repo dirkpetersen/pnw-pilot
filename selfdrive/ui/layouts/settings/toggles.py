@@ -168,6 +168,15 @@ DESCRIPTIONS = {
   "EvIncludeLevel2": tr_noop(
     "Also show slow Level 2 (AC) chargers in the EV line, not just DC-fast. Off by default."
   ),
+  # everdrive2pnw / toggles-invert2pnw: the EverDrive box is ON by default; this is the opt-OUT toggle.
+  "DisableEverDrive": tr_noop(
+    "By default, when an EverDrive auxiliary charger is connected, a small box in the lower-right " +
+    "corner (just below the CES box) shows how much power it is putting in alongside the truck's " +
+    "range — for example \"ED: 1.4 kW   112 -> 117 mi\" while moving, or \"ED: 1.4 kW   112 mi  " +
+    "+2.7 mi/h\" when stopped. The box does not appear at all unless an EverDrive is actually " +
+    "sending data, so it never shows on the Tesla or on a truck without one. Display-only — never " +
+    "affects steering or speed. Turn this ON to hide it."
+  ),
   "DeferHDVideoUpload": tr_noop(
     "Hold back the large HD video files (road/wide camera) from uploading while ON; " +
     "logs (qlog/rlog) and low-res video keep uploading. Held files upload normally once " +
@@ -322,6 +331,14 @@ class TogglesLayout(Widget):
       "EvIncludeLevel2": (
         lambda: tr("Display slow Level 2 chargers"),
         DESCRIPTIONS["EvIncludeLevel2"],
+        "speed_limit.png",
+        False,
+      ),
+      # everdrive2pnw: EverDrive auxiliary-charger power + range box (lower-right, below CES).
+      # Display-only, opt-OUT, no restart needed — the UI picks the param up on its next ~5 Hz poll.
+      "DisableEverDrive": (
+        lambda: tr("Disable EverDrive Display"),
+        DESCRIPTIONS["DisableEverDrive"],
         "speed_limit.png",
         False,
       ),
