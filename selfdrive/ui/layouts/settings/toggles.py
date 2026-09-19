@@ -172,8 +172,8 @@ DESCRIPTIONS = {
   "DisableEverDrive": tr_noop(
     "By default, when an EverDrive auxiliary charger is connected, a small box in the lower-right " +
     "corner (just below the CES box) shows how much power it is putting in alongside the truck's " +
-    "range — for example \"ED: 1.4 kW   112 -> 117 mi\" while moving, or \"ED: 1.4 kW   112 mi  " +
-    "+2.7 mi/h\" when stopped. The box does not appear at all unless an EverDrive is actually " +
+    "range — for example \"ED:1.4kw,112mi->117mi\" while moving, or \"ED:1.4kw,112mi,+2.7mi/h\" " +
+    "when stopped. The box does not appear at all unless an EverDrive is actually " +
     "sending data, so it never shows on the Tesla or on a truck without one. Display-only — never " +
     "affects steering or speed. Turn this ON to hide it."
   ),
