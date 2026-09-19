@@ -219,8 +219,20 @@ That is confirmed by the baseline reproducing the independently-published table 
 **Truth curvature** = `max(kPeak, |slKActl|)` over the apex window, preferring `kPeak` where present
 (it is ≥ the 1 Hz `|slKActl|` sample on **99.2 %** of the 6,638 ticks carrying both, median **1.90×**).
 The `slKActl`-only variant is reported alongside and moves nothing material. An exact 0.0 is treated
-as *no measurement*, never as straight road (`CURVEDB2PNW.md` D1). **Tesla is excluded at the scan** —
-ICBM does not exist there and `slKActl` is 0 % live.
+as *no measurement*, never as straight road (`CURVEDB2PNW.md` D1).
+
+**Two known data hazards, both handled by construction rather than by correction:**
+
+* **Tesla is excluded at the scan** (`scan.py` keeps only `car` = `FORD_*`, with the pre-2026-07-13
+  corpora mapped from their own `DRIVE_REPORT.md` headers). ICBM does not exist on the Raven, and
+  `slKActl` there is **0 % live / 51,754 exact zeros** — a Tesla row could contribute neither a
+  decision nor a truth curvature. Tesla record counts are printed per file so the exclusion is
+  visible, not silent.
+* **`kPose` / `achLatPose` are not used at all.** Those are the fields that shipped sign-inverted
+  before `36f914a17c`. The truth here is `slKActl` (from `CS.yawRate`, the Ford CAN signal) and
+  `kPeak`, which is defined as *"the per-second PEAK of `max(|achieved|, |commanded|)`"* — absolute
+  by construction and derived from a different source than the pose. A sign inversion cannot reach
+  either. Everything downstream additionally uses `abs()`.
 
 ### 3.4 The sweep
 
