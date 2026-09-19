@@ -8,6 +8,7 @@ self-consistent.
 import gzip
 import json
 import math
+from collections import Counter
 
 import pytest
 
@@ -267,6 +268,28 @@ def test_load_corpus_separates_present_from_alive(tmp_path):
   assert reports[0].fields_present["slKActl"] == 5
   assert reports[0].fields_alive["slKActl"] == 0
   assert reports[0].fields_alive["slKCmd"] == 5
+
+
+@pytest.mark.parametrize(("v", "alive"), [
+  (False, True), (True, True),          # a bool is a READING: `dq=False` means the roll-up ran
+  (0.0, False), (0, False), ("", False), (None, False),
+  (0.002, True), (-0.002, True), ("motorway", True),
+])
+def test_a_false_flag_is_a_live_reading_not_a_dead_field(v, alive):
+  """`False == 0.0` in Python, so the numeric-zero test swallowed it and the capability report
+  named `dq` -- a field working exactly as designed -- "PRESENT BUT ALWAYS NULL/ZERO". A false
+  dead-field report is the same class of defect the report exists to catch."""
+  assert I._is_live_reading(v) is alive
+
+
+def test_a_corpus_whose_dq_is_always_false_is_not_reported_dead(tmp_path):
+  path = write(tmp_path, "a.jsonl", [raw(i, dq=False, slKActl=0.002) for i in range(5)])
+  _, reports = I.load_corpus([path], log=lambda *x: None)
+  assert reports[0].fields_present["dq"] == 5
+  assert reports[0].fields_alive["dq"] == 5
+  lines = []
+  I.print_reports(reports, Counter(), [], log=lines.append)
+  assert not any("ALWAYS NULL/ZERO" in ln and "dq" in ln for ln in lines)
 
 
 # ----------------------------------------------------------------------------------------- drives
@@ -605,36 +628,97 @@ def test_a_straight_road_does_not_become_a_row():
 
 
 def test_a_driver_override_under_real_lateral_load_becomes_a_down_observation():
+  # NOTE THE DEFAULT MASK. Until 2026-09-19 every DOWN test here relaxed `drv` for itself, which
+  # is what let the bug through: with the design's own disqualifier set the rule was unreachable.
   recs = curve_drive()
   recs[20].update(strPrs=True, achLat=3.0, slKCmd=0.008)
-  obs, _ = observations(recs, dq_mask=I.dq_mask_from_names("lc,blnk"))
+  obs, _ = observations(recs)
   down = [o for o in obs if o.kind == "down"]
   assert len(down) == 1
   assert down[0].k == 0.008                     # section 6.2's |slKCmd| at the intervention
   assert down[0].estimator == "slKCmd_at_override"
 
 
+def test_the_down_rule_is_reachable_under_the_designs_own_disqualifier_set():
+  """THE REGRESSION TEST for the 2026-09-19 defect.
+
+  Section 6.2's DOWN is by definition a `strPrs` tick, and a `strPrs` tick sets DQ_DRV, so a
+  function that drops disqualified passages BEFORE the DOWN loop can never emit one. It did, for
+  the whole corpus: `obs_down` read 0 on 2.2 GB of driving and the README called it "the
+  interventions are simply below the trigger". This asserts the UP is still dropped for exactly
+  that cause AND the DOWN still comes out."""
+  recs = curve_drive()
+  recs[20].update(strPrs=True, achLat=3.0, slKCmd=0.008)
+  obs, stats = observations(recs)                     # I.DQ_ALL -- `drv` IS in force
+  assert [o.kind for o in obs] == ["down"]
+  assert stats["obs_dropped_dq_drv"] == 1             # the UP was still rejected, for `drv`
+  assert stats["obs_up_clean"] == 0
+  assert obs[0].dq_state == "clean"                   # clean of everything that applies TO a DOWN
+
+
+def test_a_down_is_still_disqualified_by_a_cause_that_is_not_drv():
+  """Relaxing `drv` for DOWN is not relaxing the rule: a lane change is a steering input that says
+  nothing about the road, and it still bins the pass."""
+  recs = curve_drive()
+  recs[20].update(strPrs=True, achLat=3.0, slKCmd=0.008)
+  recs[21]["slAngSat"] = True
+  obs, stats = observations(recs)
+  assert obs == []
+  assert stats["down_dropped_dq_not_drv"] == 1
+  assert stats["down_dropped_dq_sat"] == 1
+  assert stats["down_dropped_dq_drv"] == 0            # `drv` is never a DOWN's own drop cause
+
+
+def test_a_downs_dq_state_is_derived_from_the_flags_not_asserted():
+  """It was a hardcoded "clean". On every corpus we have the derived value IS "clean" -- the
+  presence of `strPrs` is itself disqualifier evidence, so a DOWN can never be "unknown" -- but a
+  constant that happens to be right is not a computed value, and `--dq clean` reads this field.
+  What the derivation buys is the line below: an UNATTRIBUTED `dq` still bins the DOWN."""
+  recs = curve_drive()
+  recs[20].update(strPrs=True, achLat=3.0, slKCmd=0.008)
+  obs, _ = observations(recs)
+  assert [o.dq_state for o in obs] == ["clean"]
+
+  # `dq` true with no named cause: not relaxable, and not a DOWN either.
+  recs[21].update(dq=True)
+  obs, stats = observations(recs)
+  assert obs == []
+  assert stats["down_dropped_dq_unattributed"] == 1
+
+
 def test_a_gentle_override_is_not_a_down_observation():
   # Section 6.2: of 2,986 overrides above 27 mph only ~113 ticks were plausibly about curve speed.
   recs = curve_drive()
   recs[20].update(strPrs=True, achLat=0.9, slKCmd=0.008)
-  obs, _ = observations(recs, dq_mask=I.dq_mask_from_names("lc,blnk"))
+  obs, _ = observations(recs)
   assert [o for o in obs if o.kind == "down"] == []
 
 
 def test_an_override_with_no_commanded_curvature_is_counted_not_guessed():
   recs = curve_drive()
   recs[20].update(strPrs=True, achLat=3.0)
-  obs, stats = observations(recs, dq_mask=I.dq_mask_from_names("lc,blnk"))
+  obs, stats = observations(recs)
   assert [o for o in obs if o.kind == "down"] == []
   assert stats["down_dropped_no_kcmd"] == 1
+
+
+def test_an_override_with_no_lateral_accel_witness_is_counted_not_guessed():
+  """Reachable at last, and it fires twice on the real corpus. The override tick carries neither
+  `achLat` nor any curvature column, so there is nothing to compute the lateral load from -- it is
+  COUNTED and dropped, never assumed to be under or over the trigger."""
+  recs = curve_drive()
+  recs[20].pop("slKActl")                # the bend is still measured by ticks 19, 21, 22
+  recs[20]["strPrs"] = True
+  obs, stats = observations(recs)
+  assert [o for o in obs if o.kind == "down"] == []
+  assert stats["down_no_lateral_accel_witness"] == 1
 
 
 def test_only_one_down_per_pass():
   recs = curve_drive()
   for i in (20, 21, 22):
     recs[i].update(strPrs=True, achLat=3.0, slKCmd=0.008)
-  obs, _ = observations(recs, dq_mask=I.dq_mask_from_names("lc,blnk"))
+  obs, _ = observations(recs)
   assert len([o for o in obs if o.kind == "down"]) == 1
 
 
@@ -694,6 +778,44 @@ def test_an_episode_with_no_reference_speed_is_counted_not_invented():
   eps, stats = episodes(recs)
   assert eps == []
   assert stats["ep_dropped_no_reference_speed"] == 1
+
+
+def test_two_episodes_at_one_junction_in_one_drive_share_a_site_group():
+  """N=170 was 24 re-fires wide. ICBM slowing for the same junction twice inside one drive is one
+  road event logged twice; the pair is KEPT (each is a real decision) and TAGGED, so every count
+  downstream can print both denominators instead of reading 170 as 170 independent sites."""
+  recs = curve_drive()
+  for i in (8, 9, 10, 11):
+    recs[i].update(icbmT=18.0, icbmSrc="map", icbmC=28.0)
+  for i in (15, 16, 17, 18):                 # >3 s later: a second episode, same site ahead
+    recs[i].update(icbmT=18.0, icbmSrc="map", icbmC=28.0)
+  eps, stats = episodes(recs)
+  assert len(eps) == 2
+  assert eps[0]["site_group"] == eps[1]["site_group"]
+  assert stats["ep_refire_same_site_same_drive"] == 1
+
+
+def test_two_different_junctions_in_one_drive_get_different_site_groups():
+  """The other half of the re-fire rule: grouping by drive alone would collapse every episode on a
+  drive into one "site" and under-count the independent evidence instead of over-counting it."""
+  recs = [raw(i) for i in range(80)]            # 2,000 m at 25 m/s
+  for i in (19, 20, 21, 22, 59, 60, 61, 62):
+    recs[i]["slKActl"] = 0.005
+  recs[8]["mapDist"] = 300.0                    # s=200 +300 -> the bend at tick 20
+  recs[48]["mapDist"] = 300.0                   # s=1200 +300 -> the bend at tick 60
+  for i in (8, 9, 10, 11, 48, 49, 50, 51):
+    recs[i].update(icbmT=18.0, icbmSrc="map", icbmC=28.0)
+  eps, stats = episodes(recs)
+  assert len(eps) == 2
+  assert eps[0]["site_group"] != eps[1]["site_group"]
+  assert stats["ep_refire_same_site_same_drive"] == 0
+
+
+def test_the_site_group_is_per_drive_so_two_drives_never_collapse():
+  eps, stats = episodes(icbm_drive())
+  assert len(eps) == 1
+  assert eps[0]["site_group"].startswith(eps[0]["drive_id"])
+  assert stats["ep_refire_same_site_same_drive"] == 0
 
 
 def test_a_rounding_sized_reduction_is_not_a_slowdown():
@@ -930,19 +1052,41 @@ def test_recurrence_separates_a_missing_revisit_from_a_discarded_one():
     return REC.analyse(ticks, [ep], obs, P)
 
   # never came back
-  tally, why, _ = run([(0,)])
+  tally, why, _, _ = run([(0,)])
   assert tally["revisited_same_direction"] == 0
 
   # came back on day 5, clean -> a row exists
-  tally, why, _ = run([(0,), (5,)])
+  tally, why, _, _ = run([(0,), (5,)])
   assert tally["revisited_same_direction"] == 1
   assert why["a row exists"] == 1
 
   # came back on day 5, but the driver was steering -> the revisit is DISCARDED, not absent
-  tally, why, _ = run([(0,), (5, True)])
+  tally, why, _, _ = run([(0,), (5, True)])
   assert tally["revisited_same_direction"] == 1
   assert why["a row exists"] == 0
   assert why["disqualified: drv"] == 1
+
+
+def test_recurrence_does_not_count_a_row_the_lookup_could_never_find():
+  """`has_row` must use the SAME key as `CurveDB._nearest`: position AND approach bearing. Omitting
+  the bearing counted the opposite carriageway as a usable row, which is why this reported 7 where
+  the replay's matcher saw 4."""
+  from openpilot.tools.curvedb import recurrence as REC
+  recs = [raw(i, t0=T0 + 86400 * d) for d in (0, 5) for i in range(40)]
+  ticks = [t for t in (I.normalise(r, "m") for r in recs) if t is not None]
+  d0 = drive_of([raw(i) for i in range(40)])
+  site = dict(site_lat=d0.ticks[20].lat, site_lon=d0.ticks[20].lon, approach_bearing=0.0)
+  ep = dict(site, date=I.pt_date(T0))
+
+  def row(bearing):
+    return Observation(date="2026-09-14", t=T0 + 86400 * 5, car=LIGHTNING, drive_id="other",
+                       site_lat=site["site_lat"], site_lon=site["site_lon"], bearing_deg=bearing,
+                       k=0.005, kind="up", estimator="kPeak100", site_src="track", source="x:1",
+                       posted_ms=29.0, highway_class="motorway", n_ticks=7, dq_state="clean",
+                       dq_src="sampled1hz")
+
+  assert REC.analyse(ticks, [ep], [row(0.0)], P)[1]["a row exists"] == 1
+  assert REC.analyse(ticks, [ep], [row(180.0)], P)[1]["a row exists"] == 0
 
 
 def test_recurrence_counts_only_revisits_in_the_same_direction():

@@ -118,10 +118,12 @@ ICBM_DECEL_SOURCES = ("map", "far", "vis", "gpsHold")
 # not inferred from an absence. The f-string-built keys (site_*, ep_site_attrib_*,
 # obs_up_*, obs_dropped_dq_*) are listed explicitly for the same reason.
 TALLY_KEYS = (
-  "down_dropped_no_kcmd", "down_no_lateral_accel_witness",
+  "down_dropped_dq_blnk", "down_dropped_dq_lc", "down_dropped_dq_not_drv", "down_dropped_dq_sat",
+  "down_dropped_dq_unattributed", "down_dropped_no_kcmd", "down_no_lateral_accel_witness",
   "drive_dropped_odometer_disagrees_with_gps", "drives",
   "ep_dropped_no_reference_speed", "ep_dropped_no_site_ahead", "ep_dropped_reduction_too_small",
-  "ep_kept", "ep_restore_only", "ep_site_attrib_logged_candidate",
+  "ep_kept", "ep_refire_same_site_same_drive", "ep_restore_only",
+  "ep_site_attrib_logged_candidate",
   "ep_site_attrib_logged_candidate_far", "ep_site_attrib_map_dist",
   "ep_site_attrib_nearest_ahead", "obs_down", "obs_dropped_disqualified",
   "obs_k_below_usable_floor", "obs_up_clean", "obs_up_unknown", "pass_extent_has_no_moving_tick",
@@ -370,6 +372,19 @@ class FileReport:
             f"bad={self.unparsable:>4} {','.join(sorted(self.cars)) or '-'}")
 
 
+def _is_live_reading(v) -> bool:
+  """Is this field value EVIDENCE, or the absence of one?
+
+  **A bool is always evidence.** `dq=False` means section 3.5's roll-up ran and said the pass was
+  clean, which is the OPPOSITE of a dead field -- but Python's `False == 0.0`, so a numeric-zero
+  test swallows it and the capability report prints `dq` under "PRESENT BUT ALWAYS NULL/ZERO". A
+  false dead-field report is the same class of defect this report exists to catch (Fable
+  2026-09-19), so bools are decided before the zero test rather than by it."""
+  if isinstance(v, bool):
+    return True
+  return v is not None and v != 0.0 and v != ""
+
+
 def _read_json_lines(path):
   op = gzip.open if str(path).endswith(".gz") else open
   with op(path, "rt", errors="replace") as f:
@@ -411,8 +426,7 @@ def load_corpus(paths, log=print) -> tuple[list[Tick], list[FileReport]]:
       for f in AUDIT_FIELDS:
         if f in r:
           rep.fields_present[f] += 1
-          v = r[f]
-          if v is not None and v != 0.0 and v != "" and v is not False:
+          if _is_live_reading(r[f]):
             rep.fields_alive[f] += 1
       pose.observe(r)
       tk = normalise(r, f"{os.path.relpath(path)}:{lineno}")
@@ -611,7 +625,8 @@ class Passage:
   k_v_ego: float                   # the speed at which that peak curvature was measured
   a_lat_max: float | None          # max |achLat| over the extent, hands-off ticks only
   a_lat_src: str
-  dq_state: str                    # "clean" | "dirty" | "unknown"
+  dq_state: str                    # "clean" | "dirty" | "unknown" -- for the UP observation (6.1)
+  dq_state_down: str               # the same roll-up WITHOUT `drv` -- for the DOWN observation (6.2)
   dq_src: str                      # "rollup100" | "sampled1hz" | "none" -- how strong that state is
   dq_why: str                      # ALL causes seen in the extent, even ones the mask relaxed
   posted: float | None
@@ -620,6 +635,27 @@ class Passage:
   t: float
   extent: tuple[int, int]
   passage_err_m: float
+
+
+def approach_bearing(drive: Drive, s_site: float, ref_m: float) -> tuple[float | None, str]:
+  """Which way the truck was pointing `ref_m` before reaching a site, and where that came from.
+
+  Section 6.3 makes a row's direction the APPROACH direction but never says at what distance it is
+  sampled, and `approach_bearing_ref_m` is that unpinned parameter. ONE implementation, called by
+  `measure_passage` (at the configured reference) and by `calib.py` (at 500/300/150 m, to measure
+  how much the answer moves across ICBM's own decision range) -- two implementations of a keying
+  rule is how ingest and a lookup come to disagree about which road this is."""
+  s_ref = s_site - ref_m
+  i_ref = drive.index_at(s_ref)
+  if i_ref is None or abs(drive.s[i_ref] - s_ref) > APPROACH_TOL_M:
+    return None, "none"
+  ref = drive.ticks[i_ref]
+  if ref.bearing is not None:
+    return ref.bearing, "logged"
+  j = drive.index_at(drive.s[i_ref] + BEARING_BASELINE_M)
+  if j is not None and j > i_ref:
+    return initial_bearing_deg(ref.lat, ref.lon, drive.ticks[j].lat, drive.ticks[j].lon), "track"
+  return None, "none"
 
 
 def _tick_k(tk: Tick) -> tuple[float | None, str]:
@@ -684,18 +720,7 @@ def measure_passage(drive: Drive, site: Site, params: CurveDBParams, stats: Coun
     return None
 
   # -- approach bearing, sampled where the CAR will later ask (section 6.3) --------------------
-  bearing, bsrc = None, "none"
-  s_ref = s_p - params.approach_bearing_ref_m
-  i_ref = drive.index_at(s_ref)
-  if i_ref is not None and abs(drive.s[i_ref] - s_ref) <= APPROACH_TOL_M:
-    ref = drive.ticks[i_ref]
-    if ref.bearing is not None:
-      bearing, bsrc = ref.bearing, "logged"
-    else:
-      j = drive.index_at(drive.s[i_ref] + BEARING_BASELINE_M)
-      if j is not None and j > i_ref:
-        bearing = initial_bearing_deg(ref.lat, ref.lon, drive.ticks[j].lat, drive.ticks[j].lon)
-        bsrc = "track"
+  bearing, bsrc = approach_bearing(drive, s_p, params.approach_bearing_ref_m)
   if bearing is None:
     # Not a silent skip: a pass whose approach was never recorded (the drive started inside the
     # extent, or the fix was lost) cannot be keyed by direction, and direction is half the key.
@@ -726,15 +751,24 @@ def measure_passage(drive: Drive, site: Site, params: CurveDBParams, stats: Coun
     bits |= tk.dq_bits
     known = known or tk.dq_known
     rollup = rollup or tk.dq_rollup
-  if bits & dq_mask:
-    dq_state = "dirty"
-  elif known:
-    dq_state = "clean"
-  else:
+
+  def _state(b: int) -> str:
+    if b & dq_mask:
+      return "dirty"
+    if known:
+      return "clean"
     # Rule 2: no flags in this corpus means the disqualifier is UNKNOWN. "No evidence of a lane
     # change" is not "no lane change", and reading it as clean is how an override-contaminated pass
     # becomes a row claiming the road is tighter -- or straighter -- than it is.
-    dq_state = "unknown"
+    return "unknown"
+
+  dq_state = _state(bits)
+  # Section 6.2's DOWN observation IS a driver steering override, so `drv` is its DEFINITION and
+  # cannot also be its disqualifier -- judging DOWN on `dq_state` made the rule STRUCTURALLY
+  # UNREACHABLE (every passage holding the `strPrs` tick DOWN needs was dropped first; measured
+  # 2026-09-19: relaxing `drv` took obs_down 0 -> 127). Every OTHER cause still applies, so this is
+  # the same roll-up with that one bit cleared. See `observations_for_drive`.
+  dq_state_down = _state(bits & ~DQ_DRV)
 
   # -- lateral acceleration actually experienced, hands-off -------------------------------------
   a_vals, used_achlat, used_kv2 = [], False, False
@@ -758,7 +792,8 @@ def measure_passage(drive: Drive, site: Site, params: CurveDBParams, stats: Coun
     site=site, i_passage=best_i, s_passage=s_p, approach_bearing=bearing, bearing_src=bsrc,
     k=k_best, k_estimator=_weakest_estimator(ests), k_n=k_n, k_v_ego=k_v,
     a_lat_max=max(a_vals) if a_vals else None, a_lat_src=a_src,
-    dq_state=dq_state, dq_src=("rollup100" if rollup else "sampled1hz" if known else "none"),
+    dq_state=dq_state, dq_state_down=dq_state_down,
+    dq_src=("rollup100" if rollup else "sampled1hz" if known else "none"),
     dq_why=dq_names(bits),
     posted=statistics.median(posted) if posted else None,
     hwy=hwys.most_common(1)[0][0] if hwys else None, n_ticks=len(extent),
@@ -774,7 +809,16 @@ def observations_for_drive(drive: Drive, passages: list[Passage], params: CurveD
   the 2026-09-08 pass for that reason. The lead confound belongs to down-by-braking only -- which
   this corpus cannot measure at all, since `brakePressed` fired 0 of 15,884 carState messages above
   27 mph on this truck. DOWN here is therefore steering-override only, exactly as section 6.2
-  specifies."""
+  specifies.
+
+  **UP and DOWN are judged by DIFFERENT disqualifier roll-ups, and that is not a relaxation.**
+  Until 2026-09-19 this function dropped a disqualified passage before the DOWN loop ever ran. A
+  DOWN is by definition a `strPrs` tick and a `strPrs` tick sets `DQ_DRV`, so every passage that
+  could produce a DOWN was thrown away first: the rule was STRUCTURALLY UNREACHABLE and its zero
+  was read as "the interventions are below the trigger". They are not -- with `drv` relaxed the
+  same corpus yields 127. UP still requires a fully clean pass (a driver's hands corrupt a
+  hands-off curvature measurement); DOWN is evaluated on `dq_state_down`, the same roll-up with
+  `drv` -- its own precondition -- cleared and every other cause still binding."""
   out: list[Observation] = []
   for p in passages:
     if p.k < K_MIN_USABLE:
@@ -789,18 +833,25 @@ def observations_for_drive(drive: Drive, passages: list[Passage], params: CurveD
       # number with no way to argue about it.
       for name in (p.dq_why.split(",") if p.dq_why else ["none"]):
         stats[f"obs_dropped_dq_{name}"] += 1
-      continue
-    tk = drive.ticks[p.i_passage]
-    out.append(Observation(
-      date=pt_date(tk.t), t=tk.t, car=drive.car, drive_id=drive.drive_id,
-      site_lat=p.site.lat, site_lon=p.site.lon,
-      bearing_deg=p.approach_bearing, k=p.k, kind="up", estimator=p.k_estimator,
-      site_src=p.site.src, source=tk.src, posted_ms=p.posted, highway_class=p.hwy,
-      n_ticks=p.n_ticks, dq_state=p.dq_state, dq_src=p.dq_src,
-    ))
-    stats[f"obs_up_{p.dq_state}"] += 1
+    else:
+      tk = drive.ticks[p.i_passage]
+      out.append(Observation(
+        date=pt_date(tk.t), t=tk.t, car=drive.car, drive_id=drive.drive_id,
+        site_lat=p.site.lat, site_lon=p.site.lon,
+        bearing_deg=p.approach_bearing, k=p.k, kind="up", estimator=p.k_estimator,
+        site_src=p.site.src, source=tk.src, posted_ms=p.posted, highway_class=p.hwy,
+        n_ticks=p.n_ticks, dq_state=p.dq_state, dq_src=p.dq_src,
+      ))
+      stats[f"obs_up_{p.dq_state}"] += 1
 
     # -- DOWN: a steering override taken while the road was actually loading the truck ----------
+    # Reached whether or not the UP above survived: see the docstring.
+    if p.dq_state_down == "dirty":
+      stats["down_dropped_dq_not_drv"] += 1
+      for name in (p.dq_why.split(",") if p.dq_why else ["none"]):
+        if name != "drv":
+          stats[f"down_dropped_dq_{name}"] += 1
+      continue
     lo, hi = p.extent
     for t2 in drive.ticks[lo:hi]:
       if not t2.str_prs or t2.v_ego < params.min_speed_ms:
@@ -825,7 +876,12 @@ def observations_for_drive(drive: Drive, passages: list[Passage], params: CurveD
         site_lat=p.site.lat, site_lon=p.site.lon,
         bearing_deg=p.approach_bearing, k=t2.k_cmd, kind="down", estimator="slKCmd_at_override",
         site_src=p.site.src, source=t2.src, posted_ms=p.posted, highway_class=p.hwy,
-        n_ticks=1, dq_state="clean", dq_src=p.dq_src,
+        # DERIVED, not asserted. This was a hardcoded "clean". On this corpus the derived value is
+        # "clean" on all 127 DOWNs anyway -- the presence of `strPrs` is itself disqualifier
+        # evidence, so `known` is true whenever a DOWN can exist -- but a constant that happens to
+        # be right is not the same as a value that was computed, and `--dq clean` is read off this
+        # field.
+        n_ticks=1, dq_state=p.dq_state_down, dq_src=p.dq_src,
       ))
       stats["obs_down"] += 1
       break          # one DOWN per pass: the driver's "too fast" is one judgement, not N ticks
@@ -842,8 +898,18 @@ def find_episodes(drive: Drive, passages: list[Passage], params: CurveDBParams,
 
   An episode is a contiguous run of ticks carrying a published `icbmT`. The RESTORE tail belongs to
   the same run (it is how the truck gets its speed back) but is excluded from the depth, because a
-  restore is by construction an increase."""
+  restore is by construction an increase.
+
+  **RE-FIRES ARE TAGGED, NOT DROPPED (`site_group`).** ICBM firing again at a junction it already
+  slowed for, later in the SAME drive, is one road event logged twice -- 24 of the 170 episodes in
+  the 2026-09-17 corpus are that. Each is a real ICBM decision so each is replayed, but a count of
+  170 read as 170 independent pieces of evidence, and two "false cancels" 36 lines apart in one
+  file read as two, when they were one junction and one Passage. The tag lets every downstream
+  count print both denominators. Grouping is by (this drive, within `site_radius_m`) and
+  deliberately ignores the approach bearing: within one drive, the same place is the same road
+  event."""
   eps: list[dict] = []
+  site_groups: list[tuple[float, float]] = []
   i, n = 0, len(drive.ticks)
   while i < n:
     if drive.ticks[i].icbm_t is None:
@@ -929,9 +995,17 @@ def find_episodes(drive: Drive, passages: list[Passage], params: CurveDBParams,
       if k is not None and (k_ahead is None or k > k_ahead):
         k_ahead, k_ahead_v = k, tk.v_ego
 
+    group = next((g for g, (gla, glo) in enumerate(site_groups)
+                  if haversine_m(gla, glo, p.site.lat, p.site.lon) <= params.site_radius_m), None)
+    if group is None:
+      group = len(site_groups)
+      site_groups.append((p.site.lat, p.site.lon))
+    else:
+      stats["ep_refire_same_site_same_drive"] += 1
+
     eps.append({
       "date": pt_date(start.t), "t": start.t, "t_end": run[-1].t, "car": drive.car,
-      "drive_id": drive.drive_id,
+      "drive_id": drive.drive_id, "site_group": f"{drive.drive_id}#{group}",
       "start_lat": start.lat, "start_lon": start.lon, "start_bearing": start.bearing,
       "v_ego_start": start.v_ego,
       "ref_ms": ref, "ref_src": ref_src, "icbm_target_ms": target, "reduction_ms": ref - target,

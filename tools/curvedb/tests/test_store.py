@@ -22,10 +22,8 @@ from openpilot.tools.curvedb.store import (
   cancel_target,
   haversine_m,
   initial_bearing_deg,
-  load_snapshot_or_empty,
   speed_for_curvature,
   tighten,
-  with_params,
 )
 
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
@@ -328,9 +326,10 @@ def test_build_is_order_independent():
   a = obs(date="2026-09-01", k=0.002)
   b = obs(date="2026-09-02", k=0.006, site_lon=east_of(45.0, -122.0, 20.0))
   c = obs(date="2026-09-03", k=0.004, site_lon=east_of(45.0, -122.0, 300.0))
-  one = CurveDB.build([a, b, c], p).to_snapshot()
-  two = CurveDB.build([c, b, a], p).to_snapshot()
-  assert one == two
+  def key(db):
+    return [(r.site_lat, r.site_lon, r.bearing_deg, r.k_up, r.k_down, r.n_passes)
+            for r in db.rows]
+  assert key(CurveDB.build([a, b, c], p)) == key(CurveDB.build([c, b, a], p))
 
 
 def test_the_row_anchor_does_not_drift_with_later_passes():
@@ -350,49 +349,6 @@ def test_build_rejects_anything_that_is_not_an_observation():
 def test_db_rejects_params_of_the_wrong_type():
   with pytest.raises(CurveDBError):
     CurveDB({"site_radius_m": 40.0})
-
-
-def test_with_params_regroups_from_the_observations():
-  wide = tighten(PROVISIONAL_PARAMS, site_radius_m=500.0)
-  db = CurveDB.build([obs(), obs(date="2026-09-02", site_lon=east_of(45.0, -122.0, 200.0))],
-                     PROVISIONAL_PARAMS)
-  assert len(db.rows) == 2
-  assert len(with_params(db, wide).rows) == 1
-
-
-# --------------------------------------------------------------------------------------- snapshot
-
-def test_snapshot_round_trips():
-  db = CurveDB.build([obs(), obs(date="2026-09-02", k=0.006)], PROVISIONAL_PARAMS)
-  back = CurveDB.from_snapshot(db.to_snapshot())
-  assert back.to_snapshot() == db.to_snapshot()
-  assert back.params == db.params
-  assert back.rows[0].k_eff == 0.006
-
-
-@pytest.mark.parametrize("mangle", [
-  lambda s: {**s, "version": 999},
-  lambda s: {k: v for k, v in s.items() if k != "params"},
-  lambda s: {**s, "params": "not a dict"},
-  lambda s: {**s, "params": {"site_radius_m": 40.0}},
-  lambda s: {**s, "rows": [{"site_lat": 45.0}]},
-  lambda s: [],
-])
-def test_from_snapshot_refuses_what_it_cannot_vouch_for(mangle):
-  good = CurveDB.build([obs()], PROVISIONAL_PARAMS).to_snapshot()
-  with pytest.raises(CurveDBError):
-    CurveDB.from_snapshot(mangle(good))
-
-
-def test_load_snapshot_or_empty_reports_before_it_degrades():
-  seen = []
-  assert load_snapshot_or_empty({"version": 999}, seen.append) is None
-  assert len(seen) == 1 and isinstance(seen[0], CurveDBError)
-
-
-def test_load_snapshot_or_empty_will_not_let_a_caller_swallow_silently():
-  with pytest.raises(CurveDBError):
-    load_snapshot_or_empty({"version": 999}, None)
 
 
 # -------------------------------------------------------------------------------------- authority

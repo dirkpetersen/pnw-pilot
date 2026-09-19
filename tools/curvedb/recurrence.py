@@ -80,14 +80,27 @@ def analyse(ticks, episodes, observations, params: CurveDBParams):
   tally = Counter()
   why = Counter()
   other_date_hist = Counter()
+  # The same count per DISTINCT episode-site. ICBM re-firing at one junction inside one drive asks
+  # this question twice about one road (`ingest.find_episodes` tags it `site_group`), so a raw
+  # episode count overstates how many roads were actually looked at. Both are reported; neither is
+  # silently substituted for the other.
+  groups: dict[str, set] = {}
+
+  def hit_group(key, e):
+    g = e.get("site_group")
+    if g is not None:
+      groups.setdefault(key, set()).add(g)
+
   for e in episodes:
     la, lo, brg, d0 = e["site_lat"], e["site_lon"], e["approach_bearing"], e["date"]
     hit = _near(grid, la, lo, params.site_radius_m)
     if hit:
       tally["came_within_radius_at_all"] += 1
+      hit_group("came_within_radius_at_all", e)
     dates = {pt_date(tk.t) for tk in hit} - {d0}
     if dates:
       tally["revisited_on_another_date"] += 1
+      hit_group("revisited_on_another_date", e)
     # Same direction, because a row is keyed on (site, approach bearing): the opposite carriageway
     # is a different road and must not be counted as a revisit.
     same_dir = [tk for tk in hit if tk.bearing is not None
@@ -96,13 +109,21 @@ def analyse(ticks, episodes, observations, params: CurveDBParams):
     if not dirs:
       continue
     tally["revisited_same_direction"] += 1
+    hit_group("revisited_same_direction", e)
     other_date_hist[len(dirs)] += 1
     if len(dirs) >= params.min_dates:
       # What D6 actually needs: leave-one-out removes the episode's own date, so a site with only
       # ONE other date can never reach min_dates however clean the pipeline gets.
       tally["revisited_on_enough_other_dates_for_D6"] += 1
+      hit_group("revisited_on_enough_other_dates_for_D6", e)
 
-    has_row = any(o.date != d0 and haversine_m(o.site_lat, o.site_lon, la, lo) <= params.site_radius_m
+    # SAME key as `CurveDB._nearest`: position AND approach bearing (Fable 2026-09-19). Omitting
+    # the bearing counted a row on the opposite carriageway as a row the lookup would find, which
+    # is why this reported 7 where the replay's matcher saw 4 -- two numbers for one question,
+    # differing for a reason nobody had written down.
+    has_row = any(o.date != d0
+                  and haversine_m(o.site_lat, o.site_lon, la, lo) <= params.site_radius_m
+                  and bearing_diff_deg(o.bearing_deg, brg) <= params.heading_tol_deg
                   for o in observations)
     if has_row:
       why["a row exists"] += 1
@@ -113,16 +134,22 @@ def analyse(ticks, episodes, observations, params: CurveDBParams):
       why[f"disqualified: {dq_names(worst)}"] += 1
     else:
       why["no map candidate / no approach bearing / never became a site"] += 1
-  return tally, why, other_date_hist
+  return tally, why, other_date_hist, groups
 
 
-def report(tally, why, hist, n_eps, params, log=print):
+def report(tally, why, hist, n_eps, params, log=print, groups=None, n_groups=None):
   log("")
   log("=" * 100)
   log("RECURRENCE -- measured from RAW GPS TICKS, with the observation pipeline OUT of the loop")
   log("=" * 100)
   log(f"  matching radius {params.site_radius_m:.0f} m, heading tolerance " +
       f"{params.heading_tol_deg:.0f} deg, speed floor {params.min_speed_ms:.1f} m/s")
+  if n_groups is None:
+    log("  per-episode counts only: this episodes file predates the `site_group` tag, so ICBM " +
+        "re-firing at one junction is counted more than once. Re-run ingest for both columns.")
+  else:
+    log(f"  two denominators: {n_eps} EPISODES at {n_groups} DISTINCT episode-sites " +
+        f"({n_eps - n_groups} are the same junction firing again inside one drive)")
   for key, label in (
     ("came_within_radius_at_all", "episode sites the truck came within the radius of, ever"),
     ("revisited_on_another_date", "... on a DIFFERENT date"),
@@ -130,7 +157,9 @@ def report(tally, why, hist, n_eps, params, log=print):
     ("revisited_on_enough_other_dates_for_D6",
      f"... on >= {params.min_dates} other dates (what D6 needs under leave-one-out)"),
   ):
-    log(f"  {label:<70} {tally[key]:>4} / {n_eps}")
+    sites = ("" if groups is None or n_groups is None
+             else f"   |  {len(groups.get(key, ())):>4} / {n_groups} distinct sites")
+    log(f"  {label:<70} {tally[key]:>4} / {n_eps}{sites}")
   log(f"  distinct OTHER dates per revisited site: {dict(sorted(hist.items()))}")
   log("")
   log("  of the revisits, why each did or did not become a usable row:")
@@ -173,8 +202,10 @@ def main(argv=None):
         f"{len(observations)} observations")
   if not episodes:
     raise SystemExit("no episodes -- nothing to measure recurrence FOR")
-  tally, why, hist = analyse(ticks, episodes, observations, params)
-  report(tally, why, hist, len(episodes), params)
+  tally, why, hist, groups = analyse(ticks, episodes, observations, params)
+  tags = [e.get("site_group") for e in episodes]
+  n_groups = None if any(t is None for t in tags) else len(set(tags))
+  report(tally, why, hist, len(episodes), params, groups=groups, n_groups=n_groups)
   return 0
 
 

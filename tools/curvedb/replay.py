@@ -28,12 +28,19 @@ method. Three defences:
 
 * the funnel is printed in full, so "0 false cancels" is always read next to "0 episodes the
   database could act on at all";
-* `--self-match` replays WITHOUT leave-one-date-out. That must find far more rows than the LODO
-  run. If it does not, the keying is broken rather than the corpus being thin, and those are
-  completely different conclusions;
-* `--control k-shuffle` / `--control site-shuffle` deliberately corrupt the database and re-run. A
+* `--self-match` replays WITHOUT leave-one-date-out. **What it can and cannot show:** it is
+  near-tautological by construction -- an episode and the pass that built the row it finds come
+  from the SAME `Passage` object, so it asks whether a row anchored at x contains x. If self-match
+  does NOT find far more rows than LODO, `build()` and `match()` disagree and the whole run is
+  meaningless. If it does, all that is established is that they are SELF-CONSISTENT: it is not
+  evidence that the keying is right, because an ingest-vs-lookup convention mismatch would be
+  invisible to it. The count of matched rows that contain an observation from the episode's own
+  drive is printed for exactly this reason -- a high count is the tautology showing, not a result;
+* `--control k-shuffle` / `--control site-shuffle` deliberately corrupt the run and repeat it. A
   measurement that is doing work must get WORSE when its content is scrambled. If scrambling
-  changes nothing, nothing was being measured.
+  changes nothing, nothing was being measured -- **provided the scrambling could have changed
+  something**, which is a property of the control that has to be argued, not assumed (the
+  observation-side site-shuffle could not, and was deleted; see `shuffle_episode_sites`).
 
 ## "Real slowdown", defined numerically -- and the one place this file interprets the design
 
@@ -77,6 +84,7 @@ from openpilot.tools.curvedb.store import (
   Observation,
   authority,
   cancel_target,
+  haversine_m,
 )
 
 # --- PROVISIONAL replay constants ------------------------------------------------------------
@@ -105,6 +113,7 @@ class Outcome:
   k_verdict: float | None       # the curvature the verdict was taken on
   k_v_ego: float                # the speed that curvature was MEASURED at (see _verdict_curvature)
   verdict: str                  # see VERDICTS
+  own_drive_in_row: bool        # did the matched row contain a pass from this episode's own drive?
 
 
 VERDICTS = ("no_row", "no_authority", "no_action", "false_cancel", "grey", "phantom_refuted",
@@ -213,10 +222,15 @@ def evaluate(episode: dict, db: CurveDB, params: CurveDBParams,
     verdict = "grey"
   else:
     verdict = "phantom_refuted"
+  # The self-match tautology, measured instead of argued: under LODO this must be False on every
+  # episode (`_assert_lodo` enforces it); without LODO a True says the row was found because the
+  # episode's own pass built it.
+  own = bool(row is not None
+             and any(o.drive_id == episode.get("drive_id") for o in row.observations))
   return Outcome(episode=episode, matched=row is not None, auth_reason=auth.reason,
                  v_row_ms=auth.v_row_ms, new_target_ms=new_target, acted=acted,
                  a_cf=a_cf, a_at_icbm=a_icbm, a_at_ref=a_ref, k_verdict=k, k_v_ego=k_v,
-                 verdict=verdict)
+                 verdict=verdict, own_drive_in_row=own)
 
 
 def run(observations: list[Observation], episodes: list[dict], params: CurveDBParams,
@@ -247,28 +261,48 @@ def shuffle_k(observations: list[Observation], seed: int) -> list[Observation]:
   return [replace(o, k=k) for o, k in zip(observations, ks, strict=True)]
 
 
-def shuffle_sites(observations: list[Observation], seed: int) -> list[Observation]:
-  """Right curvatures, wrong places. If the number of episodes the DB acts on does NOT drop, the
-  matcher is not selecting anything and every "match" was an accident of density.
+def shuffle_episode_sites(episodes: list[dict], seed: int) -> list[dict]:
+  """Right database, wrong question: each episode is looked up at ANOTHER episode's site.
 
-  **Shuffled WITHIN each date** (Fable 2026-09-17). A global shuffle reassigns sites across dates
-  and thereby MANUFACTURES multi-date rows the real corpus does not have, so the corrupted database
-  looked MORE capable than the real one and the control's own alarm text fired for a reason
-  unrelated to what it asserts. Permuting inside a date preserves the site-to-date coupling, so a
-  row that survives is one the matcher built out of genuinely unrelated places -- which is the
-  thing being tested."""
-  by_date: dict[str, list[int]] = {}
-  for i, o in enumerate(observations):
-    by_date.setdefault(o.date, []).append(i)
-  out = list(observations)
-  rng = random.Random(seed)
-  for idxs in by_date.values():
-    pts = [(observations[i].site_lat, observations[i].site_lon, observations[i].bearing_deg)
-           for i in idxs]
-    rng.shuffle(pts)
-    for i, pt in zip(idxs, pts, strict=True):
-      out[i] = replace(observations[i], site_lat=pt[0], site_lon=pt[1], bearing_deg=pt[2])
-  return out
+  If the match count DROPS, the lookup is selecting on position and direction. If it stays equal,
+  any episode-site finds a row as readily as its own and a "match" is an accident of row density.
+  If it RISES -- which is what this corpus does, 29 against 6 -- the comparison is confounded and
+  the confound is the finding: leave-one-date-out removes the episode's own date, the passes at an
+  episode's own site are overwhelmingly from that date, and another episode's site is built from
+  dates LODO does not touch. `main` prints whichever of the three applies; none of them is "the
+  matcher is broken", which is what the deleted control asserted unconditionally.
+
+  **The observation-side version of this control could not fail, and was deleted (2026-09-19).**
+  It permuted the observations' sites WITHIN each date. That preserves each date's multiset of
+  positions exactly; leave-one-date-out removes whole dates; so the surviving position multiset is
+  the same either way and `matched` is invariant up to anchor-ordering noise. Its alarm --
+  "the matcher is not selecting anything" -- therefore fired BY CONSTRUCTION on every corpus, and
+  README section 1's conclusion that the 4 matches were row-density artefacts did not follow from
+  it. An alarm that always fires is worse than no alarm: it teaches the reader to skip it.
+
+  **Only `matched` may be read from this run.** The episode keeps its own `k_truth`, reference
+  speed and date while looking up a different road, so its verdict columns are meaningless and
+  `main` reports the match count alone."""
+  sites = [(e.get("site_lat"), e.get("site_lon"), e.get("approach_bearing")) for e in episodes]
+  random.Random(seed).shuffle(sites)
+  return [dict(e, site_lat=s[0], site_lon=s[1], approach_bearing=s[2])
+          for e, s in zip(episodes, sites, strict=True)]
+
+
+def stayed_put(episodes: list[dict], shuffled: list[dict], params: CurveDBParams) -> int:
+  """How many episodes the permutation left within `site_radius_m` of their OWN site.
+
+  A permutation has fixed points, and re-fires (see `site_group`) put the identical site in the
+  list more than once, so some episodes get their own road back. Those are not controlled at all,
+  and a control that is silently part-uncontrolled is the failure this file exists to avoid."""
+  n = 0
+  for a, b in zip(episodes, shuffled, strict=True):
+    pts = (a.get("site_lat"), a.get("site_lon"), b.get("site_lat"), b.get("site_lon"))
+    if not all(isinstance(x, int | float) and math.isfinite(x) for x in pts):
+      continue
+    if haversine_m(pts[0], pts[1], pts[2], pts[3]) <= params.site_radius_m:
+      n += 1
+  return n
 
 
 # ---------------------------------------------------------------------------------------------
@@ -277,6 +311,30 @@ def shuffle_sites(observations: list[Observation], seed: int) -> list[Observatio
 
 def _pct(n, d):
   return "--" if not d else f"{100.0 * n / d:.1f}%"
+
+
+def distinct_sites(episodes: list[dict]) -> int | None:
+  """How many DISTINCT episode-sites a list of episodes covers, or None if it cannot be known.
+
+  ICBM re-firing at a junction it already slowed for, later in the same drive, is one road event
+  logged twice (`ingest.find_episodes` tags it `site_group`; 24 of this corpus's 170 are re-fires).
+  Every count taken per-episode therefore overstates how much INDEPENDENT evidence it rests on --
+  "170 episodes" and "2 false cancels" both did, the latter being one junction and one Passage.
+
+  **None, never `len(episodes)`, when the tag is missing.** An episodes file written before the tag
+  existed would otherwise silently report every re-fire as an independent site, which is the same
+  defect wearing a fix's costume."""
+  groups = [e.get("site_group") for e in episodes]
+  return None if any(g is None for g in groups) else len(set(groups))
+
+
+def _sites_suffix(episodes: list[dict]) -> str:
+  """The distinct-episode-site count to print beside a per-episode count."""
+  d = distinct_sites(episodes)
+  if d is None:
+    return ("  (distinct episode-sites: UNKNOWN -- this episodes file predates `site_group`; " +
+            "re-run ingest)")
+  return f"  ({d} distinct episode-sites)"
 
 
 def summarise(outcomes: list[Outcome], title: str, log=print, *, real_a_lat: float):
@@ -290,29 +348,39 @@ def summarise(outcomes: list[Outcome], title: str, log=print, *, real_a_lat: flo
   log("=" * 100)
   log(f"{title}")
   log("=" * 100)
-  log(f"  episodes replayed                       {n}")
+  eps = [o.episode for o in outcomes]
+  log(f"  episodes replayed                       {n}{_sites_suffix(eps)}")
   log(f"  ... matched a row                       {sum(1 for o in outcomes if o.matched)}" +
       f"  ({_pct(sum(1 for o in outcomes if o.matched), n)})")
   for key in VERDICTS:
     if v.get(key):
       log(f"  ... verdict {key:<28} {v[key]}  ({_pct(v[key], n)})")
   log("")
-  log(f"  THE GATE (section 7): episodes the database would have cancelled or reduced = {len(acted)}")
-  log(f"    of those, adjudicable (k_truth present)   {len(adjudicable)}")
+  log(f"  THE GATE (section 7): episodes the database would have cancelled or reduced = {len(acted)}"
+      + _sites_suffix([o.episode for o in acted]))
+  log(f"    of those, adjudicable (k_truth present)   {len(adjudicable)}" +
+      _sites_suffix([o.episode for o in adjudicable]))
   log(f"    REAL SLOWDOWNS WRONGLY CANCELLED          {len(false_cancels)}" +
-      "   <- section 7 ships ONLY on zero")
+      _sites_suffix([o.episode for o in false_cancels]) + "   <- section 7 ships ONLY on zero")
   log(f"    phantoms refuted                          {v.get('phantom_refuted', 0)}")
   log(f"    grey band                                 {v.get('grey', 0)}")
 
-  bound = rule_of_three(len(adjudicable))
+  # The BOUND is taken on distinct sites, not on raw episodes: a re-fire at a junction already
+  # counted is not an independent trial, and the rule of three assumes independent trials. Falls
+  # back to the episode count only when the tag is absent, and says which it used.
+  n_indep = distinct_sites([o.episode for o in adjudicable])
+  indep_src = "distinct episode-sites"
+  if n_indep is None:
+    n_indep, indep_src = len(adjudicable), "raw episodes -- `site_group` absent, re-fires included"
+  bound = rule_of_three(n_indep)
   if not false_cancels:
     if bound is None:
       log("    bound on the false-cancel rate            NONE -- zero adjudicable actions bounds " +
           "nothing. 0-of-0 is not evidence.")
     else:
       log(f"    bound on the false-cancel rate            <= {100 * bound:.1f}% at 95% " +
-          f"(rule of three, N={len(adjudicable)})")
-      log(f"    section 3.9 item 5 wants N >= 60          {'MET' if len(adjudicable) >= 60 else 'NOT MET'}")
+          f"(rule of three, N={n_indep} {indep_src})")
+      log(f"    section 3.9 item 5 wants N >= 60          {'MET' if n_indep >= 60 else 'NOT MET'}")
   else:
     log(f"    false-cancel rate (point estimate)        {_pct(len(false_cancels), len(adjudicable))}" +
         f" of {len(adjudicable)} -- NOT a bound, an observed failure rate")
@@ -344,13 +412,23 @@ def summarise(outcomes: list[Outcome], title: str, log=print, *, real_a_lat: flo
   if false_cancels:
     log("")
     log("  EVERY FALSE CANCEL, in full (this is the list that stops the project):")
+    # `!` marks an episode at a site an earlier line already listed -- the same junction firing
+    # again inside one drive. Two such lines are ONE piece of evidence, and the 2026-09-17 300 m
+    # run printed exactly that pair without saying so.
+    seen_groups: set = set()
     for o in false_cancels[:40]:
       e = o.episode
-      log(f"    {e['date']} {e['car']:<24} k={o.k_verdict:.5f}@{o.k_v_ego:.0f}m/s " +
+      g = e.get("site_group")
+      mark = "!" if g is not None and g in seen_groups else " "
+      seen_groups.add(g)
+      log(f"   {mark}{e['date']} {e['car']:<24} k={o.k_verdict:.5f}@{o.k_v_ego:.0f}m/s " +
           f"({e['k_estimator']}) icbm {e['icbm_target_ms']:.1f} -> db {o.new_target_ms:.1f} m/s  " +
           f"a_cf={o.a_cf:.2f}  {e['source']}")
     if len(false_cancels) > 40:
       log(f"    ... and {len(false_cancels) - 40} more")
+    if any(e is not None for e in (o.episode.get("site_group") for o in false_cancels)):
+      log("    ('!' = a re-fire at a site already listed above: the same junction, not a second " +
+          "independent failure)")
     slow = sum(1 for o in false_cancels if o.k_v_ego < 0.6 * o.new_target_ms)
     log(f"    of these, {slow} had their curvature measured below 60 % of the counterfactual " +
         "speed -- a junction or turn, not a through-road curve the truck would have taken at speed")
@@ -363,7 +441,10 @@ def summarise(outcomes: list[Outcome], title: str, log=print, *, real_a_lat: flo
       log(f"    {c:>6}  {r}")
   return {"n": n, "acted": len(acted), "adjudicable": len(adjudicable),
           "false_cancels": len(false_cancels), "phantoms": v.get("phantom_refuted", 0),
-          "grey": v.get("grey", 0), "matched": sum(1 for o in outcomes if o.matched)}
+          "grey": v.get("grey", 0), "matched": sum(1 for o in outcomes if o.matched),
+          "distinct_sites": distinct_sites(eps),
+          "distinct_sites_false_cancels": distinct_sites([o.episode for o in false_cancels]),
+          "own_drive_in_row": sum(1 for o in outcomes if o.own_drive_in_row)}
 
 
 def provenance_table(observations: list[Observation], episodes: list[dict], log=print):
@@ -422,8 +503,10 @@ def main(argv=None):
                   help="also replay WITHOUT leave-one-date-out -- the diagnostic that tells a thin " +
                        "corpus apart from a broken matcher")
   ap.add_argument("--control", choices=("k-shuffle", "site-shuffle"), action="append", default=[],
-                  help="corrupt the database deliberately and re-run; a measurement that is doing " +
-                       "work must get WORSE")
+                  help="corrupt the run deliberately and repeat it; a measurement that is doing " +
+                       "work must get WORSE. 'k-shuffle' scrambles the rows' curvatures (read the " +
+                       "false-cancel count); 'site-shuffle' looks each episode up at another " +
+                       "episode's site (read the match count ONLY)")
   ap.add_argument("--seed", type=int, default=20260917)
   ap.add_argument("--site-radius-m", type=float)
   ap.add_argument("--heading-tol-deg", type=float)
@@ -490,27 +573,71 @@ def main(argv=None):
       real_a_lat=REAL_SLOWDOWN_A_LAT_MS2)
     print("")
     print(f"  DIAGNOSTIC: self-match found {results['self_match']['matched']} rows vs " +
-          f"{results['lodo']['matched']} under LODO.")
+          f"{results['lodo']['matched']} under LODO, and " +
+          f"{results['self_match']['own_drive_in_row']} of those rows contain a pass from the " +
+          "episode's OWN drive.")
+    print("  That second number is the TAUTOLOGY, not a result: this check asks whether a row " +
+          "anchored at x contains x. It shows `build()` and `match()` are SELF-CONSISTENT. It " +
+          "cannot show the keying is right -- an ingest-vs-lookup convention mismatch would be " +
+          "invisible to it, because both sides read the same Passage object.")
     if results["self_match"]["matched"] <= results["lodo"]["matched"]:
       print("  !! Self-match did not find MORE rows than LODO. The keying is not working -- this " +
             "is a broken matcher, not a thin corpus. Do not read the LODO numbers as a result.")
 
   for ctrl in args.control:
-    obs2 = (shuffle_k(observations, args.seed) if ctrl == "k-shuffle"
-            else shuffle_sites(observations, args.seed))
-    res = summarise(run(obs2, episodes, params, envelopes),
-                    f"CONTROL '{ctrl}' -- the database deliberately corrupted",
-                    real_a_lat=REAL_SLOWDOWN_A_LAT_MS2)
+    if ctrl == "k-shuffle":
+      res = summarise(run(shuffle_k(observations, args.seed), episodes, params, envelopes),
+                      "CONTROL 'k-shuffle' -- the database's curvatures deliberately scrambled",
+                      real_a_lat=REAL_SLOWDOWN_A_LAT_MS2)
+      print("")
+      if results["lodo"]["acted"] == 0 and res["acted"] == 0:
+        print("  (UNINFORMATIVE, not a failure: neither the real database nor the corrupted one " +
+              "acted on anything, so there is no false-cancel count for scrambling to raise. " +
+              "This control can only speak once the DB acts.)")
+      elif res["false_cancels"] <= results["lodo"]["false_cancels"]:
+        print("  !! k-shuffle did not produce MORE false cancels than the real database, although " +
+              "the database DID act. The curvature measurement is not doing work here -- treat " +
+              "the headline as unsupported.")
+      else:
+        print(f"  k-shuffle raised false cancels {results['lodo']['false_cancels']} -> " +
+              f"{res['false_cancels']}: the curvature content is doing work.")
+    else:
+      eps2 = shuffle_episode_sites(episodes, args.seed)
+      fixed = stayed_put(episodes, eps2, params)
+      res = summarise(run(observations, eps2, params, envelopes),
+                      "CONTROL 'site-shuffle' -- each episode looked up at ANOTHER episode's site",
+                      real_a_lat=REAL_SLOWDOWN_A_LAT_MS2)
+      print("")
+      print(f"  {fixed} of {len(episodes)} episodes landed back within {params.site_radius_m:.0f} m " +
+            "of their own site (permutation fixed points + re-fires): those are UNCONTROLLED and " +
+            "their matches are not evidence either way.")
+      print("  Read ONLY the match count from this run -- each episode kept its own k_truth and " +
+            "reference speed while looking up a different road, so its verdicts are meaningless.")
+      real, ctl = results["lodo"]["matched"], res["matched"]
+      if real == 0:
+        print("  (UNINFORMATIVE, not a failure: the real lookup matched nothing, so a corrupted " +
+              "one has nothing to lose.)")
+      elif ctl > real:
+        # Measured 2026-09-19: 29 vs 6. Reading this as "the matcher is not selective" would be
+        # the known-false alarm all over again -- the comparison is CONFOUNDED, and the confound is
+        # the finding.
+        print(f"  !! site-shuffle matched MORE than the real lookup ({ctl} vs {real}). An " +
+              "episode's OWN site is the hardest place for it to find a row.")
+        print("  That is not a broken matcher and not row density -- it is leave-one-date-out " +
+              "doing its job: the passes at an episode's own site are overwhelmingly from the " +
+              "episode's own date, so LODO removes them, while another episode's site is built " +
+              "from dates LODO does not touch. It is the recurrence blocker (README section 3.1) " +
+              "seen from the other side, and it is the single-visit-site problem, not a keying " +
+              "problem.")
+      elif ctl == real:
+        print(f"  !! site-shuffle matched as many rows as the real lookup ({ctl}). Any " +
+              "episode-site finds a row as readily as its own, which is what row DENSITY rather " +
+              "than recurrence predicts. (A count comparison: the matched episodes need not be " +
+              "the same ones.)")
+      else:
+        print(f"  site-shuffle dropped matches {real} -> {ctl}: the lookup IS selecting on " +
+              "position and direction.")
     results[f"control_{ctrl}"] = res
-    print("")
-    if ctrl == "k-shuffle" and res["false_cancels"] <= results["lodo"]["false_cancels"]:
-      print("  !! k-shuffle did not produce MORE false cancels than the real database. The " +
-            "curvature measurement is not doing work here -- treat the headline as unsupported.")
-    if ctrl == "site-shuffle" and results["lodo"]["matched"] > 0 \
-       and res["matched"] >= results["lodo"]["matched"]:
-      print("  !! site-shuffle matched as many rows as the real database, with positions permuted " +
-            "WITHIN each date. The matcher is not selecting anything; matches are an artifact of " +
-            "row density rather than of the truck having driven that place before.")
 
   if args.json_out:
     with open(args.json_out, "w") as f:

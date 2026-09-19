@@ -9,7 +9,7 @@ Contract, per section 8.3's C1 row ("drops into any fork, any path, any 0.11.x")
 
 * **zero openpilot imports** -- stdlib only, so it resolves on 0.11.1 and 0.11.2 alike and cannot
   drag `cereal` (which is NOT import-stable across those versions) in behind it;
-* **no I/O** -- `match()` is pure geometry; snapshots are handed in as already-parsed objects;
+* **no I/O** -- `match()` is pure geometry; every input is handed in as an already-parsed object;
 * **no clock** -- every time is passed in. `Observation.date` is a *PT calendar date string*, and it
   is the leave-one-date-out key, so it must be computed once, by the caller, from the record's own
   epoch (the device runs UTC, the driver lives in Pacific -- rendering it here would bake a timezone
@@ -61,11 +61,10 @@ __all__ = [
   "PROVISIONAL_ENVELOPES", "PROVISIONAL_PARAMS", "UNKNOWN_HIGHWAY_CLASSES", "Authority",
   "CarEnvelope", "CurveDB", "CurveDBError", "CurveDBParams", "CurveRow", "Observation",
   "authority", "bearing_diff_deg", "cancel_target", "haversine_m", "initial_bearing_deg",
-  "load_snapshot_or_empty", "speed_for_curvature", "tighten", "with_params",
+  "speed_for_curvature", "tighten",
 ]
 
 R_EARTH_M = 6371000.0
-SNAPSHOT_VERSION = 1
 
 # Spellings that mean "the map did not tell us what road this is". `unknown` is a real member of
 # cereal/custom.capnp's HighwayClass (the way's highway tag was not one of the listed values, or the
@@ -399,15 +398,6 @@ class CurveRow:
   def n_observations(self) -> int:
     return len(self.observations)
 
-  def to_json(self) -> dict:
-    return {
-      "site_lat": self.site_lat, "site_lon": self.site_lon, "bearing_deg": self.bearing_deg,
-      "k_up": self.k_up, "k_down": self.k_down,
-      "n_passes": self.n_passes, "dates": list(self.dates), "cars": list(self.cars),
-      "estimators": list(self.estimators), "site_srcs": list(self.site_srcs),
-      "observations": [vars(o) for o in self.observations],
-    }
-
 
 # ---------------------------------------------------------------------------------------------
 # the database
@@ -416,11 +406,16 @@ class CurveRow:
 class CurveDB:
   """The road table (section 5) plus the matcher (section 6.3).
 
-  Built by GROUPING an observation list, not by incremental merge, because that is also what
-  section 8.1's compaction is: the append-only JSONL holds observations, the snapshot holds the
-  grouped rows, and rebuilding from the log must give byte-identical rows or the snapshot is a
-  second source of truth. `build()` therefore sorts its input into a canonical order first, so the
-  same observations always produce the same rows regardless of the order they were appended in.
+  Built by GROUPING an observation list, not by incremental merge: the append-only JSONL of
+  observations is the one source of truth, and a row is a view of it. `build()` therefore sorts its
+  input into a canonical order first, so the same observations always produce the same rows
+  regardless of the order they were appended in.
+
+  (Section 8.1's on-car snapshot/compaction half -- `to_snapshot`/`from_snapshot`/
+  `load_snapshot_or_empty`/`CurveRow.to_json` -- was DELETED 2026-09-19. It was reachable only from
+  its own tests: section 12's conclusion is that the on-car half is not being built, so it was code
+  carrying a maintenance and review cost for a consumer that does not exist. `git show
+  a46b90f2b5:tools/curvedb/store.py` has it if Phase 2 is ever un-gated.)
   """
 
   def __init__(self, params: CurveDBParams, rows: list[CurveRow] | None = None):
@@ -482,62 +477,6 @@ class CurveDB:
     Identical to the function that decides row identity at build time -- on purpose. If matching and
     merging could disagree, a pass could build a row the lookup can never find."""
     return self._nearest(lat, lon, bearing_deg)
-
-  # ---- snapshot (section 8.1) ----------------------------------------------------------
-
-  def to_snapshot(self) -> dict:
-    return {
-      "version": SNAPSHOT_VERSION,
-      "params": vars(self.params),
-      "rows": [r.to_json() for r in self.rows],
-    }
-
-  @classmethod
-  def from_snapshot(cls, obj: dict) -> CurveDB:
-    """Rebuild from a snapshot. Raises CurveDBError on anything it cannot vouch for.
-
-    Section 8.1 says the consumer must fail SAFE to "no database" -- but silently substituting an
-    empty DB for a corrupt one is the exact Rule 2 failure this project keeps paying for, so the
-    failure is raised here and the CALLER is required to log it (see `load_snapshot_or_empty`)."""
-    if not isinstance(obj, dict):
-      raise CurveDBError(f"snapshot is a {type(obj).__name__}, not an object")
-    if obj.get("version") != SNAPSHOT_VERSION:
-      raise CurveDBError(f"snapshot version {obj.get('version')!r} != {SNAPSHOT_VERSION}")
-    praw = obj.get("params")
-    if not isinstance(praw, dict):
-      raise CurveDBError("snapshot carries no params -- rows built with one matching tolerance and " +
-                         "read with another are rows the lookup cannot find")
-    try:
-      praw = dict(praw)
-      praw["ramp_highway_classes"] = tuple(praw.get("ramp_highway_classes") or ())
-      params = CurveDBParams(**praw)
-    except TypeError as e:
-      raise CurveDBError(f"snapshot params do not match CurveDBParams: {e}") from e
-    rows = []
-    for raw in obj.get("rows") or []:
-      try:
-        obs = [Observation(**o) for o in raw["observations"]]
-        rows.append(CurveRow(site_lat=raw["site_lat"], site_lon=raw["site_lon"],
-                             bearing_deg=raw["bearing_deg"], observations=obs))
-      except (KeyError, TypeError) as e:
-        raise CurveDBError(f"snapshot row is malformed: {e}") from e
-    return cls(params, rows)
-
-
-def load_snapshot_or_empty(obj, on_error) -> CurveDB | None:
-  """Section 8.1's fail-safe, with the logging made non-optional.
-
-  `on_error` has NO DEFAULT and is called with the exception before an empty result is returned.
-  A caller that wants to swallow the failure has to write the swallow down."""
-  if not callable(on_error):
-    raise CurveDBError("load_snapshot_or_empty needs an on_error callback -- a corrupt database " +
-                       "that reports nothing is worse than no database")
-  try:
-    return CurveDB.from_snapshot(obj)
-  except CurveDBError as e:
-    on_error(e)
-    return None
-
 
 # ---------------------------------------------------------------------------------------------
 # authority + the cancel formula (section 6.4)
@@ -613,14 +552,6 @@ def cancel_target(ref_ms: float, icbm_target_ms: float, v_row_ms: float | None) 
   if not isinstance(v_row_ms, int | float) or not math.isfinite(v_row_ms):
     raise CurveDBError(f"cancel_target: v_row_ms={v_row_ms!r}")
   return min(float(ref_ms), max(float(icbm_target_ms), float(v_row_ms)))
-
-
-def with_params(db: CurveDB, params: CurveDBParams) -> CurveDB:
-  """Re-group an existing DB's observations under different matching parameters.
-
-  The parameter sweep in the report needs this, and doing it by rebuilding from the observations
-  (rather than by editing rows) is what keeps "the snapshot is derivable from the log" true."""
-  return CurveDB.build([o for r in db.rows for o in r.observations], params)
 
 
 def tighten(params: CurveDBParams, **changes) -> CurveDBParams:

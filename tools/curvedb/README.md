@@ -1,8 +1,9 @@
 # curvedb — the OFFLINE half of CURVEDB2PNW.md Phase 2
 
 **Status: NOT DEPLOYED, NO AUTHORITY, NOT PUSHED.** Built 2026-09-17 on branch `curvedb2pnw` off
-`3devpnw` @ `7c40d8003b`; reviewed by Fable the same night (SHIP WITH CHANGES) and this is the
-post-review state. Everything lives under `tools/`; nothing in `selfdrive/`, `system/`, `cereal/`
+`3devpnw` @ `7c40d8003b`; reviewed by Fable the same night (SHIP WITH CHANGES), **re-reviewed
+2026-09-19** (section 10 -- one of the findings was a rule that could never fire and a README
+paragraph that said the opposite), and this is the post-review state. Everything lives under `tools/`; nothing in `selfdrive/`, `system/`, `cereal/`
 or any submodule is touched, and nothing the car imports imports any of it. Phase 2 remains gated
 on §3.9 and this branch does not change that.
 
@@ -12,7 +13,8 @@ on §3.9 and this branch does not change that.
 | `ingest.py` | ces_events corpora → observations + ICBM episodes, with a per-file capability report. |
 | `replay.py` | **§7's go/no-go gate.** Leave-one-date-out, a stated N, and three adversarial self-checks. |
 | `recurrence.py` | Does the truck actually re-drive the phantom roads? Measured from **raw GPS**, with the observation pipeline deliberately out of the loop — because measuring it *through* the pipeline gave the wrong answer. |
-| `tests/` | 315 tests. 81/81 mutants killed (`_scratch/curvedb/mutate.py`). |
+| `calib.py` | The two numbers this README quotes about its own PROVISIONAL constants: what a 1 Hz-built row costs against the 100 Hz peak, and how far the approach bearing moves across ICBM's decision range. **Committed because they used to come from an uncommitted scratch script** (§10). |
+| `tests/` | 345 tests. **96/96 mutants killed**, 0 survived, 0 unbuilt (`_scratch/curvedb/mutate.py`). |
 
 ```bash
 PYTHONPATH=. python3 tools/curvedb/ingest.py drives/**/ces_events*.jsonl \
@@ -21,6 +23,7 @@ PYTHONPATH=. python3 tools/curvedb/replay.py --observations obs.jsonl --episodes
     --dq any --self-match --control k-shuffle --control site-shuffle
 PYTHONPATH=. python3 tools/curvedb/recurrence.py drives/**/ces_events*.jsonl \
     --episodes eps.jsonl --observations obs.jsonl
+PYTHONPATH=. python3 tools/curvedb/calib.py drives/**/ces_events*.jsonl
 ```
 
 ---
@@ -28,15 +31,16 @@ PYTHONPATH=. python3 tools/curvedb/recurrence.py drives/**/ces_events*.jsonl \
 ## 1. THE RESULT: **NO RESULT**, and that is the honest answer
 
 Run over every `ces_events` corpus under `drives/` — 84 files, **400,583 unique ticks** after
-deduplication, 139 drives (1 dropped, §4), 16 dates, both cars, **4,719 observations**:
+deduplication, 139 drives (1 dropped, §4), 16 dates, both cars, **4,846 observations** (4,719 UP +
+**127 DOWN**, the latter newly reachable — §10 finding 1):
 
 ```
-  episodes replayed                       170
-  ... matched a row                       4  (2.4%)
-  ... verdict no_row                      166 (97.6%)
-  ... verdict no_authority                4   (2.4%)
+  episodes replayed                       170  (146 distinct episode-sites)
+  ... matched a row                       6  (3.5%)
+  ... verdict no_row                      164 (96.5%)
+  ... verdict no_authority                6   (3.5%)
 
-  THE GATE (§7): episodes the database would have cancelled or reduced = 0
+  THE GATE (§7): episodes the database would have cancelled or reduced = 0  (0 distinct sites)
     of those, adjudicable (k_truth present)   0
     REAL SLOWDOWNS WRONGLY CANCELLED          0
     bound on the false-cancel rate            NONE -- 0-of-0 is not evidence.
@@ -47,7 +51,20 @@ acted. §7 has not been passed and has not been failed; it has not been *evaluat
 zero without the denominator would be the `getfattr` failure again — a uniform result read as a
 finding instead of as an un-exercised method.
 
-**The 170 has its own denominator, and it is a selection effect worth seeing.** ICBM produced
+**Fixing the DOWN rule did not change that.** §6.2's DOWN observations were structurally
+unreachable until 2026-09-19 (§3.4). With them the database has 4,023 rows instead of 3,899 and
+matches **6** episodes instead of 4 — and still acts on **zero**. All 6 are refused authority by
+D6 (one pass). This is the thing to check first if any of these numbers are re-quoted: the
+headline is unchanged by the fix, not preserved by omission.
+
+**170 episodes is 146 distinct episode-sites**, and the difference is not decoration: **24 of the
+170 are ICBM re-firing at a junction it had already slowed for, later in the same drive** — one
+road event logged twice (`site_group`, tagged by `ingest.py`, printed by every tool). The two
+"false cancels" the 300 m run produces below are *one* junction, lines 4258 and 4294 of one file,
+one `Passage`. Every count here now prints both denominators, and the rule-of-three bound is taken
+on distinct sites, because a re-fire is not an independent trial.
+
+**The 170 has its own denominator too, and it is a selection effect worth seeing.** ICBM produced
 **433** target runs in this corpus: 50 were restore-only (an increase, not a slowdown), **213 had
 no measurable passage within 500 m ahead**, and 170 survived. Half the population is excluded
 before the replay starts, for a reason (no candidate, or the drive ended) that is not random.
@@ -56,24 +73,35 @@ before the replay starts, for a reason (no candidate, or the drive ended) that i
 
 | check | result | reading |
 |---|---|---|
-| **self-match** (no LODO — circular by construction) | **26** rows vs 4 under LODO | Rows are found when the pass that built them is present, so the LODO 2.4 % is about the corpus, not a broken key. Caveat Fable raised, and it is fair: the episode's site/bearing and the observation's come from the *same* `Passage` object, so this asks whether a row anchored at x contains x. It proves `build()`/`match()` are self-consistent; it cannot detect an ingest-vs-lookup convention mismatch. |
-| **`k-shuffle`** (right places, wrong curvatures) | identical funnel (4 matched, 0 actions) | Cannot discriminate — because nothing acts. Uninformative here *by construction*, and the tool says so. |
-| **`site-shuffle`** (right curvatures, wrong places, permuted **within each date**) | 4 matched, 0 actions — same as the real DB | The 4 matches survive scrambling, i.e. they are row-density artifacts rather than evidence the truck drove that place before. The tool fires its own alarm saying exactly that. |
+| **self-match** (no LODO — circular by construction) | **40** rows vs 6 under LODO; **34 of the 40 rows contain a pass from the episode's own drive** | This shows `build()` and `match()` are **SELF-CONSISTENT** — nothing more. It asks whether a row anchored at x contains x, because the episode's site/bearing and the observation's come from the *same* `Passage` object; the 34 is that tautology, measured. It would *not* detect an ingest-vs-lookup convention mismatch, so it is **not** evidence that "the keying works". What it does rule out: a matcher so broken that LODO's 3.5 % is an artefact of the key rather than of the corpus. |
+| **`k-shuffle`** (right places, wrong curvatures) | identical funnel (6 matched, 0 actions) | **Uninformative, and now says so in those words** rather than firing an alarm. With zero actions there is no false-cancel count for scrambling to raise; this control can only speak once the DB acts. |
+| **`site-shuffle`** (each episode looked up at **another episode's site**) | **29 matched vs 6** — the corrupted lookup matches *five times more often* | An episode's **own** site is the hardest place for it to find a row. Not a broken matcher and not row density: leave-one-date-out removes the episode's own date, and the passes at its own site are overwhelmingly *from* that date, while another episode's site is built from dates LODO does not touch. **It is §3.1's single-visit-site blocker, measured from a second direction.** |
 
-> The site-shuffle was **rebuilt after review**. It used to permute globally, which reassigns sites
-> across dates and thereby *manufactures* multi-date rows the real corpus does not have — so the
-> corrupted database came out looking **more** capable than the real one (21 matches vs 4), and the
-> control's own alarm text fired for a reason unrelated to what it asserts. A control whose failure
-> message is known-false is not a control.
+> **The site-shuffle was rebuilt again on 2026-09-19, because the previous version could not
+> fail.** It permuted the *observations'* sites within each date. That preserves each date's
+> multiset of positions exactly; LODO removes whole dates; so the surviving multiset — and
+> therefore `matched` — was invariant **by construction**. Its alarm ("the matcher is not selecting
+> anything") fired on every corpus no matter what, and this README's previous conclusion, that the
+> 4 matches were row-density artefacts, did not follow from it. An alarm that always fires is worse
+> than no alarm: it teaches the reader to skip it. (The version before *that* permuted globally,
+> manufacturing multi-date rows the corpus does not have. Third time.)
+>
+> The replacement can land in any of four states — fewer matches (the lookup selects), equal
+> (density), more (the LODO confound above), or "the real lookup matched nothing, so this is
+> uninformative" — and `main` prints which. Its self-control is printed too: **3 of 170 episodes
+> landed back within 40 m of their own site** (permutation fixed points and re-fires) and are
+> therefore uncontrolled.
 
 ### Loosening the match until it *can* act makes it worse, not better
 
 At `--site-radius-m 300 --heading-tol-deg 45` the database finally acts on 2 episodes — and
-**both are false cancels, a 100 % failure rate**:
+**both are false cancels, a 100 % failure rate**. They are, however, **ONE junction**: the same
+site firing twice inside one drive, lines 4258 and 4294 of one file. The `!` is the tool marking
+the re-fire, and "2 (1 distinct episode-site)" is how it is now counted:
 
 ```
-2026-08-26 k=0.06654@5m/s (sample1hz_cmd) icbm 2.6 -> db 11.2 m/s  a_cf=8.35
-2026-08-26 k=0.06654@5m/s (sample1hz_cmd) icbm 2.6 -> db 11.2 m/s  a_cf=8.35
+ 2026-08-26 k=0.06654@5m/s (sample1hz_cmd) icbm 2.6 -> db 11.2 m/s  a_cf=8.35  ...:4258
+!2026-08-26 k=0.06654@5m/s (sample1hz_cmd) icbm 2.6 -> db 11.2 m/s  a_cf=8.35  ...:4294
   of these, 2 had their curvature measured below 60 % of the counterfactual speed
 ```
 
@@ -84,10 +112,10 @@ garbage"**, which is a stronger argument against loosening the match than any of
 
 ### Stratified to the roads the phantoms are actually on
 
-`--highway-only` (motorway/trunk) keeps **25 of 170** episodes, and on those the LODO match rate is
-**4/25 = 16 %** rather than 2.4 % (self-match 12/25 = 48 %). Still zero actions — every match is a
-single pass — but it says the corridor sites are considerably less sparse than the corpus average,
-which is the population §1 of the design is about.
+`--highway-only` (motorway/trunk) keeps **25 of 170** episodes (24 distinct sites), and on those
+the LODO match rate is **4/25 = 16 %** rather than 3.5 % (self-match 12/25 = 48 %). Still zero
+actions — every match is a single pass — but it says the corridor sites are considerably less
+sparse than the corpus average, which is the population §1 of the design is about.
 
 ---
 
@@ -97,24 +125,33 @@ The Phase-1 fields (`kPeak` `kPeakN` `kPose` `kPoseP` `achLatPose` `dq` `dqWhy` 
 `mapLon` `mapCandD`) exist only from 2026-09-17. Everything before is a reconstruction, and
 `ingest.py` reports per file which vocabulary it had.
 
-| provenance of the 4,719 observations | count | consequence |
+| provenance of the 4,846 observations | count | consequence |
 |---|---|---|
 | `kPeak100` — the real 100 Hz peak | **166** | the only rows built the way §3.3 specifies |
 | `sample1hz_cmd` — commanded only (every Tesla pass) | 3,196 | a *model* estimate, not a CAN measurement (see §5 I8) |
 | `sample1hz_cmd_actl` — max of both, 1 Hz | 1,338 | §3.3's estimator, at 1/100th the rate |
+| `slKCmd_at_override` — §6.2's DOWN | **127** | the driver's own "too fast", newly reachable (§3.4) |
 | `sample1hz_actl` — achieved only | 19 | D2: bounded by steering authority |
-| `site_src="logged"` (`mapLat`/`mapLon`) | **166** | keyed on the candidate, as §6.3 requires |
-| `site_src="track"` (reconstructed from the truck's later position) | 4,553 | keyed on a reconstruction of it |
-| `dq_src="rollup100"` (§3.5's 100 Hz OR) | **166** | a `clean` that means what §3.5 says |
-| `dq_src="sampled1hz"` (instantaneous flags) | 4,553 | a `clean` that may have been *between* events |
+| `site_src="logged"` (`mapLat`/`mapLon`) | **167** | keyed on the candidate, as §6.3 requires |
+| `site_src="track"` (reconstructed from the truck's later position) | 4,679 | keyed on a reconstruction of it |
+| `dq_src="rollup100"` (§3.5's 100 Hz OR) | **167** | a `clean` that means what §3.5 says |
+| `dq_src="sampled1hz"` (instantaneous flags) | 4,679 | a `clean` that may have been *between* events |
 
-(Across all sites *considered*, not just those that became rows: 307 logged, 27,563 reconstructed.)
+(Across all sites *considered*, not just those that became rows: 307 logged, 27,564 reconstructed.)
+By car and kind: Tesla 2,931 UP + 31 DOWN, Lightning 1,788 UP + 96 DOWN.
 
-**Measured, not assumed — how bad is the 1 Hz estimator?** On the one corpus where both exist
-(2026-09-17), per measurement extent, `max(kPeak) / max(1 Hz sample)` is **p50 1.10, p90 1.51,
-max 2.88**. Since `v = sqrt(a/k)`, a 1 Hz-built row permits a speed **5 % too high at the median,
-23 % at p90, 70 % at worst.** Per tick the sample under-reads by more than 20 % on **74 %** of
-ticks. Every 1 Hz row is therefore biased in the direction that **under-brakes**.
+**Measured, not assumed — how bad is the 1 Hz estimator?** `calib.py`, over the 259 measurement
+extents where both a 100 Hz peak and a 1 Hz sample exist (only the 2026-09-17 corpora carry
+`kPeak`): `max(kPeak) / max(1 Hz sample)` is **p50 1.101, p90 1.506, max 2.875**. Since
+`v = sqrt(a/k)`, a 1 Hz-built row permits a speed **5 % too high at the median, 23 % at p90, 70 %
+at worst.** Per tick (n=8,139) the sample under-reads by more than 20 % on **62 %** of ticks. Every
+1 Hz row is therefore biased in the direction that **under-brakes**.
+
+> These figures used to come from an uncommitted scratch script (§10 finding 4). `calib.py`
+> reproduces the two that were quoted — p50 1.10, p90 1.51, max 2.875 — to three significant
+> figures. The **per-tick** figures it produces differ (n=8,139 / 62 % against the scratch's
+> n=6,451 / 74 %); the scratch's filter is not recoverable, so the committed script's numbers are
+> the ones quoted here and the old per-tick numbers should be treated as unreproducible.
 
 ---
 
@@ -125,39 +162,48 @@ ticks. Every 1 Hz row is therefore biased in the direction that **under-brakes**
 This reversed under an adversarial check, so both numbers are given, and the check is now a
 committed tool (`recurrence.py`) rather than a scratch script.
 
-Via the observation pipeline, only 7 of 170 episodes have a row at their site from another date,
+Via the observation pipeline, only 6 of 170 episodes have a row at their site from another date,
 which reads as "the truck does not repeat these roads". **It does.** Measured from raw GPS ticks,
 bypassing observations, passages and disqualifiers entirely:
 
-| | episodes (of 170) |
-|---|---|
-| the truck came within 40 m of the site at all | **169** |
-| ... on a **different date** | **39** |
-| ... on a different date *and* a compatible approach bearing | **33** |
-| ... on **≥2 other dates** — what D6 needs under leave-one-out | **15** |
-| ... and a usable row actually exists there | **7** |
+| | episodes (of 170) | distinct sites (of 146) |
+|---|---|---|
+| the truck came within 40 m of the site at all | **169** | 145 |
+| ... on a **different date** | **39** | 36 |
+| ... on a different date *and* a compatible approach bearing | **33** | 31 |
+| ... on **≥2 other dates** — what D6 needs under leave-one-out | **15** | 13 |
+| ... and a usable row actually exists there | **6** | — |
 
-**26 of the 33 genuine revisits are lost inside our own pipeline.** Attributed by the
+**27 of the 33 genuine revisits are lost inside our own pipeline.** Attributed by the
 disqualifier's own named cause:
 
 | why the revisit produced no row | count |
 |---|---|
-| **disqualified, `drv` involved** (`drv` 12, `sat,drv` 4, `drv,blnk` 2, `sat,drv,lc` 1) | **19** |
-| disqualified, `sat`/`blnk` only | 4 |
-| no map candidate / no approach bearing / never became a site | 3 |
-| *(a row exists)* | 7 |
+| **disqualified, `drv` involved** (`drv` 12, `sat,drv` 2, `drv,blnk` 2, `sat,drv,lc` 1) | **17** |
+| disqualified, `sat`/`blnk` only | 5 |
+| no map candidate / no approach bearing / never became a site | 5 |
+| *(a row exists)* | 6 |
+
+> **"A row exists" was 7 and is now 6, and the change is two separate corrections** (§10 findings
+> 8 and 1). `has_row` was testing position only while the replay's matcher also tests the approach
+> bearing, so it counted the opposite carriageway: keyed identically, the same corpus reads **4**,
+> which is exactly what the replay's matcher saw. The DOWN fix then adds 2 real rows, taking both
+> tools to **6**. They now agree at every stage, which is the point — two numbers for one question
+> is how a discrepancy nobody wrote down becomes a finding.
 
 Two conclusions, and they must be kept apart:
 
 * **For row EXISTENCE, the driving pattern is not the primary blocker — §6.1's disqualifier is.**
-  19 of 33 revisits lost to `drv`-involved causes alone.
+  17 of 33 revisits lost to `drv`-involved causes alone.
 * **For the GATE, that is not enough.** Authority needs ≥2 passes on ≥2 dates, and under
   leave-one-out that means ≥2 *other* dates — true for only **15 of 170** sites
-  (`{1 other date: 18, 2: 4, 4: 7, 5: 2, 12: 2}`). So even with a perfect pipeline this corpus
-  tops out around 15 adjudicable actions, and **§3.9 item 5's N ≥ 60 is unreachable here under any
-  dq rule.** Fixing the `drv` question raises the ceiling; it does not by itself reach the bar.
+  (`{1 other date: 18, 2: 4, 4: 7, 5: 2, 12: 2}`) — 13 of 146 distinct sites. So even with a
+  perfect pipeline this corpus tops out around 15 adjudicable actions, and **§3.9 item 5's N ≥ 60
+  is unreachable here under any dq rule.** Fixing the `drv` question raises the ceiling; it does
+  not by itself reach the bar. **The DOWN fix did not move this ceiling** (still 15/170): DOWN
+  observations land at the same sparse sites.
 
-Secondary, still true: 3,899 rows exist and **762 have ≥2 passes on ≥2 dates** (~20 %), but those
+Secondary, still true: 4,023 rows exist and **765 have ≥2 passes on ≥2 dates** (~19 %), but those
 are Seattle city loops with no ICBM slowdowns on them.
 
 ### 3.2 §6.1's disqualifier rejects 147 of 170 episode passes
@@ -172,8 +218,9 @@ cause, so the episode column sums above 147:
 | `blnk` — blinker | 432 | 21 |
 | `lc` — lane change | 113 | 1 |
 
-**Driver steering, not saturation, is what disqualifies these passes.** Two consequences the design
-does not discuss:
+**Driver steering, not saturation, is what disqualifies these passes.** (This is the UP rule.
+Since 2026-09-19 §6.2's DOWN is judged on the same roll-up *without* `drv` — see §3.4 — so `drv`
+costs the UP half only.) Two consequences the design does not discuss:
 
 1. A pass is only admissible where openpilot was steering. On the **Tesla**, and on any drive with
    lateral disengaged, `strPrs` is true continuously — so those roads can never be learned at all.
@@ -192,20 +239,52 @@ fix; the `drv` question is the one worth asking.
 ### 3.3 §6.3's "direction by approach bearing" is under-specified, and the gap is 22 %
 
 §6.3 replaces v1's 45° buckets with "the approach bearing at lookup time" but does not say **at
-what distance**. Measured over 2,074 site passages, the truck's own bearing at 500 m, 300 m and
-150 m before a site spreads by **p50 17.7°, p90 59°, max 180°** — and **22.2 % of sites exceed the
-35° matching tolerance.** ICBM decides anywhere from 150 m to its 500 m far-source horizon, so on
-one site in five, ingest and the car can disagree about which direction "this way" is and the row
-is simply never found. `approach_bearing_ref_m` is a real parameter with a real cost.
+what distance**. `calib.py`, over the **8,244 measured passages** where all three reference points
+exist, finds the truck's own bearing at 500 m, 300 m and 150 m before a site spreads by
+**p50 13.9°, p90 54.0°, max 179.7°** — and **18.8 % of passages exceed the 35° matching
+tolerance.** ICBM decides anywhere from 150 m to its 500 m far-source horizon, so on close to one
+site in five, ingest and the car can disagree about which direction "this way" is and the row is
+simply never found. `approach_bearing_ref_m` is a real parameter with a real cost.
 
-### 3.4 §6.2's DOWN rule produced **zero** observations on 2.2 GB of driving
+> **The "22.2 % over 2,074 site passages" this section used to quote is NOT reproducible** (§10
+> finding 4): it came from an uncommitted scratch script whose denominator of 2,074 matches nothing
+> in the pipeline — there are 8,279 passages and 27,871 candidate sites. `calib.py` measures it
+> through `measure_passage` itself, so a passage here is a passage there; it gets 18.8 % over 8,244,
+> or 12.1 % if every candidate site is counted instead. **The conclusion is unchanged and the
+> number is not:** anything quoting 22.2 % (including `docs/CURVEDB2PNW.md` §12 and the 09-18
+> changelog, which this branch does not touch) should be corrected to 18.8 %.
 
-Not one steering override inside a site extent met §6.2's own trigger (measured lateral accel
-≥ 2.5 m/s² with a commanded curvature to compute the magnitude from). The tally prints
-`down_dropped_no_kcmd 0` and `down_no_lateral_accel_witness 0` **explicitly** — the counters are
-pre-seeded, so this is read rather than inferred from an absence — so it is not a plumbing failure;
-the interventions are simply below the trigger. Consistent with §6.2's own measurement (113 of
-2,986 overrides), but it means **the DOWN half of the design is entirely unexercised**.
+### 3.4 §6.2's DOWN rule was UNREACHABLE — this section used to say the opposite
+
+**What this section said until 2026-09-19 was the reverse of the truth, and it is the worst defect
+this branch has had.** It read: *"it is not a plumbing failure; the interventions are simply below
+the trigger."* They were not. **`observations_for_drive` dropped every disqualified passage before
+the DOWN loop ran, and a DOWN is BY DEFINITION a `strPrs` tick, which sets `DQ_DRV`, which makes
+the passage disqualified.** The rule could not fire on any input whatsoever. Its zero was a
+structural property of the code, and this README confidently explained it as a property of the
+road — exactly what Rule 2 exists to prevent.
+
+The pre-seeded counters were real and did what they were built for; they simply could not detect
+this, because `down_dropped_no_kcmd 0` is equally consistent with "no overrides qualified" and
+"the loop was never entered". The test suite could not detect it either: **every DOWN test relaxed
+`drv` for itself** (`--dq-flags lc,blnk`), so the tests encoded the bug. They now run under the
+design's own disqualifier set, and one of them exists only to assert reachability.
+
+**Fixed:** UP is still judged on the full §6.1 roll-up (a driver's hands corrupt a *hands-off*
+curvature measurement), while DOWN is judged on the same roll-up with `drv` — its own precondition
+— cleared, and every other cause (`sat`, `blnk`, `lc`, unattributed) still binding.
+
+| | before | after |
+|---|---|---|
+| `obs_down` | **0** | **127** |
+| `down_no_lateral_accel_witness` | 0 | **2** |
+| `down_dropped_dq_not_drv` (new counter) | — | 1,342 (`sat` 976, `blnk` 432, `lc` 113) |
+| `down_dropped_no_kcmd` | 0 | 0 |
+
+127 DOWN observations against §6.2's own estimate of ~113 qualifying override ticks in a comparable
+corpus — the right order of magnitude, which is the sanity check that the fix did not simply
+un-gate everything. 96 are the Lightning, 31 the Tesla. **They change the funnel (4,023 rows, 6
+matched) and they do not change the result: still zero actions** (§1).
 
 ### 3.5 Episode→site attribution is still short of where ICBM decides
 
@@ -223,8 +302,8 @@ whole 500 m window (I7) rather than on the chosen node.
   Lightning because `slKActl` is dead (confirmed: exactly 0.0 on essentially every moving Tesla
   tick, every corpus). But the **commanded** curvature is alive on **99.4–99.8 %** of moving Tesla
   ticks with the correct sign (agrees with `strAng` on 95–100 % of records where |strAng| > 8°).
-  §3.3 itself argues commanded is the *better* half on curves. Result: **2,931 of the 4,719
-  observations are Tesla passes** — more than the Lightning's 1,788. This is a **deviation from
+  §3.3 itself argues commanded is the *better* half on curves. Result: **2,962 of the 4,846
+  observations are Tesla passes** — more than the Lightning's 1,884. This is a **deviation from
   §3.9 item 1**, not a footnote; it is written up as I8 in §5.
 * **The 2026-09-17 pose sign fix is confirmed live.** `ingest.py`'s per-file sign check reads
   **INVERTED** on the two 09-17 daytime corpora (median `kPose/slKActl` −0.85 and −0.71) and
@@ -298,7 +377,7 @@ constants with the same comment discipline.
 | name | value | why this value, and what is known about it |
 |---|---|---|
 | `site_radius_m` | **40 m** | Stands in for the OSM way/node ID §6.3 says mapd does not publish. **Measured cost:** at 300 m the only actions produced are garbage (§1). Nothing measured supports 40 specifically. |
-| `heading_tol_deg` | **35°** | §6.3 killed 45° *buckets* (D4) but named no replacement. **Measured cost:** 22.2 % of sites have an approach-bearing spread wider than this across 500→150 m. |
+| `heading_tol_deg` | **35°** | §6.3 killed 45° *buckets* (D4) but named no replacement. **Measured cost (`calib.py`):** 18.8 % of measured passages have an approach-bearing spread wider than this across 500→150 m. |
 | `approach_bearing_ref_m` | **300 m** | The midpoint of ICBM's 150–500 m decision range, and nothing more. §6.3 does not specify it. **§3.3 says this is not a free parameter.** |
 | `PHANTOM_A_LAT_MS2` | **1.5 m/s²** | The design defines "real" and not "phantom". Everything between this and 2.5 is reported as grey. |
 | `PASSAGE_MAX_M` | 80 m | How close the truck must have come for a pass to count. §6.3 notes mapd's point sits 56–125 m from the bend. |
@@ -360,11 +439,12 @@ road-not-policy, never-above-posted, or the cancel formula, and the store implem
 without needing to bend one. Everything testable mechanically works.
 
 The premise it rests on — **that a curve worth refuting gets driven repeatedly** — survives, but
-only after an adversarial check reversed the first reading. Through the pipeline it looked like 7
-of 170 (4 %); measured from raw GPS it is 33 of 170 (19 %), and **26 of those 33 revisits are
-discarded by our own admissibility rules, 19 of them by `drv`.** The truck repeats these roads
+only after an adversarial check reversed the first reading. Through the pipeline it looked like 6
+of 170 (4 %); measured from raw GPS it is 33 of 170 (19 %), and **27 of those 33 revisits are
+discarded by our own admissibility rules, 17 of them by `drv`.** The truck repeats these roads
 about five times more often than the database can currently see, and the gap is mostly a rule we
-chose.
+chose. The site-shuffle control now says the same thing from the other side: an episode's own site
+is the *hardest* place for it to find a row, because its rows are its own date's (§1).
 
 **But row existence is not the gate.** D6 needs ≥2 *other* dates under leave-one-out, and only
 **15 of 170** sites have that. So even a perfect pipeline tops out around 15 adjudicable actions on
@@ -375,16 +455,18 @@ fix.
 The one thing this corpus cannot speak to at all is the number §7 actually asks for — **the
 false-cancel rate** — because that needs actions and there were none. Nothing here is evidence that
 cancelling is safe. The single data point pointing the other way is that the only parameterisation
-which produced any action produced 2 actions and 2 false cancels (§1) — an artifact of an over-wide
-radius, but not a reassuring one.
+which produced any action produced 2 actions and 2 false cancels (§1) — one junction twice over,
+an artifact of an over-wide radius, but not a reassuring one.
 
 **Recommendation: neither a green light nor a red light. In this order:**
 
-1. **Decide the `drv` question (§3.2).** It costs 19 of the 33 genuine revisits — more than the
+1. **Decide the `drv` question (§3.2).** It costs 17 of the 33 genuine revisits — more than the
    driving pattern does. Answerable today with `ingest.py --dq-flags` and `recurrence.py`, no new
-   driving required.
-2. **Pin `approach_bearing_ref_m` (§3.3).** 22 % of sites move further than the matching tolerance
-   across ICBM's own decision range, so ingest and the car can disagree about direction.
+   driving required. (§3.4 has now answered the DOWN half of it: `drv` cannot disqualify the rule
+   it defines. The UP half is still open and still the owner's call.)
+2. **Pin `approach_bearing_ref_m` (§3.3).** 19 % of measured passages move further than the
+   matching tolerance across ICBM's own decision range, so ingest and the car can disagree about
+   direction. `calib.py` is the tool.
 3. **Then** accumulate the corridor driving §3.9 item 3 asks for, with the pipeline no longer
    discarding four-fifths of the revisits it gets — and re-run this replay before building
    anything.
@@ -414,40 +496,71 @@ Fixed in this branch:
 | 15 | zero-count stats were absent rather than printed as 0 | `TALLY_KEYS` pre-seeded |
 | 17 | `n_passes` counted observations, not passes | counts distinct drives |
 
-**Deferred for the owner, not fixed here** (recorded so they are not re-discovered):
+**Deferred at that round, and their fate at the 2026-09-19 round (§10):**
 
-* **16 — dead code.** `to_snapshot`/`from_snapshot`/`load_snapshot_or_empty`/`tighten`/
-  `with_params` are used only by tests. They implement §8.1's "fail SAFE to no database, but say
-  so", which is a Rule 2 exemplar, but §8.1 belongs to commit C3 of a gated phase. Delete or keep
-  is a judgement call and the owner should make it. (`load_snapshot_or_empty` also returns `None`,
-  not an empty DB — the name should change either way.)
+* **16 — dead code.** `to_snapshot`/`from_snapshot`/`load_snapshot_or_empty`/`CurveRow.to_json`/
+  `with_params` were reachable only from their own tests. **DELETED 2026-09-19** — §8.1's on-car
+  half is not being built, so it was code carrying review cost for a consumer that does not exist.
+  `git show a46b90f2b5:tools/curvedb/store.py` has it. `tighten` stays: it is `dataclasses.replace`
+  under a greppable name and three test modules use it.
+* **7 — `--self-match` is near-tautological** (episode and observation share the same `Passage`).
+  **REWORDED 2026-09-19.** Both this README and the tool used to argue from it that "the keying
+  works"; it shows only that `build()` and `match()` are self-consistent. The tool now measures and
+  prints the tautology itself — **34 of the 40 self-matched rows contain a pass from the episode's
+  own drive** — and says in those words what that can and cannot support.
 * **20 — `K_MIN_USABLE` drops the 473 straightest passes**, which §10 of the design says matter
-  most. Clamping instead of dropping is the safe direction and is a design call.
-* **7 — `--self-match` is near-tautological** (episode and observation share the same `Passage`),
-  so its docstring's "the matcher works" overstates. Noted in §1's table rather than reworded in
-  code, because a non-tautological version needs an independent site source that does not exist
-  before 2026-09-17.
+  most. Clamping instead of dropping is the safe direction and is a design call. **Still open**
+  (the 2026-09-19 review verified independently that removing the floor changes the replay verdict
+  not at all).
 * **18 — LODO includes future dates.** Standard for cross-validation, optimistic for the funnel.
+  **Still open**, deliberately.
 * **19 — `track` vs `logged` sites are geometrically different things** (lane position vs mapd
-  node); `site_radius_m` must absorb that offset too.
-* **21 — `_PoseSign`** arguably belongs in `tools/curvedb_telemetry_check.py`.
-* **22 — small Rule-2 items**: `no_fix` conflates four causes; `fields_alive` reports `dq=False` as
-  "always null/zero" though `False` is a live clean reading; the clock filter counts drops without
-  printing their dates; `"steer"` breadcrumb records may lack `strPrs` and so enter an extent as
-  hands-off ticks.
+  node); `site_radius_m` must absorb that offset too. **Still open**, deliberately.
+* **21 — `_PoseSign`** arguably belongs in `tools/curvedb_telemetry_check.py`. **Still open** —
+  a relocation with no behaviour attached.
+* **22 — small Rule-2 items.** `fields_alive` reporting `dq=False` as "always null/zero" is
+  **FIXED** (§10 finding 5). The rest are still open: `no_fix` conflates four causes; the clock
+  filter counts drops without printing their dates; `"steer"` breadcrumb records may lack `strPrs`
+  and so enter an extent as hands-off ticks.
 
 ---
 
-## 10. Reproducing
+## 10. Review round 2026-09-19 (Fable, second pass)
 
-Working files from the 2026-09-17 run are in `_scratch/curvedb/out/` (not committed):
-`ingest_all.log`, `obs_all.jsonl` (4,719), `eps_all.jsonl` (170), `replay_main.log`,
-`replay_r{80,150,300}.log`, `replay_highway.log`, `replay_anyclass.log`, `recurrence.txt`,
-`calib.txt`, `mutate_full.log`.
+The headline — over 170 ICBM episodes the DB acted on ZERO under leave-one-date-out — was
+**independently verified and holds**: the recurrence ceiling reproduces, LODO is leak-free, the
+match radius is not the loss mechanism, and removing `K_MIN_USABLE` changes nothing. What sat
+underneath it did not survive as well.
+
+| # | finding | what was done |
+|---|---|---|
+| 1 | **§6.2's DOWN rule could never fire**, and §3.4 said the opposite in as many words | the disqualifier that *defines* DOWN no longer disqualifies it; §3.4 rewritten. `obs_down` **0 → 127**. The tests relaxed `drv` for themselves and so encoded the bug — they now run under the design's own set |
+| 2 | **the site-shuffle control could not fail** — permuting within a date leaves `matched` invariant under LODO, so its alarm fired by construction and §1's conclusion from it was unsupported | rebuilt to permute the **episodes'** sites; four outcomes, each with its own reading; §1 rewritten. It now reports something real (29 vs 6) |
+| 3 | **N = 170 is inflated by 24 re-fires**, and the two 300 m "false cancels" are one junction | episodes carry `site_group`; every count prints both denominators; the false-cancel listing marks re-fires with `!`; the rule-of-three bound is taken on distinct sites |
+| 4 | **uncommitted evidence (D12 again)** — the 1 Hz under-read and bearing-spread figures had no script behind them | `calib.py`, committed and tested. The per-extent figures reproduce (p50 1.10 / p90 1.51); **the 22.2 % bearing figure does not** and is superseded by 18.8 % (§3.3) |
+| 5 | **`fields_alive` reported a legitimately-`False` field as dead** (`False == 0.0` in Python) | `_is_live_reading` decides bools before the zero test |
+| 6 | **dead snapshot code** (Rule 4) | deleted, with the tests that were its only caller |
+| 7 | **"keying works" overstated what self-match shows** | reworded in §1, §9 and the tool; the tautology is now measured and printed |
+| 8 | **`recurrence.has_row` omitted the bearing check** the replay's matcher applies, which is why it said 7 where the replay saw 4 | keyed identically; both now report the same number at every stage (4 before the DOWN fix, 6 after) |
+
+**Not material, skipped by instruction:** 18 (LODO includes future dates), 19 (`track` vs `logged`
+geometry), 21 (`_PoseSign`'s home).
+
+**What did NOT change: the result.** Fixing DOWN adds 127 observations and 124 rows, and the
+database still acts on **zero** episodes under LODO. §7 remains un-evaluated.
+
+---
+
+## 11. Reproducing
+
+Working files are in `_scratch/curvedb/` (not committed): the 2026-09-17 run in `out/`, and the
+2026-09-19 re-run in `new/` (`ingest.log`, `obs.jsonl` (4,846), `eps.jsonl` (170),
+`replay_main.log`, `replay_{r300,highway}.log`, `recurrence.txt`, `calib.txt`). `base/` holds the
+pre-fix run the before/after numbers in §3.4 and §10 are taken from.
 
 ```bash
 # tests (the worktree needs opendbc_repo/opendbc symlinked and a borrowed common/params_pyx.so)
-PYTHONPATH=$PWD:$PWD/opendbc_repo ../pnw-pilot/.venv/bin/python -m pytest tools/curvedb/tests -q
+PYTHONPATH=$PWD:$PWD/opendbc_repo ../pnw-pilot/.venv/bin/python -m pytest tools/curvedb -q
 # mutation harness -- every mutant compile-checked and anchor-checked before it counts
 python3 /home/dp/gh/comma/_scratch/curvedb/mutate.py
 ```

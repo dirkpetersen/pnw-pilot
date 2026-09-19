@@ -45,7 +45,7 @@ def episode(**over):
            k_truth=0.0005, k_estimator="kPeak100", k_n=7, k_v_ego=29.0,
            k_ahead_max=0.0005, k_ahead_v_ego=29.0,
            a_lat_measured=0.4, a_lat_src="achLat", dq_state="clean", dq_src="rollup100",
-           dq_why="",
+           dq_why="", site_group="drive-2026-09-05#0",
            posted_ms=29.0, highway_class="motorway", n_ticks=7, source="x:9")
   e.update(over)
   return e
@@ -218,35 +218,98 @@ def test_k_shuffle_keeps_the_places_and_moves_the_curvatures():
   assert [x.site_lat for x in out] == [x.site_lat for x in o]
 
 
-def _two_days_of_sites(n=12):
-  return [obs(date=f"2026-09-{1 + i % 2:02d}", k=0.001 * (i + 1), site_lat=45.0 + 0.05 * i)
-          for i in range(n)]
+def _sites(n=12):
+  """n episodes at n different places, each far enough apart to be its own row."""
+  return [episode(site_lat=45.0 + 0.05 * i, start_lat=45.0 + 0.05 * i,
+                  site_group=f"drive-2026-09-05#{i}") for i in range(n)]
 
 
-def test_site_shuffle_keeps_the_curvatures_and_moves_the_places():
-  o = _two_days_of_sites()
-  out = R.shuffle_sites(o, seed=1)
-  assert [x.k for x in out] == [x.k for x in o]
-  assert sorted(x.site_lat for x in out) == sorted(x.site_lat for x in o)
-  assert [x.site_lat for x in out] != [x.site_lat for x in o]
-
-
-def test_site_shuffle_permutes_WITHIN_a_date_and_never_across_one():
-  # This is the whole point of the control: a global shuffle reassigns sites across dates and
-  # MANUFACTURES the multi-date rows the real corpus lacks, which made the corrupted database look
-  # more capable than the real one.
-  o = _two_days_of_sites()
-  out = R.shuffle_sites(o, seed=1)
-  for date in ("2026-09-01", "2026-09-02"):
-    before = sorted(x.site_lat for x in o if x.date == date)
-    after = sorted(x.site_lat for x in out if x.date == date)
-    assert before == after
+def test_site_shuffle_moves_each_episode_to_another_episodes_site():
+  eps = _sites()
+  out = R.shuffle_episode_sites(eps, seed=1)
+  assert sorted(e["site_lat"] for e in out) == sorted(e["site_lat"] for e in eps)
+  assert [e["site_lat"] for e in out] != [e["site_lat"] for e in eps]
+  # the episode keeps everything that is NOT the lookup key
+  assert [e["k_truth"] for e in out] == [e["k_truth"] for e in eps]
+  assert [e["date"] for e in out] == [e["date"] for e in eps]
 
 
 def test_site_shuffle_is_seed_dependent():
-  o = _two_days_of_sites()
-  assert [x.site_lat for x in R.shuffle_sites(o, 7)] == [x.site_lat for x in R.shuffle_sites(o, 7)]
-  assert [x.site_lat for x in R.shuffle_sites(o, 7)] != [x.site_lat for x in R.shuffle_sites(o, 8)]
+  eps = _sites()
+  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)] ==
+          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)])
+  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)] !=
+          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 8)])
+
+
+def test_site_shuffle_CAN_change_the_match_count():
+  """The defect this control was rebuilt to fix (2026-09-19).
+
+  Its predecessor permuted the OBSERVATIONS' sites within each date. That preserves each date's
+  multiset of positions, leave-one-date-out removes whole dates, so `matched` was invariant BY
+  CONSTRUCTION and the alarm fired on every corpus. A control that cannot fail proves nothing, so
+  this test demands that the control be able to move the number it is read on.
+
+  What makes the episode-side version able to move it is that under leave-one-date-out **each
+  episode faces a DIFFERENT database**. Here each site's only pass comes from the date of the
+  episode standing on it, so every episode's own row is excluded and nothing matches -- until the
+  sites are swapped, when each episode looks up a row the other date built and both match."""
+  s1, s2 = (45.0, -122.0), (46.0, -122.0)
+  rows = [obs(date="2026-09-01", site_lat=s1[0]), obs(date="2026-09-02", site_lat=s2[0])]
+  eps = [episode(date="2026-09-01", drive_id="drive-2026-09-01", site_lat=s1[0],
+                 site_group="a#0"),
+         episode(date="2026-09-02", drive_id="drive-2026-09-02", site_lat=s2[0],
+                 site_group="b#0")]
+  assert sum(o.matched for o in R.run(rows, eps, P, E)) == 0
+  swapped = R.shuffle_episode_sites(eps, seed=1)
+  assert [e["site_lat"] for e in swapped] == [s2[0], s1[0]]
+  assert sum(o.matched for o in R.run(rows, swapped, P, E)) == 2
+
+
+def test_stayed_put_counts_the_episodes_the_permutation_did_not_control():
+  eps = _sites(4)
+  assert R.stayed_put(eps, eps, P) == 4                     # identity permutation: nothing moved
+  assert R.stayed_put(eps, R.shuffle_episode_sites(eps, 3), P) < 4
+
+
+def test_stayed_put_survives_an_episode_with_no_fix():
+  eps = [episode(site_lat=None), episode()]
+  assert R.stayed_put(eps, eps, P) == 1
+
+
+# ------------------------------------------------------------------------ re-fires (`site_group`)
+
+def test_distinct_sites_collapses_a_refire():
+  eps = [episode(), episode(), episode(site_group="drive-2026-09-05#1")]
+  assert R.distinct_sites(eps) == 2
+
+
+def test_distinct_sites_refuses_to_guess_when_the_tag_is_absent():
+  """None, never len(episodes): an untagged corpus would otherwise report every re-fire as an
+  independent site, which is the defect wearing the fix's costume."""
+  eps = [episode(), {k: v for k, v in episode().items() if k != "site_group"}]
+  assert R.distinct_sites(eps) is None
+
+
+def test_the_funnel_prints_both_denominators(capsys):
+  R.summarise(R.run(two_dates(), [episode(), episode()], P, E), "t",
+              real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)
+  out = capsys.readouterr().out
+  assert "episodes replayed                       2  (1 distinct episode-sites)" in out
+
+
+def test_the_funnel_says_so_when_the_refire_tag_is_missing(capsys):
+  ep = {k: v for k, v in episode().items() if k != "site_group"}
+  R.summarise(R.run(two_dates(), [ep], P, E), "t", real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)
+  assert "distinct episode-sites: UNKNOWN" in capsys.readouterr().out
+
+
+def test_the_bound_is_taken_on_distinct_sites_not_on_refires(capsys):
+  # Two episodes, one junction: the rule of three must see N=1, not N=2.
+  R.summarise(R.run(two_dates(), [episode(), episode()], P, E), "t",
+              real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)
+  out = capsys.readouterr().out
+  assert "N=1 distinct episode-sites" in out
 
 
 def test_the_controls_are_deterministic():
@@ -277,7 +340,8 @@ def test_summarise_counts_the_funnel(capsys):
   outs = R.run(two_dates(), [episode(), episode(k_truth=0.004, k_ahead_max=0.004)], P, E)
   res = R.summarise(outs, "t", real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)
   assert res == {"n": 2, "acted": 2, "adjudicable": 2, "false_cancels": 1, "phantoms": 1,
-                 "grey": 0, "matched": 2}
+                 "grey": 0, "matched": 2, "distinct_sites": 1,
+                 "distinct_sites_false_cancels": 1, "own_drive_in_row": 0}
   out = capsys.readouterr().out
   assert "REAL SLOWDOWNS WRONGLY CANCELLED          1" in out
   assert "EVERY FALSE CANCEL" in out
@@ -289,10 +353,11 @@ def test_summarise_refuses_to_turn_zero_of_zero_into_a_bound(capsys):
 
 
 def test_summarise_states_the_bound_when_there_is_one(capsys):
-  eps = [episode(date=f"2026-09-{d:02d}") for d in range(5, 9)]
+  eps = [episode(date=f"2026-09-{d:02d}", site_group=f"drive-2026-09-{d:02d}#0")
+         for d in range(5, 9)]
   R.summarise(R.run(two_dates(), eps, P, E), "t", real_a_lat=2.5)
   out = capsys.readouterr().out
-  assert "rule of three, N=4" in out
+  assert "rule of three, N=4 distinct episode-sites" in out
   assert "NOT MET" in out                 # section 3.9 item 5 wants N >= 60
 
 
@@ -420,3 +485,41 @@ def test_a_tighter_comfort_target_makes_the_database_more_cautious():
   assert tight.new_target_ms < loose.new_target_ms
   assert math.isclose(loose.new_target_ms, math.sqrt(2.5 / 0.004), rel_tol=1e-9)
   assert math.isclose(tight.new_target_ms, math.sqrt(1.0 / 0.004), rel_tol=1e-9)
+
+
+def test_main_reads_a_control_that_matched_MORE_as_the_lodo_confound_not_a_broken_matcher(
+    tmp_path, capsys):
+  """On the real corpus the rebuilt control matches 29 against 6. Calling that "the matcher is not
+  selecting anything" would be the known-false alarm the old control shipped; the cause is that
+  LODO removes the episode's own date and an episode's own site is built from that date.
+
+  Built here the same way: six SINGLE-VISIT sites, each with one pass from the date of the episode
+  standing on it, plus one episode looking at a site another date built. The real lookup finds one
+  row; swapping the sites around finds several."""
+  import json
+  obs_p, eps_p = tmp_path / "o.jsonl", tmp_path / "e.jsonl"
+  lats = [45.0 + 0.5 * i for i in range(6)]
+  rows = [obs(date=f"2026-09-{1 + i:02d}", site_lat=lat) for i, lat in enumerate(lats)]
+  eps = [episode(date=f"2026-09-{1 + i:02d}", drive_id=f"drive-2026-09-{1 + i:02d}",
+                 site_lat=lat, start_lat=lat, site_group=f"s{i}#0")
+         for i, lat in enumerate(lats)]
+  eps.append(episode(date="2026-09-20", drive_id="drive-2026-09-20", site_lat=lats[0],
+                     start_lat=lats[0], site_group="s9#0"))
+  obs_p.write_text("\n".join(json.dumps(vars(o)) for o in rows))
+  eps_p.write_text("\n".join(json.dumps(e) for e in eps))
+  R.main(["--observations", str(obs_p), "--episodes", str(eps_p), "--control", "site-shuffle"])
+  out = capsys.readouterr().out
+  assert "matched MORE than the real lookup" in out
+  assert "not a broken matcher" in out
+
+
+def test_the_self_match_tautology_is_measured_not_argued():
+  """`own_drive_in_row` is the number that tells a reader what self-match actually shows. Under
+  LODO it must be 0 on every episode (that IS the non-circularity property); without LODO a row
+  built by the episode's own drive is exactly what gets found, and saying so is the point."""
+  ep = episode(date="2026-09-01", drive_id="drive-2026-09-01")
+  rows = [obs(date="2026-09-01"), obs(date="2026-09-02")]
+  assert R.run(rows, [ep], P, E, lodo=False)[0].own_drive_in_row is True
+  assert R.run(rows, [ep], P, E)[0].own_drive_in_row is False
+  assert R.summarise(R.run(rows, [ep], P, E, lodo=False), "t",
+                     real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)["own_drive_in_row"] == 1
