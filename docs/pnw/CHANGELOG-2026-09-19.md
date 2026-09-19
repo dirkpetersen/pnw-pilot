@@ -3,7 +3,7 @@
 Continues [`CHANGELOG-2026-09-18.md`](CHANGELOG-2026-09-18.md). Four branches shipped, one
 measurement returned a verdict of *dead*, and one owner decision closed a proposal.
 
-**Channel tip:** `origin/3devpnw` = `915a030207`.
+**Channel tip:** `origin/3devpnw` = `1f9a352538`.
 
 ⚠️ **NOT VERIFIED ON THE CAR — and it is the documented Starlink case, not a mystery network.** The
 device is alive (it phoned the uploader at 11:22:59 PT) from `local_ip 192.168.1.79` under public
@@ -164,6 +164,85 @@ curvature. Owner: **"no chnage needed"**, and again **"no chnage please"**. Reco
 **DO-NOT-BUILD** in `PENDING-WORK.md` and in the drive report so it is not re-proposed.
 
 ---
+
+## 🧪 SHIPPED — the uploader's tests had been RED for two weeks (`uploadtest2pnw`, `1f9a352538`)
+
+Found while integration-testing the channel tip after four branches landed in one day — not by looking
+for it. **4 of 39 tests in `system/loggerd/tests/test_uploader.py` were failing on the channel.**
+
+**Bisected:** 1 red at `4bb6a2e23b` (08-14), still 1 at `702487b133` (08-27), **4 at `6ad65ca264`**
+(`uploadanywifi2pnw`, 09-05), still 4 at `718079e75a` (09-10 — which touched this very file).
+`uploadanywifi2pnw` made pass 2 run on any qualifying WiFi, so the tests now move **4** files where
+stock moves **2**, while `gen_order` still returned stock's expectation. **The code was right and the
+test was stale.**
+
+**Why that is worse here than in most files.** This is the component whose API_HOST fallback once
+marked files uploaded *without them ever reaching S3* — silent data loss, idle uploader, clean-looking
+device. `test_upload_ignored` exists to pin that it cannot come back. **`test_upload_ignored` was one
+of the four red.**
+
+The restored suite asserts the fork's contract: the real key set, no duplicates, creation order, and
+that **`dcamera.hevc` never leaves the device** — the driver-facing camera, which `list_upload_files`
+yields and only one tier keeps unpicked. Also fixed a latent helper bug: `.with_suffix("")` maps
+`qlog.zst` → `qlog` correctly and `fcamera.hevc` → `fcamera` incorrectly; stock never hit it because
+stock only ever checked qlog keys.
+
+### Fable caught that I had made failing tests pass by WEAKENING them
+
+I dropped stock's exact-sequence assertion, claiming the pass interleave made a global sequence *"a
+race"*. **It is not a race.** `main()` is single-threaded, the tests disable every sleep, and the order
+is a pure function of `PASS2_INTERLEAVE`. Fable re-measured the 24-key sequence **five times and got
+byte-identical output**, then derived it from the constant.
+
+Two real regressions went through the hole that claim opened, both now proven by mutation:
+
+| mutant | my set-based check | the restored sequence check |
+|---|---|---|
+| boot tier swapped below qlog (boot stops going first) | **survives** | **KILLED** |
+| `pass1_run >= PASS2_INTERLEAVE` gate deleted (video starves) | **survives** | **KILLED** |
+
+Neither moves a file in or out of the set, so a set-plus-per-kind check structurally cannot see either
+— **and stock would have caught the first one.** `gen_sequence` now rebuilds the exact order *from*
+`PASS2_INTERLEAVE` rather than pasting a captured sequence, so a constant bump updates the expectation
+while a genuine reordering still fails.
+
+**8 mutants, 8 KILLED, 0 survived, 0 not built**, source restored byte-identical; 39 passed (was
+4 failed / 35 passed), 1,849 across the full suite. The harness reports **the assertion that killed
+each mutant**, because `-q` truncates messages to `Ass...` and a mutant killed by the wrong assertion
+would otherwise look identical to one killed by the right one. Reproducible at
+[`uploadtest-evidence/`](uploadtest-evidence/README.md).
+
+> **One mutant SURVIVED and is recorded rather than quietly dropped.** M7 as first written
+> (`PASS2_INTERLEAVE` 4 → 1) survived — but it is a **mis-specified mutant, not a coverage hole**: it
+> mutates the very constant the expectation derives from, so contract and expectation move together,
+> which is the documented intended property. Rewritten as the ordering change it was meant to be, it dies.
+
+### The general gap this exposes
+**Nothing in this workbench runs the test suite against the channel tip after a merge.** Every branch
+is tested on its own base. That is how four branches shipped in one day today, and how a file could
+stay red for two weeks while a commit edited it. A CI-equivalent — run the suite on `origin/3devpnw`
+after each push — would have caught this on 2026-09-05. **Not built; recorded as a proposal in
+`PENDING-WORK.md`.**
+
+## ✅ VERIFIED ON THE CAR — the map-rating floor IS live, established without SSH
+
+The truck is on **CGNAT Starlink**, so there is no inbound route. But a new route
+(`000001b3--2bb58f4d0d`) began uploading at 11:18 PT, and **every route's qlog carries
+`initData.gitCommit`** — and qlogs upload. Read straight out of S3:
+
+```
+gitCommit  d0a6b08abce254fa1ff5118b852c6f2e0e5ea52c
+gitBranch  3devpnw     dirty False     version 0.11.1
+```
+
+`a9329c6d75` (`icbmslow2pnw`) is an **ancestor** of that, so **`icbm_map_floor_frac` is on the truck at
+its default 1.0 — the floor is ON at full strength, on today's drives.** The ICBM over-slow reported on
+09-17 should already be softened: +1.31 mph on targets, median lateral accel 1.41 → 1.65 m/s², zero
+slowdowns lost.
+
+**The car is 22 commits behind**, so none of today's four ships are on it yet — the ordinary reason,
+now distinguishable from an unknowable one. Recipe recorded in `DEVICE-STATE.md`; evidence kept in
+`drives/2026-09-19/parkgate-baseline/`.
 
 ## 🔁 The pattern worth naming: five checks this week that could not fail
 
