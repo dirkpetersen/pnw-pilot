@@ -688,6 +688,37 @@ class TestOnTheRealCallPath:
     assert mgr._icbm_cand_d is None and mgr._icbm_cand_pt == (None, None), \
       "the previous tick's candidate survived a failed tick"
 
+  def test_the_vision_curvature_is_logged_on_ticks_ICBM_DID_NOT_ACT_ON(self, monkeypatch, tmp_path):
+    """viskvis2pnw, and the whole reason the field was added.
+
+    `icbmKVis` carries the same quantity, but it is written by `_curvelead_note`, which runs only
+    inside `_icbm_step`'s lead-pacing block -- i.e. only where ICBM ALREADY HAS A TARGET. So the one
+    reading that could say whether vision agreed with a map slowdown was recorded only where ICBM had
+    already decided to slow. Measured 2026-09-19 across every corpus: a correctly-computed vision
+    curvature coexists with an ICBM decision on ONE drive, 56 ticks.
+
+    This drives a road with NO map candidate at all, so ICBM never acts -- and asserts the reading is
+    there anyway. A field present only when the feature fires cannot answer whether the feature
+    should have fired."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", False,
+                  yaw_of=lambda i: 0.02, cmd_of=lambda i: 0.0, curve_at=None)
+    quiet = [r for r in recs if r.get("icbmSrc") is None]
+    assert quiet, "every record had an ICBM source -- this test proves nothing"
+    assert all("visKMax" in r for r in quiet), "the key is missing on ticks ICBM did not act on"
+    live = [r for r in quiet if r.get("visKMax") is not None]
+    assert live, "visKMax is null on every ICBM-idle tick -- logged but never computed (the visK failure)"
+    assert all(r.get("visKRch") is not None for r in live), "a curvature with no horizon reach cannot be judged"
+
+  def test_the_vision_curvature_is_null_where_nothing_computes_it(self, monkeypatch, tmp_path):
+    """The negative control. `vis_k_max` is computed only on the ICBM shadow path (`veh.ces_shadow`),
+    so with openpilot longitudinal ON it is never produced -- and must read NULL, not 0.0. Without
+    this, a field that is always 0.0 would pass the test above and look alive on every car."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", True,
+                  yaw_of=lambda i: 0.02, cmd_of=lambda i: 0.0, curve_at=None)
+    assert recs, "no records"
+    assert all(r.get("visKMax") is None for r in recs), \
+      "visKMax is populated where nothing computes it -- that is a fabricated reading"
+
   def test_a_broken_accumulator_is_logged_and_never_reaches_the_control_loop(self, monkeypatch, tmp_path):
     """Rule 2. A silently dead accumulator is the visK failure; kPeakN going to 0 in the record and
     the swaglog line must agree that it is dead."""

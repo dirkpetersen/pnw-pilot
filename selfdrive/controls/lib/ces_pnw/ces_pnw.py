@@ -2896,6 +2896,27 @@ def decision_telemetry(s) -> dict:
     "rawActive": bool(raw_active),
     "reason": reason,
     "mdlEndX": round(float(s.get("mdl_end_x", 0.0)), 1),   # ces2-study replay dataset (log-only)
+    # viskvis2pnw -- LOG-ONLY, nothing reads these. The model's tightest predicted curvature and how
+    # far its horizon reaches (icbm_vision_curvature, computed every shadow tick at ces_pnw.py:3960).
+    #
+    # WHY THEY ARE HERE AND NOT ONLY IN icbmKVis: `icbmKVis` carries the same vis_k, but it is written
+    # by _curvelead_note, which runs ONLY inside _icbm_step's lead-pacing block -- i.e. only on ticks
+    # where ICBM already HAS a target. So the one quantity that could say whether vision agreed with
+    # a map slowdown is recorded only where ICBM already decided to slow, and is null everywhere else.
+    # Measured 2026-09-19: across every corpus, a correctly-computed vision curvature coexists with an
+    # ICBM decision on ONE drive, 56 ticks -- not enough to answer whether vision could ever contribute.
+    # These two ride `sig` directly, so they are present on every tick the model produced a reading,
+    # independent of what ICBM did. That is the whole point: the comparison needs the ticks where ICBM
+    # did NOT act just as much as the ones where it did.
+    #
+    # NULL means "no reading": any car but the Lightning (only the ICBM shadow path, `veh.ces_shadow`,
+    # computes it) or a model hiccup. **0.0 is NOT null here, and that is deliberate** -- unlike
+    # slKActl on the Tesla, where an exact zero is a dead sensor (D1), the model always produces a
+    # path, so k = 0 is a real reading of a straight road. Applying _zero_is_null here would throw
+    # away the majority of the evidence: the ticks where vision saw nothing are exactly the ones a
+    # "does vision agree with the map?" question needs.
+    "visKMax": _round_or_none(s.get("vis_k_max"), 6),
+    "visKRch": _round_or_none(s.get("vis_reach"), 0),
     "curvePct": int(round(cpct * 100)),
     "curveSrc": csrc,
     "mapV": round(float(s["map_target_v"]), 1),
@@ -5336,6 +5357,9 @@ class CESController:
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
       "mdlEndX": round(float(tele.get("mdlEndX") or 0.0), 1),
+      # viskvis2pnw: the model's own curvature reading on EVERY tick, not only the ones ICBM acted on.
+      # Passed straight through from `tele` -- null on a non-Lightning and on a model hiccup, never 0.0.
+      "visKMax": tele.get("visKMax"), "visKRch": tele.get("visKRch"),
       # ces2core2pnw shadow A/B: CES2 would-be mode/reason, graded stop urgency, cumulative
       # divergence edges vs v1, and whether CES2 was LIVE (deciding) for this record.
       "ces2Mode": tele.get("ces2Mode"), "ces2Reason": tele.get("ces2Reason"),
