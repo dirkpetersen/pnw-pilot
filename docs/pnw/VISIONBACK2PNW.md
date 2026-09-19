@@ -377,9 +377,13 @@ than 2× on one in six of the ticks it acts on.
 
 ## 6. The motivating phantom, tested directly
 
-`drives/2026-09-08/…` does contain the 20:28 event. It also gives the forward model a third
-independent check: the logged `icbmT` held **44.1–44.9 mph** across the episode and the model with the
-floor OFF returns **45.3** — a +0.5 mph residual on a live phantom.
+`drives/2026-09-08/…` does contain the 20:28 event. It also gives the forward model a spot check on a
+live phantom: the logged `icbmT` held **44.1–44.9 mph** across the episode and the model with the floor
+OFF returns **45.3**, a residual of **+0.4…+1.2 mph (+0.2…+0.5 m/s)**. That is larger than the
+corpus-wide +0.03…+0.10 m/s `ICBMSLOW2PNW.md` reports, and it is stated rather than smoothed: `ref` is
+reconstructed here from `icbmC`/`stockSet`, and the logged target reflects the episode's latched
+ceiling rather than the current stock set. It biases the modelled target slightly HIGH, i.e. it makes
+the shipped baseline look marginally better than it was, not worse.
 
 | PT | `stockOn` | vEgo | stock set | `mapDist` | logged `icbmT` | model, floor ON | `visLat` | vision verdict |
 |---|---|---|---|---|---|---|---|---|
