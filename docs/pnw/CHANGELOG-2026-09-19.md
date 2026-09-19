@@ -5,10 +5,18 @@ measurement returned a verdict of *dead*, and one owner decision closed a propos
 
 **Channel tip:** `origin/3devpnw` = `915a030207`.
 
-⚠️ **NOT VERIFIED ON THE CAR.** The device is alive (it phoned the uploader at 11:22:59 PT) but sits
-behind a LAN this host cannot route to — `local_ip 192.168.1.79` under public `98.97.34.51`, neither
-the home nor the hotspot subnet. So **everything below is pushed, and none of it is confirmed
-installed.** The updater fetches on its own ~1.5 h cycle; the install lands at the next reboot.
+⚠️ **NOT VERIFIED ON THE CAR — and it is the documented Starlink case, not a mystery network.** The
+device is alive (it phoned the uploader at 11:22:59 PT) from `local_ip 192.168.1.79` under public
+`98.97.34.51`. That is the **same LAN address as the 09-17 Starlink session**; only the public IP
+rotated within the ISP's block (`98.97.43.186` → `98.97.34.51`). **Starlink is CGNAT: there is no
+inbound route from anywhere**, so this is SSH being *impossible*, not blocked — no `SIGHUP` to force a
+fetch, no reboot, no post-install health check, no param read.
+
+A stable `local_ip` with a drifting `src_ip` is the signature of this link. **Do not read the changed
+public IP as a different network, and do not read "no answer on port 22" as "the device is down"** —
+it uploaded 50 seconds before I looked. Everything below is **pushed and unconfirmed**; the updater
+fetches outbound on its own ~1.5 h cycle and installs at the next reboot, and S3 is the only install
+evidence available until the truck joins a routable network.
 
 ---
 
