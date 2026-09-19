@@ -1,13 +1,15 @@
 ---
 updated: 2026-09-19
-status: current     # MEASUREMENT ONLY -- no feature, no car code, nothing deployed, nothing pushed
+status: current     # MEASUREMENT ONLY -- no feature, no car code, nothing deployed. Pushed 2026-09-19 as
+        # documentation: 100 % under docs/, it cannot reach the car.
 ---
 
 # VISIONBACK2PNW — can vision hand back a bounded N mph of a map slowdown?
 
 > **⛔ NOTHING WAS BUILT.** This is an offline measurement answering one question the owner asked on
-> 2026-09-19. No control-path file was touched. No branch was pushed. The verdict below is a
-> recommendation, not a decision.
+> 2026-09-19. No control-path file was touched. The branch is **100 % under `docs/`** and is pushed
+> as documentation only — it cannot reach the car. The verdict below is a recommendation, not a
+> decision.
 
 ## The question
 
