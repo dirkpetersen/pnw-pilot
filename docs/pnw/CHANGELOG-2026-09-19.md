@@ -3,7 +3,7 @@
 Continues [`CHANGELOG-2026-09-18.md`](CHANGELOG-2026-09-18.md). Four branches shipped, one
 measurement returned a verdict of *dead*, and one owner decision closed a proposal.
 
-**Channel tip:** `origin/3devpnw` = `586446b6f3`.
+**Channel tip:** `origin/3devpnw` = `550f8ede1b`, **verified GREEN by the new checker: 3,320 passed, 0 failed**, all 12 paths clearing their collection floors.
 
 ⚠️ **NOT VERIFIED ON THE CAR — and it is the documented Starlink case, not a mystery network.** The
 device is alive (it phoned the uploader at 11:22:59 PT) from `local_ip 192.168.1.79` under public
@@ -216,6 +216,36 @@ would otherwise look identical to one killed by the right one. Reproducible at
 > (`PASS2_INTERLEAVE` 4 → 1) survived — but it is a **mis-specified mutant, not a coverage hole**: it
 > mutates the very constant the expectation derives from, so contract and expectation move together,
 > which is the documented intended property. Rewritten as the ordering change it was meant to be, it dies.
+
+### Run 2 found a SECOND global-state leak — on a docs-only push
+
+The checker's first run on the fixed tip was green (3,320). Its **second** run, after a *docs-only*
+push, came back **1 failed / 3,319 passed** — and the failing test was nowhere near the change.
+
+`EventName.canError == 0`. Upstream's `test_state_machine.make_event()` registered its synthetic
+event as **`EVENTS[0]`**, so from the moment that helper ran, **the real `canError` definition was
+replaced by a stub for the rest of the process.** Our `test_mads_pnw.py` parametrises over
+`EventName.canError` and inherited the stub — but only when xdist happened to schedule the two files
+into the same worker. Hence intermittent, and hence blamed on MADS rather than on the actual cause.
+
+Reproduced deterministically:
+
+```
+pytest selfdrive/selfdrived/tests/test_state_machine.py selfdrive/selfdrived/tests/test_mads_pnw.py
+  before: 1 failed, 113 passed        after: 114 passed
+```
+
+**The directory as a whole passed either way (174).** That is exactly why nobody saw it: whether it
+fails depends on how xdist splits the files, so the same code produced green and red on alternate
+runs and neither looked like a bug.
+
+Fixed at the cause — the synthetic key is now `max(EVENTS) + 1000`, which cannot be an `EventName`,
+plus an autouse fixture that removes it after each test. That cleanup is not redundant: *"nothing
+else reads that key"* is precisely the assumption that was false the first time.
+
+> **Two global-state leaks in one day, both found only by running the suites TOGETHER, and in both
+> cases every individual directory was green.** That is the entire argument for Rule 9 in two
+> sentences.
 
 ### The general gap this exposes
 **Nothing in this workbench runs the test suite against the channel tip after a merge.** Every branch
