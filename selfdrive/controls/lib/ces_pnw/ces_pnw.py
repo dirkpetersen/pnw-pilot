@@ -5358,7 +5358,14 @@ class CESController:
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
       "mdlEndX": round(float(tele.get("mdlEndX") or 0.0), 1),
       # viskvis2pnw: the model's own curvature reading on EVERY tick, not only the ones ICBM acted on.
-      # Passed straight through from `tele` -- null on a non-Lightning and on a model hiccup, never 0.0.
+      # Passed straight through from `tele`, and the two nulls do NOT mean the same thing:
+      #   visKMax -- null on a non-Lightning and on a model hiccup; never 0.0 for "no reading".
+      #   visKRch -- null on a non-Lightning, but **0.0 on a hiccup** (icbm_vision_curvature and its
+      #              own except both return (None, 0.0)). A 0.0 reach is never a real horizon.
+      # So the three states are distinguishable: (0.0, >0) straight road, (null, 0.0) hiccup,
+      # (null, null) car that never computes it -- and `shadow` in the same record confirms which.
+      # An earlier draft of this comment said "never 0.0" of BOTH, which would have had a future
+      # analyst read visKRch=0.0 as a real reading (Fable 2026-09-19).
       "visKMax": tele.get("visKMax"), "visKRch": tele.get("visKRch"),
       # ces2core2pnw shadow A/B: CES2 would-be mode/reason, graded stop urgency, cumulative
       # divergence edges vs v1, and whether CES2 was LIVE (deciding) for this record.

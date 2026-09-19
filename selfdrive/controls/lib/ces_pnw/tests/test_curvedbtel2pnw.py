@@ -709,6 +709,20 @@ class TestOnTheRealCallPath:
     assert live, "visKMax is null on every ICBM-idle tick -- logged but never computed (the visK failure)"
     assert all(r.get("visKRch") is not None for r in live), "a curvature with no horizon reach cannot be judged"
 
+  def test_the_vision_curvature_TRACKS_THE_MODEL_and_is_not_a_constant(self, monkeypatch, tmp_path):
+    """Fable's optional, taken: the test above only ever sees exact-0.0 readings, because its fixture
+    road is straight. A field hard-wired to 0.0 would pass it. Drive a real curve and require the
+    reading to move -- otherwise "the value is present" says nothing about whether it is the model's."""
+    recs = _drive(monkeypatch, tmp_path, LIGHTNING, "ford", False, yaw_of=lambda i: 0.02,
+                  cmd_of=lambda i: 0.0, curve_at=150.0)
+    live = [r for r in recs if r.get("visKMax") is not None]
+    assert live, "no vision reading at all -- the harness, not the field, is broken"
+    assert any(r["visKMax"] > 0 for r in live), \
+      "visKMax is 0.0 on every tick of a curved road -- it is a constant, not the model's reading"
+    for r in live:
+      assert r.get("visKRch") and r["visKRch"] > 0, \
+        "a curvature with a 0.0 horizon reach is a hiccup's signature, not a reading"
+
   def test_the_vision_curvature_is_null_where_nothing_computes_it(self, monkeypatch, tmp_path):
     """The negative control. `vis_k_max` is computed only on the ICBM shadow path (`veh.ces_shadow`),
     so with openpilot longitudinal ON it is never produced -- and must read NULL, not 0.0. Without
