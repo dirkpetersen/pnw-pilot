@@ -407,6 +407,15 @@ class TestL4TheRecordGoesNowhereButTheLog:
           continue
         if isinstance(up, ast.Subscript) and isinstance(up.ctx, ast.Store):
           continue
+        # (c) `rec.update({...})` -- a dict WRITE spelled as a method call. parkgate2pnw does exactly
+        #     this (`rec.update(self._park_gate.record_fields(park_d))`), and without this arm L4
+        #     fails the moment the two branches meet, for a write rather than a read. The CALL's
+        #     arguments are walked by this same loop, so an argument that READ `rec` back out would
+        #     still be flagged -- the allowance is for the receiver only, not the whole expression.
+        if isinstance(up, ast.Attribute) and up.attr == "update":
+          call_up = fparents.get(id(up))
+          if isinstance(call_up, ast.Call) and call_up.func is up:
+            continue
         pytest.fail(f"{name!r} (an _event_record result) is READ at line {use.lineno}: " +
                     f"{ast.unparse(up)}")
 

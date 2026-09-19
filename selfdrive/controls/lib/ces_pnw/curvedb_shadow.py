@@ -157,22 +157,34 @@ CONFIG_PATH = os.path.join(CURVEDB_DIR, "curvedb.json")
 #
 # `CurveDB.build` matches each observation against every row built so far, so it is superlinear:
 # measured on the dev host, 2,000 rows -> 0.55 s, 5,000 -> 1.1 s, 10,000 -> 6.5 s, 20,000 -> 24 s.
-# The load runs on a background thread, but a CPU-bound Python thread CONTENDS THE GIL at the 5 ms
-# switch interval -- measured +5.2 ms p50 on every main-thread wakeup while a build runs -- and
-# `selfdrivedLagging` is SOFT_DISABLE + NO_ENTRY above 11.1 ms average. A multi-minute build could
-# therefore soft-disable the car on a manager restart mid-drive, which is the one way this
-# authority-free feature could ever affect anything.
+# ⚠️ THE BUILD DOES RAISE `selfdrivedLagging` WHILE IT RUNS. An earlier version of this comment said
+# "+5.2 ms p50, ~2x margin"; that was wrong in BOTH directions (Fable, 2026-09-19). Measured on the
+# worst case this code permits (every observation a distinct site -> 4,122 rows, O(n^2) build): the
+# main-thread overshoot during a 1.33 s build is **+11.2 ms p50 / +62 ms p99 / +15.8 ms mean**
+# against an idle baseline of 0.24 ms. `Ratekeeper.lagging` is a 100-frame AVERAGE over 11.1 ms, so
+# any async build (> ASYNC_LOAD_MIN_BYTES) trips it. On the device expect 3-4x longer still.
 #
-# 1.5 MB is ~4,000 observations / ~2,000 rows: a sub-second build and ~0.6 ms per lookup. And it is
-# not a tight budget at the measured site rate: on a real 46-minute Phase-1 drive, ICBM named a
-# map/far candidate at **6 distinct sites** (~8/h), so the cap is ~500 driving hours. (Discovering
-# sites from ANY map candidate instead would have been 77 sites in the same 46 minutes -- ~13x --
-# which is exactly why the write half is gated on ICBM's own candidate; see `curvedb_tele`.)
+# WHY THAT IS NEVERTHELESS SAFE, and it is the whole argument -- read it before moving this code:
+# the load thread is started from `CESController.__init__`, which runs inside `SelfdriveD.__init__`
+# (selfdrived.py:217). Nothing can be ENGAGED before selfdrived exists, so `enabled` is necessarily
+# False for the entire build. The cost is a **NO_ENTRY window of (build + ~1 s) after ignition-on**,
+# never a SOFT_DISABLE mid-drive.
+#   => NEVER construct or reload this object after startup. Doing so would move a multi-second
+#      GIL-contending build into a window where the car can be engaged, and that IS a soft-disable.
+#
+# 512 KB, not 1.5 MB, for exactly that reason: the build must finish before a driver could plausibly
+# engage. 512 KB is ~1,400 observations and a 0.21 s build on the dev host (~1 s on device); 1.5 MB
+# measured 1.33 s here, i.e. plausibly 5+ s on the device -- overlapping the moment someone first
+# reaches for the stalk. It is still ~170 driving hours at the measured site rate: on a real
+# 46-minute Phase-1 drive ICBM named a map/far candidate at **6 distinct sites** (~8/h). (Discovering
+# sites from ANY map candidate would have been 77 in the same 46 minutes -- ~13x -- which is why the
+# write half is gated on ICBM's own candidate; see `curvedb_tele`. The broad rate stays recoverable
+# OFFLINE from mapLat/mapLon, which `_curve_tele` still resolves on every record.)
 #
 # At the cap the writer STOPS and says so, loudly and repeatedly: a frozen corpus that announces
 # itself is recoverable, a silently rotated one destroys the >= 2-dates history that is the entire
 # point of collecting it.
-OBS_MAX_BYTES = 1536 * 1024
+OBS_MAX_BYTES = 512 * 1024
 # Below this the boot load is inline; above it, a background thread. ~256 KB is ~800 observations,
 # which groups in well under 0.1 s. See the comment at the call site for why a thread is not always
 # used -- a background load makes `cdbOn` nondeterministic for the first fraction of a second.
@@ -504,7 +516,16 @@ class CurveDBShadow:
           # appending while this runs, and a line that landed DURING the load would enter the live
           # database -- this drive judged against itself, which is the one property section 3.9
           # item 6 asks for. (A torn tail is still handled: it simply fails to parse.)
-          for line in f.read(size).splitlines(True):
+          # The WRITER stops at the cap, but a hand-placed or concatenated file is not bound by that
+          # (Fable 2026-09-19). A 20 MB file builds in ~24 s on the dev host and minutes on the
+          # device -- i.e. a minute-plus NO_ENTRY window after ignition, from a file nobody meant to
+          # leave here. Bound the READ too, and say so: a silently truncated database would be worse
+          # than a slow one.
+          read_n = min(size, OBS_MAX_BYTES + OBS_MAX_LINE)
+          if read_n < size:
+            cloudlog.error(f"curvedb_shadow: {self._obs_path} is {size} B, over the {OBS_MAX_BYTES} B cap -- "
+                           f"only the first {read_n} B are loaded; the tail is NOT in this boot's database")
+          for line in f.read(read_n).splitlines(True):
             n_lines += 1
             if len(line) > OBS_MAX_LINE:
               bad += 1
