@@ -1,3 +1,5 @@
+import pytest
+
 from cereal import log
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.selfdrived.state import StateMachine, SOFT_DISABLE_TIME
@@ -13,12 +15,34 @@ ALL_STATES = tuple(State.schema.enumerants.values())
 ENABLE_EVENT_TYPES = (ET.ENABLE, ET.PRE_ENABLE, ET.OVERRIDE_LATERAL, ET.OVERRIDE_LONGITUDINAL)
 
 
+# `EVENTS[0]` -- which this used to use -- IS a real event: EventName.canError == 0. Registering the
+# synthetic event there permanently overwrote canError's real definition for the rest of the process,
+# so any later test in the same worker that exercised canError got this stub instead. Our
+# test_mads_pnw.py parametrises over EventName.canError, so it failed only when xdist happened to put
+# the two files in the same worker -- intermittently, and pointing at MADS rather than at here.
+#
+# Found 2026-09-19 by scripts/check-channel-tip.sh (CLAUDE.md Rule 9); upstream file, upstream bug.
+# Use a key that cannot be an EventName, and clean it up so nothing leaks past this module.
+SYNTHETIC_EVENT = max(EVENTS) + 1000
+
+
 def make_event(event_types):
   event = {}
   for ev in event_types:
     event[ev] = NormalPermanentAlert("alert")
-  EVENTS[0] = event
-  return 0
+  EVENTS[SYNTHETIC_EVENT] = event
+  return SYNTHETIC_EVENT
+
+
+@pytest.fixture(autouse=True)
+def _drop_synthetic_event():
+  """Remove the synthetic entry after every test, so EVENTS is exactly as this module found it.
+
+  Without this the table stays mutated for the rest of the worker -- harmless at a key nothing else
+  reads, but the whole point of the fix is that "nothing else reads it" was the assumption that was
+  false the first time."""
+  yield
+  EVENTS.pop(SYNTHETIC_EVENT, None)
 
 
 class TestStateMachine:
