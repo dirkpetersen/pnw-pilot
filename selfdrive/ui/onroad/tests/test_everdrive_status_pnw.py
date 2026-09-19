@@ -258,18 +258,21 @@ class TestTheFiveDocumentedOutputs:
       assert out is not None
       assert len(out) <= widest, f"{out!r} ({len(out)}) is wider than any exemplar ({widest})"
 
-  def test_KNOWN_GAP_an_implausible_acKw_overflows_the_fixed_width_box(self, widget, now):
-    """REPORTED, NOT FIXED (2026-09-19) -- pinned here so the gap is visible rather than latent.
+  def test_an_implausible_acKw_drops_the_gain_term_instead_of_clipping(self, widget, now):
+    """GAP CLOSED 2026-09-19. This test was originally `test_KNOWN_GAP_...` and asserted the BROKEN
+    behaviour (`ED:99.9kw,112mi,+194.0mi/h`, wider than the box) so the gap stayed visible. It is now
+    inverted to pin the fix.
 
-    acKw is the ONLY published number with no plausibility band: rangeKm, socPct and effWhKm each
-    get one in everdrive_pnw._usable, but acKw is `I * U / 1000` straight off an AFTERMARKET module
-    whose DBC entry has no counter and no checksum, so a garbled 0x2A7 can decode to anything up to
-    409.6 A x 8191.9 V. The stopped form then prints a 3-digit mi/h and overflows the fixed-width
-    box -- exactly the clipping the _PROJ_MAX_RATIO comment says it exists to prevent, but the gain
-    rate has no equivalent clamp. Update this test when acKw gets a band or the gain rate a clamp."""
+    Two independent guards close it, and this one is the second line of defence:
+      * the producer bands 0x2A7 to 0..100 A / 0..277 V, so acKw can no longer exceed ~27.7 kW
+        (gain <= ~53.8 mi/h, two integer digits, which is what the exemplar reserves);
+      * the UI does not TRUST that, because acKw arrives over a mem-param from an aftermarket
+        module -- so _GAIN_MAX_MI_H drops the term rather than printing it clipped.
+    Showing LESS is honest; a clipped number silently corrupts the whole line, not just its last
+    term (Rule 2). The change of form is the visible signal, exactly as it is for the projection."""
     out = widget._build_text(st(now, acKw=99.9, vMs=0.0))
-    assert out == "ED:99.9kw,112mi,+194.0mi/h"
-    assert len(out) > max(len(e) for e in ed._EXEMPLARS), "if this now fits, the gap was closed"
+    assert out == "ED:99.9kw,112mi", "the un-showable gain term must be dropped, not clipped"
+    assert len(out) <= max(len(e) for e in ed._EXEMPLARS), "must now fit the fixed-width box"
 
 
 # ---------------------------------------------------------------- T9
@@ -353,9 +356,18 @@ class TestGuards:
   def test_an_absurd_projection_falls_back_to_the_stopped_form(self, widget, now):
     """_PROJ_MAX_RATIO: a glitched efficiency can squeeze the denominator toward zero while still
     clearing _PROJ_HEADROOM. The change of FORM is the visible failure signal; a 4-digit projection
-    would also overflow the fixed-width box."""
+    would also overflow the fixed-width box.
+
+    UPDATED 2026-09-19 (_GAIN_MAX_MI_H): an efficiency this glitched makes BOTH derived terms
+    nonsense, not just the projection -- 3 Wh/km implies a gain of ~290 mi/h. So the fallback now
+    goes one step further and drops the gain rate too, leaving ONLY the two measured quantities
+    (charger power and the truck's own range). "When the efficiency is untrustworthy, show only what
+    was measured" is the stronger and more honest property, so it is what this now asserts.
+    The sane-efficiency low-speed case still shows the gain -- see the stopped-form test in T8."""
     out = widget._build_text(st(now, effWhKm=3.0, vMs=60 * MPH))
-    assert "->" not in out and out.endswith("mi/h")
+    assert "->" not in out, "an absurd projection must not print"
+    assert not out.endswith("mi/h"), "a gain derived from an absurd efficiency must not print either"
+    assert out == "ED:1.4kw,112mi"
 
   def test_the_disable_toggle_hides_the_box_and_backs_the_poll_off(self, widget, now):
     assert poll(widget, st(now, vMs=62 * MPH), disabled=True) is None

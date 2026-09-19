@@ -73,9 +73,16 @@ _BOX_H = _LINE_H + _PAD * 2   # always exactly one line — the height never var
 _KM_PER_MI = 1.60934
 _MS_TO_MPH = 2.23694
 _AC_ZERO_KW = 0.05        # at/below this the charger is unplugged: a REAL measured zero -> "not charging"
+_GAIN_MAX_MI_H = 100.0    # the stopped form's mi/h term may use at most TWO integer digits, because
+                          #   that is what the fixed-width exemplar reserves. At or above this the term
+                          #   is DROPPED rather than printed clipped — see the comment at its use site.
 _PROJ_HEADROOM = 1.05     # the projection is only credible while P_assumed > acKw * this. Below it the
-                          #   car is crawling and rangeMi * P/(P-acKw) diverges. The low-speed cutoff is
-                          #   DERIVED from this guard, deliberately not a separate magic mph threshold.
+                          #   car is crawling and rangeMi * P/(P-acKw) diverges.
+                          #   NOTE (corrected 2026-09-19): this is the WEAKER of the two projection
+                          #   guards and is not what actually sets the low-speed cutoff — _PROJ_MAX_RATIO
+                          #   binds first, since proj <= 2*range requires P_assumed >= 2*acKw, not
+                          #   1.05*acKw. Both land on the stopped form, so the driver sees the right
+                          #   thing; this constant is the divergence backstop, not the cutoff.
 _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple of the printed range.
                           #   Protects against (a) a glitched effWhKm/vMs squeezing the denominator
                           #   toward zero just inside the _PROJ_HEADROOM guard, which would print a
@@ -226,7 +233,17 @@ class EverDriveStatusRenderer(Widget):
     # truck the truck's own awake load ate about 1.0 kW of a 1.36 kW input while parked, so SoC climbed
     # far more slowly than this figure. The contribution is still the right number to show a driver,
     # because that awake load would be drawn anyway.
-    return f"{kw},{range_mi:.0f}mi,+{ac_kw / (eff_wh_mi / 1000.0):.1f}mi/h"
+    gain = ac_kw / (eff_wh_mi / 1000.0)
+    # everdrive2pnw: the same fixed-width discipline the projection gets from _PROJ_MAX_RATIO. The
+    # exemplar budgets TWO integer digits for mi/h ("+00.0"); three would overflow the box and CLIP,
+    # which is a silent corruption of the whole line, not just of this term. The producer's AC band
+    # already bounds this to ~53.8 mi/h, so reaching here means the producer's guard was bypassed or
+    # effWhKm is implausibly small -- either way the inputs are wrong. Drop the term rather than print
+    # a clipped one: showing LESS is honest, showing a truncated number is not (Rule 2). The change of
+    # form is the visible signal, exactly as it is for the projection.
+    if gain >= _GAIN_MAX_MI_H:
+      return f"{kw},{rng}mi"
+    return f"{kw},{range_mi:.0f}mi,+{gain:.1f}mi/h"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
