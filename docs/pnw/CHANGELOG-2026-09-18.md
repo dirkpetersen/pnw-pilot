@@ -50,9 +50,15 @@ for this driver's pattern and Phase 2 should be **abandoned rather than tuned** 
 ### Other blockers, worth keeping even if Phase 2 dies
 * **§6.1 rejects 147/170 episode passes**, `drv` on 136 — as written **no Tesla road can ever be learned**.
   The `drv` rule alone costs 19 of 33 genuine revisits. Decidable today, no new driving.
-* **§6.3 never states at what distance the approach bearing is measured**; 22 % of sites exceed tolerance
-  across ICBM's decision range.
-* **§6.2's DOWN rule produced ZERO observations** on 2.2 GB.
+* **§6.3 never states at what distance the approach bearing is measured**; **13.6 %** of sites exceed the
+  tolerance across ICBM's decision range. (Corrected 2026-09-19 from 22.2 % — that denominator matched
+  nothing in the pipeline. Now reproducible: `tools/curvedb/calib.py`, committed for exactly that reason.)
+* ~~**§6.2's DOWN rule produced ZERO observations** on 2.2 GB.~~ **WRONG — corrected 2026-09-19.** It was
+  **structurally unreachable**: the passage was discarded as `drv`-dirty *before* the DOWN loop ran, and a
+  DOWN **is** a `strPrs` tick. So the rule that exists to record the DRIVER'S OWN interventions had never
+  recorded one, anywhere. Fixed: **127 observations**. It did NOT change the headline — the replay still
+  acts on zero of 170 — but the zero was a bug, not a fact about the driving, and the old text explained
+  it as "the interventions are simply below the trigger", which was the reverse of the truth.
 * **A 1 Hz-built row under-reads curvature p50 1.10× / p90 1.51×** — permitting a speed 5–23 % too high,
   the UNSAFE direction. Exactly why §3.3 demands the per-second peak.
 * **`slKCmd` is alive on the Tesla** — independently verified at **98.2 % live over 52,514 moving Tesla
