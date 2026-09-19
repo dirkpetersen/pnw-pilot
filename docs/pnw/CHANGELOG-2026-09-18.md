@@ -3,8 +3,15 @@
 Continues [`CHANGELOG-2026-09-17.md`](CHANGELOG-2026-09-17.md). Overnight work on two questions the
 owner asked: build curvedb Phase 2 offline, and fix the ICBM over-slow.
 
-**Channel tip:** `origin/3devpnw` = `a46b90f2b5`. `icbmslow2pnw` is built and in Fable re-review, **not
-pushed** — it changes how the truck brakes and its post-review commit has not been reviewed.
+**Channel tip when written:** `origin/3devpnw` = `a46b90f2b5`.
+
+> ⚠️ **CORRECTED 2026-09-19 — this header went stale within the hour.** It said `icbmslow2pnw` was
+> *"in Fable re-review, not pushed"*. The re-review returned and it **shipped the same evening**: the
+> map-rating floor as **`a9329c6d75`** (09-18 19:27), the regenerated washout registry as
+> **`ef558400c6`**, its doc follow-ups as `01eb35b55b` / `1c37374818` / `d0a6b08abc`. Everything below
+> that reads "NOT pushed" about `icbmslow2pnw` is therefore wrong — **`icbm_map_floor_frac` is on the
+> channel at its default 1.0, so the floor is ON at full strength.** See
+> [`CHANGELOG-2026-09-19.md`](CHANGELOG-2026-09-19.md).
 
 ---
 
@@ -68,7 +75,8 @@ for this driver's pattern and Phase 2 should be **abandoned rather than tuned** 
 
 ## 🟠 The ICBM over-slow is a dated REGRESSION, not a tuning preference
 
-Branch `icbmslow2pnw`, built, **in Fable re-review, NOT pushed**.
+Branch `icbmslow2pnw` — **SHIPPED 2026-09-18 19:27** as `a9329c6d75` (this line read "in Fable
+re-review, NOT pushed" when written; see the header correction).
 
 **Root cause.** `eff = icbm_map_eff_scale(raw) · raw · map_scale`. The 5 mph penalty hump was calibrated
 **2026-07-11**, when the composite was a flat **1.35 × 0.92 = 1.242×** — so targets landed *above* mapd's

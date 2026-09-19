@@ -55,10 +55,16 @@ SKIP_WIDE_PARAM = "SkipWideCameraUpload"
 #
 # The CES event stream is the corpus every tuning decision on this fork is made from, and
 # curvedbtel2pnw's Phase-1 gate wants 6-8 weeks of it retained AND REACHABLE. Nothing ever pulled it
-# off the device: /data/pnw/ces_archive is WRITE-ONLY. It is budgeted at 2 GB (~95 days at the
-# measured 21 MB/day) and a generation that falls off the old end is simply gone -- prune_ces_archive
-# says so loudly, but saying so does not bring the data back. Uploading makes the device's disk a
-# cache instead of the only copy.
+# off the device: /data/pnw/ces_archive is WRITE-ONLY. It is budgeted at 2 GB and a generation that
+# falls off the old end is simply gone -- prune_ces_archive says so loudly, but saying so does not
+# bring the data back. Uploading makes the device's disk a cache instead of the only copy.
+#
+# CORRECTED 2026-09-19 (parkgate2pnw): this comment used to read "~95 days at the measured 21
+# MB/day". Both halves were true and the conclusion was still wrong -- 93.7 % of the archived bytes
+# were a PARKED truck (IsOnroad follows ignition, so charging in the driveway logged a breadcrumb a
+# second, forever), so 2 GB held about **12.9 DRIVING HOURS**, not 95 days of anything useful. With
+# the gear gate the same 2 GB holds **~140-150 driving hours**. Derivation, reproducible:
+# docs/pnw/PARKGATE2PNW.md.
 #
 # These files live OUTSIDE Paths.log_root(), which is deliberate and load-bearing: the deleter only
 # ever walks the log root, so it can never reclaim them, and their space stays governed by the

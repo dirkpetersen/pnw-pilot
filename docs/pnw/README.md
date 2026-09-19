@@ -1,6 +1,6 @@
 ---
-updated: 2026-08-15          # git-derived; bump when you edit this file
-status: unreviewed     # current | drifted | superseded | unreviewed
+updated: 2026-09-19          # git-derived; bump when you edit this file
+status: current        # current | drifted | superseded | unreviewed
 ---
 
 # PNW design docs
@@ -23,7 +23,8 @@ the deeper per-feature design/rationale docs.
 | [UPSTREAM2PNW.md](UPSTREAM2PNW.md) | Upstream (commaai) sync / rebase notes |
 | [CES2PNW.md](CES2PNW.md) | Initial CES+VTSC+mapd port onto the pnw line (+ its 5 Gemini safety fixes) — port history |
 | [ICBM2PNW.md](ICBM2PNW.md) | Lightning stock-ACC curve slow-downs via SET−/SET+ taps (map-first, set-tracking, guarded restore) |
-| [ICBMSLOW2PNW.md](ICBMSLOW2PNW.md) | ⛔ NOT DEPLOYED — ICBM over-slows for curves: the map-rating floor (the 2026-08-11 penalty/scale double count), + the widened n=3,087-tick evidence |
+| [VISIONBACK2PNW.md](VISIONBACK2PNW.md) | ⛔ MEASUREMENT ONLY, verdict **dead** — can vision hand back a bounded N mph of a map slowdown between 50–150 m? N=10 reaches **5.80 m/s²**, N=5 reaches 4.70, only N=2 is safe and returns 2 mph. Not an accuracy problem: the trust gate is a pass-through (vision says "no real curve" on 87 % of ticks). Nine reproducible analysis scripts in `visionback-evidence/` |
+| [ICBMSLOW2PNW.md](ICBMSLOW2PNW.md) | ✅ **SHIPPED** `a9329c6d75` (2026-09-18 19:27; the row used to read "NOT DEPLOYED") — ICBM over-slows for curves: the map-rating floor (the 2026-08-11 penalty/scale double count), + the widened n=3,087-tick evidence |
 | [LATACCEL2PNW.md](LATACCEL2PNW.md) | Speed-scheduled, JSON-hot-reloadable max-lateral-accel cap for `clip_curvature()` (low-speed authority up, highway stays ISO 3.0) |
 | [FORDREGEN2PNW.md](FORDREGEN2PNW.md) | EV regen over-decel design (Ford long PID damping Fix A + regen-bite Fix B) |
 | [MAPD-SYSTEM.md](MAPD-SYSTEM.md) | **As-deployed mapd** — pfeiferj binary (stock pin v2.3.1; device runs override build `77bad867`), `mapd_configd`, `MapdOut`, full param table |
@@ -33,7 +34,7 @@ the deeper per-feature design/rationale docs.
 | [GLARE.md](GLARE.md) | Layer-C DM glare band-aid (deployed 2026-07-06) |
 | [ONROAD-CHARGING.md](ONROAD-CHARGING.md) | EV parked-while-charging reads as onroad — `gearShifter=park` is the real parked signal |
 | [PARKNOREC2PNW.md](PARKNOREC2PNW.md) | No route segments while the shifter is in Park: manager stops loggerd after 30 s of `GearPark`; GearPark writer hardened; kill switch `RecordWhileParked` |
-| [PARKGATE2PNW.md](PARKGATE2PNW.md) | The `ces_events` half of the same problem: the ~1 Hz breadcrumb stops while the shifter is in Park (93.7 % of the archived corpus was a parked truck). Gear-gated, fails open, 60 s marked heartbeat so a hold is never a silent gap; adds `gear`/`park` to every record. Corrects the 2 GB archive's retention from ~12.9 driving hours to ~140–150 |
+| [PARKGATE2PNW.md](PARKGATE2PNW.md) | ✅ **SHIPPED** `1dd8a1a313` (2026-09-19) — the `ces_events` half of the same problem: the ~1 Hz breadcrumb stops while the shifter is in Park (93.7 % of the archived corpus was a parked truck). Gear-gated, fails open, 60 s marked heartbeat so a hold is never a silent gap; adds `gear`/`park` to every record. Corrects the 2 GB archive's retention from ~12.9 driving hours to ~140–150 |
 | [REST_AREAS.md](REST_AREAS.md) | Feasibility: mapd can't surface rest-area POIs → option (b) built |
 | [REST_AREA_DATA.md](REST_AREA_DATA.md) | The corridor rest-area JSON dataset + schema + generators |
 | [DEFER_HD_UPLOAD.md](DEFER_HD_UPLOAD.md) | "Defer HD Video Upload" toggle |
@@ -41,6 +42,7 @@ the deeper per-feature design/rationale docs.
 | [CHANGELOG-2026-07-01.md](CHANGELOG-2026-07-01.md) | PNW changelog 06-29→07-06 |
 | [CHANGELOG-2026-07-12.md](CHANGELOG-2026-07-12.md) | PNW changelog 07-11→07-12 (the "Ford weekend") |
 | [CHANGELOG-2026-07-18.md](CHANGELOG-2026-07-18.md) | PNW changelog 07-12(eve)→07-18 (red-light-lurch arc, commIssue cascade, speedadjust, tightfollow arc + revert) |
+| [CHANGELOG-2026-09-19.md](CHANGELOG-2026-09-19.md) | PNW changelog 09-19 — four ships: **`parkgate2pnw`** (`ces_events` was 93.7 % a parked truck; the 2 GB archive held 12.9 driving hours, now ~140–150), **`curvedbshadow2pnw`** (Phase 2's on-car half, SHADOW ONLY, read boundary enforced by a test), **`viskvis2pnw`** (the model's curvature on every tick, not only the ones ICBM acted on), and **`VISIONBACK2PNW`** — the bounded vision give-back MEASURED AND DEAD (N=10 → 5.80 m/s²; the trust gate is a pass-through, vision says "no curve" on 87 % of ticks). Plus: `icbmslow2pnw` actually shipped 09-18, §6.2's DOWN rule was structurally unreachable (0 → 127 observations), and the five checks this week that could not fail |
 | [CHANGELOG-2026-09-18.md](CHANGELOG-2026-09-18.md) | PNW changelog 09-18 — **curvedb Phase 2's §7 replay was built and RUN, and returned NO RESULT**: 170 ICBM episodes, acted on zero under leave-one-out; the blocker is SITE RECURRENCE (185 of 193 sites driven once) — but `drives/` is analysis windows, median 62 min, so that is a biased lower bound and the question has never really been asked. Also: the ICBM over-slow is a dated REGRESSION (began 2026-08-11 when `icbmcurve2pnw` changed the tier scale and nobody re-calibrated the penalty hump), a retraction of the `map_scale: 1.0` advice (it deletes 18 of 88 slowdowns), and the map-rating floor built to fix it |
 | [CHANGELOG-2026-09-17.md](CHANGELOG-2026-09-17.md) | PNW changelog 09-17 — **curvedb Phase 1 shipped** (`4b901737b2`, 9 commits): curvature telemetry + `/data/pnw/ces_archive` retention + S3 upload of the corpus. Four Fable rounds, three of which caught a check that passed for the wrong reason. Could NOT be verified on the car (Starlink CGNAT — no inbound SSH). Also: the abort rule is preempted by `behindrun2pnw`, and the stale-branch audit (`lcroc2pnw` was already shipped) |
 | [CHANGELOG-2026-09-16.md](CHANGELOG-2026-09-16.md) | PNW changelog 09-16 — mapd car-GPS relay shipped; the stale-branch survey ("nothing was ready", three would have reverted shipped work); corrections to the 0.11.2 claim, the "31 satellites" sentinel and the swaglog-grep trap |
