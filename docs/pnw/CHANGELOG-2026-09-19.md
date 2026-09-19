@@ -3,7 +3,8 @@
 Continues [`CHANGELOG-2026-09-18.md`](CHANGELOG-2026-09-18.md). Four branches shipped, one
 measurement returned a verdict of *dead*, and one owner decision closed a proposal.
 
-**Channel tip:** `origin/3devpnw` = `550f8ede1b`, **verified GREEN by the new checker: 3,320 passed, 0 failed**, all 12 paths clearing their collection floors.
+**Channel tip:** `origin/3devpnw` = `a1f22cb679`, **verified GREEN by the new checker (3,320 passed,
+0 failed, all 12 paths clearing their collection floors) and DEPLOYED TO THE TRUCK at 13:17 PT.**
 
 ⚠️ **NOT VERIFIED ON THE CAR — and it is the documented Starlink case, not a mystery network.** The
 device is alive (it phoned the uploader at 11:22:59 PT) from `local_ip 192.168.1.79` under public
@@ -17,6 +18,52 @@ public IP as a different network, and do not read "no answer on port 22" as "the
 it uploaded 50 seconds before I looked. Everything below is **pushed and unconfirmed**; the updater
 fetches outbound on its own ~1.5 h cycle and installs at the next reboot, and S3 is the only install
 evidence available until the truck joins a routable network.
+
+---
+
+## ✅ DEPLOYED AND VERIFIED ON THE TRUCK — 13:17 PT, `a1f22cb679`
+
+The morning's entries said "pushed, not verified", because the truck was on **CGNAT Starlink** with no
+inbound route. By 13:14 PT it had moved to **home WiFi `192.168.13.154`**, so it was deployed properly
+instead of waiting out the auto-update cycle.
+
+**Sequence.** SIGHUP `updated` → `finalizing update...` → `UpdaterNewDescription` flips to `a1f22cb`
+→ **`selfdriveState.enabled` read as a SEPARATE call** (`False`; gear `park`, `vEgo 0.0`, both streams
+alive) → reboot 13:16:21 → back up 13:17:25 running `a1f22cb`. The separate-call discipline is not
+ceremony: collapsing a precondition into the action it gates is how a moving, engaged car once got
+rebooted.
+
+**Health.** 37 processes stable across 8 s (no crash-loop) · **`UnknownKeyName` count = 0** across
+three swaglogs *and* the tmux pane — counted, never `grep | head`, which prints OK on zero matches ·
+`MapdUseCarGps=1` survived the reboot, which matters because that one only ever existed as a
+device-local param · `RecordWhileParked=0` · `CESMode=2`.
+
+### All three of the day's features verified LIVE — and Park was the ideal moment
+
+**`parkgate2pnw`.** The transition is visible in the telemetry rather than inferred:
+
+```
+20:17:45 -> 20:17:57   gap 1.0 s each          <- 1 Hz breadcrumb (startup grace)
+20:17:58               {"parkGate":"hold"}     <- gate arms
+20:18:58   gap 60.3 s  {"parkGate":"hold"}     <- the 60 s heartbeat
+```
+
+**1 Hz → 1/min, with the hold explicitly marked**, so a quiet logger can never be mistaken for a dead
+one — which was the whole design requirement.
+
+**`viskvis2pnw`.** `visKMax=0.000134`, `visKRch=5.0` on a tick **ICBM did not act on**. That is
+precisely the case `icbmKVis` could never record, and the reason the branch exists.
+
+**`curvedbshadow2pnw`.** `cdbOn="on"`, `cdbRows=0` — running, with an empty DB, correct on first boot.
+
+### Still open, and it needs the driver
+**Stop at a red light IN DRIVE and confirm the ~1 Hz breadcrumb keeps running.** A stopped car in gear
+is `vEgo` 0 and must keep logging at full rate; if it goes quiet, the gate read speed somewhere it
+should have read gear. Park alone cannot prove that half.
+
+Also: the shadow's corpus starts empty, so **the site-recurrence number that decides whether curvedb
+Phase 2 is viable at all is weeks of driving away.** `cdbRow`'s true-rate among `cdbSite` records is
+the number to watch.
 
 ---
 
@@ -104,7 +151,7 @@ that drives a real curve and requires the reading to move, plus the mutant that 
 > gate"). The message is otherwise intact. **Not amended** — it is the channel tip the device tracks,
 > and force-pushing a channel branch to restore two words is not a trade worth making.
 
-## ⛔ MEASURED AND DEAD — the bounded vision give-back (`VISIONBACK2PNW.md`, pushed `915a030207`)
+## ⛔ MEASURED AND DEAD — the bounded vision give-back (branch `visionback2pnw`, `f9accf96e5`..`915a030207`)
 
 The owner asked: *"would vision make a good contribution if it was 100 m away regardless of the 13 %
 inaccuracy?"* and then *"please measure it, I think Vision can make a valuable contribution here."*
@@ -274,7 +321,7 @@ slowdowns lost.
 now distinguishable from an unknowable one. Recipe recorded in `DEVICE-STATE.md`; evidence kept in
 `drives/2026-09-19/parkgate-baseline/`.
 
-## 🚨 NEW REQUIRED STEP — test the CHANNEL TIP after every push (CLAUDE.md **Rule 9**)
+## 🚨 NEW REQUIRED STEP — test the CHANNEL TIP after every push (CLAUDE.md **Rule 9**; branch `channeltest2pnw`, `baa2482957` / `586446b6f3` / `550f8ede1b`)
 
 Owner directive: *"build this and add it to CLAUDE.md as a required step."* Built as
 `scripts/check-channel-tip.sh` + `scripts/_check_params_so.py`.
