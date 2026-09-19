@@ -5,8 +5,8 @@ status: unreviewed     # current | drifted | superseded | unreviewed
 
 # PARKGATE2PNW — `ces_events` stops logging a parked truck
 
-Branch `parkgate2pnw` off `origin/3devpnw` `d0a6b08abc`, commit `0e4f446a7c`.
-**Not pushed, not deployed.**
+Branch `parkgate2pnw` off `origin/3devpnw` `d0a6b08abc` — `0e4f446a7c` (the gate) + `cbed02949d`
+(Fable round 1) + the round-2 commit. **Not pushed, not deployed. Fable verdict: SHIP.**
 
 ## The problem, measured
 
@@ -148,7 +148,7 @@ the first successful read the gate is **off**, so an unreadable switch can never
 | carState absent / `_steer_log_step` called with a stub | `gear` is `None`, never Park | — |
 | `RecordWhileParked` unreadable (`UnknownKeyName`, params mismatch) | gate holds its last value; on a first-ever failure that is **off** | `cloudlog.exception`, throttled |
 | driver wants the parked breadcrumb back | `RecordWhileParked=1` over SSH, effective within ~1 s | `ces_park_gate hold=False reason=gateOff` |
-| the gate itself raises | **not swallowed** — it sits outside `_steer_log_step`'s `except Exception: pass`, so selfdrived's own guard around `experimental_request()` catches and logs it. A gate that quietly stopped gating is the failure this whole file is about. |
+| the gate itself raises | caught in `CESController._park_decision()`, which returns "log the record" — the breadcrumb keeps running at full rate. **Never swallowed silently**: `cloudlog.exception` once per 60 s with a failure count, because "logging everything" is also what healthy pre-feature behaviour looks like, so a gate that quietly stopped gating would otherwise be invisible. It never reaches selfdrived's guard around `experimental_request()`, which would force CES to **Chill** — a telemetry decision must not be able to change what the car does. |
 
 ### Known, bounded side effect
 
@@ -177,16 +177,16 @@ not a per-second sample like every other row.
 
 ## Tests
 
-`selfdrive/controls/lib/ces_pnw/tests/test_parkgate2pnw.py` — **77 tests**, organised by what they
+`selfdrive/controls/lib/ces_pnw/tests/test_parkgate2pnw.py` — **79 tests**, organised by what they
 cost when they break: a stop is not a park · hysteresis / heartbeat / release · fail open · the kill
 switch · it says so · the wiring · the measurement · **the production tick path** · the gate can
-never reach control. Every gear value comes from a real `car.CarState` message, so the enum values
+never reach control · the gate runs once per record, not once per 100 Hz tick. Every gear value comes from a real `car.CarState` message, so the enum values
 under test are genuine `_DynamicEnum`s.
 
-**1,036 tests green** in `selfdrive/controls/lib/ces_pnw/tests` (959 before). Six existing test files
+**1,038 tests green** in `selfdrive/controls/lib/ces_pnw/tests` (959 before). Six existing test files
 gained the new collaborator in their stubs; no assertion was weakened or removed.
 
-**59 mutants, 59 killed, 0 survivors** (`_scratch/parkgate/mutate.py`). Every mutant is
+**63 mutants, 63 killed, 0 survivors** (`_scratch/parkgate/mutate.py`). Every mutant is
 anchor-checked for a unique match and `compile()`-checked before it counts, and **both** the feature
 suite and the wider `ces_pnw` suite are baselined green before any mutant runs. Every one of the 59
 is killed by `test_parkgate2pnw.py` alone — no kill depends on the wider suite.
@@ -210,7 +210,8 @@ every branch of the moving interlock, the debounce, the heartbeat cadence and it
 the suppressed counters, the release record, both cloudlog edges, `record_fields`, **both call
 sites**, all four record fields on **both** record families, the gear sampling, the kill-switch read
 and its failure path, the `_park_decision` wrapper's arguments, its fail-open return, its log and
-its throttle, and a frozen clock at each call site.
+its throttle, a frozen clock at each call site, and (round 2) moving the gate outside either
+writer's own 1 Hz throttle so it would run at the full 100 Hz control rate.
 
 ### Replay against real archived logs
 
@@ -245,6 +246,23 @@ Round 1 (2026-09-19) — **HOLD**, on two MAJORs and three MINORs, all applied:
 
 Fable could not construct a case where a driven car is suppressed, and confirmed the six existing
 test-file edits are additive only and that no submodule pin moved.
+
+Round 2 (2026-09-19) — **SHIP**, with one must-fix and one recommendation, both applied:
+
+| # | finding | what changed |
+|---|---|---|
+| 1 | MINOR, must-fix (docs) — the "the gate itself raises" failure-mode row still described round 1's behaviour ("not swallowed… selfdrived's guard catches it"), contradicting `_park_decision` in the same commit | row rewritten: caught, fails open to a full-rate log, `cloudlog.exception` once per 60 s, never reaches selfdrived's guard |
+| 2 | MINOR — **two mutants Fable constructed SURVIVED all 1,036 tests**: moving `_park_decision` *above* either writer's own 1 Hz throttle, so the gate would run at the full 100 Hz control rate and `parkSupp` would count control ticks (~100× inflation) instead of records. Not a defect in the shipped code — both harnesses simply drove the writers at exactly 1 Hz, so nothing pinned it | `TestTheGateRunsOncePerRecordNotOncePerTick`: both real writers driven at **100 Hz for 600 s**, asserting 40 records and `parkSupp == 560`. Mutants T01/T02/T02b/T02d added; all four now killed |
+| 3 | NIT — `test_leadrate2pnw.py`'s AST harness hand-mirrors `_park_decision` | accepted: the real wrapper is covered by `TestTheGateCanNeverReachControl` and by the structural test forbidding either call site from touching `_park_gate.update` directly |
+
+One mutant proposed in round 2 was **dropped as semantically EQUIVALENT** rather than scored: merely
+*duplicating* the `_tick_last` stamp inside the written branch assigns the same value twice and
+changes nothing, so it can never be killed. Replaced by T02d, which actually *moves* the stamp.
+
+Fable also confirmed the two deliberate omissions: `docs/DEVICE-STATE.md`'s param registry stays
+untouched until deploy (it describes what is on the car), and the `system/loggerd/uploader.py:58`
+"~95 days" comment stays out of this branch (Rule 5 — different subsystem; a comment-only follow-up
+needs no review because it cannot change what the car does).
 
 ## On-car verification (after the owner approves a deploy)
 

@@ -339,14 +339,14 @@ def _make_controller(monkeypatch, **over):
   return c
 
 
-def _run_steer_log_step(monkeypatch, secs=1, g="drive", v_ego=20.0, c=None, t0=1000.0):
+def _run_steer_log_step(monkeypatch, secs=1, g="drive", v_ego=20.0, c=None, t0=1000.0, hz=1.0):
   c = c or _make_controller(monkeypatch)
   cs = car.CarState.new_message()
   cs.gearShifter = g
   cs.vEgo = v_ego
   sm = {"radarState": type("RS", (), {"leadOne": type("L", (), {"status": False})()})()}
-  for i in range(secs):
-    monkeypatch.setattr(m.time, "monotonic", lambda t=t0 + i: t)
+  for i in range(int(secs * hz)):
+    monkeypatch.setattr(m.time, "monotonic", lambda t=t0 + i / hz: t)
     c._gear, c._gear_name, c._v_ego_raw = cs.gearShifter, str(cs.gearShifter), v_ego
     c._steer_log_step(cs, sm)
   return c.captured
@@ -560,11 +560,11 @@ def _publish_controller(monkeypatch):
   return c
 
 
-def _run_publish(monkeypatch, c, secs, g="drive", v_ego=0.0, t0=1000.0):
+def _run_publish(monkeypatch, c, secs, g="drive", v_ego=0.0, t0=1000.0, hz=1.0):
   cs = car.CarState.new_message()
   cs.gearShifter = g
-  for i in range(secs):
-    monkeypatch.setattr(m.time, "monotonic", lambda t=t0 + i: t)
+  for i in range(int(secs * hz)):
+    monkeypatch.setattr(m.time, "monotonic", lambda t=t0 + i / hz: t)
     c._gear, c._gear_name, c._v_ego_raw = cs.gearShifter, str(cs.gearShifter), v_ego
     c._publish(None, False)
   return c.captured
@@ -668,3 +668,31 @@ class TestTheGateCanNeverReachControl:
       src = inspect.getsource(meth)
       assert "_park_decision(" in src
       assert "_park_gate.update(" not in src
+
+
+# =====================================================================================================
+# 9. the gate lives INSIDE each writer's 1 Hz throttle, not above it
+#
+# Fable round 2 (finding 2): both harnesses above drive the writers at exactly 1 Hz, so nothing
+# pinned that `_park_decision` is evaluated once per RECORD rather than once per 100 Hz control tick.
+# Two mutants that moved it outside the throttle survived all 1,036 tests. They are not defects in the
+# shipped code -- the gate is correctly inside both throttles -- but a refactor making either mistake
+# would inflate parkSupp ~100x and silently break the jsonl accounting invariant in section 7.
+# These two run the REAL writers at the REAL 100 Hz selfdrived rate.
+# =====================================================================================================
+class TestTheGateRunsOncePerRecordNotOncePerTick:
+  def test_the_tick_writer_counts_records_not_control_ticks(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    caps = _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0, hz=100.0)
+    assert len(caps) == 40                                  # 30 debounce + 10 heartbeats, as at 1 Hz
+    _run_publish(monkeypatch, c, 1, g="drive", v_ego=0.0, t0=1600.0, hz=100.0)
+    rel = c.captured[-1]
+    assert rel["parkGate"] == "release"
+    assert rel["parkSupp"] == 560, "parkSupp must count SUPPRESSED RECORDS, not 100 Hz control ticks"
+
+  def test_the_steer_writer_counts_records_not_control_ticks(self, monkeypatch):
+    c = _make_controller(monkeypatch)
+    caps = _run_steer_log_step(monkeypatch, secs=600, g="park", v_ego=0.0, c=c, hz=100.0)
+    assert len(caps) == 40
+    _run_steer_log_step(monkeypatch, secs=1, g="drive", v_ego=0.0, c=c, t0=1600.0, hz=100.0)
+    assert caps[-1]["parkGate"] == "release" and caps[-1]["parkSupp"] == 560
