@@ -88,7 +88,13 @@ sum is 8,719. The deduped 3,087 matches `_scratch/icbmslow` exactly, which is th
 cross-checks against that independently-written harness.)*
 
 > ### ⚠️ The continuous archive contributed ZERO ICBM decisions, and the reason is Rule 3
-> The six rotated generations are **96 % parked ticks**: 41,239 of 42,918 records sit below 5 m/s.
+> The six rotated generations are **96 % parked ticks**: **41,130 of 42,918** records sit below
+> 5 m/s. A further **109** (85 `steerEvent` + 24 `accDrop`) are structured event rows carrying no
+> top-level `vEgo` at all — an earlier draft of this paragraph said 41,239 because
+> `float(r.get("vEgo") or 0.0)` folded those into "parked". That is the silent-default Rule 2 bans,
+> it was caught by adversarial verification of this document, and `scan.py` now counts them under
+> their own name (`no_vego`, 2,106 corpus-wide) and excludes them from BOTH tallies. `ticks.jsonl`
+> is byte-identical before and after the fix, so no downstream number moves.
 > Three whole generations (09-16 02:21–08:21 PT) are 100 % stationary — the truck charging with the
 > ignition on. The 1,848 moving ticks are three short city legs, all at or below 22 m/s (50 mph),
 > and **not one of them has a non-null `icbmT`**.
@@ -191,8 +197,14 @@ That is confirmed by the baseline reproducing the independently-published table 
 
 | | this harness (N = 0, 88 episodes) | ICBMSLOW2PNW.md |
 |---|---|---|
-| a_lat at ICBM's commanded target | median **1.65**, p90 **2.34** | median **1.65**, p90 **2.32** |
-| a_lat the truck actually pulled | median **1.53** | median **1.50** |
+| a_lat at ICBM's commanded target (`a3`, ALL, `slk_only`, N = 0) | median **1.65**, p90 **2.32** | median **1.65**, p90 **2.32** |
+| a_lat the truck actually pulled (`a7_diag.py`, ALL) | median **1.53** | median **1.50** |
+
+> ⚠️ **Do not read `a3`'s own N = 0 row as "what the truck pulled".** That row is
+> `max(v_apex_measured, T)` — the deliberate upper bound of extension 2 below — and reads **1.82**
+> (`kpeak_or_slk`) / **1.81** (`slk_only`). The *pure* measured-apex figure is computed separately by
+> `a7_diag.py`: **1.53** (ALL) / **1.62** (cruise ON). They are different quantities on purpose, and
+> an adversarial re-check of this document conflated them, so the distinction is pinned here.
 
 ### 3.3 Two extensions, both stated
 

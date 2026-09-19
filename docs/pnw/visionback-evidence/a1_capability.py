@@ -65,6 +65,13 @@ def main():
   line += "".join(f"{tot[k]:>10}" for k in SHOW)
   print(line)
 
+  # Rule 2: records with NO top-level vEgo are structured event rows (`steerEvent`, `accDrop`),
+  # not records of a stationary truck. Reported under their own name so a "parked ticks" count
+  # built from `records - moving` cannot silently absorb them.
+  nov = sum(r["no_vego"] for r in inv)
+  print(f"\nFord records with NO top-level vEgo (structured event rows, excluded from BOTH the "
+        f"moving and the stationary tallies): {nov}")
+
   print("\nCAR MIX per corpus")
   for name in sorted(agg, key=lambda n: agg[n]["t_min"] or 0):
     print(f"  {name:<50} {dict(agg[name]['cars'])}")

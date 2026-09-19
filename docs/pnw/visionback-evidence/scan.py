@@ -108,7 +108,7 @@ def main():
     row = {"corpus": corpus, "file": rel, "bytes": os.path.getsize(path), "lines": 0,
            "records": 0, "parse_err": 0, "t_min": None, "t_max": None,
            "present": {k: 0 for k in KEYS}, "cars": {}, "icbm_ticks": 0,
-           "ford_moving": 0, "error": None}
+           "ford_moving": 0, "no_vego": 0, "error": None}
     try:
       with opener(path) as fh:
         for line in fh:
@@ -137,10 +137,20 @@ def main():
           if r.get("icbmT") is not None:
             row["icbm_ticks"] += 1
           if isinstance(t, (int, float)) and c == "FORD":
+            # Rule 2: a record with NO vEgo field is not a record of a stationary truck. The
+            # structured event rows (`steerEvent`, `accDrop`) carry their speed in nested traces and
+            # have no top-level vEgo at all; defaulting those to 0.0 and folding them into a
+            # "parked ticks" count inflates it (measured: by 109 across /tmp/arch). They are counted
+            # under their own name and excluded from BOTH the moving and the stationary tallies.
+            raw_v = r.get("vEgo")
+            if raw_v is None:
+              row["no_vego"] += 1
+              continue
             try:
-              v = float(r.get("vEgo") or 0.0)
+              v = float(raw_v)
             except (TypeError, ValueError):
-              v = 0.0
+              row["no_vego"] += 1
+              continue
             if v > 4.0:
               row["ford_moving"] += 1
               slim = {k: r.get(k) for k in KEYS if k != "t"}
