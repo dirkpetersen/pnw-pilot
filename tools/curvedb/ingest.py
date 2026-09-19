@@ -884,7 +884,12 @@ def observations_for_drive(drive: Drive, passages: list[Passage], params: CurveD
         n_ticks=1, dq_state=p.dq_state_down, dq_src=p.dq_src,
       ))
       stats["obs_down"] += 1
-      break          # one DOWN per pass: the driver's "too fast" is one judgement, not N ticks
+      # One DOWN per PASSAGE: the driver's "too fast" is one judgement, not N ticks. It is NOT one
+      # per override -- extents overlap, so a single override tick lands inside several
+      # neighbouring sites and becomes one observation at each (measured: 127 observations from 75
+      # distinct ticks; 33 ticks feed 2-4 sites). That is the same multiplicity UP has, and it is
+      # why every count of DOWNs has to say which unit it is in.
+      break
   return out
 
 
@@ -1030,6 +1035,28 @@ def find_episodes(drive: Drive, passages: list[Passage], params: CurveDBParams,
 # driver
 # ---------------------------------------------------------------------------------------------
 
+def drive_odo_gps_ok(drive: Drive) -> bool:
+  """Does this drive's odometer agree with its GPS track?
+
+  A drive that fails this is DROPPED, not merely warned about: vEgo in the wrong unit, or a fix not
+  moving with the truck, shifts every extent, the approach-bearing reference and the lookahead
+  window by an unknown factor (the 2026-08-26 Tesla drive read 0.61, i.e. ~1.6x off), and
+  downstream those rows are indistinguishable from good ones.
+
+  A function rather than an inline test because `calib.py` measures extents and approach bearings
+  on the same drives and must drop the same ones -- the bearing spread is odometer-indexed, so a
+  bad-odometer drive is exactly the input that corrupts it (Fable 2026-09-19: calib skipped this
+  gate, and on this corpus got away with it only because the dropped drive happened to contribute
+  no passages).
+
+  **A drive with NO ratio at all is admitted, not dropped.** `gps_vs_odo` is None when no tick pair
+  moved far enough to compare (a slow or high-rate corpus), which means the cross-check was not
+  RUN -- it did not fail. Dropping those would be treating a missing measurement as a negative
+  result, which is the trap at the top of this file."""
+  return (drive.gps_vs_odo is None
+          or ODO_GPS_RATIO_BAND[0] <= drive.gps_vs_odo <= ODO_GPS_RATIO_BAND[1])
+
+
 def _run_pipeline(drives, params: CurveDBParams, dq_mask: int, log, reports):
   """Drives -> observations + episodes. The one place the per-drive gates live, so the
   file-driven and record-driven entry points cannot diverge."""
@@ -1042,12 +1069,7 @@ def _run_pipeline(drives, params: CurveDBParams, dq_mask: int, log, reports):
   episodes: list[dict] = []
   for d in drives:
     stats["drives"] += 1
-    if d.gps_vs_odo is not None and not ODO_GPS_RATIO_BAND[0] <= d.gps_vs_odo <= ODO_GPS_RATIO_BAND[1]:
-      # DROPPED, not merely reported (Fable 2026-09-17). vEgo in the wrong unit, or a fix not
-      # moving with the truck, shifts every extent, the approach-bearing reference and the
-      # lookahead window by an unknown factor -- the 2026-08-26 Tesla drive read 0.61, i.e. ~1.6x
-      # off. Being loud satisfies Rule 2; letting the rows in anyway does not, because downstream
-      # they are indistinguishable from good ones.
+    if not drive_odo_gps_ok(d):
       stats["drive_dropped_odometer_disagrees_with_gps"] += 1
       log(f"  !! {d.date} {d.car}: GPS/odometer ratio {d.gps_vs_odo:.2f} -- DROPPING this drive; " +
           "its extents would be measured against a distance the two sources disagree about")

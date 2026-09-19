@@ -14,7 +14,7 @@ on §3.9 and this branch does not change that.
 | `replay.py` | **§7's go/no-go gate.** Leave-one-date-out, a stated N, and three adversarial self-checks. |
 | `recurrence.py` | Does the truck actually re-drive the phantom roads? Measured from **raw GPS**, with the observation pipeline deliberately out of the loop — because measuring it *through* the pipeline gave the wrong answer. |
 | `calib.py` | The two numbers this README quotes about its own PROVISIONAL constants: what a 1 Hz-built row costs against the 100 Hz peak, and how far the approach bearing moves across ICBM's decision range. **Committed because they used to come from an uncommitted scratch script** (§10). |
-| `tests/` | 345 tests. **96/96 mutants killed**, 0 survived, 0 unbuilt (`_scratch/curvedb/mutate.py`). |
+| `tests/` | 352 tests. **102/102 mutants killed**, 0 survived, 0 unbuilt (`_scratch/curvedb/mutate.py`). |
 
 ```bash
 PYTHONPATH=. python3 tools/curvedb/ingest.py drives/**/ces_events*.jsonl \
@@ -75,7 +75,7 @@ before the replay starts, for a reason (no candidate, or the drive ended) that i
 |---|---|---|
 | **self-match** (no LODO — circular by construction) | **40** rows vs 6 under LODO; **34 of the 40 rows contain a pass from the episode's own drive** | This shows `build()` and `match()` are **SELF-CONSISTENT** — nothing more. It asks whether a row anchored at x contains x, because the episode's site/bearing and the observation's come from the *same* `Passage` object; the 34 is that tautology, measured. It would *not* detect an ingest-vs-lookup convention mismatch, so it is **not** evidence that "the keying works". What it does rule out: a matcher so broken that LODO's 3.5 % is an artefact of the key rather than of the corpus. |
 | **`k-shuffle`** (right places, wrong curvatures) | identical funnel (6 matched, 0 actions) | **Uninformative, and now says so in those words** rather than firing an alarm. With zero actions there is no false-cancel count for scrambling to raise; this control can only speak once the DB acts. |
-| **`site-shuffle`** (each episode looked up at **another episode's site**) | **29 matched vs 6** — the corrupted lookup matches *five times more often* | An episode's **own** site is the hardest place for it to find a row. Not a broken matcher and not row density: leave-one-date-out removes the episode's own date, and the passes at its own site are overwhelmingly *from* that date, while another episode's site is built from dates LODO does not touch. **It is §3.1's single-visit-site blocker, measured from a second direction.** |
+| **`site-shuffle`** (each episode looked up at **another episode's site**) | **29 matched vs 6** — the corrupted lookup matches *five times more often*; **23 of the 29 landed on a site whose own episode cannot match there under its own LODO key**, and the excess is 23 | An episode's **own** site is the hardest place for it to find a row. Not a broken matcher and not row density: leave-one-date-out removes the episode's own date, and the passes at its own site are overwhelmingly *from* that date, while another episode's site is built from dates LODO does not touch. **It is §3.1's single-visit-site blocker, measured from a second direction.** That explanation is *measured* (`confound_matches`), not asserted — and `confound ≥ excess` is an identity, so a run where it fails is a plumbing bug and the tool says so in those words. |
 
 > **The site-shuffle was rebuilt again on 2026-09-19, because the previous version could not
 > fail.** It permuted the *observations'* sites within each date. That preserves each date's
@@ -222,8 +222,12 @@ cause, so the episode column sums above 147:
 Since 2026-09-19 §6.2's DOWN is judged on the same roll-up *without* `drv` — see §3.4 — so `drv`
 costs the UP half only.) Two consequences the design does not discuss:
 
-1. A pass is only admissible where openpilot was steering. On the **Tesla**, and on any drive with
-   lateral disengaged, `strPrs` is true continuously — so those roads can never be learned at all.
+1. A pass is only admissible where openpilot was steering, and an extent is disqualified if `drv`
+   fired **anywhere** in it — which is a far stronger rule than the per-tick rate suggests.
+   Measured over ticks carrying the field above 5 m/s, `strPrs` is true on **7.7 %** of Tesla ticks
+   and 16.5 % of Lightning ticks. (This section used to say "on the Tesla `strPrs` is true
+   continuously". It is not; the 7.7 % is the measurement. What is true is that 136 of the 147
+   disqualified episode passes carry `drv`.)
 2. An ICBM slowdown *provokes* the driver to steer. The rule therefore systematically excludes the
    population it exists to serve.
 
@@ -239,20 +243,25 @@ fix; the `drv` question is the one worth asking.
 ### 3.3 §6.3's "direction by approach bearing" is under-specified, and the gap is 22 %
 
 §6.3 replaces v1's 45° buckets with "the approach bearing at lookup time" but does not say **at
-what distance**. `calib.py`, over the **8,244 measured passages** where all three reference points
-exist, finds the truck's own bearing at 500 m, 300 m and 150 m before a site spreads by
-**p50 13.9°, p90 54.0°, max 179.7°** — and **18.8 % of passages exceed the 35° matching
-tolerance.** ICBM decides anywhere from 150 m to its 500 m far-source horizon, so on close to one
-site in five, ingest and the car can disagree about which direction "this way" is and the row is
-simply never found. `approach_bearing_ref_m` is a real parameter with a real cost.
+what distance**. ICBM decides anywhere from 150 m to its 500 m far-source horizon; ingest samples
+at `approach_bearing_ref_m` = 300 m. `calib.py`, over the **8,244 measured passages** where all
+three reference points exist:
+
+| | p50 | p90 | max | over the 35° tolerance |
+|---|---|---|---|---|
+| **vs the 300 m reference ingest samples at** — the disagreement that loses a row | 10.6° | 43.4° | 179.6° | **13.6 %** |
+| pairwise max over 500/300/150 — an **upper bound**, not the same number | 13.9° | 54.0° | 179.7° | 18.8 % |
+
+**On one site in seven, ingest and the car can disagree about which direction "this way" is and
+the row is simply never found.** `approach_bearing_ref_m` is a real parameter with a real cost.
 
 > **The "22.2 % over 2,074 site passages" this section used to quote is NOT reproducible** (§10
 > finding 4): it came from an uncommitted scratch script whose denominator of 2,074 matches nothing
 > in the pipeline — there are 8,279 passages and 27,871 candidate sites. `calib.py` measures it
-> through `measure_passage` itself, so a passage here is a passage there; it gets 18.8 % over 8,244,
-> or 12.1 % if every candidate site is counted instead. **The conclusion is unchanged and the
-> number is not:** anything quoting 22.2 % (including `docs/CURVEDB2PNW.md` §12 and the 09-18
-> changelog, which this branch does not touch) should be corrected to 18.8 %.
+> through `measure_passage` itself, and applies the same odometer/GPS drive gate, so a passage here
+> is a passage there. **The conclusion is unchanged and the number is not:** anything quoting
+> 22.2 % (including `docs/CURVEDB2PNW.md` §12 and the 09-18 changelog, which this branch does not
+> touch) should be corrected to **13.6 %**.
 
 ### 3.4 §6.2's DOWN rule was UNREACHABLE — this section used to say the opposite
 
@@ -281,10 +290,22 @@ curvature measurement), while DOWN is judged on the same roll-up with `drv` — 
 | `down_dropped_dq_not_drv` (new counter) | — | 1,342 (`sat` 976, `blnk` 432, `lc` 113) |
 | `down_dropped_no_kcmd` | 0 | 0 |
 
-127 DOWN observations against §6.2's own estimate of ~113 qualifying override ticks in a comparable
-corpus — the right order of magnitude, which is the sanity check that the fix did not simply
-un-gate everything. 96 are the Lightning, 31 the Tesla. **They change the funnel (4,023 rows, 6
-matched) and they do not change the result: still zero actions** (§1).
+**What the 127 are, stated rather than rounded to a reassuring comparison.** They come from **75
+distinct override ticks**: extents overlap, so one override lands inside several neighbouring
+sites and becomes one observation at each (33 ticks feed 2–4 sites). **88 of the 127 are a single
+Lightning drive on 2026-09-13**; 96 are the Lightning and 31 the Tesla. Median `k` is 0.0146
+(R ≈ 69 m) and **46 of 127 are tighter than R = 50 m** — city corners, not corridor bends. The two
+`k_down = 0.0807, n=2, dates=2` rows in the row table are *one* Tesla tick at R ≈ 12 m attributed
+to two sites 60 m apart.
+
+(§6.2's own "~113 of 2,986 overrides" is **not** a like-for-like check on this: it counted
+Lightning ticks above 27 mph, these are site-attributed observations from both cars above 5 m/s.
+The numbers being close is a coincidence, not corroboration.)
+
+**They change the funnel (4,023 rows, 6 matched) and they do not change the result: still zero
+actions** (§1). Nothing improper becomes a row — `n_passes` counts distinct drives, so one drive's
+UP and DOWN cannot together satisfy D6, and a DOWN can only ever raise `k_eff`, which only ever
+lowers the derived speed.
 
 ### 3.5 Episode→site attribution is still short of where ICBM decides
 
@@ -377,7 +398,7 @@ constants with the same comment discipline.
 | name | value | why this value, and what is known about it |
 |---|---|---|
 | `site_radius_m` | **40 m** | Stands in for the OSM way/node ID §6.3 says mapd does not publish. **Measured cost:** at 300 m the only actions produced are garbage (§1). Nothing measured supports 40 specifically. |
-| `heading_tol_deg` | **35°** | §6.3 killed 45° *buckets* (D4) but named no replacement. **Measured cost (`calib.py`):** 18.8 % of measured passages have an approach-bearing spread wider than this across 500→150 m. |
+| `heading_tol_deg` | **35°** | §6.3 killed 45° *buckets* (D4) but named no replacement. **Measured cost (`calib.py`):** on 13.6 % of measured passages the bearing at 500 or 150 m differs from the 300 m reference by more than this (18.8 % by the pairwise-max upper bound). |
 | `approach_bearing_ref_m` | **300 m** | The midpoint of ICBM's 150–500 m decision range, and nothing more. §6.3 does not specify it. **§3.3 says this is not a free parameter.** |
 | `PHANTOM_A_LAT_MS2` | **1.5 m/s²** | The design defines "real" and not "phantom". Everything between this and 2.5 is reported as grey. |
 | `PASSAGE_MAX_M` | 80 m | How close the truck must have come for a pass to count. §6.3 notes mapd's point sits 56–125 m from the bend. |
@@ -391,7 +412,7 @@ constants with the same comment discipline.
 | `PASSAGE_SCAN_M` | 1500 m | Bounds the passage search; 3× the far horizon. |
 | `APPROACH_TOL_M` | 60 m | Tolerance on where the approach bearing is sampled. |
 | `BEARING_BASELINE_M` | 50 m | Baseline for a track-derived bearing. |
-| `K_MIN_USABLE` | 1e-4 1/m | R > 10 km. Rejects a degenerate row — **never** used to declare a road straight. **Open (Fable):** it also drops the 473 *straightest* passes, which §10 of the design says are the prime phantom refuters. Clamping instead (`k = max(k, K_MIN_USABLE)`, tagged) is the safe direction. A design call. |
+| `K_MIN_USABLE` | 1e-4 1/m | R > 10 km. Rejects a degenerate row — **never** used to declare a road straight. **Open (Fable):** it also drops the 473 *straightest* passes, which §10 of `CURVEDB2PNW.md` says are the prime phantom refuters. Clamping instead (`k = max(k, K_MIN_USABLE)`, tagged) is the safe direction. A design call. |
 | `ODO_GPS_RATIO_BAND` | 0.8–1.25 | Outside this band the drive is **dropped**. |
 | `ACT_EPS_MS` | 0.1 m/s | Below this a raised target is arithmetic noise, not an action. |
 | `EPISODE_CAND_SCAN_TICKS` | 5 | How many ticks from the decision to look in for ICBM's own candidate. |
@@ -464,9 +485,9 @@ an artifact of an over-wide radius, but not a reassuring one.
    driving pattern does. Answerable today with `ingest.py --dq-flags` and `recurrence.py`, no new
    driving required. (§3.4 has now answered the DOWN half of it: `drv` cannot disqualify the rule
    it defines. The UP half is still open and still the owner's call.)
-2. **Pin `approach_bearing_ref_m` (§3.3).** 19 % of measured passages move further than the
-   matching tolerance across ICBM's own decision range, so ingest and the car can disagree about
-   direction. `calib.py` is the tool.
+2. **Pin `approach_bearing_ref_m` (§3.3).** On 13.6 % of measured passages the bearing elsewhere
+   in ICBM's decision range differs from the 300 m reference by more than the matching tolerance,
+   so ingest and the car can disagree about direction. `calib.py` is the tool.
 3. **Then** accumulate the corridor driving §3.9 item 3 asks for, with the pipeline no longer
    discarding four-fifths of the revisits it gets — and re-run this replay before building
    anything.
@@ -480,7 +501,7 @@ Fixed in this branch:
 | # | finding | fix |
 |---|---|---|
 | 1 | the recurrence claim was produced by an uncommitted scratch script (D12 again) | `recurrence.py` is committed and tested, and reports the ≥2-other-dates split the gate actually needs |
-| 1 | "15 by `drv` alone" overstated the author's own table | now "19 `drv`-involved"; the per-cause table is printed by the tool |
+| 1 | "15 by `drv` alone" overstated the author's own table | now "19 `drv`-involved" (17 after §10's finding 8 keyed `has_row` the same way the matcher does — both numbers are correct, for the before and after corpora); the per-cause table is printed by the tool |
 | 2 | README site-shuffle figures matched no run on disk | re-run and re-quoted from `replay_main.log` |
 | 3 | the ramp gate compared the raw object while the unknown gate compared `str()` — fails **open** on a capnp enum | normalised once; three tests including a fake enum |
 | 4 | leave-one-**date**-out leaks across PT midnight within one drive | key is now `(date, drive_id)`, `_assert_lodo` checks both |
@@ -508,8 +529,8 @@ Fixed in this branch:
   works"; it shows only that `build()` and `match()` are self-consistent. The tool now measures and
   prints the tautology itself — **34 of the 40 self-matched rows contain a pass from the episode's
   own drive** — and says in those words what that can and cannot support.
-* **20 — `K_MIN_USABLE` drops the 473 straightest passes**, which §10 of the design says matter
-  most. Clamping instead of dropping is the safe direction and is a design call. **Still open**
+* **20 — `K_MIN_USABLE` drops the 473 straightest passes**, which §10 of `CURVEDB2PNW.md` says
+  matter most. Clamping instead of dropping is the safe direction and is a design call. **Still open**
   (the 2026-09-19 review verified independently that removing the floor changes the replay verdict
   not at all).
 * **18 — LODO includes future dates.** Standard for cross-validation, optimistic for the funnel.
@@ -537,11 +558,21 @@ underneath it did not survive as well.
 | 1 | **§6.2's DOWN rule could never fire**, and §3.4 said the opposite in as many words | the disqualifier that *defines* DOWN no longer disqualifies it; §3.4 rewritten. `obs_down` **0 → 127**. The tests relaxed `drv` for themselves and so encoded the bug — they now run under the design's own set |
 | 2 | **the site-shuffle control could not fail** — permuting within a date leaves `matched` invariant under LODO, so its alarm fired by construction and §1's conclusion from it was unsupported | rebuilt to permute the **episodes'** sites; four outcomes, each with its own reading; §1 rewritten. It now reports something real (29 vs 6) |
 | 3 | **N = 170 is inflated by 24 re-fires**, and the two 300 m "false cancels" are one junction | episodes carry `site_group`; every count prints both denominators; the false-cancel listing marks re-fires with `!`; the rule-of-three bound is taken on distinct sites |
-| 4 | **uncommitted evidence (D12 again)** — the 1 Hz under-read and bearing-spread figures had no script behind them | `calib.py`, committed and tested. The per-extent figures reproduce (p50 1.10 / p90 1.51); **the 22.2 % bearing figure does not** and is superseded by 18.8 % (§3.3) |
+| 4 | **uncommitted evidence (D12 again)** — the 1 Hz under-read and bearing-spread figures had no script behind them | `calib.py`, committed and tested. The per-extent figures reproduce (p50 1.10 / p90 1.51); **the 22.2 % bearing figure does not** and is superseded by 13.6 % (§3.3) |
 | 5 | **`fields_alive` reported a legitimately-`False` field as dead** (`False == 0.0` in Python) | `_is_live_reading` decides bools before the zero test |
 | 6 | **dead snapshot code** (Rule 4) | deleted, with the tests that were its only caller |
 | 7 | **"keying works" overstated what self-match shows** | reworded in §1, §9 and the tool; the tautology is now measured and printed |
 | 8 | **`recurrence.has_row` omitted the bearing check** the replay's matcher applies, which is why it said 7 where the replay saw 4 | keyed identically; both now report the same number at every stage (4 before the DOWN fix, 6 after) |
+
+**A second Fable pass on the fixes themselves** found eight more, all applied: `calib.py` skipped
+the odometer/GPS drive gate ingest applies (it now shares ingest's own `drive_odo_gps_ok`
+and reports the dropped drive); §3.4's "127 vs §6.2's ~113" was not
+like-for-like and is now stated as 75 distinct ticks with 88 on one date; §3.2's "on the Tesla
+`strPrs` is true continuously" was wrong and is now the measured 7.7 %; the site-shuffle's
+confound explanation is now **measured** (`confound_matches`) instead of asserted; a "12.1 %"
+figure no committed script produces was deleted; the bearing spread is split into the number that
+matters and its upper bound; `site_group` now travels with the site through the shuffle; and §9's
+19-vs-§3.1's-17 is explained rather than left as two numbers for one table.
 
 **Not material, skipped by instruction:** 18 (LODO includes future dates), 19 (`track` vs `logged`
 geometry), 21 (`_PoseSign`'s home).

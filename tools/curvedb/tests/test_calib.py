@@ -48,18 +48,18 @@ def test_the_sample_is_none_when_no_1hz_column_exists():
 
 def test_the_per_tick_ratio_is_peak_over_sample_not_the_other_way_up():
   # kPeak 0.02 against a 1 Hz sample of 0.005 is a 4x under-read, not 0.25.
-  per_tick, _, _, _, _ = C.measure(ticks_of([raw(0, kPeak=0.02, slKActl=0.005)]), P)
+  per_tick, _, _, _, _, _ = C.measure(ticks_of([raw(0, kPeak=0.02, slKActl=0.005)]), P)
   assert per_tick == [4.0]
 
 
 def test_a_corpus_with_no_kpeak_reports_NOTHING_not_a_perfect_ratio():
   """The `getfattr` shape: a missing column must not read as agreement. `n=0` and a loud line, not
   a p50 of 1.0."""
-  per_tick, per_extent, _, why, _ = C.measure(ticks_of(curve_records()), P)
+  per_tick, per_extent, _, _, why, _ = C.measure(ticks_of(curve_records()), P)
   assert per_tick == [] and per_extent == []
   assert why["tick: no kPeak (corpus predates 2026-09-17)"] == 40
   lines = []
-  C.report(per_tick, per_extent, [], why, P, 40, 1, log=lines.append)
+  C.report(per_tick, per_extent, [], [], why, P, 40, 1, log=lines.append)
   assert any("NO kPeak ANYWHERE IN THIS CORPUS" in ln for ln in lines)
   assert not any("p50=1.0" in ln for ln in lines)
 
@@ -68,14 +68,14 @@ def test_the_per_extent_ratio_is_taken_over_the_extent_ingest_would_build_a_row_
   recs = curve_records()
   for i in range(19, 23):
     recs[i]["kPeak"] = 0.010                # the 100 Hz peak is 2x the 1 Hz sample of 0.005
-  _, per_extent, _, _, _ = C.measure(ticks_of(recs), P)
+  _, per_extent, _, _, _, _ = C.measure(ticks_of(recs), P)
   assert per_extent == [2.0]
 
 
 def test_a_site_ingest_rejects_contributes_no_ratio_and_is_counted():
   recs = [raw(i) for i in range(40)]       # no curvature anywhere -> no passage
   recs[8]["mapDist"] = 300.0
-  _, per_extent, spreads, why, _ = C.measure(ticks_of(recs), P)
+  _, per_extent, spreads, _, why, _ = C.measure(ticks_of(recs), P)
   assert per_extent == [] and spreads == []
   assert why["ingest: pass_no_curvature_anywhere_in_extent"] == 1
 
@@ -84,7 +84,7 @@ def test_a_site_ingest_rejects_contributes_no_ratio_and_is_counted():
 
 def test_a_straight_drive_has_no_bearing_spread():
   # 40 ticks at 25 m/s is 975 m, enough for all three reference points before the site at s=500.
-  _, _, spreads, _, _ = C.measure(ticks_of(curve_records()), P)
+  _, _, spreads, _, _, _ = C.measure(ticks_of(curve_records()), P)
   assert spreads == [0.0]
 
 
@@ -95,7 +95,7 @@ def test_a_turn_inside_the_decision_range_shows_up_as_a_spread():
   for i in range(40):
     # the first 8 ticks (s < 200 m, i.e. >300 m before the site) approach from the west
     recs[i]["bearing"] = 90.0 if i < 8 else 0.0
-  _, _, spreads, _, _ = C.measure(ticks_of(recs), P)
+  _, _, spreads, _, _, _ = C.measure(ticks_of(recs), P)
   assert spreads and spreads[0] == 90.0
 
 
@@ -105,7 +105,7 @@ def test_a_spread_needs_every_reference_point_and_says_so_when_it_cannot_get_the
   for i in range(13, 17):
     recs[i]["slKActl"] = 0.005
   recs[2]["mapDist"] = 300.0
-  _, _, spreads, why, _ = C.measure(ticks_of(recs), P)
+  _, _, spreads, _, why, _ = C.measure(ticks_of(recs), P)
   assert spreads == []
   assert sum(v for k, v in why.items() if k.startswith("bearing: only")) == 1
 
@@ -116,16 +116,41 @@ def test_the_report_states_the_speed_error_the_ratio_implies():
   recs = curve_records()
   for i in range(19, 23):
     recs[i]["kPeak"] = 0.020               # 4x under-read -> sqrt(4) = 2.0x too fast
-  per_tick, per_extent, spreads, why, _ = C.measure(ticks_of(recs), P)
+  per_tick, per_extent, spreads, vs_ref, why, _ = C.measure(ticks_of(recs), P)
   lines = []
-  C.report(per_tick, per_extent, spreads, why, P, 40, 1, log=lines.append)
+  C.report(per_tick, per_extent, spreads, vs_ref, why, P, 40, 1, log=lines.append)
   assert any("2.000x too high at the median" in ln for ln in lines)
 
 
 def test_the_report_prints_the_share_over_the_matching_tolerance_with_its_denominator():
   lines = []
-  C.report([], [], [10.0, 40.0, 50.0, 5.0], Counter(), P, 0, 0, log=lines.append)
+  C.report([], [], [10.0, 40.0, 50.0, 5.0], [10.0, 40.0, 50.0, 5.0], Counter(), P, 0, 0,
+           log=lines.append)
   assert any("2 of 4 (50.0%)" in ln for ln in lines)
+
+
+def test_the_pairwise_spread_is_labelled_an_upper_bound_on_the_one_that_matters():
+  """Ingest samples the approach bearing at ONE distance, so the disagreement that can lose a row
+  is against that distance -- the pairwise max over all three is an upper bound on it, and calling
+  them the same number overstates the cost of leaving `approach_bearing_ref_m` unpinned."""
+  lines = []
+  C.report([], [], [90.0], [10.0], Counter(), P, 0, 0, log=lines.append)
+  text = "\n".join(lines)
+  assert "the disagreement that loses a row" in text
+  assert "UPPER BOUND" in text
+  # the vs-reference figure is under the tolerance, the pairwise max is over it
+  assert "0 of 1 (0.0%)" in text and "1 of 1 (100.0%)" in text
+
+
+def test_a_drive_whose_odometer_disagrees_with_gps_is_dropped_from_the_calibration():
+  """The same gate ingest applies. Both measurements are odometer-indexed, so a drive whose
+  odometer and GPS disagree is exactly the input that corrupts them."""
+  recs = curve_records()
+  for r in recs:
+    r["vEgo"] = 50.0                     # twice the speed the GPS track actually shows
+  _, per_extent, spreads, vs_ref, why, _ = C.measure(ticks_of(recs), P)
+  assert per_extent == [] and spreads == [] and vs_ref == []
+  assert why["ingest: drive_dropped_odometer_disagrees_with_gps"] == 1
 
 
 def test_main_refuses_an_empty_corpus_rather_than_reporting_a_ratio(tmp_path):
@@ -143,3 +168,27 @@ def test_main_runs_end_to_end(tmp_path, capsys):
   path.write_text("\n".join(json.dumps(r) for r in recs))
   assert C.main([str(path)]) == 0
   assert "per extent  n=1" in capsys.readouterr().out
+
+
+def test_the_vs_reference_spread_is_not_the_pairwise_max():
+  """Ingest samples at ONE distance, so the disagreement that can lose a row is measured against
+  that distance. Here the 300 m reference sits between the other two: the pairwise max is 90
+  degrees and the disagreement that matters is 45."""
+  recs = curve_records()
+  for i, r in enumerate(recs):
+    s_i = 25.0 * i
+    # the site is at s = 500 m; 500/300/150 m before it are s = 0 / 200 / 350
+    r["bearing"] = 90.0 if s_i < 100.0 else (45.0 if s_i < 275.0 else 0.0)
+  _, _, spreads, vs_ref, _, _ = C.measure(ticks_of(recs), P)
+  assert spreads == [90.0]
+  assert vs_ref == [45.0]
+
+
+def test_a_reference_distance_the_spread_cannot_be_measured_against_is_counted():
+  """If `approach_bearing_ref_m` is not one of the sampled distances there is no vs-reference
+  number to report, and that must be COUNTED rather than quietly leaving the denominator."""
+  from openpilot.tools.curvedb.store import tighten
+  params = tighten(P, approach_bearing_ref_m=250.0)
+  _, _, spreads, vs_ref, why, _ = C.measure(ticks_of(curve_records()), params)
+  assert spreads and vs_ref == []
+  assert why["bearing: approach_bearing_ref_m is not one of the reference distances"] == 1

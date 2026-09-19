@@ -46,6 +46,7 @@ from openpilot.tools.curvedb.ingest import (
   DQ_ALL,
   PROVISIONAL_PARAMS,
   approach_bearing,
+  drive_odo_gps_ok,
   find_sites,
   load_corpus,
   measure_passage,
@@ -76,6 +77,7 @@ def measure(ticks, params: CurveDBParams):
   per_tick: list[float] = []
   per_extent: list[float] = []
   spreads: list[float] = []
+  vs_ref: list[float] = []
   why: Counter = Counter()
   drives = split_drives(ticks)
 
@@ -95,6 +97,12 @@ def measure(ticks, params: CurveDBParams):
   # counted by `ingest`'s own named reason in `drop`.
   drop: Counter = Counter()
   for d in drives:
+    if not drive_odo_gps_ok(d):
+      # The SAME gate ingest applies. Both measurements below are odometer-indexed -- the extent
+      # boundaries and the 500/300/150 m reference points -- so a drive whose odometer and GPS
+      # disagree is precisely the input that corrupts them.
+      why["ingest: drive_dropped_odometer_disagrees_with_gps"] += 1
+      continue
     for site in find_sites(d, params, drop):
       p = measure_passage(d, site, params, drop, DQ_ALL)
       if p is None:
@@ -108,10 +116,20 @@ def measure(ticks, params: CurveDBParams):
       else:
         why["extent: no kPeak/1 Hz pair inside it"] += 1
 
-      brgs = [b for b, _ in (approach_bearing(d, d.s[p.i_passage], r) for r in BEARING_REFS_M)
-              if b is not None]
+      brgs = {r: b for r, b in ((r, approach_bearing(d, d.s[p.i_passage], r)[0])
+                                for r in BEARING_REFS_M) if b is not None}
       if len(brgs) == len(BEARING_REFS_M):
-        spreads.append(max(bearing_diff_deg(a, b) for a in brgs for b in brgs))
+        vals = list(brgs.values())
+        spreads.append(max(bearing_diff_deg(a, b) for a in vals for b in vals))
+        # The disagreement that can actually lose a row is between the reference INGEST samples at
+        # and wherever the car happens to ask, so it is measured against `approach_bearing_ref_m`
+        # specifically. The pairwise max above is an UPPER BOUND on it, not the same number
+        # (Fable 2026-09-19).
+        here = brgs.get(params.approach_bearing_ref_m)
+        if here is None:
+          why["bearing: approach_bearing_ref_m is not one of the reference distances"] += 1
+        else:
+          vs_ref.append(max(bearing_diff_deg(here, b) for b in vals))
       else:
         why[f"bearing: only {len(brgs)} of {len(BEARING_REFS_M)} reference points on the drive"] += 1
   # Every one of ingest's own counters except the two that say what KIND of site it was rather than
@@ -120,7 +138,7 @@ def measure(ticks, params: CurveDBParams):
   for k, v in drop.items():
     if k not in ("site_track", "site_logged"):
       why[f"ingest: {k}"] += v
-  return per_tick, per_extent, spreads, why, drives
+  return per_tick, per_extent, spreads, vs_ref, why, drives
 
 
 def _stats(xs: list[float]) -> str:
@@ -131,7 +149,8 @@ def _stats(xs: list[float]) -> str:
           f"max={s[-1]:.3f}")
 
 
-def report(per_tick, per_extent, spreads, why, params: CurveDBParams, n_ticks, n_drives, log=print):
+def report(per_tick, per_extent, spreads, vs_ref, why, params: CurveDBParams, n_ticks, n_drives,
+           log=print):
   log("")
   log("=" * 100)
   log("CALIBRATION -- what a 1 Hz row costs, and how far the approach bearing moves")
@@ -153,13 +172,19 @@ def report(per_tick, per_extent, spreads, why, params: CurveDBParams, n_ticks, n
   log("")
   log(f"  2. approach-bearing spread across {'/'.join(f'{r:.0f}' for r in BEARING_REFS_M)} m " +
       "before a site")
-  log(f"     {_stats(spreads)} degrees")
+  log(f"     vs the {params.approach_bearing_ref_m:.0f} m reference INGEST samples at   " +
+      f"{_stats(vs_ref)} degrees   <- the disagreement that loses a row")
+  if vs_ref:
+    over = sum(1 for x in vs_ref if x > params.heading_tol_deg)
+    log(f"       exceeding the {params.heading_tol_deg:.0f} deg matching tolerance: {over} of " +
+        f"{len(vs_ref)} ({100.0 * over / len(vs_ref):.1f}%)")
+    log("       on those, ingest and the car can disagree about which direction 'this way' is, " +
+        "and the row is never found")
+  log(f"     pairwise max over all three (an UPPER BOUND, not the same number)   {_stats(spreads)}")
   if spreads:
     over = sum(1 for x in spreads if x > params.heading_tol_deg)
-    log(f"     exceeding the {params.heading_tol_deg:.0f} deg matching tolerance: {over} of " +
-        f"{len(spreads)} ({100.0 * over / len(spreads):.1f}%)")
-    log("       on those sites ingest and the car can disagree about which direction 'this way' " +
-        "is, and the row is never found")
+    log(f"       exceeding {params.heading_tol_deg:.0f} deg: {over} of {len(spreads)} " +
+        f"({100.0 * over / len(spreads):.1f}%)")
   log("")
   log("  what was NOT measurable, and why (Rule 2: an absent number is a claim, not a silence):")
   for k, v in why.most_common():
@@ -182,8 +207,8 @@ def main(argv=None):
     raise SystemExit("no usable ticks in any of those files -- that is a statement about the " +
                      "input, and no ratio should be read out of it")
   params = PROVISIONAL_PARAMS
-  per_tick, per_extent, spreads, why, drives = measure(ticks, params)
-  report(per_tick, per_extent, spreads, why, params, len(ticks), len(drives),
+  per_tick, per_extent, spreads, vs_ref, why, drives = measure(ticks, params)
+  report(per_tick, per_extent, spreads, vs_ref, why, params, len(ticks), len(drives),
          log=(lambda *a: None) if args.quiet else print)
   return 0
 

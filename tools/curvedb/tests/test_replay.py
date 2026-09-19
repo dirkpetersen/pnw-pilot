@@ -226,8 +226,12 @@ def _sites(n=12):
 
 def test_site_shuffle_moves_each_episode_to_another_episodes_site():
   eps = _sites()
-  out = R.shuffle_episode_sites(eps, seed=1)
+  out, donors = R.shuffle_episode_sites(eps, seed=1)
+  assert sorted(donors) == list(range(len(eps)))
   assert sorted(e["site_lat"] for e in out) == sorted(e["site_lat"] for e in eps)
+  # the site's own identity travels with it, or the funnel's distinct-site count describes
+  # episodes that are no longer there
+  assert [e["site_group"] for e in out] == [eps[j]["site_group"] for j in donors]
   assert [e["site_lat"] for e in out] != [e["site_lat"] for e in eps]
   # the episode keeps everything that is NOT the lookup key
   assert [e["k_truth"] for e in out] == [e["k_truth"] for e in eps]
@@ -236,10 +240,10 @@ def test_site_shuffle_moves_each_episode_to_another_episodes_site():
 
 def test_site_shuffle_is_seed_dependent():
   eps = _sites()
-  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)] ==
-          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)])
-  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)] !=
-          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 8)])
+  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)[0]] ==
+          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)[0]])
+  assert ([e["site_lat"] for e in R.shuffle_episode_sites(eps, 7)[0]] !=
+          [e["site_lat"] for e in R.shuffle_episode_sites(eps, 8)[0]])
 
 
 def test_site_shuffle_CAN_change_the_match_count():
@@ -261,7 +265,7 @@ def test_site_shuffle_CAN_change_the_match_count():
          episode(date="2026-09-02", drive_id="drive-2026-09-02", site_lat=s2[0],
                  site_group="b#0")]
   assert sum(o.matched for o in R.run(rows, eps, P, E)) == 0
-  swapped = R.shuffle_episode_sites(eps, seed=1)
+  swapped, _ = R.shuffle_episode_sites(eps, seed=1)
   assert [e["site_lat"] for e in swapped] == [s2[0], s1[0]]
   assert sum(o.matched for o in R.run(rows, swapped, P, E)) == 2
 
@@ -269,7 +273,7 @@ def test_site_shuffle_CAN_change_the_match_count():
 def test_stayed_put_counts_the_episodes_the_permutation_did_not_control():
   eps = _sites(4)
   assert R.stayed_put(eps, eps, P) == 4                     # identity permutation: nothing moved
-  assert R.stayed_put(eps, R.shuffle_episode_sites(eps, 3), P) < 4
+  assert R.stayed_put(eps, R.shuffle_episode_sites(eps, 3)[0], P) < 4
 
 
 def test_stayed_put_survives_an_episode_with_no_fix():
@@ -523,3 +527,35 @@ def test_the_self_match_tautology_is_measured_not_argued():
   assert R.run(rows, [ep], P, E)[0].own_drive_in_row is False
   assert R.summarise(R.run(rows, [ep], P, E, lodo=False), "t",
                      real_a_lat=R.REAL_SLOWDOWN_A_LAT_MS2)["own_drive_in_row"] == 1
+
+
+def test_the_confound_explanation_is_measured_not_asserted():
+  """The "matched MORE" reading is only true if the extra matches ARE the leave-one-out asymmetry.
+  `confound_matches` counts them, and `main` prints the explanation only when they dominate --
+  a future corpus could match more for some other reason entirely."""
+  eps = [episode(date="2026-09-01", drive_id="drive-2026-09-01", site_lat=45.0, site_group="a#0"),
+         episode(date="2026-09-02", drive_id="drive-2026-09-02", site_lat=46.0, site_group="b#0")]
+  rows = [obs(date="2026-09-01", site_lat=45.0), obs(date="2026-09-02", site_lat=46.0)]
+  real = R.run(rows, eps, P, E)
+  swapped, donors = R.shuffle_episode_sites(eps, seed=1)
+  ctl = R.run(rows, swapped, P, E)
+  assert sum(o.matched for o in real) == 0
+  assert sum(o.matched for o in ctl) == 2
+  assert R.confound_matches(real, ctl, donors) == 2      # both are the LODO asymmetry
+
+
+def test_the_confound_count_cannot_be_smaller_than_the_excess():
+  """`confound_matches >= control - real` is an identity: the permutation is a bijection, so the
+  control matches whose donor ALSO matched are at most `real`. `main` therefore reports the
+  measurement instead of applying a threshold to it -- and treats a violation as a plumbing bug,
+  because that is the only thing it can be. Shown here by misaligning the donor index on purpose."""
+  eps = [episode(date="2026-09-01", drive_id="drive-2026-09-01", site_lat=45.0, site_group="a#0"),
+         episode(date="2026-09-02", drive_id="drive-2026-09-02", site_lat=46.0, site_group="b#0")]
+  rows = [obs(date="2026-09-01", site_lat=45.0), obs(date="2026-09-02", site_lat=46.0)]
+  real = R.run(rows, eps, P, E)
+  swapped, donors = R.shuffle_episode_sites(eps, seed=1)
+  ctl = R.run(rows, swapped, P, E)
+  excess = sum(o.matched for o in ctl) - sum(o.matched for o in real)
+  assert R.confound_matches(real, ctl, donors) >= excess
+  # the identity depends on the donor index being the one the shuffle produced
+  assert R.confound_matches(ctl, ctl, donors) < excess

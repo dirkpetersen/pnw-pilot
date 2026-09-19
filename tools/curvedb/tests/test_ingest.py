@@ -1106,3 +1106,15 @@ def test_recurrence_refuses_to_report_a_rate_from_an_empty_index():
   with pytest.raises(SystemExit):
     REC.analyse(parked, [dict(site_lat=45.0, site_lon=-122.0, approach_bearing=0.0,
                               date="2000-01-01")], [], P)
+
+
+def test_a_drive_with_no_odometer_gps_witness_is_admitted_not_dropped():
+  """`gps_vs_odo is None` means the cross-check never RAN (no tick pair moved far enough), not
+  that it failed. Dropping those drives would be reading a missing measurement as a negative
+  result -- and it would silently discard whole corpora."""
+  d = drive_of(curve_drive())
+  fields = dict(car=d.car, ticks=d.ticks, s=d.s, date=d.date, drive_id=d.drive_id)
+  assert I.drive_odo_gps_ok(I.Drive(gps_vs_odo=None, **fields))
+  assert I.drive_odo_gps_ok(I.Drive(gps_vs_odo=1.0, **fields))
+  assert not I.drive_odo_gps_ok(I.Drive(gps_vs_odo=0.61, **fields))
+  assert not I.drive_odo_gps_ok(I.Drive(gps_vs_odo=1.6, **fields))

@@ -261,7 +261,7 @@ def shuffle_k(observations: list[Observation], seed: int) -> list[Observation]:
   return [replace(o, k=k) for o, k in zip(observations, ks, strict=True)]
 
 
-def shuffle_episode_sites(episodes: list[dict], seed: int) -> list[dict]:
+def shuffle_episode_sites(episodes: list[dict], seed: int) -> tuple[list[dict], list[int]]:
   """Right database, wrong question: each episode is looked up at ANOTHER episode's site.
 
   If the match count DROPS, the lookup is selecting on position and direction. If it stays equal,
@@ -282,11 +282,40 @@ def shuffle_episode_sites(episodes: list[dict], seed: int) -> list[dict]:
 
   **Only `matched` may be read from this run.** The episode keeps its own `k_truth`, reference
   speed and date while looking up a different road, so its verdict columns are meaningless and
-  `main` reports the match count alone."""
-  sites = [(e.get("site_lat"), e.get("site_lon"), e.get("approach_bearing")) for e in episodes]
-  random.Random(seed).shuffle(sites)
-  return [dict(e, site_lat=s[0], site_lon=s[1], approach_bearing=s[2])
-          for e, s in zip(episodes, sites, strict=True)]
+  `main` reports the match count alone.
+
+  Returns `(shuffled_episodes, donor_index)`; `donor_index[i]` is the episode whose site episode
+  `i` took, which is what `confound_matches` needs to check the explanation rather than assert
+  it."""
+  order = list(range(len(episodes)))
+  random.Random(seed).shuffle(order)
+  out = []
+  for e, j in zip(episodes, order, strict=True):
+    d = episodes[j]
+    # `site_group` travels WITH the site: after the swap the episode is standing on the donor's
+    # junction, so the donor's group is what names where it is. Leaving its own behind made the
+    # funnel's distinct-site count describe episodes that are no longer there (Fable 2026-09-19).
+    out.append(dict(e, site_lat=d.get("site_lat"), site_lon=d.get("site_lon"),
+                    approach_bearing=d.get("approach_bearing"), site_group=d.get("site_group")))
+  return out, order
+
+
+def confound_matches(real: list[Outcome], control: list[Outcome], donors: list[int]) -> int:
+  """Of the control's matches, how many landed on a site whose OWN episode could not match there
+  under its own leave-one-date-out key?
+
+  This is the arithmetic behind the "matched MORE than the real lookup" reading, MEASURED rather
+  than asserted (Fable 2026-09-19). If an episode's own site is only rowed by its own date, LODO
+  removes those rows for it and leaves them for everybody else -- so a control match on that site
+  is the leave-one-out asymmetry, not a claim about the matcher.
+
+  **`confound_matches >= control_matches - real_matches` is an IDENTITY, not a hypothesis**, and
+  that is why `main` does not apply a threshold to it. The permutation is a bijection, so the
+  control matches whose donor also matched are at most `real_matches`; the rest are counted here.
+  A run where it does not hold means the donor index and the outcome lists have come apart, and
+  `main` says so in those words rather than reporting a finding."""
+  return sum(1 for i, o in enumerate(control)
+             if o.matched and not real[donors[i]].matched)
 
 
 def stayed_put(episodes: list[dict], shuffled: list[dict], params: CurveDBParams) -> int:
@@ -602,9 +631,10 @@ def main(argv=None):
         print(f"  k-shuffle raised false cancels {results['lodo']['false_cancels']} -> " +
               f"{res['false_cancels']}: the curvature content is doing work.")
     else:
-      eps2 = shuffle_episode_sites(episodes, args.seed)
+      eps2, donors = shuffle_episode_sites(episodes, args.seed)
       fixed = stayed_put(episodes, eps2, params)
-      res = summarise(run(observations, eps2, params, envelopes),
+      ctl_outcomes = run(observations, eps2, params, envelopes)
+      res = summarise(ctl_outcomes,
                       "CONTROL 'site-shuffle' -- each episode looked up at ANOTHER episode's site",
                       real_a_lat=REAL_SLOWDOWN_A_LAT_MS2)
       print("")
@@ -618,17 +648,26 @@ def main(argv=None):
         print("  (UNINFORMATIVE, not a failure: the real lookup matched nothing, so a corrupted " +
               "one has nothing to lose.)")
       elif ctl > real:
-        # Measured 2026-09-19: 29 vs 6. Reading this as "the matcher is not selective" would be
-        # the known-false alarm all over again -- the comparison is CONFOUNDED, and the confound is
-        # the finding.
+        # Measured 2026-09-19: 29 vs 6, of which 23 are the leave-one-out asymmetry. The
+        # explanation is CHECKED here rather than asserted -- a future corpus could match more for
+        # some other reason, and then the paragraph below must not print (Fable 2026-09-19).
+        conf, excess = confound_matches(outcomes, ctl_outcomes, donors), ctl - real
         print(f"  !! site-shuffle matched MORE than the real lookup ({ctl} vs {real}). An " +
               "episode's OWN site is the hardest place for it to find a row.")
-        print("  That is not a broken matcher and not row density -- it is leave-one-date-out " +
-              "doing its job: the passes at an episode's own site are overwhelmingly from the " +
-              "episode's own date, so LODO removes them, while another episode's site is built " +
-              "from dates LODO does not touch. It is the recurrence blocker (README section 3.1) " +
-              "seen from the other side, and it is the single-visit-site problem, not a keying " +
-              "problem.")
+        print(f"  {conf} of those {ctl} matches landed on a site whose OWN episode cannot match " +
+              f"there under its own leave-one-date-out key; the excess is {excess}.")
+        if conf >= excess:
+          print("  Those ARE the excess, and they are not a broken matcher and not row density: " +
+                "the passes at an episode's own site are overwhelmingly from the episode's own " +
+                "date, so LODO removes them for that episode and leaves them for everybody else. " +
+                "It is the recurrence blocker (README section 3.1) seen from the other side -- " +
+                "the single-visit-site problem, not a keying problem.")
+        else:
+          # conf >= excess is an identity (see `confound_matches`), so this branch means the
+          # donor index and the outcome lists have come apart -- a plumbing bug, not a finding.
+          print("  !! ARITHMETICALLY IMPOSSIBLE: fewer confound matches than excess matches. The " +
+                "donor index and the outcome lists are misaligned; this control's output cannot " +
+                "be read at all until that is fixed.")
       elif ctl == real:
         print(f"  !! site-shuffle matched as many rows as the real lookup ({ctl}). Any " +
               "episode-site finds a row as readily as its own, which is what row DENSITY rather " +
