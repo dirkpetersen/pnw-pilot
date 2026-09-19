@@ -294,6 +294,29 @@ else reads that key"* is precisely the assumption that was false the first time.
 > cases every individual directory was green.** That is the entire argument for Rule 9 in two
 > sentences.
 
+### The submodule pins: warned → actually fixed, and it found a real hole
+
+The first version symlinked submodules from the main checkout, which sits on whatever branch it is
+on. **Four of six were the wrong revision**, and `opendbc` — car code, on `PYTHONPATH` — matched
+**only by coincidence**. The script could only warn, and a warning is not a fix: *"tested the channel
+tip"* was not strictly true.
+
+Each submodule now gets its **own detached worktree at the exact SHA the tip pins**. Two pins
+(`opendbc_repo`, `panda`) **were not in the local object stores at all** and had to be fetched — so
+the borrowed setup could never have been right, not merely wrong today.
+
+**Pinning correctly then broke the run, which is how you know it was doing something:**
+`3192 passed, 5 errors` — `ModuleNotFoundError: msgq.visionipc.visionipc_pyx`, a **compiled**
+extension the borrowed `msgq_repo` happened to have lying around. Added to the build.
+
+**And that exposed a defect in the checker itself:** it called those five import failures
+**"CHANNEL TIP IS RED"**. They are not. A module that never imported says *nothing* about whether the
+code is green or red — reporting it as red sends someone hunting a regression that does not exist.
+It now prints **`NOT A VERDICT: N test module(s) failed to IMPORT`**. The script was enforcing Rule 2
+on the repo and not on itself.
+
+Final: **exit 0, 3,320 passed in 154 s, all six submodules "at the channel pin".**
+
 ### The general gap this exposes
 **Nothing in this workbench runs the test suite against the channel tip after a merge.** Every branch
 is tested on its own base. That is how four branches shipped in one day today, and how a file could
