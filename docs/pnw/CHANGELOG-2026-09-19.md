@@ -3,7 +3,7 @@
 Continues [`CHANGELOG-2026-09-18.md`](CHANGELOG-2026-09-18.md). Four branches shipped, one
 measurement returned a verdict of *dead*, and one owner decision closed a proposal.
 
-**Channel tip:** `origin/3devpnw` = `1f9a352538`.
+**Channel tip:** `origin/3devpnw` = `586446b6f3`.
 
 ⚠️ **NOT VERIFIED ON THE CAR — and it is the documented Starlink case, not a mystery network.** The
 device is alive (it phoned the uploader at 11:22:59 PT) from `local_ip 192.168.1.79` under public
@@ -243,6 +243,70 @@ slowdowns lost.
 **The car is 22 commits behind**, so none of today's four ships are on it yet — the ordinary reason,
 now distinguishable from an unknowable one. Recipe recorded in `DEVICE-STATE.md`; evidence kept in
 `drives/2026-09-19/parkgate-baseline/`.
+
+## 🚨 NEW REQUIRED STEP — test the CHANNEL TIP after every push (CLAUDE.md **Rule 9**)
+
+Owner directive: *"build this and add it to CLAUDE.md as a required step."* Built as
+`scripts/check-channel-tip.sh` + `scripts/_check_params_so.py`.
+
+**Its first run on the real tip returned `319 failed / 2,578 passed / 232 errors`.** All of it had
+been true for weeks. Nothing in this workbench had ever run the fork's test directories *together*.
+
+### One line was corrupting 319 tests, with two unrelated-looking symptoms
+`common/tests/test_connect_backend.py` did a bare
+`sys.modules["openpilot.common.swaglog"] = _swaglog_stub` and never undid it. `sys.modules` is
+per-**process**, so every test collected after it got the stub.
+
+| | |
+|---|---|
+| tip as-is | **319 failed, 2,578 passed, 232 errors** |
+| that one file fixed | **1 failed, 3,286 passed** |
+
+The second symptom looked like a different bug entirely: `common/tests/test_swaglog_rotation.py` —
+**26 tests for our own swaglog-rotation feature** — erroring with `cannot import name
+'SwaglogRotatingFileHandler' … (unknown location)`, never run. Same stub; it has no such attribute. I
+detoured onto `--import-mode=importlib`, which "fixed" that symptom by changing collection order and
+left the cause in place.
+
+### A driver-visible alert had been overflowing the screen since 2026-07-14
+`canBusMissing`'s PERMANENT text measured **1928 px against an 1860 px limit**. `canoff2pnw`
+introduced it; `test_alert_text_length` exists to catch exactly this and lives in a directory nothing
+ran. Shortened to *"CAN Bus Disconnected — Vehicle Off or Wiring"* = 1681 px. Fable swept the file:
+this is now the widest alert and the next is upstream's at 1568, so nothing else is near the limit.
+
+### Two of my three exclusion reasons were FALSE, and both hid tests for OUR code
+This is the part worth carrying forward.
+
+| I wrote | actually |
+|---|---|
+| `test_following_distance` — "upstream harness drift" | The traceback says that; the diagnosis was wrong. The plant harness is unmodified upstream — what reads `.alive`/`.valid` on its plain dict is **our** code (`tightfollow2pnw` `sm.alive['mapdOut']`, `leadlossgate2pnw` `sm.valid['carState']`). **The 18 tests validating our follow distance had been dead since those features landed.** |
+| `test_leads` — "Hyundai flag, inert for our cars" | True of car behaviour, false of infrastructure. The stale `CANFD_LKA_STEERING` is in `process_replay/migration.py`, which every `replay_process_with_name` consumer in the fork depends on. |
+| `test_loggerd.py` — "needs camera/encoder hardware" | Wrong too: the binaries were simply **not built**. Building `system/loggerd` recovers 13 of 16, **including all five `test_skip_video_when_parked*`** — the Rule-3 "don't record in Park" feature. Only 3 genuinely cannot run here, now deselected **by name** with measured reasons. |
+
+`selfdrive/controls/tests` went **32 passed (two files excluded) → 51 passed, nothing excluded.**
+
+> **An exclusion is a claim about the world. Check it before writing it.** Now in Rule 9.
+
+### My script committed the exact sin it exists to prevent
+On the red tip it printed *"only 2578 tests passed … Either collection broke or a whole path stopped
+being discovered"* — **a real failure reported as a tooling problem.** The exit-code check came after
+the count check. Fable caught it; the order is swapped and the RED path now names the failure. It
+also found **`except Exception: pass`** in `_check_params_so.py` — the idiom Rule 2 bans by name, in
+the file whose docstring cites Rule 2.
+
+`MIN_TESTS=3000` against 3,287 measured was likewise nearly a check that could not fail: only the
+four largest paths could ever trip it, so silently losing `selfdrive/selfdrived/tests` (which caught
+the alert) or `system/loggerd/tests` (the uploader tests that motivated all this) still passed.
+Replaced with **per-path collection floors**.
+
+### And no `params_pyx.so` in the workbench was current
+Every one was missing at least one key `params_keys.h` declares. A stale one manufactured **31
+phantom failures/errors in `ces_pnw` alone** and pointed at an unrelated file. The script now BUILDS
+it from the tip's own header — submodules symlinked from the main checkout, **each verified against
+the channel pin**, with an opendbc mismatch fatal since it is on `PYTHONPATH` and is car code — then
+VALIDATES it before trusting any result.
+
+**Scope:** 12 paths, ~3,300 tests, ~90 s once built. 3 tests deselected by name, 0 paths excluded.
 
 ## 🔁 The pattern worth naming: five checks this week that could not fail
 
