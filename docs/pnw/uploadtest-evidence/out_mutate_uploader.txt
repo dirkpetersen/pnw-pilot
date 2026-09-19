@@ -1,0 +1,28 @@
+BASELINE: GREEN  (39 passed in 5.29s)
+KILLED     M1 dcamera leaks: drop the key-prefix tier that keeps driver-cam unpicked
+           (4 failed, 26 passed in 5.05s
+           via: E       AssertionError: dcamera.hevc must never leave the device (driver-facing camera): ['00000004--0ac3964c96--81/dcamera.hevc'])
+KILLED     M2 creation order broken: reverse the per-directory sort
+           (1 failed, 37 passed in 4.86s
+           via: E       AssertionError: qlog.zst uploaded out of creation order:)
+KILLED     M3 SILENT DATA LOSS returns: mark uploaded regardless of success
+           (1 failed, 37 passed in 4.77s
+           via: E       AssertionError: 412'd file was marked uploaded without reaching S3 (silent data loss): /home/dp/.commaeea90ee75bba470/media/0/realdata/boot/00)
+KILLED     M4 duplicate uploads: never mark a file uploaded, so it is picked again
+           (4 failed, 26 passed in 3.48s
+           via: E     AssertionError: a file was uploaded twice: ['boot/00000004--0ac3964c96--121.zst', 'boot/00000004--0ac3964c96--121.zst', 'boot/00000004--0ac3964c)
+KILLED     M5 rlog silently dropped from the firehose set
+           (6 failed, 19 passed in 11.88s
+           via: E     AssertionError: assert {'ecamera.hev...fcamera.hevc'} == {'ecamera.hev...', 'rlog.zst'})
+KILLED     M6 HD-interleave gate deleted: pass 2 no longer runs alongside pass 1 (video starves)
+           (1 failed, 37 passed in 4.64s
+           via: E     AssertionError: Files uploaded in wrong order)
+KILLED     M14 boot/crash tier swapped below the qlog tier: boot stops going first
+           (2 failed, 35 passed in 4.61s
+           via: E     AssertionError: Files uploaded in wrong order)
+KILLED     M7 pass-2 priority dropped: video no longer waits behind rlog
+           (6 failed, 16 passed in 2.62s
+           via: E     AssertionError: assert 'fcamera.hevc' == 'rlog.zst')
+
+8 mutants: 8 KILLED, 0 SURVIVED, 0 NOT BUILT
+source restored byte-identical: OK

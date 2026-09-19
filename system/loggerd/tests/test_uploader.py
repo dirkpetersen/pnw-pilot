@@ -8,7 +8,7 @@ from openpilot.system.hardware.hw import Paths
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.loggerd.uploader import (main, effective_metered, pass1_allowed, pass2_allowed, PASS2_NETWORK_TYPES,
-                                               UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE, Uploader,
+                                               UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE, Uploader, PASS2_INTERLEAVE,
                                                uploadable_firehose_files, FIREHOSE_FILES)
 from cereal import log
 
@@ -133,65 +133,175 @@ class TestUploader(UploaderTestCase):
       f_paths.append(self.make_file_with_data("boot", f"{self.seg_dir}", 1, lock=lock, upload_xattr=xattr))
     return f_paths
 
+  # uploadanywifi2pnw made pass 2 run on any qualifying WiFi, so from 6ad65ca264 (2026-09-05) these
+  # tests moved 4 files where stock moves 2, and `gen_order`'s stock boot+qlog expectation started
+  # failing. It stayed red for two weeks. That matters more than it looks: this is the component
+  # whose API_HOST fallback once marked files uploaded WITHOUT reaching S3 (see test_upload_ignored),
+  # and a permanently-red file means a real regression here would have been invisible.
+  #
+  # Two things had to change to express the fork's contract instead of stock's.
+  #
+  # 1. WHICH files. The fork moves boot + qlog (pass 1), rlog (pass 2) and fcamera (pass 3), and
+  #    NEVER dcamera.hevc -- the driver-facing camera. That exclusion is a privacy property, not an
+  #    accident: list_upload_files yields dcamera and only the key-prefix tier in
+  #    next_file_to_upload keeps it from being picked (see the Fable 2026-09-16 comment there).
+  #    `dcamera_never_uploads` below asserts it here too, because a test that lists dcamera among its
+  #    inputs and never checks it is the weakest possible witness.
+  #
+  # 2. IN WHAT ORDER. The passes INTERLEAVE: the 8-segment case produces
+  #    `--0/qlog, --1/qlog, --2/qlog, --10/qlog, --0/rlog, --20/qlog, ...`.
+  #
+  #    ⚠️ AN EARLIER VERSION OF THIS COMMENT CALLED THAT A RACE AND REFUSED TO ASSERT THE GLOBAL
+  #    SEQUENCE. THAT WAS WRONG (Fable 2026-09-19), and it cost real coverage. The order is fully
+  #    DETERMINISTIC: `main()` is single-threaded, the tests disable every sleep, and the sequence is
+  #    a pure function of `PASS2_INTERLEAVE` -- pass 1 walks boot then qlog in creation order, one
+  #    pass-2 file goes after every `PASS2_INTERLEAVE` pass-1 successes, and once pass 1 is empty
+  #    pass 2 drains all rlogs then all fcameras. Re-measured five times: byte-identical every run.
+  #
+  #    Dropping the exact-sequence check let two real regressions through, both proven by mutation:
+  #    swapping the boot and qlog tiers in `next_file_to_upload` (boot stops going first), and
+  #    deleting the `pass1_run >= PASS2_INTERLEAVE` gate (HD video stops interleaving and starves).
+  #    Neither moves a file in or out of the set, so a set-plus-per-kind check cannot see either.
+  #    `gen_sequence` below rebuilds the exact order and the success tests assert it.
+  #
+  #    `assert_upload_contract` is kept as well, for its diagnostics: when something does move, its
+  #    message names the missing/unexpected key, which a list-compare of 24 items does not.
+  UPLOAD_KINDS = ("qlog.zst", "rlog.zst", "fcamera.hevc")
+  NEVER_UPLOADED = ("dcamera.hevc",)
+
   def gen_order(self, seg1: list[int], seg2: list[int], boot=True) -> list[str]:
+    """Every key the fork is expected to move, in per-kind creation order.
+
+    NOT a global sequence -- see the note above. Use with `assert_upload_contract`, which compares
+    it as a set plus a per-kind ordering, never as one ordered list."""
     keys = []
     if boot:
       keys += [f"boot/{self.seg_format.format(i)}.zst" for i in seg1]
       keys += [f"boot/{self.seg_format2.format(i)}.zst" for i in seg2]
-    keys += [f"{self.seg_format.format(i)}/qlog.zst" for i in seg1]
-    keys += [f"{self.seg_format2.format(i)}/qlog.zst" for i in seg2]
+    for kind in self.UPLOAD_KINDS:
+      keys += [f"{self.seg_format.format(i)}/{kind}" for i in seg1]
+      keys += [f"{self.seg_format2.format(i)}/{kind}" for i in seg2]
     return keys
+
+  def gen_sequence(self, seg1: list[int], seg2: list[int], boot=True) -> list[str]:
+    """The exact global order, derived from `PASS2_INTERLEAVE` -- not observed and pasted.
+
+    Deriving it means a change to the interleave constant makes this expectation follow
+    automatically, while a change to the uploader's ORDERING still fails. Pasting a captured
+    sequence would have inverted that: it would break on a harmless constant bump and pass on a real
+    reordering."""
+    def seg_keys(kind: str) -> list[str]:
+      return ([f"{self.seg_format.format(i)}/{kind}" for i in seg1] +
+              [f"{self.seg_format2.format(i)}/{kind}" for i in seg2])
+
+    p1 = []
+    if boot:
+      p1 += [f"boot/{self.seg_format.format(i)}.zst" for i in seg1]
+      p1 += [f"boot/{self.seg_format2.format(i)}.zst" for i in seg2]
+    p1 += seg_keys("qlog.zst")
+    p2 = seg_keys("rlog.zst") + seg_keys("fcamera.hevc")
+
+    out, pending, run = [], list(p2), 0
+    for key in p1:
+      out.append(key)
+      run += 1
+      if run >= PASS2_INTERLEAVE and pending:
+        out.append(pending.pop(0))
+        run = 0
+    out += pending          # pass 1 exhausted -> pass 2 drains
+    return out
+
+  def wait_for(self, observed: list[str], n: int, timeout: float = 10.0) -> None:
+    """Poll until `n` keys have been logged, or give up.
+
+    Replaces a bare `time.sleep(1)`. A fixed sleep is racy in the direction that HIDES a defect on a
+    slow machine (fewer files moved -> "failed to upload" -> looks like a real bug) and wastes a
+    second on a fast one. Polling removes the false failure without weakening anything: the
+    assertions still run on whatever was actually observed, and a genuine stall still fails on the
+    count."""
+    deadline = time.monotonic() + timeout
+    while len(observed) < n and time.monotonic() < deadline:
+      time.sleep(0.05)
+
+  def assert_upload_contract(self, observed: list[str], expected: list[str], what: str = "uploaded") -> None:
+    """The fork's contract: same SET, no duplicates, no dcamera, creation order within each kind."""
+    assert len(observed) == len(set(observed)), \
+      f"a file was {what} twice: {[k for k in observed if observed.count(k) > 1]}"
+    # The dcamera check runs BEFORE the set comparison, deliberately. The set check would catch a
+    # leak too -- dcamera is never in `expected` -- which would leave this assertion permanently
+    # unreachable, i.e. a check that cannot fail. Verified by mutation: with the key-prefix tier in
+    # next_file_to_upload removed, it is THIS assertion that fires, and it says why it matters
+    # instead of printing an "unexpected" key the reader has to interpret.
+    for never in self.NEVER_UPLOADED:
+      leaked = [k for k in observed if k.endswith(never)]
+      assert not leaked, f"{never} must never leave the device (driver-facing camera): {leaked}"
+    missing, extra = sorted(set(expected) - set(observed)), sorted(set(observed) - set(expected))
+    assert not missing and not extra, f"{what} set differs -- missing {missing}, unexpected {extra}"
+    for kind in self.UPLOAD_KINDS:
+      got = [k for k in observed if k.endswith(kind)]
+      want = [k for k in expected if k.endswith(kind)]
+      assert got == want, f"{kind} {what} out of creation order:\n  got  {got}\n  want {want}"
+
+  @staticmethod
+  def local_path(key: str) -> Path:
+    """The on-disk file a published key came from.
+
+    Stock derived this with `.with_suffix("")`, which is right for `qlog.zst` -> `qlog` and WRONG for
+    `fcamera.hevc` -> `fcamera`: only the log files are zstd-compressed in flight, video is uploaded
+    under its own name. Stock never hit it because stock only ever checked qlog keys."""
+    return Path(Paths.log_root()) / (key[:-len(".zst")] if key.endswith(".zst") else key)
 
   def test_upload(self):
     self.gen_files(lock=False)
 
-    self.start_thread()
-    # allow enough time that files could upload twice if there is a bug in the logic
-    time.sleep(1)
-    self.join_thread()
-
     exp_order = self.gen_order([self.seg_num], [])
 
-    assert len(log_handler.upload_ignored) == 0, "Some files were ignored"
-    assert not len(log_handler.upload_order) < len(exp_order), "Some files failed to upload"
-    assert not len(log_handler.upload_order) > len(exp_order), "Some files were uploaded twice"
-    for f_path in exp_order:
-      assert os.getxattr((Path(Paths.log_root()) / f_path).with_suffix(""), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, "All files not uploaded"
+    self.start_thread()
+    # Poll rather than sleep(1), and keep a margin so a file uploaded TWICE is still caught: the
+    # contract check below rejects duplicates, so the wait ending early would not mask one.
+    self.wait_for(log_handler.upload_order, len(exp_order))
+    time.sleep(0.2)
+    self.join_thread()
 
-    assert log_handler.upload_order == exp_order, "Files uploaded in wrong order"
+    assert len(log_handler.upload_ignored) == 0, "Some files were ignored"
+    self.assert_upload_contract(log_handler.upload_order, exp_order)
+    # The exact global order, restored after it was wrongly dropped as "a race" -- see gen_sequence.
+    assert log_handler.upload_order == self.gen_sequence([self.seg_num], []), "Files uploaded in wrong order"
+    for f_path in exp_order:
+      assert os.getxattr(self.local_path(f_path), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, f"not marked uploaded: {f_path}"
 
   def test_upload_with_wrong_xattr(self):
     self.gen_files(lock=False, xattr=b'0')
 
-    self.start_thread()
-    # allow enough time that files could upload twice if there is a bug in the logic
-    time.sleep(1)
-    self.join_thread()
-
     exp_order = self.gen_order([self.seg_num], [])
 
-    assert len(log_handler.upload_ignored) == 0, "Some files were ignored"
-    assert not len(log_handler.upload_order) < len(exp_order), "Some files failed to upload"
-    assert not len(log_handler.upload_order) > len(exp_order), "Some files were uploaded twice"
-    for f_path in exp_order:
-      assert os.getxattr((Path(Paths.log_root()) / f_path).with_suffix(""), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, "All files not uploaded"
+    self.start_thread()
+    # Poll rather than sleep(1), and keep a margin so a file uploaded TWICE is still caught: the
+    # contract check below rejects duplicates, so the wait ending early would not mask one.
+    self.wait_for(log_handler.upload_order, len(exp_order))
+    time.sleep(0.2)
+    self.join_thread()
 
-    assert log_handler.upload_order == exp_order, "Files uploaded in wrong order"
+    assert len(log_handler.upload_ignored) == 0, "Some files were ignored"
+    self.assert_upload_contract(log_handler.upload_order, exp_order)
+    # The exact global order, restored after it was wrongly dropped as "a race" -- see gen_sequence.
+    assert log_handler.upload_order == self.gen_sequence([self.seg_num], []), "Files uploaded in wrong order"
+    for f_path in exp_order:
+      assert os.getxattr(self.local_path(f_path), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, f"not marked uploaded: {f_path}"
 
   def test_upload_ignored(self):
     self.set_ignore()
     self.gen_files(lock=False)
 
-    self.start_thread()
-    # allow enough time that files could upload twice if there is a bug in the logic
-    time.sleep(1)
-    self.join_thread()
-
     exp_order = self.gen_order([self.seg_num], [])
 
+    self.start_thread()
+    self.wait_for(log_handler.upload_ignored, len(exp_order))
+    time.sleep(0.2)
+    self.join_thread()
+
     assert len(log_handler.upload_order) == 0, "Some files were not ignored"
-    assert not len(log_handler.upload_ignored) < len(exp_order), "Some files failed to ignore"
-    assert not len(log_handler.upload_ignored) > len(exp_order), "Some files were ignored twice"
+    self.assert_upload_contract(log_handler.upload_ignored, exp_order, what="ignored")
 
     # testbaseline2pnw: this assertion is INVERTED from stock openpilot, deliberately. Upstream marks a
     # 412'd file uploaded (user.upload=1) and moves on. This fork does NOT -- uploadretry2pnw made "only
@@ -202,11 +312,10 @@ class TestUploader(UploaderTestCase):
     # be SET) had been failing on this branch ever since, which is exactly backwards -- it would now pass
     # only if the data-loss bug came back.
     for f_path in exp_order:
-      fn = (Path(Paths.log_root()) / f_path).with_suffix("")
+      fn = self.local_path(f_path)
       assert UPLOAD_ATTR_NAME not in os.listxattr(fn), \
         f"412'd file was marked uploaded without reaching S3 (silent data loss): {fn}"
 
-    assert log_handler.upload_ignored == exp_order, "Files ignored in wrong order"
 
   def test_upload_files_in_create_order(self):
     seg1_nums = [0, 1, 2, 10, 20]
@@ -221,17 +330,16 @@ class TestUploader(UploaderTestCase):
     exp_order = self.gen_order(seg1_nums, seg2_nums, boot=False)
 
     self.start_thread()
-    # allow enough time that files could upload twice if there is a bug in the logic
-    time.sleep(1)
+    self.wait_for(log_handler.upload_order, len(exp_order))
+    time.sleep(0.2)
     self.join_thread()
 
     assert len(log_handler.upload_ignored) == 0, "Some files were ignored"
-    assert not len(log_handler.upload_order) < len(exp_order), "Some files failed to upload"
-    assert not len(log_handler.upload_order) > len(exp_order), "Some files were uploaded twice"
+    self.assert_upload_contract(log_handler.upload_order, exp_order)
+    # The exact global order, restored after it was wrongly dropped as "a race" -- see gen_sequence.
+    assert log_handler.upload_order == self.gen_sequence(seg1_nums, seg2_nums, boot=False), "Files uploaded in wrong order"
     for f_path in exp_order:
-      assert os.getxattr((Path(Paths.log_root()) / f_path).with_suffix(""), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, "All files not uploaded"
-
-    assert log_handler.upload_order == exp_order, "Files uploaded in wrong order"
+      assert os.getxattr(self.local_path(f_path), UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE, f"not marked uploaded: {f_path}"
 
   def test_no_upload_with_lock_file(self):
     self.start_thread()
