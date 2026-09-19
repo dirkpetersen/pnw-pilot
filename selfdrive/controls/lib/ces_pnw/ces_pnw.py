@@ -36,7 +36,8 @@ from openpilot.selfdrive.controls.lib.ces_pnw.green_light import GreenLightDetec
 from openpilot.selfdrive.controls.lib.ces_pnw.ces2_core import Ces2Core, DivergenceCounter
 # parkgate2pnw: the ~1 Hz breadcrumb's GEAR gate (not speed, not IsOnroad — CLAUDE.md Rule 3).
 # 93.7% of the archived ces_events corpus was a PARKED truck; see park_tick_gate.py for the measurement.
-from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import ParkTickGate, SUPPRESS as PARK_SUPPRESS
+from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import (ParkTickGate, SUPPRESS as PARK_SUPPRESS,
+                                                                      LOG as PARK_LOG)
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -88,6 +89,18 @@ CES_EVENT_LOG_GENERATIONS = 8
 CES_ARCHIVE_DIR = "/data/pnw/ces_archive"
 # 2 GB. Heavy driving writes ~21 MB/day (measured, 2026-08-26 Olympic Peninsula trip), so this is a
 # ~95-day window -- comfortably past the 6-8 weeks section 3.9 asks for.
+#
+# CORRECTED 2026-09-19 (parkgate2pnw) -- the "~95 days" above is a count of CALENDAR BYTES, not of
+# anything useful, and the sentence as written reads as an answer to "how much DRIVING is retained".
+# It is not. 21 MB/day was measured on a driving DAY; the archive's steady-state content, measured
+# over six generations pulled from S3 (42,918 records / ~120 MB), is 93.7% a STATIONARY truck --
+# IsOnroad follows ignition, and parked + charging on the Lightning is ignition-on indefinitely.
+# Only 6.3% of the archive is driving, so 2 GB retained about 12.9 DRIVING HOURS, not 95 days of
+# anything. With the park gate below thinning the parked breadcrumb to ~1 record/min that becomes
+# ~140-150 driving hours, and -- the part that matters more -- parked content is now CAPPED however
+# long the truck sits, so retention stops depending on how much the truck is parked.
+# Full arithmetic: docs/pnw/PARKGATE2PNW.md. The same "~95 days" claim is still uncorrected in
+# system/loggerd/uploader.py, ~/gh/comma/docs/CURVEDB2PNW.md and ~/gh/comma/docs/DEVICE-STATE.md.
 #
 # WHAT IT COSTS, stated plainly (Fable 2026-09-16 -- an earlier version of this comment justified the
 # size "against the 8.9 GB free on /data", which MISREAD that number). The free space on /data is not
@@ -3396,6 +3409,8 @@ class CESController:
     self._gear_name = None          # str(enum) -- the BARE name ('park'). A LOG field, never compared.
     self._v_ego_raw = None          # raw carState vEgo (None = unread), for the gate's moving interlock
     self._park_gate = ParkTickGate()
+    self._park_err_t = None         # monotonic time of the last logged park-gate failure
+    self._park_err_n = 0            # park-gate failures since that log line
     # True = the gate may suppress. Starts False so that until RecordWhileParked has been read even
     # once, the log keeps its old full-rate behaviour (Rule 2: an unread kill switch must not cost
     # telemetry). _read_params() sets it on the very first cycle (frame 0).
@@ -4172,7 +4187,7 @@ class CESController:
     # parkgate2pnw: same gear gate as the CES-on tick path, on the SAME shared ParkTickGate instance
     # (the two writers are mutually exclusive per tick, so the hysteresis survives CESMode flipping
     # mid-session). Evaluated BEFORE _read_map() so a suppressed tick costs nothing at all.
-    park_d = self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
+    park_d = self._park_decision(now)
     if park_d == PARK_SUPPRESS:
       return
     try:
@@ -5116,7 +5131,7 @@ class CESController:
         # red-light stop is vEgo 0 in DRIVE and still logs at full rate. While suppressing, one
         # marked record per PARK_HEARTBEAT_S is still written (carrying parkGate/parkSupp), so the
         # window can never be misread as a dead logger. Adopt records above are never gated.
-        park_d = self._park_gate.update(self._gear, self._v_ego_raw, now2, self._park_gate_on)
+        park_d = self._park_decision(now2)
         if park_d != PARK_SUPPRESS:
           rec = self._event_record("tick", tele)
           rec.update(self._park_gate.record_fields(park_d))
@@ -5137,6 +5152,29 @@ class CESController:
       self.mem_params.put_nonblocking("CESStatus", tele)
     except Exception:
       pass
+
+  def _park_decision(self, now: float) -> str:
+    """parkgate2pnw: ask the park gate, in the one place both per-tick writers share.
+
+    Wrapped because a TELEMETRY gate must never reach control. _steer_log_step's own try/except is
+    deliberately entered AFTER this call (so a suppressed tick costs no _read_map work), which would
+    otherwise leave a raise here to propagate into selfdrived's guard around experimental_request()
+    -- and that guard forces CES to Chill. A logging decision must not be able to change what the
+    car does (Fable review 2026-09-19, finding 3).
+
+    Fails OPEN (returns PARK_LOG: write the record) and says so, throttled -- never silently. A gate
+    that stopped gating would otherwise be invisible, since "logging everything" is also what the
+    healthy pre-feature behaviour looks like."""
+    try:
+      return self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
+    except Exception as e:
+      self._park_err_n += 1
+      if self._park_err_t is None or now - self._park_err_t >= CURVELEAD_ERR_LOG_S:
+        cloudlog.exception(f"ces_pnw: park gate raised ({type(e).__name__}) -- the ces_events breadcrumb " +
+                           f"keeps logging in full ({self._park_err_n} failure(s) since the last log)")
+        self._park_err_t = now
+        self._park_err_n = 0
+      return PARK_LOG
 
   def _event_record(self, kind: str, tele: dict) -> dict:
     """Build one rich, flat record for the persistent CES_EVENT_LOG. `kind` is "adopt" (a CES mode

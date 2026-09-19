@@ -1,38 +1,30 @@
 """parkgate2pnw: stop the ~1 Hz `ces_events` breadcrumb from logging a PARKED truck.
 
-WHY. `ces_events.jsonl` logs once a second for as long as the device is onroad, and `IsOnroad`
-follows IGNITION, not motion (CLAUDE.md Rule 3). On the F-150 Lightning, parked + charging = ignition
-on, indefinitely -- so the log fills with a stationary truck. Measured over six archived generations
-pulled from S3 (42,918 records): **40,203 of them (93.7 %) are stationary**, and 39,983 of those are
-a single repeated row, `{"ev":"tick","mode":"experimental","reason":"stopLatch"}`. The archive is
-6.3 % driving. `CES_ARCHIVE_MAX_BYTES` (2 GB) was sized as "~95 days at 21 MB/day"; at 6.3 % driving
-content it holds about **six days of actual driving**, which is why curvedb Phase 2's 6-8 week corpus
-was never going to exist.
+`IsOnroad` follows IGNITION, not motion (CLAUDE.md Rule 3), and on the Lightning parked + charging =
+ignition on, indefinitely. Measured over six archived generations from S3 (42,918 records): 40,203
+(93.7 %) are stationary, 39,983 of them the same `{"ev":"tick","reason":"stopLatch"}` row. Full
+rationale, the corrected retention arithmetic and the on-car checks: docs/pnw/PARKGATE2PNW.md.
 
-WHAT IT IS NOT. It is NOT a speed gate and NOT an `IsOnroad` gate. A red-light stop is `vEgo` 0 with
-the shifter in **Drive** and MUST keep logging at full rate -- the stop / lurch / green-light
-analyses all live in exactly those records. Only `gearShifter == park` suppresses.
+Four invariants, and they are the whole design:
 
-RULE 2 -- IT NEVER GOES DARK, AND IT NEVER GOES QUIET.
-  * **Fail open.** Anything other than a confident Park reads as "not parked" and logs: an absent
-    carState, a missing/None gearShifter, `unknown` (Tesla DI_GEAR_SNA/INVALID, Ford
-    Unknown_Position), a gear this code does not recognise, an unread kill switch. Losing telemetry
-    is worse than wasting bytes, so every ambiguity resolves toward logging.
-  * **A moving car always logs**, whatever the gear says. CANParser initialises every signal to 0 and
-    on 74 platforms in the pinned opendbc 0 decodes as Park (see selfdrive/car/gear_park.py), so a
-    gear message that never arrived can read `park` for a whole drive. `PARK_RELEASE_V` is the
-    interlock that makes that cost nothing. It is an ESCAPE HATCH, not the gate: speed can only
-    RELEASE suppression, never cause it.
-  * **No silent gap.** While suppressing, one full, explicitly-marked record is still written every
-    `PARK_HEARTBEAT_S`, carrying `parkGate` and `parkSupp` (how many were suppressed). A reader can
-    always tell "the truck sat in a parking space" from "the logger died" -- which a bare gap cannot.
-  * **It announces itself.** `cloudlog.event("ces_park_gate", ...)` on the rising and falling edge
-    only -- two lines per Park episode, never per tick.
+ 1. **Only `gearShifter == park` suppresses.** Not speed, not standstill, not IsOnroad. A red-light
+    stop is `vEgo` 0 in DRIVE and keeps logging at full rate -- the stop / lurch / green-light
+    analyses live entirely in those records. Compared AS AN ENUM: `str(x) == "GearShifter.park"` is
+    always False and has already silently killed one feature here (memory capnp-enum-str-trap).
+ 2. **Fail open.** Absent carState, None/missing gear, `unknown`, a non-enum gear, an unread kill
+    switch -- all log. And a MOVING car always logs whatever the gear says (`PARK_RELEASE_V`):
+    CANParser zero-inits every signal and 0 decodes as Park on 74 platforms in the pinned opendbc
+    (selfdrive/car/gear_park.py), so a gear message that never arrived can read `park` for a whole
+    drive. Speed is an escape hatch that can only RELEASE, never a gate that can suppress.
+ 3. **No silent gap.** While suppressing, one explicitly-marked record per `PARK_HEARTBEAT_S` carries
+    `parkGate` and `parkSupp`. A gap that reads as "the logger died" is itself a Rule 2 failure.
+ 4. **It announces itself** -- `cloudlog.event("ces_park_gate", ...)` on the rising and falling edge
+    ONLY. Two lines per Park episode; this runs inside selfdrived's 100 Hz loop, so a per-tick log
+    would be its own regression.
 
-HYSTERESIS. Suppression starts only after the gear has read Park continuously for `PARK_HOLD_S`, and
-releases on the first tick that is not Park. Same 30 s as parknorec2pnw's loggerd gate, deliberately:
-the two logs then agree about which windows were parked, and a park/unpark shuffle at a rest stop
-keeps its surrounding driving context in full (30 records is nothing).
+Hysteresis: suppress after `PARK_HOLD_S` of continuous Park, release on the first non-Park tick. The
+30 s is parknorec2pnw's, deliberately, so this log and the route segments agree about which windows
+were parked -- and a rest-stop park/unpark shuffle keeps its surrounding driving context whole.
 """
 import math
 

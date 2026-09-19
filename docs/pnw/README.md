@@ -33,6 +33,7 @@ the deeper per-feature design/rationale docs.
 | [GLARE.md](GLARE.md) | Layer-C DM glare band-aid (deployed 2026-07-06) |
 | [ONROAD-CHARGING.md](ONROAD-CHARGING.md) | EV parked-while-charging reads as onroad — `gearShifter=park` is the real parked signal |
 | [PARKNOREC2PNW.md](PARKNOREC2PNW.md) | No route segments while the shifter is in Park: manager stops loggerd after 30 s of `GearPark`; GearPark writer hardened; kill switch `RecordWhileParked` |
+| [PARKGATE2PNW.md](PARKGATE2PNW.md) | The `ces_events` half of the same problem: the ~1 Hz breadcrumb stops while the shifter is in Park (93.7 % of the archived corpus was a parked truck). Gear-gated, fails open, 60 s marked heartbeat so a hold is never a silent gap; adds `gear`/`park` to every record. Corrects the 2 GB archive's retention from ~12.9 driving hours to ~140–150 |
 | [REST_AREAS.md](REST_AREAS.md) | Feasibility: mapd can't surface rest-area POIs → option (b) built |
 | [REST_AREA_DATA.md](REST_AREA_DATA.md) | The corridor rest-area JSON dataset + schema + generators |
 | [DEFER_HD_UPLOAD.md](DEFER_HD_UPLOAD.md) | "Defer HD Video Upload" toggle |

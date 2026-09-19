@@ -16,6 +16,7 @@ import pytest
 
 from cereal import car
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate as pg
 from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import ParkTickGate, LOG, HOLD, RELEASE, SUPPRESS
 
@@ -307,6 +308,7 @@ def _make_controller(monkeypatch, **over):
   c = m.CESController.__new__(m.CESController)
   c._park_gate = ParkTickGate()
   c._park_gate_on = True
+  c._park_err_t, c._park_err_n = None, 0
   c._gear = c._gear_name = c._v_ego_raw = None
   c._enabled = False
   c._steer_tick_last = -1e9
@@ -368,6 +370,13 @@ class TestTheStepsHonourTheGate:
     caps = _run_steer_log_step(monkeypatch, secs=3600, g="drive", v_ego=0.0, c=c)
     assert len(caps) == 3600
     assert all("parkGate" not in r for r in caps)
+
+  def test_the_steer_record_is_marked_parked_while_holding(self, monkeypatch):
+    """Fable finding 1 (C09): `park` must be a real reading on the CES-off record too, not a
+    constant False that happens to match every driving case."""
+    c = _make_controller(monkeypatch)
+    caps = _run_steer_log_step(monkeypatch, secs=600, g="park", v_ego=0.0, c=c)
+    assert caps and all(r["gear"] == "park" and r["park"] is True for r in caps)
 
   def test_the_release_record_reaches_the_log(self, monkeypatch):
     c = _make_controller(monkeypatch)
@@ -496,3 +505,166 @@ def test_a_fresh_controller_starts_with_the_gate_open():
   assert "self._park_gate_on = False" in body, "the gate must not default to ON before the first read"
   assert "self._park_gate = ParkTickGate()" in body
   del c
+
+
+# =====================================================================================================
+# 7. the PRODUCTION call site: _publish_status's CES-on "tick" record
+#
+# Fable review 2026-09-19 (finding 1): the first version of this file covered only _steer_log_step.
+# On the Lightning CES runs in shadow, so `_enabled` is True and the ~1 Hz breadcrumb comes from
+# _publish_status -- the 39,983 `ev:tick … stopLatch` rows in the archive were written HERE. That
+# branch had no suppression coverage at all, and a broken harness was reporting its mutants as killed.
+# =====================================================================================================
+def _publish_controller(monkeypatch):
+  """A controller stub that drives the REAL _publish_status tick branch and captures what it appends."""
+  cls = m.CESController
+
+  class Stub:
+    def __getattr__(self, n):
+      return None
+
+  c = Stub()
+  c.mem_params = None                     # skip the overlay publish; the record path is what is under test
+  c._shadow = False                       # keep the icbm overlay block out of this test's way
+  c._last_mode = "chill"                  # equal to the mode _publish_status computes -> the TICK branch
+  c._tick_last = -1e9
+  c._vtsc_tele = {}
+  c._sa_tele = {}
+  c._map_targets = []
+  c._speed_limit = 11.2
+  c._button = C.BTN_CES
+  c._ces2_urg = 0.0
+  c._ces2_div = type("D", (), {"count": 0})()
+  c._gl = type("G", (), {"state": None, "status": lambda s: None})()
+  c._sm = type("S", (), {"state": None, "status": lambda s: None})()
+  c._icbm_floor_lim = 0.0
+  c._icbm_floor_hit = False
+  # _event_record float()s these unconditionally (the permissive __getattr__ -> None would blow up
+  # inside the record, which is exactly the failure test_ces_record_fields' stub exists to avoid).
+  c._icbm_k = c._icbm_k_dist = c._icbm_k_v = 0.0
+  c._icbm_k_n = 0
+  c._icbm_k_ahead = False
+  c._icbm_k_at = c._icbm_k_at_d = c._icbm_k_at_gap = 0.0
+  c._icbm_k_at_n = 0
+  c._curve_peak = m.CurvePeak()
+  c._gear_name = None
+  c._gear = c._v_ego_raw = None
+  c._park_gate = ParkTickGate()
+  c._park_gate_on = True
+  c._park_err_t, c._park_err_n = None, 0
+  c.captured = []
+  c._append_event = c.captured.append
+  c._event_record = cls._event_record.__get__(c)
+  c._park_decision = cls._park_decision.__get__(c)
+  c._publish = cls._publish_status.__get__(c)
+  return c
+
+
+def _run_publish(monkeypatch, c, secs, g="drive", v_ego=0.0, t0=1000.0):
+  cs = car.CarState.new_message()
+  cs.gearShifter = g
+  for i in range(secs):
+    monkeypatch.setattr(m.time, "monotonic", lambda t=t0 + i: t)
+    c._gear, c._gear_name, c._v_ego_raw = cs.gearShifter, str(cs.gearShifter), v_ego
+    c._publish(None, False)
+  return c.captured
+
+
+class TestTheProductionTickPath:
+  def test_an_hour_at_a_red_light_logs_every_tick(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    caps = _run_publish(monkeypatch, c, 3600, g="drive", v_ego=0.0)
+    assert len(caps) == 3600
+    assert all(r["ev"] == "tick" and r["gear"] == "drive" and r["park"] is False for r in caps)
+    assert all("parkGate" not in r for r in caps)
+
+  def test_ten_minutes_parked_collapses_to_the_debounce_plus_one_per_minute(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    caps = _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0)
+    assert len(caps) == 30 + 10
+    assert sum(1 for r in caps if r.get("parkGate") == "hold") == 10
+    assert caps[30]["parkGate"] == "hold" and caps[30]["parkSupp"] == 0
+    assert caps[-1]["parkSupp"] == 60 * 9 - 9
+
+  def test_every_suppressed_record_is_accounted_for_in_the_log_itself(self, monkeypatch):
+    """Rule 2 end-to-end: reading ONLY the jsonl, the 600 s window reconstructs to 600 seconds."""
+    c = _publish_controller(monkeypatch)
+    n_parked = len(_run_publish(monkeypatch, c, 600, g="park", v_ego=0.0))
+    _run_publish(monkeypatch, c, 1, g="drive", v_ego=0.0, t0=1600.0)
+    rel = c.captured[-1]
+    assert rel["parkGate"] == "release"
+    assert n_parked == 40                                 # 30 debounce + 10 heartbeats
+    assert n_parked + rel["parkSupp"] + 1 == 601          # every one of the 601 ticks is accounted for
+
+  def test_the_record_is_marked_parked_while_holding(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    caps = _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0)
+    assert all(r["gear"] == "park" and r["park"] is True for r in caps)
+
+  def test_the_kill_switch_restores_full_rate_on_the_production_path(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    c._park_gate_on = False
+    caps = _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0)
+    assert len(caps) == 600
+    assert all(r["park"] is True for r in caps)      # still says the truck is parked, just keeps logging
+
+  def test_a_moving_truck_whose_gear_reads_park_is_never_suppressed_here_either(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    caps = _run_publish(monkeypatch, c, 600, g="park", v_ego=25.0)
+    assert len(caps) == 600
+    assert all(r["gear"] == "park" and r["park"] is False for r in caps)
+
+  def test_an_adopt_record_is_never_gated(self, monkeypatch):
+    """A mode transition during a hold still writes -- edge records are deliberately ungated."""
+    c = _publish_controller(monkeypatch)
+    _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0)
+    n = len(c.captured)
+    monkeypatch.setattr(m.time, "monotonic", lambda: 1600.0)
+    c._publish(None, True)                            # chill -> experimental while parked
+    assert len(c.captured) == n + 1
+    assert c.captured[-1]["ev"] == "adopt" and c.captured[-1]["park"] is True
+    assert "parkGate" not in c.captured[-1]
+
+
+class TestTheGateCanNeverReachControl:
+  """Fable finding 3: _park_decision is called OUTSIDE _steer_log_step's try, so a raise would hit
+  selfdrived's guard around experimental_request() -- which forces CES to Chill. A logging decision
+  must not be able to change what the car does."""
+
+  def _boom(self, monkeypatch, c):
+    monkeypatch.setattr(c._park_gate, "update",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("gate exploded")))
+
+  def test_a_raising_gate_fails_open_and_never_propagates(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    self._boom(monkeypatch, c)
+    said = []
+    monkeypatch.setattr(m.cloudlog, "exception", lambda msg: said.append(msg))
+    caps = _run_publish(monkeypatch, c, 120, g="park", v_ego=0.0)
+    assert len(caps) == 120, "a broken gate must keep the full-rate log, not suppress it"
+
+  def test_a_raising_gate_says_so_but_does_not_flood(self, monkeypatch):
+    c = _publish_controller(monkeypatch)
+    self._boom(monkeypatch, c)
+    said = []
+    monkeypatch.setattr(m.cloudlog, "exception", lambda msg: said.append(msg))
+    _run_publish(monkeypatch, c, 600, g="park", v_ego=0.0)
+    assert 1 <= len(said) <= 12, f"expected ~1 line per 60 s over 600 s, got {len(said)}"
+    assert "park gate raised" in said[0]
+
+  def test_the_steer_path_is_wrapped_too(self, monkeypatch):
+    c = _make_controller(monkeypatch)
+    monkeypatch.setattr(c._park_gate, "update",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("gate exploded")))
+    monkeypatch.setattr(m.cloudlog, "exception", lambda msg: None)
+    caps = _run_steer_log_step(monkeypatch, secs=120, g="park", v_ego=0.0, c=c)
+    assert len(caps) == 120
+
+  def test_both_writers_go_through_the_one_wrapper(self):
+    """Structural: neither call site may talk to the gate directly (that is what made the argument
+    mutants survive at one site while the other was covered)."""
+    import inspect
+    for meth in (m.CESController._steer_log_step, m.CESController._publish_status):
+      src = inspect.getsource(meth)
+      assert "_park_decision(" in src
+      assert "_park_gate.update(" not in src

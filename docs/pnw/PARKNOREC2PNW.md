@@ -20,8 +20,15 @@ The owner added on 2026-09-13 that this applies to the **Tesla** as well as the 
 ### What "record" means
 **No route segments.** While the gate holds, nothing is written: no rlog, qlog, qcamera, fcamera,
 ecamera or dcamera, and no thumbnails. **Out of scope**, because these are not route segments: `bootlog`
-(one per manager start), crash logs and tombstones, swaglog (`/data/log`), and
-`/data/pnw/ces_events.jsonl`.
+(one per manager start), crash logs and tombstones, and swaglog (`/data/log`).
+
+> **UPDATED 2026-09-19 (`parkgate2pnw`).** `/data/pnw/ces_events.jsonl` used to be listed here as out
+> of scope. It no longer is: 93.7 % of the archived `ces_events` corpus turned out to be a parked
+> truck, so it got its own gate — `selfdrive/controls/lib/ces_pnw/park_tick_gate.py`, same
+> `PARK_HOLD_S` = 30 s, but reading the **live `carState.gearShifter`** (it is control-path code)
+> rather than the `GearPark` param, and thinning to one marked heartbeat record a minute instead of
+> stopping entirely. **`RecordWhileParked` now governs both**: route segments *and* the `ces_events`
+> breadcrumb. See [PARKGATE2PNW.md](PARKGATE2PNW.md).
 
 ### Where the gate lives: loggerd's manager `should_run`
 `process_config.logging()` returns False while `ParkRecordGate` holds, so the manager stops **loggerd**

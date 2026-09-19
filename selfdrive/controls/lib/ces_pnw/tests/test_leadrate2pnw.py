@@ -192,6 +192,12 @@ class _SteerLogHarness:
     self.captured: list = []
     self.read_map_calls = 0
 
+  def _park_decision(self, now):
+    # parkgate2pnw: _steer_log_step now routes the park gate through this wrapper on the controller.
+    # Mirrored here (the AST harness extracts only _steer_log_step); the real wrapper's fail-open and
+    # throttled-log behaviour is covered in test_parkgate2pnw.py::TestTheGateCanNeverReachControl.
+    return self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
+
   def _read_map(self):
     self.read_map_calls += 1   # real one refreshes sl*/lc*/vtsc*/GPS from mem-params -- no-op here
 

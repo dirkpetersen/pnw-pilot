@@ -24,6 +24,7 @@ from openpilot.selfdrive.controls.lib import coopsteer_pnw as cs
 from openpilot.selfdrive.controls.lib.coopsteer_pnw import CoopSteerShadow, telemetry_fields, COOP_TELEMETRY_KEYS
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 
 DT = 0.01
@@ -545,6 +546,10 @@ class TestTelemetryArrival:
     g._icbm_k_at_d = 0.0
     g._icbm_k_at_n = 0
     g._icbm_k_at_gap = 0.0
+    # parkgate2pnw added "gear"/"park" to the enabled record; `park` comes off a real ParkTickGate
+    # (the _Permissive stub's None would raise before reaching the cp* fields under test).
+    g._gear_name = "drive"
+    g._park_gate = park_tick_gate.ParkTickGate()
     rec = _ces_cls()._event_record.__get__(g)("tick", {"vEgo": 11.0})
     assert rec["cpOff"] == pytest.approx(res.offset_deg, abs=1e-3) and rec["cpOff"] < 0
     assert rec["cpWhy"] == cs.REASON_ACTIVE and rec["cpTq"] == pytest.approx(-0.8)
@@ -569,6 +574,13 @@ class TestTelemetryArrival:
     captured = []
     g._append_event = captured.append
     g._read_map = lambda: None          # already run above; the real one would re-read the same stub
+    # parkgate2pnw: _steer_log_step now asks the park gate first, via the controller's _park_decision
+    # wrapper. Seeded with no gear at all -> the FAIL-OPEN case, so the breadcrumb is written exactly
+    # as before and every cp* assertion below is unaffected.
+    g._gear = g._gear_name = g._v_ego_raw = None
+    g._park_gate = park_tick_gate.ParkTickGate()
+    g._park_gate_on = True
+    g._park_decision = _ces_cls()._park_decision.__get__(g)
     car_state = type("CS", (), {"vEgo": 25.0})()
     sm = {"radarState": type("R", (), {"leadOne": type("L", (), {"status": False})()})()}
     _ces_cls()._steer_log_step.__get__(g)(car_state, sm)
