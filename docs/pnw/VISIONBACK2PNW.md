@@ -79,8 +79,12 @@ as its own row so a corpus contributing nothing is visible (full table:
 
 | corpus | files | records | Ford moving ticks | **ICBM ticks** |
 |---|---|---|---|---|
-| `drives/**` (22 corpora with ICBM activity, 27 without) | 92 | 730,887 | 69,288 | **3,087** |
+| `drives/**` (47 corpora: **20 carry ICBM activity, 27 do not**) | 92 | 730,887 | 69,288 | **3,087** |
 | **`/tmp/arch` continuous archive (2026-09-16/17)** | 6 | 42,918 | 1,848 | **0** |
+
+*(ICBM ticks are DEDUPED by timestamp across rotated generations of the same drive; the raw per-file
+sum is 8,719. The deduped 3,087 matches `_scratch/icbmslow` exactly, which is the first of several
+cross-checks against that independently-written harness.)*
 
 > ### ⚠️ The continuous archive contributed ZERO ICBM decisions, and the reason is Rule 3
 > The six rotated generations are **96 % parked ticks**: 41,239 of 42,918 records sit below 5 m/s.
