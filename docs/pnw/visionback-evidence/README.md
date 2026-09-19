@@ -23,6 +23,9 @@ PYTHONPATH=$PP $PY a3_giveback.py    # THE SWEEP                              ->
 python3 a4_vision_accuracy.py        # vision accuracy vs distance            -> out_a4_vision_accuracy.txt
 PYTHONPATH=$PP $PY a5_worst.py       # window sweep + named worst sites       -> out_a5_worst.txt
 PYTHONPATH=$PP $PY a6_worstsite_dump.py   # tick-by-tick of the max episodes  -> out_a6_worstsite.txt
+PYTHONPATH=$PP $PY a7_diag.py        # commanded-vs-measured + vision verdict  -> out_a7_diag.txt
+PYTHONPATH=$PP $PY a8_phantom.py     # the 2026-09-08 phantom, floor ON/OFF    -> out_a8_phantom.txt
+PYTHONPATH=$PP $PY a9_window_sensitivity.py  # apex-window sensitivity          -> out_a9_window_sensitivity.txt
 ```
 
 `a3_giveback.py` imports the SHIPPED functions from `/home/dp/gh/comma/pnw/wt-icbmslow`

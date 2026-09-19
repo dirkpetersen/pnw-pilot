@@ -1,0 +1,6 @@
+[cruise_ON] window=tight  n= 33  N0: med 1.83 max 3.81 | N2: med 1.83 max 3.81 | N5: med 1.83 max 3.81 | N10: med 1.83 max 4.68 | N15: med 1.83 max 4.68
+[cruise_ON] window=base   n= 33  N0: med 1.66 max 3.81 | N2: med 1.79 max 3.81 | N5: med 1.79 max 3.81 | N10: med 1.79 max 4.68 | N15: med 1.79 max 4.68
+[cruise_ON] window=wide   n= 32  N0: med 2.04 max 4.93 | N2: med 2.07 max 4.93 | N5: med 2.21 max 4.93 | N10: med 2.21 max 4.93 | N15: med 2.21 max 4.93
+[ALL      ] window=tight  n= 90  N0: med 1.84 max 3.81 | N2: med 1.92 max 4.10 | N5: med 1.92 max 4.70 | N10: med 2.01 max 5.80 | N15: med 2.01 max 7.01
+[ALL      ] window=base   n= 88  N0: med 1.82 max 3.81 | N2: med 1.92 max 4.10 | N5: med 1.94 max 4.70 | N10: med 2.04 max 5.80 | N15: med 2.07 max 7.01
+[ALL      ] window=wide   n= 86  N0: med 2.17 max 4.96 | N2: med 2.28 max 4.96 | N5: med 2.32 max 4.96 | N10: med 2.34 max 5.80 | N15: med 2.36 max 7.01

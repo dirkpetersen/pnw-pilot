@@ -282,7 +282,24 @@ curve at all*, which is precisely the phantom case the give-back exists to catch
 technically correct witness, still produces a **4.51 m/s²** outcome at N = 5 from its 38 eligible
 ticks, on an R = 40 m bend at 09-17 13:23:10 where a 30 mph posted limit was the only thing capping it.
 
-### 3.7 "Never above the posted limit" is unenforceable where it matters
+### 3.7 The apex-witness window does not decide the answer
+
+Repeating the sweep under the three window definitions `_scratch/icbmslow/a5_replay.py` uses
+(`a9_window_sensitivity.py`), maximum resulting a_lat:
+
+| window | population | N 0 | N 2 | N 5 | N 10 | N 15 |
+|---|---|---|---|---|---|---|
+| tight | ALL (n 90) | 3.81 | 4.10 | 4.70 | **5.80** | 7.01 |
+| base | ALL (n 88) | 3.81 | 4.10 | 4.70 | **5.80** | 7.01 |
+| wide | ALL (n 86) | 4.96 | 4.96 | 4.96 | **5.80** | 7.01 |
+| tight / base | cruise ON (n 33) | 3.81 | 3.81 | 3.81 | **4.68** | 4.68 |
+| wide | cruise ON (n 32) | 4.93 | 4.93 | 4.93 | 4.93 | 4.93 |
+
+`tight` and `base` agree exactly. `wide` raises the **baseline** to 4.93–4.96 — i.e. it is catching a
+different, tighter curve than the episode's own, which is the window-contamination artifact
+`ICBMSLOW2PNW.md` documents; it is reported, not used. **N = 10 exceeds 5.0 m/s² under all three.**
+
+### 3.8 "Never above the posted limit" is unenforceable where it matters
 
 `spdLim` reads 0.0 — posted limit unknown — on **408 of the 896** in-window map ICBM ticks (46 %), and
 on essentially the whole central-Oregon weekend, i.e. on exactly the curvy roads where a give-back
@@ -444,6 +461,9 @@ PYTHONPATH=$PP $PY a3_giveback.py    # THE SWEEP (both populations x both truths
 python3 a4_vision_accuracy.py        # vision accuracy vs distance, both terms de-biased
 PYTHONPATH=$PP $PY a5_worst.py       # window sweep, named worst sites, firing rate
 PYTHONPATH=$PP $PY a6_worstsite_dump.py   # tick-by-tick dump of the max-producing episodes
+PYTHONPATH=$PP $PY a7_diag.py             # commanded-vs-measured split + vision's verdict
+PYTHONPATH=$PP $PY a8_phantom.py          # the 2026-09-08 phantom, floor ON vs OFF
+PYTHONPATH=$PP $PY a9_window_sensitivity.py   # does the apex window decide the answer? (no)
 ```
 
 ## Related
