@@ -35,9 +35,26 @@ class _CloudlogStub:
 
 
 _swaglog_stub.cloudlog = _CloudlogStub()
-sys.modules["openpilot.common.swaglog"] = _swaglog_stub
 
-from openpilot.common import connect_backend as cb
+# FIXED 2026-09-19: this used to be a bare `sys.modules[...] = _swaglog_stub` that was NEVER undone.
+# sys.modules is per-PROCESS, so in any pytest run that collected this file alongside others, every
+# later test got the STUB instead of the real swaglog. That is not hypothetical -- it produced:
+#   * 30 errors + 1 failure in selfdrive/controls/lib/ces_pnw/tests (green on its own: 1116 passed),
+#   * and the "cannot import name 'SwaglogRotatingFileHandler' ... (unknown location)" ImportError
+#     that had common/tests/test_swaglog_rotation.py -- 26 tests for our OWN swaglog rotation
+#     feature -- erroring out and never running.
+# Two symptoms, one cause, and both looked like unrelated broken tests. Restore the real module as
+# soon as the import that needs the stub is done, so the blast radius is these few lines instead of
+# the rest of the process.
+_real_swaglog = sys.modules.get("openpilot.common.swaglog")
+sys.modules["openpilot.common.swaglog"] = _swaglog_stub
+try:
+  from openpilot.common import connect_backend as cb
+finally:
+  if _real_swaglog is not None:
+    sys.modules["openpilot.common.swaglog"] = _real_swaglog
+  else:
+    del sys.modules["openpilot.common.swaglog"]
 
 
 class FakeParams:

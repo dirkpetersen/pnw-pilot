@@ -1042,8 +1042,13 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     # canoff2pnw: reworded from "Likely Faulty Cable" — on the Lightning (ignition sensed via CAN, no 12V
     # line) the CAN bus goes quiet on a NORMAL power-off exactly like a cable fault, so "faulty cable"
     # falsely scared the driver every shutdown. The honest wording covers both (vehicle off OR wiring).
+    #
+    # SHORTENED 2026-09-19: the canoff2pnw wording ("... or Check Wiring") rendered 1928 px against the
+    # 1860 px limit, so it OVERFLOWED THE SCREEN for two months. test_alert_text_length catches exactly
+    # this and had never been run -- it lives in a directory nothing in this workbench executed until
+    # scripts/check-channel-tip.sh existed. Dropping "Check" keeps both meanings and fits.
     ET.PERMANENT: Alert(
-      "CAN Bus Disconnected — Vehicle Off or Check Wiring",
+      "CAN Bus Disconnected — Vehicle Off or Wiring",
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 1., creation_delay=1.),
