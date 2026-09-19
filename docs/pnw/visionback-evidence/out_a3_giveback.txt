@@ -1,0 +1,332 @@
+vehicle: FORD_F_150_LIGHTNING_MK1  map_scale=0.92  firm_decel=1.4  map_floor_frac=1.0  vision a_lat=2.5
+ICBM_MIN_DROP_MS=1.0  window=50-150 m
+
+ford moving ticks: 71136   DEC episodes: 251
+
+======================================================================================================================
+POPULATION = cruise_ON (ICBM could actuate)   TRUTH = kpeak_or_slk   episodes analysed: 36
+   excluded   71: no replayable MAP tick with ICBM authority (far/vision-sourced, missing inputs, or stock ACC disengaged)
+   excluded   70: below 8 m/s at episode start, or no logged target
+   excluded   68: no curvature witness in the apex window (corpus predates 2026-08-11)
+   excluded    6: apex radius < 30 m (junction/parking turn, not a road curve)
+   apex witness source: {'slKActl': 29, 'kPeak': 7}
+   episodes above 25 mph: 33
+   by corpus: {'2026-09-12/central-oregon-weekend': 13, '2026-08-12/crown-hill-both-directions': 7, '2026-09-17/curvedb-first-capture': 6, '2026-09-08/i5-evening-police-miss-and-onramp-steer': 3, '2026-08-18/i5-southbound-curve-takeover': 2, '2026-08-13/crownhill-tesla-loop': 1, '2026-08-21/starlink-leg': 1}
+
+--- vision witness = kvis ---
+    in-window tick verdicts: {'outOfWindow': 209, 'noKvis': 118, 'eligible': 31, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.38      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        1     2.00     2.00     2.00      1.66      2.47      3.81      3.81     3     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        1     2.96     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10        2     2.10     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        15        2     2.10     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.56 @09-17 18:31:42 R=263m 58mph(+2.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.31 @09-17 13:06:21 R=404m 68mph(+0.0)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.64 @09-17 18:31:42 R=263m 59mph(+3.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.31 @09-17 13:06:21 R=404m 68mph(+0.0)
+    N=10  top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.64 @09-17 18:31:42 R=263m 59mph(+3.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.31 @09-17 13:06:21 R=404m 68mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.28 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.30 p90 2.28 max 2.56 | >2.5 1 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.30 p90 2.28 max 2.64 | >2.5 1 >4.5 0
+        10  dT med  +0.00 max  +7.05 mph | alat med 1.30 p90 2.28 max 2.64 | >2.5 1 >4.5 0
+        15  dT med  +0.00 max  +7.05 mph | alat med 1.30 p90 2.28 max 2.64 | >2.5 1 >4.5 0
+
+--- vision witness = vislat_bold ---
+    in-window tick verdicts: {'outOfWindow': 209, 'eligible': 149, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.38      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       11     1.48     2.00     2.00      1.79      2.45      3.81      3.81     2     0     0  late  3  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5       11     2.46     3.80     4.88      1.79      2.45      3.81      3.81     2     0     0  late  6  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10       14     2.46     4.63     4.88      1.79      2.45      4.68      4.68     2     1     0  late  8  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=29mph
+        15       14     2.46     4.88     4.92      1.79      2.45      4.68      4.68     2     1     0  late  8  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=29mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+    N=10  top-5 a_lat: 4.68 @09-13 13:56:52 R=36m 29mph(+2.8) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.28 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +1.48 max  +2.00 mph | alat med 1.41 p90 2.39 max 2.47 | >2.5 0 >4.5 0
+         5  dT med  +1.48 max  +5.00 mph | alat med 1.58 p90 2.39 max 3.21 | >2.5 1 >4.5 0
+        10  dT med  +1.48 max +10.00 mph | alat med 1.59 p90 2.39 max 4.68 | >2.5 1 >4.5 1
+        15  dT med  +1.48 max +15.00 mph | alat med 1.59 p90 2.39 max 4.68 | >2.5 1 >4.5 1
+
+--- vision witness = vislat_strict ---
+    in-window tick verdicts: {'outOfWindow': 209, 'notACurve': 102, 'eligible': 47, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.38      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        8     1.74     2.00     2.00      1.72      2.45      3.81      3.81     2     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        8     1.78     5.00     5.00      1.72      2.45      3.81      3.81     2     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10        9     2.01    10.00    10.00      1.79      2.45      3.81      3.81     2     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        15        9     2.01    15.00    15.00      1.79      2.47      3.81      3.81     3     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+    N=10  top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.45 @09-17 18:31:42 R=263m 57mph(+0.8) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+        15  engaged   1  dV med 4.32 max 4.32 mph | a_lat med 1.66 p90 2.38 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.28 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.30 p90 2.37 max 2.47 | >2.5 0 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.54 p90 2.37 max 2.47 | >2.5 0 >4.5 0
+        10  dT med  +0.00 max +10.00 mph | alat med 1.69 p90 2.37 max 2.47 | >2.5 0 >4.5 0
+        15  dT med  +0.00 max +15.00 mph | alat med 1.69 p90 2.39 max 2.64 | >2.5 1 >4.5 0
+
+======================================================================================================================
+POPULATION = cruise_ON (ICBM could actuate)   TRUTH = slk_only   episodes analysed: 36
+   excluded   71: no replayable MAP tick with ICBM authority (far/vision-sourced, missing inputs, or stock ACC disengaged)
+   excluded   70: below 8 m/s at episode start, or no logged target
+   excluded   68: no curvature witness in the apex window (corpus predates 2026-08-11)
+   excluded    6: apex radius < 30 m (junction/parking turn, not a road curve)
+   apex witness source: {'slKActl': 36}
+   episodes above 25 mph: 33
+   by corpus: {'2026-09-12/central-oregon-weekend': 13, '2026-08-12/crown-hill-both-directions': 7, '2026-09-17/curvedb-first-capture': 6, '2026-09-08/i5-evening-police-miss-and-onramp-steer': 3, '2026-08-18/i5-southbound-curve-takeover': 2, '2026-08-13/crownhill-tesla-loop': 1, '2026-08-21/starlink-leg': 1}
+
+--- vision witness = kvis ---
+    in-window tick verdicts: {'outOfWindow': 209, 'noKvis': 118, 'eligible': 31, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.28      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        1     2.00     2.00     2.00      1.66      2.44      3.81      3.81     2     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        1     2.96     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10        2     2.10     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        15        2     2.10     2.96     2.96      1.66      2.47      3.81      3.81     3     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.44 @09-17 18:31:42 R=275m 58mph(+2.0) | 2.28 @09-12 06:55:03 R=150m 41mph(+0.0)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.52 @09-17 18:31:42 R=275m 59mph(+3.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.28 @09-12 06:55:03 R=150m 41mph(+0.0)
+    N=10  top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.52 @09-17 18:31:42 R=275m 59mph(+3.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.28 @09-12 06:55:03 R=150m 41mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.25 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.30 p90 2.25 max 2.47 | >2.5 0 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.30 p90 2.25 max 2.52 | >2.5 1 >4.5 0
+        10  dT med  +0.00 max  +7.05 mph | alat med 1.30 p90 2.25 max 2.52 | >2.5 1 >4.5 0
+        15  dT med  +0.00 max  +7.05 mph | alat med 1.30 p90 2.25 max 2.52 | >2.5 1 >4.5 0
+
+--- vision witness = vislat_bold ---
+    in-window tick verdicts: {'outOfWindow': 209, 'eligible': 149, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.28      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       11     1.48     2.00     2.00      1.79      2.39      3.81      3.81     2     0     0  late  3  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5       11     2.46     3.80     4.88      1.79      2.39      3.81      3.81     2     0     0  late  6  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10       14     2.46     4.63     4.88      1.79      2.39      4.68      4.68     2     1     0  late  8  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=29mph
+        15       14     2.46     4.88     4.92      1.79      2.39      4.68      4.68     2     1     0  late  8  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=29mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+    N=10  top-5 a_lat: 4.68 @09-13 13:56:52 R=36m 29mph(+2.8) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.25 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +1.48 max  +2.00 mph | alat med 1.41 p90 2.37 max 2.47 | >2.5 0 >4.5 0
+         5  dT med  +1.48 max  +5.00 mph | alat med 1.58 p90 2.37 max 3.21 | >2.5 1 >4.5 0
+        10  dT med  +1.48 max +10.00 mph | alat med 1.59 p90 2.37 max 4.68 | >2.5 1 >4.5 1
+        15  dT med  +1.48 max +15.00 mph | alat med 1.59 p90 2.37 max 4.68 | >2.5 1 >4.5 1
+
+--- vision witness = vislat_strict ---
+    in-window tick verdicts: {'outOfWindow': 209, 'notACurve': 102, 'eligible': 47, 'candidateBeyondModelHorizon': 28}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.66      2.28      3.81      3.81     2     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        8     1.74     2.00     2.00      1.72      2.39      3.81      3.81     2     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        8     1.78     5.00     5.00      1.72      2.39      3.81      3.81     2     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10        9     2.01    10.00    10.00      1.79      2.39      3.81      3.81     2     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        15        9     2.01    15.00    15.00      1.79      2.47      3.81      3.81     3     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+    N=10  top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.13 @09-08 19:44:07 R=172m 52mph(+0.0) | 2.47 @08-16 15:04:09 R=71m 30mph(+0.0) | 2.39 @09-13 11:15:28 R=74m 30mph(+1.5) | 2.37 @09-13 12:21:38 R=182m 46mph(+1.3)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+        15  engaged   1  dV med 4.32 max 4.32 mph | a_lat med 1.66 p90 2.28 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.30 p90 2.25 max 2.47 | >2.5 0 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.30 p90 2.34 max 2.47 | >2.5 0 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.54 p90 2.34 max 2.47 | >2.5 0 >4.5 0
+        10  dT med  +0.00 max +10.00 mph | alat med 1.69 p90 2.34 max 2.47 | >2.5 0 >4.5 0
+        15  dT med  +0.00 max +15.00 mph | alat med 1.69 p90 2.37 max 2.64 | >2.5 1 >4.5 0
+
+======================================================================================================================
+POPULATION = ALL ICBM ticks (incl. cruise off = advisory)   TRUTH = kpeak_or_slk   episodes analysed: 101
+   excluded   70: below 8 m/s at episode start, or no logged target
+   excluded   68: no curvature witness in the apex window (corpus predates 2026-08-11)
+   excluded    6: apex radius < 30 m (junction/parking turn, not a road curve)
+   excluded    6: no replayable MAP tick (far/vision-sourced, or missing mapV/mapDist/ref)
+   apex witness source: {'slKActl': 92, 'kPeak': 9}
+   episodes above 25 mph: 88
+   by corpus: {'2026-09-12/central-oregon-weekend': 64, '2026-09-17/curvedb-first-capture': 8, '2026-08-12/crown-hill-both-directions': 7, '2026-09-08/i5-evening-police-miss-and-onramp-steer': 5, '2026-08-18/i5-southbound-curve-takeover': 2, '2026-08-13/crownhill-tesla-loop': 1, '2026-08-21/starlink-leg': 1}
+
+--- vision witness = kvis ---
+    in-window tick verdicts: {'noKvis': 415, 'outOfWindow': 398, 'candidateBeyondModelHorizon': 56, 'eligible': 38}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.82      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        2     2.00     2.00     2.00      1.82      2.77      3.81      3.81    11     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        2     3.83     4.70     4.70      1.82      2.77      4.51      4.51    11     1     0  late  1  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+        10        3     2.96     4.70     4.70      1.82      2.77      4.51      4.51    11     1     0  late  2  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+        15        3     2.96     4.70     4.70      1.82      2.77      4.51      4.51    11     1     0  late  2  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.73 @09-17 13:23:10 R=40m 27mph(+2.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=5   top-5 a_lat: 4.51 @09-17 13:23:10 R=40m 30mph(+4.7) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=10  top-5 a_lat: 4.51 @09-17 13:23:10 R=40m 30mph(+4.7) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.34 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.65 p90 2.34 max 3.73 | >2.5 5 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.65 p90 2.34 max 4.51 | >2.5 5 >4.5 1
+        10  dT med  +0.00 max +10.00 mph | alat med 1.65 p90 2.34 max 4.51 | >2.5 5 >4.5 1
+        15  dT med  +0.00 max +15.00 mph | alat med 1.65 p90 2.34 max 4.51 | >2.5 5 >4.5 1
+
+--- vision witness = vislat_bold ---
+    in-window tick verdicts: {'eligible': 451, 'outOfWindow': 398, 'candidateBeyondModelHorizon': 56, 'visionAgreesOrTighter': 2}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.82      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       38     2.00     2.00     2.00      1.92      2.77      4.10      4.10    16     0     0  late  3  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=42mph
+         5       40     3.05     5.00     5.00      1.94      3.02      4.70      4.70    18     2     0  late  6  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=45mph
+        10       45     3.33    10.00    10.00      2.04      3.61      5.80      5.80    22     4     1  late  7  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=50mph
+        15       46     4.69    15.00    15.00      2.07      4.32      7.01      7.01    24     8     3  late  7  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=55mph
+    N=2   top-5 a_lat: 4.10 @09-12 14:59:36 R=87m 42mph(+2.0) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.73 @09-17 13:23:10 R=40m 27mph(+2.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5)
+    N=5   top-5 a_lat: 4.70 @09-12 14:59:36 R=87m 45mph(+5.0) | 4.51 @09-17 13:23:10 R=40m 30mph(+4.7) | 4.06 @09-12 14:56:30 R=125m 50mph(+5.0) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0)
+    N=10  top-5 a_lat: 5.80 @09-12 14:59:36 R=87m 50mph(+10.0) | 4.91 @09-12 14:56:30 R=125m 55mph(+10.0) | 4.69 @09-13 13:56:52 R=36m 29mph(+2.8) | 4.51 @09-17 13:23:10 R=40m 30mph(+4.7) | 4.18 @09-13 13:19:36 R=38m 28mph(+1.3)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   7  dV med 1.55 max 2.33 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        15  engaged  15  dV med 4.41 max 7.33 mph | a_lat med 1.87 p90 3.13 max 4.58 | >4.5 1
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.34 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +2.00 max  +2.00 mph | alat med 1.75 p90 2.56 max 4.10 | >2.5 10 >4.5 0
+         5  dT med  +2.19 max  +5.00 mph | alat med 1.87 p90 2.95 max 4.70 | >2.5 14 >4.5 2
+        10  dT med  +2.19 max +10.00 mph | alat med 1.96 p90 3.61 max 5.80 | >2.5 19 >4.5 4
+        15  dT med  +2.19 max +15.00 mph | alat med 2.00 p90 4.32 max 7.01 | >2.5 21 >4.5 8
+
+--- vision witness = vislat_strict ---
+    in-window tick verdicts: {'outOfWindow': 398, 'notACurve': 386, 'eligible': 65, 'candidateBeyondModelHorizon': 56, 'visionAgreesOrTighter': 2}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.82      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       12     1.74     2.00     2.00      1.82      2.77      3.81      3.81    12     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5       12     1.76     4.88     5.00      1.82      2.95      3.81      3.81    12     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10       14     1.76     4.88    10.00      1.84      2.95      4.18      4.18    12     0     0  late  5  09-13 13:19:36 2026-09-12/central-oregon-weekend R=38m v=28mph
+        15       14     1.99     4.92    15.00      1.84      2.95      4.64      4.64    13     1     0  late  5  09-13 13:19:36 2026-09-12/central-oregon-weekend R=38m v=30mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=10  top-5 a_lat: 4.18 @09-13 13:19:36 R=38m 28mph(+1.3) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+        15  engaged   1  dV med 4.32 max 4.32 mph | a_lat med 1.82 p90 2.77 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.34 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.67 p90 2.39 max 3.72 | >2.5 6 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.67 p90 2.46 max 3.72 | >2.5 7 >4.5 0
+        10  dT med  +0.00 max +10.00 mph | alat med 1.68 p90 2.46 max 4.18 | >2.5 7 >4.5 0
+        15  dT med  +0.00 max +15.00 mph | alat med 1.68 p90 2.47 max 4.64 | >2.5 8 >4.5 1
+
+======================================================================================================================
+POPULATION = ALL ICBM ticks (incl. cruise off = advisory)   TRUTH = slk_only   episodes analysed: 101
+   excluded   70: below 8 m/s at episode start, or no logged target
+   excluded   68: no curvature witness in the apex window (corpus predates 2026-08-11)
+   excluded    6: apex radius < 30 m (junction/parking turn, not a road curve)
+   excluded    6: no replayable MAP tick (far/vision-sourced, or missing mapV/mapDist/ref)
+   apex witness source: {'slKActl': 101}
+   episodes above 25 mph: 88
+   by corpus: {'2026-09-12/central-oregon-weekend': 64, '2026-09-17/curvedb-first-capture': 8, '2026-08-12/crown-hill-both-directions': 7, '2026-09-08/i5-evening-police-miss-and-onramp-steer': 5, '2026-08-18/i5-southbound-curve-takeover': 2, '2026-08-13/crownhill-tesla-loop': 1, '2026-08-21/starlink-leg': 1}
+
+--- vision witness = kvis ---
+    in-window tick verdicts: {'noKvis': 415, 'outOfWindow': 398, 'candidateBeyondModelHorizon': 56, 'eligible': 38}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.81      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2        2     2.00     2.00     2.00      1.81      2.77      3.81      3.81    10     0     0  late  1  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5        2     3.83     4.70     4.70      1.81      2.77      4.45      4.45    11     0     0  late  1  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+        10        3     2.96     4.70     4.70      1.81      2.77      4.45      4.45    11     0     0  late  2  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+        15        3     2.96     4.70     4.70      1.81      2.77      4.45      4.45    11     0     0  late  2  09-17 13:23:10 2026-09-17/curvedb-first-capture R=40m v=30mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.68 @09-17 13:23:10 R=40m 27mph(+2.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=5   top-5 a_lat: 4.45 @09-17 13:23:10 R=40m 30mph(+4.7) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=10  top-5 a_lat: 4.45 @09-17 13:23:10 R=40m 30mph(+4.7) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        15  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.32 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.65 p90 2.34 max 3.72 | >2.5 4 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.65 p90 2.34 max 4.45 | >2.5 5 >4.5 0
+        10  dT med  +0.00 max +10.00 mph | alat med 1.65 p90 2.34 max 4.45 | >2.5 5 >4.5 0
+        15  dT med  +0.00 max +15.00 mph | alat med 1.65 p90 2.34 max 4.45 | >2.5 5 >4.5 0
+
+--- vision witness = vislat_bold ---
+    in-window tick verdicts: {'eligible': 451, 'outOfWindow': 398, 'candidateBeyondModelHorizon': 56, 'visionAgreesOrTighter': 2}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.81      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       38     2.00     2.00     2.00      1.92      2.77      4.10      4.10    16     0     0  late  3  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=42mph
+         5       40     3.05     5.00     5.00      1.94      3.02      4.70      4.70    18     1     0  late  6  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=45mph
+        10       45     3.33    10.00    10.00      2.01      3.61      5.80      5.80    22     3     1  late  7  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=50mph
+        15       46     4.69    15.00    15.00      2.03      4.32      7.01      7.01    24     7     3  late  7  09-12 14:59:36 2026-09-12/central-oregon-weekend R=87m v=55mph
+    N=2   top-5 a_lat: 4.10 @09-12 14:59:36 R=87m 42mph(+2.0) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.68 @09-17 13:23:10 R=40m 27mph(+2.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5)
+    N=5   top-5 a_lat: 4.70 @09-12 14:59:36 R=87m 45mph(+5.0) | 4.45 @09-17 13:23:10 R=40m 30mph(+4.7) | 4.06 @09-12 14:56:30 R=125m 50mph(+5.0) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0)
+    N=10  top-5 a_lat: 5.80 @09-12 14:59:36 R=87m 50mph(+10.0) | 4.91 @09-12 14:56:30 R=125m 55mph(+10.0) | 4.69 @09-13 13:56:52 R=36m 29mph(+2.8) | 4.45 @09-17 13:23:10 R=40m 30mph(+4.7) | 4.18 @09-13 13:19:36 R=38m 28mph(+1.3)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   7  dV med 1.55 max 2.33 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        15  engaged  15  dV med 4.41 max 7.33 mph | a_lat med 1.86 p90 3.13 max 4.58 | >4.5 1
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.32 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +2.00 max  +2.00 mph | alat med 1.75 p90 2.56 max 4.10 | >2.5 10 >4.5 0
+         5  dT med  +2.19 max  +5.00 mph | alat med 1.87 p90 2.95 max 4.70 | >2.5 14 >4.5 1
+        10  dT med  +2.19 max +10.00 mph | alat med 1.95 p90 3.61 max 5.80 | >2.5 19 >4.5 3
+        15  dT med  +2.19 max +15.00 mph | alat med 1.99 p90 4.32 max 7.01 | >2.5 21 >4.5 7
+
+--- vision witness = vislat_strict ---
+    in-window tick verdicts: {'outOfWindow': 398, 'notACurve': 386, 'eligible': 65, 'candidateBeyondModelHorizon': 56, 'visionAgreesOrTighter': 2}
+     N mph  engaged   dV med   dV p90   dV max  alat med  alat p90  alat p99  alat MAX  >2.5  >4.5  >5.0   worst site
+         0        0     0.00     0.00     0.00      1.81      2.77      3.81      3.81    10     0     0  late  0  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         2       12     1.74     2.00     2.00      1.81      2.77      3.81      3.81    12     0     0  late  2  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+         5       12     1.76     4.88     5.00      1.81      2.95      3.81      3.81    12     0     0  late  5  09-13 13:56:52 2026-09-12/central-oregon-weekend R=36m v=26mph
+        10       14     1.76     4.88    10.00      1.82      2.95      4.18      4.18    12     0     0  late  5  09-13 13:19:36 2026-09-12/central-oregon-weekend R=38m v=28mph
+        15       14     1.99     4.92    15.00      1.82      2.95      4.64      4.64    13     1     0  late  5  09-13 13:19:36 2026-09-12/central-oregon-weekend R=38m v=30mph
+    N=2   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=5   top-5 a_lat: 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.81 @09-13 13:19:36 R=38m 27mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+    N=10  top-5 a_lat: 4.18 @09-13 13:19:36 R=38m 28mph(+1.3) | 3.81 @09-13 13:56:52 R=36m 26mph(+0.0) | 3.72 @09-12 14:59:36 R=87m 40mph(+0.0) | 3.61 @09-12 14:57:23 R=83m 39mph(+1.5) | 3.55 @09-13 13:55:19 R=98m 42mph(+0.0)
+     N mph  UNLATCHED (give-back released at 50 m, walk resumes 2.5 mph/s):
+         0  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         2  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+         5  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        10  engaged   0  dV med 0.00 max 0.00 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+        15  engaged   1  dV med 4.32 max 4.32 mph | a_lat med 1.81 p90 2.77 max 3.81 | >4.5 0
+     N mph   --- a_lat at the COMMANDED target (icbmslow-comparable) ---
+         0  dT med  +0.00 max  +0.00 mph | alat med 1.65 p90 2.32 max 3.72 | >2.5 4 >4.5 0
+         2  dT med  +0.00 max  +2.00 mph | alat med 1.67 p90 2.39 max 3.72 | >2.5 6 >4.5 0
+         5  dT med  +0.00 max  +5.00 mph | alat med 1.67 p90 2.46 max 3.72 | >2.5 7 >4.5 0
+        10  dT med  +0.00 max +10.00 mph | alat med 1.68 p90 2.46 max 4.18 | >2.5 7 >4.5 0
+        15  dT med  +0.00 max +15.00 mph | alat med 1.68 p90 2.47 max 4.64 | >2.5 8 >4.5 1

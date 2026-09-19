@@ -1,0 +1,80 @@
+EXPOSURE (Ford, moving ticks, duplicate generations summed -> an OVER-count of exposure, i.e. a conservative UNDER-count of the firing rate):
+   19.5 driving hours, 808 miles across 23 corpora
+
+==============================================================================================================
+WINDOW SENSITIVITY (vision witness = vislat_bold; a_lat at max(measured apex speed, counterfactual target))
+window           N  episodes  engaged   dV med  a_lat med     p90     max  >4.5  >5.0
+50-150 m         0        88        0     0.00       1.82    2.77    3.81     0     0
+50-150 m         2        88       38     2.00       1.92    2.77    4.10     0     0
+50-150 m         5        88       40     3.05       1.94    3.02    4.70     2     0
+50-150 m        10        88       45     3.33       2.04    3.61    5.80     4     1
+50-100 m         0        88        0     0.00       1.82    2.77    3.81     0     0
+50-100 m         2        88       32     2.00       1.92    2.77    4.10     0     0
+50-100 m         5        88       33     4.82       1.94    3.02    4.70     2     0
+50-100 m        10        88       38     4.66       2.01    3.63    5.80     5     2
+100-150 m        0        88        0     0.00       1.82    2.77    3.81     0     0
+100-150 m        2        88       35     2.00       1.92    2.77    4.10     0     0
+100-150 m        5        88       37     4.70       1.92    3.02    4.70     2     0
+100-150 m       10        88       41     4.70       2.03    3.63    5.80     4     1
+0-50 m           0        88        0     0.00       1.82    2.77    3.81     0     0
+0-50 m           2        88       21     2.00       1.87    2.77    4.10     0     0
+0-50 m           5        88       23     5.00       1.89    3.02    4.70     1     0
+0-50 m          10        88       27     7.76       1.92    3.41    5.80     3     2
+0-300 m          0        88        0     0.00       1.82    2.77    3.81     0     0
+0-300 m          2        88       36     2.00       1.89    2.77    4.10     0     0
+0-300 m          5        88       40     4.12       1.92    3.02    4.70     2     0
+0-300 m         10        88       46     4.09       1.97    3.61    5.80     4     1
+
+==============================================================================================================
+EPISODES OVER 3.0 m/s^2 AT ANY N  --  vision witness = vislat_bold  (n=88 episodes)
+PT time             corpus                                   R m  mapV  set post    a@N0    a@N2    a@N5   a@N10   mph0   mph2   mph5  mph10  ksrc  candDists
+09-12 14:59:36    2026-09-12/central-oregon-weekend         87     0   59    0    3.72    4.10    4.70    5.80   40.3   42.3   45.3   50.3  slKActl [148, 130, 113, 97, 83, 68, 54, 42, 27]
+09-12 14:56:30    2026-09-12/central-oregon-weekend        125    45   59    0    3.30    3.59    4.06    4.91   45.4   47.4   50.4   55.4  slKActl [145, 128, 112, 99, 85]
+09-13 13:56:52    2026-09-12/central-oregon-weekend         36    19   63    0    3.81    3.81    3.81    4.69   26.2   26.2   26.2   29.0  slKActl [55, 39, 24, 165, 160, 158, 143, 147, 134, 130, 120, 110]
+09-17 13:23:10    2026-09-17/curvedb-first-capture          40    25   69   30    3.20    3.73    4.51    4.51   25.3   27.3   30.0   30.0  kPeak   [100, 112, 125, 137]
+09-13 13:19:36    2026-09-12/central-oregon-weekend         38    18   42    0    3.81    3.81    3.81    4.18   26.8   26.8   26.8   28.1  slKActl [65, 65]
+09-12 14:57:54    2026-09-12/central-oregon-weekend        118    37   59    0    2.34    2.60    3.02    3.77   37.1   39.1   42.1   47.1  slKActl [11, 7, 18, 30, 39, 47, 60, 72, 85, 96, 108, 118]
+09-12 14:53:02    2026-09-12/central-oregon-weekend        117    37   59    0    2.30    2.55    2.97    3.72   36.7   38.7   41.7   46.7  slKActl [149, 134, 120, 89, 80]
+09-12 14:53:44    2026-09-12/central-oregon-weekend        154    43   59    0    2.39    2.62    2.98    3.63   42.9   44.9   47.9   52.9  slKActl [165, 148, 132, 114, 97, 82, 67, 52, 37, 6, 10, 24]
+09-12 14:57:23    2026-09-12/central-oregon-weekend         83    37   59    0    3.33    3.61    3.61    3.61   37.1   38.6   38.6   38.6  slKActl [147, 132, 114, 98, 84, 69, 55, 39, 9, 9, 26, 44]
+09-12 14:59:56    2026-09-12/central-oregon-weekend         87    30   59    0    2.00    2.28    2.74    3.58   29.5   31.5   34.5   39.5  slKActl [133, 131, 115, 100, 132, 121]
+09-13 13:55:19    2026-09-12/central-oregon-weekend         98    32   42    0    3.55    3.55    3.55    3.55   41.8   41.8   41.8   41.8  slKActl [86, 73]
+09-12 14:56:43    2026-09-12/central-oregon-weekend        175    45   59    0    2.35    2.56    2.90    3.50   45.4   47.4   50.4   55.4  slKActl [27, 12, 7, 21, 37, 53, 69, 85, 100, 113, 127, 142]
+09-12 15:00:07    2026-09-12/central-oregon-weekend         92    30   59    0    1.90    2.17    2.60    3.41   29.5   31.5   34.5   39.5  slKActl [48, 35, 24, 1, 13, 27, 41, 55, 75, 86, 98, 112]
+09-12 15:03:34    2026-09-12/central-oregon-weekend         83    27   59    0    1.73    1.99    2.43    3.25   26.8   28.8   31.8   36.8  slKActl [109, 100, 88, 80, 67, 55, 96, 86, 74, 62, 52, 43]
+09-12 15:00:29    2026-09-12/central-oregon-weekend         86    52   59    0    1.67    1.93    2.35    3.15   26.8   28.8   31.8   36.8  slKActl [47, 57, 70, 85, 100, 112, 122, 136, 118, 109, 96, 83]
+09-08 19:44:07    2026-09-08/i5-evening-police-miss-an     172    36   60   60    3.13    3.13    3.13    3.13   51.9   51.9   51.9   51.9  slKActl [124, 124, 98, 72, 49, 7, 18, 42, 65, 90, 90, 114]
+09-13 12:58:52    2026-09-12/central-oregon-weekend         46    16   42    0    2.77    2.77    2.77    3.00   25.3   25.3   25.3   26.3  slKActl [90, 129]
+   N=2   engages on 38/88 episodes = 1.95/driving-hour, 4.70/100 mi; median gain 2.00 mph, total 66 mph-episodes
+   N=5   engages on 40/88 episodes = 2.06/driving-hour, 4.95/100 mi; median gain 3.05 mph, total 134 mph-episodes
+   N=10  engages on 45/88 episodes = 2.31/driving-hour, 5.57/100 mi; median gain 3.33 mph, total 229 mph-episodes
+
+==============================================================================================================
+EPISODES OVER 3.0 m/s^2 AT ANY N  --  vision witness = vislat_strict  (n=88 episodes)
+PT time             corpus                                   R m  mapV  set post    a@N0    a@N2    a@N5   a@N10   mph0   mph2   mph5  mph10  ksrc  candDists
+09-13 13:19:36    2026-09-12/central-oregon-weekend         38    18   42    0    3.81    3.81    3.81    4.18   26.8   26.8   26.8   28.1  slKActl [65, 65]
+09-13 13:56:52    2026-09-12/central-oregon-weekend         36    19   63    0    3.81    3.81    3.81    3.81   26.2   26.2   26.2   26.2  slKActl [55, 39, 24, 165, 160, 158, 143, 147, 134, 130, 120, 110]
+09-12 14:59:36    2026-09-12/central-oregon-weekend         87     0   59    0    3.72    3.72    3.72    3.72   40.3   40.3   40.3   40.3  slKActl [148, 130, 113, 97, 83, 68, 54, 42, 27]
+09-12 14:57:23    2026-09-12/central-oregon-weekend         83    37   59    0    3.33    3.61    3.61    3.61   37.1   38.6   38.6   38.6  slKActl [147, 132, 114, 98, 84, 69, 55, 39, 9, 9, 26, 44]
+09-13 13:55:19    2026-09-12/central-oregon-weekend         98    32   42    0    3.55    3.55    3.55    3.55   41.8   41.8   41.8   41.8  slKActl [86, 73]
+09-12 14:56:30    2026-09-12/central-oregon-weekend        125    45   59    0    3.30    3.30    3.30    3.30   45.4   45.4   45.4   45.4  slKActl [145, 128, 112, 99, 85]
+09-17 13:23:10    2026-09-17/curvedb-first-capture          40    25   69   30    3.20    3.20    3.20    3.20   25.3   25.3   25.3   25.3  kPeak   [100, 112, 125, 137]
+09-08 19:44:07    2026-09-08/i5-evening-police-miss-an     172    36   60   60    3.13    3.13    3.13    3.13   51.9   51.9   51.9   51.9  slKActl [124, 124, 98, 72, 49, 7, 18, 42, 65, 90, 90, 114]
+   N=2   engages on 12/88 episodes = 0.62/driving-hour, 1.48/100 mi; median gain 1.74 mph, total 18 mph-episodes
+   N=5   engages on 12/88 episodes = 0.62/driving-hour, 1.48/100 mi; median gain 1.76 mph, total 29 mph-episodes
+   N=10  engages on 14/88 episodes = 0.72/driving-hour, 1.73/100 mi; median gain 1.76 mph, total 40 mph-episodes
+
+==============================================================================================================
+EPISODES OVER 3.0 m/s^2 AT ANY N  --  vision witness = kvis  (n=88 episodes)
+PT time             corpus                                   R m  mapV  set post    a@N0    a@N2    a@N5   a@N10   mph0   mph2   mph5  mph10  ksrc  candDists
+09-17 13:23:10    2026-09-17/curvedb-first-capture          40    25   69   30    3.20    3.73    4.51    4.51   25.3   27.3   30.0   30.0  kPeak   [100, 112, 125, 137]
+09-13 13:56:52    2026-09-12/central-oregon-weekend         36    19   63    0    3.81    3.81    3.81    3.81   26.2   26.2   26.2   26.2  slKActl [55, 39, 24, 165, 160, 158, 143, 147, 134, 130, 120, 110]
+09-13 13:19:36    2026-09-12/central-oregon-weekend         38    18   42    0    3.81    3.81    3.81    3.81   26.8   26.8   26.8   26.8  slKActl [65, 65]
+09-12 14:59:36    2026-09-12/central-oregon-weekend         87     0   59    0    3.72    3.72    3.72    3.72   40.3   40.3   40.3   40.3  slKActl [148, 130, 113, 97, 83, 68, 54, 42, 27]
+09-13 13:55:19    2026-09-12/central-oregon-weekend         98    32   42    0    3.55    3.55    3.55    3.55   41.8   41.8   41.8   41.8  slKActl [86, 73]
+09-12 14:57:23    2026-09-12/central-oregon-weekend         83    37   59    0    3.33    3.33    3.33    3.33   37.1   37.1   37.1   37.1  slKActl [147, 132, 114, 98, 84, 69, 55, 39, 9, 9, 26, 44]
+09-12 14:56:30    2026-09-12/central-oregon-weekend        125    45   59    0    3.30    3.30    3.30    3.30   45.4   45.4   45.4   45.4  slKActl [145, 128, 112, 99, 85]
+09-08 19:44:07    2026-09-08/i5-evening-police-miss-an     172    36   60   60    3.13    3.13    3.13    3.13   51.9   51.9   51.9   51.9  slKActl [124, 124, 98, 72, 49, 7, 18, 42, 65, 90, 90, 114]
+   N=2   engages on 2/88 episodes = 0.10/driving-hour, 0.25/100 mi; median gain 2.00 mph, total 4 mph-episodes
+   N=5   engages on 2/88 episodes = 0.10/driving-hour, 0.25/100 mi; median gain 3.83 mph, total 8 mph-episodes
+   N=10  engages on 3/88 episodes = 0.15/driving-hour, 0.37/100 mi; median gain 2.96 mph, total 9 mph-episodes

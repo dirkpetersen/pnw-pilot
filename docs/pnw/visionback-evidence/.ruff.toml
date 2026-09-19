@@ -1,0 +1,10 @@
+# This directory is a committed COPY of the offline analysis harness that lives in the workbench at
+# /home/dp/gh/comma/_scratch/visionback/ (the project's "harness in _scratch/" rule). It is evidence,
+# not shipped code: nothing here is imported by the car, by tools/, or by any test. It is committed
+# so the numbers in ../VISIONBACK2PNW.md are reproducible (defect D12).
+#
+# Scoped lint relaxation so a verbatim copy of a working harness does not have to be edited -- and
+# therefore risked -- to satisfy the tree's house style. The relaxation cannot reach any other
+# directory: ruff resolves the CLOSEST config file for each checked file.
+extend = "../../../pyproject.toml"
+lint.ignore = ["ISC002", "RUF100", "E401", "F541", "C420", "F401"]

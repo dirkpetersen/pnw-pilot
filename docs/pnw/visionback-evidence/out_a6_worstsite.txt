@@ -1,0 +1,154 @@
+POSTED-LIMIT AVAILABILITY on in-window map ticks: {'in-window map ticks': 896, 'posted UNKNOWN (spdLim 0)': 408, 'posted known': 488}
+  -> 'never above the posted limit' is unenforceable wherever spdLim is 0; on those ticks
+     the only remaining cap is the driver's own set speed.
+
+======================================================================================================================
+EPISODE 09-12 14:56:30 PT   2026-09-12/central-oregon-weekend   9 ticks
+PT          src   vEgo    set  icbmT  modelT   mapV   mapD  spdLim  visLat visTtc   v_vis  mdlEndX  icbmKVis  slKActl   kPeak  a_lat
+14:56:30    far   35.6   59.0   41.0     nan   62.4     58     0.0   -1.31    1.0     inf      165       nan  0.00384     nan   0.97
+14:56:31    far   35.3   59.0   41.0     nan   57.3    147     0.0   -1.13    1.0     inf      161       nan  0.00472     nan   1.18
+14:56:32    far   35.3   59.0   41.0     nan   51.4    153     0.0   -0.98    1.0     inf      156       nan  0.00359     nan   0.90
+14:56:33    far   35.1   59.0   41.0     nan   51.4    136     0.0   -1.06    1.0     inf      159       nan  0.00339     nan   0.84
+14:56:34    map   34.2   59.0   41.0    45.4   45.4    145     0.0    0.97    6.6     inf      156       nan  0.00247     nan   0.58
+14:56:36    map   32.9   59.0   40.6    45.4   45.4    128     0.0    1.85    5.6     inf      133       nan  0.00199     nan   0.43
+14:56:37    map   31.8   59.0   39.5    45.4   45.4    112     0.0    1.97    4.3    35.8      128       nan  0.00089     nan   0.18
+14:56:38    map   31.3   59.0   38.7    45.4   45.4     99     0.0    1.80    2.8     inf      139       nan  0.00006     nan   0.01
+14:56:39    map   30.6   59.0   38.4    45.4   45.4     85     0.0    1.87    1.2     inf      141       nan  0.00275     nan   0.52
+  --- the 24 s after the last decision tick (the curve itself) ---
+    14:56:40  v= 30.4 mph  k=0.00787 (R=   127 m)  a_lat= 1.46  strPrs=True slSat=False blnk=False
+    14:56:41  v= 30.9 mph  k=0.00800 (R=   125 m)  a_lat= 1.52  strPrs=True slSat=False blnk=False
+    14:56:42  v= 32.0 mph  k=0.00658 (R=   152 m)  a_lat= 1.34  strPrs=True slSat=False blnk=False
+    14:56:43  v= 33.3 mph  k=0.00477 (R=   210 m)  a_lat= 1.06  strPrs=True slSat=False blnk=False
+    14:56:44  v= 34.2 mph  k=0.00370 (R=   270 m)  a_lat= 0.87  strPrs=True slSat=False blnk=False
+    14:56:45  v= 34.7 mph  k=0.00322 (R=   311 m)  a_lat= 0.77  strPrs=True slSat=False blnk=False
+    14:56:46  v= 34.9 mph  k=0.00393 (R=   254 m)  a_lat= 0.96  strPrs=True slSat=False blnk=False
+    14:56:47  v= 34.9 mph  k=0.00370 (R=   270 m)  a_lat= 0.90  strPrs=True slSat=False blnk=False
+    14:56:48  v= 34.9 mph  k=0.00322 (R=   310 m)  a_lat= 0.78  strPrs=True slSat=False blnk=False
+    14:56:49  v= 34.7 mph  k=0.00385 (R=   260 m)  a_lat= 0.92  strPrs=True slSat=False blnk=False
+    14:56:50  v= 35.1 mph  k=0.00288 (R=   347 m)  a_lat= 0.71  strPrs=True slSat=False blnk=False
+    14:56:51  v= 35.3 mph  k=0.00244 (R=   410 m)  a_lat= 0.61  strPrs=False slSat=False blnk=False
+    14:56:52  v= 35.6 mph  k=0.00203 (R=   493 m)  a_lat= 0.51  strPrs=False slSat=False blnk=False
+    14:56:53  v= 36.0 mph  k=0.00025 (R=  4000 m)  a_lat= 0.06  strPrs=False slSat=False blnk=False
+    14:56:54  v= 36.2 mph  k=0.00015 (R=  6757 m)  a_lat= 0.04  strPrs=False slSat=False blnk=False
+    14:56:55  v= 36.7 mph  k=0.00017 (R=  5848 m)  a_lat= 0.05  strPrs=False slSat=False blnk=False
+    14:56:56  v= 36.7 mph  k=0.00024 (R=  4115 m)  a_lat= 0.07  strPrs=False slSat=False blnk=False
+    14:56:57  v= 36.5 mph  k=0.00039 (R=  2558 m)  a_lat= 0.10  strPrs=True slSat=False blnk=False
+    14:56:58  v= 36.5 mph  k=0.00133 (R=   755 m)  a_lat= 0.35  strPrs=True slSat=False blnk=False
+    14:56:59  v= 36.5 mph  k=0.00119 (R=   839 m)  a_lat= 0.32  strPrs=False slSat=False blnk=False
+    14:57:00  v= 35.8 mph  k=0.00037 (R=  2710 m)  a_lat= 0.09  strPrs=True slSat=False blnk=False
+    14:57:01  v= 34.7 mph  k=0.00147 (R=   681 m)  a_lat= 0.35  strPrs=True slSat=False blnk=False
+    14:57:02  v= 33.1 mph  k=0.00233 (R=   428 m)  a_lat= 0.51  strPrs=True slSat=False blnk=False
+    14:57:03  v= 32.7 mph  k=0.00358 (R=   279 m)  a_lat= 0.76  strPrs=True slSat=False blnk=False
+
+======================================================================================================================
+EPISODE 09-12 14:59:36 PT   2026-09-12/central-oregon-weekend   17 ticks
+PT          src   vEgo    set  icbmT  modelT   mapV   mapD  spdLim  visLat visTtc   v_vis  mdlEndX  icbmKVis  slKActl   kPeak  a_lat
+14:59:36    far   32.0   59.0   36.3     nan    0.0      0     0.0   -0.09    1.0     inf      141       nan  0.00008     nan   0.02
+14:59:37    far   32.0   59.0   36.3     nan    0.0      0     0.0   -0.24    1.0     inf      140       nan  0.00076     nan   0.16
+14:59:38    far   32.2   59.0   36.3     nan    0.0      0     0.0   -0.18    1.0     inf      141       nan  0.00103     nan   0.21
+14:59:39    far   32.9   59.0   36.3     nan    0.0      0     0.0   -0.14    1.0     inf      143       nan  0.00018     nan   0.04
+14:59:40    far   33.1   59.0   36.3     nan    0.0      0     0.0    0.13    1.0     inf      145       nan  0.00019     nan   0.04
+14:59:41    far   33.6   59.0   36.3     nan    0.0      0     0.0   -0.38    8.8     inf      153       nan  0.00011     nan   0.02
+14:59:42    far   33.8   59.0   36.3     nan   88.4    138     0.0   -0.53    8.2     inf      157       nan  0.00048     nan   0.11
+14:59:43    far   33.8   59.0   36.3     nan   56.1    147     0.0   -0.43    8.2     inf      154       nan  0.00056     nan   0.13
+14:59:44    map   34.0   59.0   36.3    40.3   40.3    148     0.0   -0.72    7.1     inf      150       nan  0.00016     nan   0.04
+14:59:45    map   33.8   59.0   36.3    40.3   40.3    130     0.0   -0.90    7.1     inf      150       nan  0.00012     nan   0.03
+14:59:46    map   33.3   59.0   36.3    40.3   40.3    113     0.0   -1.22    6.6     inf      150       nan  0.00043     nan   0.09
+14:59:47    map   32.9   59.0   36.3    40.3   40.3     97     0.0   -1.28    6.6     inf      144       nan  0.00016     nan   0.04
+14:59:48    map   32.2   59.0   36.3    40.3   40.3     83     0.0   -1.21    4.7     inf      136       nan  0.00025     nan   0.05
+14:59:49    map   31.5   59.0   36.3    40.3   40.3     68     0.0   -1.39    4.3     inf      125       nan  0.00001     nan   0.00
+14:59:50    map   30.6   59.0   36.3    40.3   40.3     54     0.0   -1.01    3.5     inf      133       nan  0.00047     nan   0.09
+14:59:51    map   31.1   59.0   36.3    40.3   40.3     42     0.0   -1.16    3.5     inf      133       nan  0.00301     nan   0.58
+14:59:52    map   31.5   59.0   36.3    40.3   40.3     27     0.0   -1.36    1.7     inf      134       nan  0.00511     nan   1.02
+  --- the 24 s after the last decision tick (the curve itself) ---
+    14:59:53  v= 32.0 mph  k=0.00651 (R=   154 m)  a_lat= 1.33  strPrs=True slSat=False blnk=False
+    14:59:54  v= 32.0 mph  k=0.00816 (R=   123 m)  a_lat= 1.67  strPrs=True slSat=False blnk=False
+    14:59:55  v= 31.5 mph  k=0.00860 (R=   116 m)  a_lat= 1.71  strPrs=True slSat=False blnk=False
+    14:59:56  v= 31.1 mph  k=0.00500 (R=   200 m)  a_lat= 0.97  strPrs=False slSat=False blnk=False
+    14:59:57  v= 30.2 mph  k=0.00026 (R=  3817 m)  a_lat= 0.05  strPrs=False slSat=False blnk=False
+    14:59:58  v= 30.0 mph  k=0.00084 (R=  1196 m)  a_lat= 0.15  strPrs=True slSat=False blnk=False
+    14:59:59  v= 31.1 mph  k=0.00212 (R=   471 m)  a_lat= 0.41  strPrs=True slSat=False blnk=False
+    15:00:00  v= 31.8 mph  k=0.00284 (R=   351 m)  a_lat= 0.57  strPrs=True slSat=False blnk=False
+    15:00:01  v= 31.3 mph  k=0.00411 (R=   243 m)  a_lat= 0.81  strPrs=True slSat=False blnk=False
+    15:00:02  v= 30.6 mph  k=0.00725 (R=   138 m)  a_lat= 1.36  strPrs=True slSat=False blnk=False
+    15:00:03  v= 29.8 mph  k=0.00905 (R=   110 m)  a_lat= 1.60  strPrs=True slSat=False blnk=False
+    15:00:04  v= 28.4 mph  k=0.00929 (R=   108 m)  a_lat= 1.50  strPrs=True slSat=False blnk=False
+    15:00:05  v= 27.3 mph  k=0.01067 (R=    94 m)  a_lat= 1.59  strPrs=True slSat=False blnk=False
+    15:00:06  v= 26.4 mph  k=0.01148 (R=    87 m)  a_lat= 1.60  strPrs=True slSat=False blnk=False
+    15:00:07  v= 25.7 mph  k=0.01091 (R=    92 m)  a_lat= 1.44  strPrs=True slSat=False blnk=False
+    15:00:08  v= 25.1 mph  k=0.00860 (R=   116 m)  a_lat= 1.08  strPrs=True slSat=False blnk=False
+    15:00:09  v= 24.8 mph  k=0.01011 (R=    99 m)  a_lat= 1.25  strPrs=True slSat=False blnk=False
+    15:00:10  v= 24.8 mph  k=0.00999 (R=   100 m)  a_lat= 1.23  strPrs=True slSat=False blnk=False
+    15:00:11  v= 26.2 mph  k=0.00829 (R=   121 m)  a_lat= 1.14  strPrs=True slSat=False blnk=False
+    15:00:12  v= 28.0 mph  k=0.00696 (R=   144 m)  a_lat= 1.09  strPrs=True slSat=False blnk=False
+    15:00:13  v= 29.8 mph  k=0.00311 (R=   321 m)  a_lat= 0.55  strPrs=False slSat=False blnk=False
+    15:00:14  v= 31.1 mph  k=0.00132 (R=   758 m)  a_lat= 0.26  strPrs=False slSat=False blnk=False
+    15:00:15  v= 32.0 mph  k=0.00028 (R=  3521 m)  a_lat= 0.06  strPrs=False slSat=False blnk=False
+    15:00:16  v= 32.4 mph  k=0.00028 (R=  3584 m)  a_lat= 0.06  strPrs=False slSat=False blnk=False
+
+======================================================================================================================
+EPISODE 09-13 13:56:52 PT   2026-09-12/central-oregon-weekend   17 ticks
+PT          src   vEgo    set  icbmT  modelT   mapV   mapD  spdLim  visLat visTtc   v_vis  mdlEndX  icbmKVis  slKActl   kPeak  a_lat
+13:56:52    map   36.0   63.0   38.7    42.7   42.7     55     0.0   -0.18    1.2     inf      188       nan  0.00015     nan   0.04
+13:56:53    map   37.4   63.0   38.7    42.7   42.7     39     0.0   -0.22    2.5     inf      173       nan  0.00021     nan   0.06
+13:56:54    map   39.1   63.0   38.7    42.7   42.7     24     0.0   -0.20    1.4     inf      180       nan  0.00042     nan   0.13
+13:56:55    map   40.7   63.0   38.7     nan    0.0      0     0.0   -0.22    1.0     inf      168       nan  0.00039     nan   0.13
+13:56:56    far   40.3   63.0   20.0     nan    0.0      0     0.0   -0.27    1.0     inf      165       nan  0.00043     nan   0.14
+13:56:59    far   36.0   39.0   20.0     nan    0.0      0     0.0   -0.04    1.0     inf      157       nan  0.00023     nan   0.06
+13:57:00    map   36.9   37.0   24.2    24.8   24.8    165     0.0    0.03    1.0     inf      166       nan  0.00002     nan   0.01
+13:57:01    map   36.7   34.0   22.7    23.5   23.5    160     0.0    0.06    1.0     inf      160       nan  0.00002     nan   0.01
+13:57:02    map   36.0   32.0   20.0    20.8   20.8    158     0.0    0.07    1.0     inf      157       nan  0.00017     nan   0.04
+13:57:03    map   34.9   29.0   20.0    20.8   20.8    143     0.0   -0.08    1.0     inf      156       nan  0.00019     nan   0.05
+13:57:04    map   33.3   27.0   19.2    19.9   19.9    147     0.0   -0.10    1.0     inf      129       nan  0.00018     nan   0.04
+13:57:05    map   31.1   33.0   19.2    19.9   19.9    134     0.0   -0.19    1.0     inf       95       nan  0.00020     nan   0.04
+13:57:06    map   31.8   33.0   18.7     nan   19.0    141     0.0    1.55    6.6     inf      102       nan  0.00068     nan   0.14
+13:57:07    map   33.1   33.0   18.3    19.0   19.0    130     0.0    2.29    6.1    34.6       88       nan  0.00017     nan   0.04
+13:57:08    map   34.0   32.0   18.3    19.0   19.0    120     0.0    2.73    5.6    32.5       88       nan  0.00003     nan   0.01
+13:57:09    map   33.8   29.0   18.3    19.0   19.0    110     0.0    2.74    5.6    32.3       84       nan  0.00144     nan   0.33
+13:57:10    map   33.3   27.0   18.2    19.0   19.0    101     0.0    3.23    5.2    29.3       61       nan  0.00415     nan   0.92
+  --- the 25 s after the last decision tick (the curve itself) ---
+    13:57:11  v= 30.4 mph  k=0.00604 (R=   166 m)  a_lat= 1.12  strPrs=True slSat=False blnk=False
+    13:57:12  v= 28.2 mph  k=0.01156 (R=    86 m)  a_lat= 1.84  strPrs=True slSat=False blnk=False
+    13:57:13  v= 28.0 mph  k=0.01541 (R=    65 m)  a_lat= 2.41  strPrs=True slSat=False blnk=False
+    13:57:14  v= 27.7 mph  k=0.01883 (R=    53 m)  a_lat= 2.90  strPrs=True slSat=False blnk=False
+    13:57:15  v= 26.8 mph  k=0.02434 (R=    41 m)  a_lat= 3.50  strPrs=True slSat=False blnk=False
+    13:57:16  v= 26.4 mph  k=0.02552 (R=    39 m)  a_lat= 3.55  strPrs=True slSat=False blnk=False
+    13:57:17  v= 26.2 mph  k=0.02721 (R=    37 m)  a_lat= 3.72  strPrs=True slSat=False blnk=False
+    13:57:18  v= 26.2 mph  k=0.02786 (R=    36 m)  a_lat= 3.81  strPrs=True slSat=False blnk=False
+    13:57:19  v= 26.2 mph  k=0.02644 (R=    38 m)  a_lat= 3.62  strPrs=True slSat=False blnk=False
+    13:57:20  v= 26.6 mph  k=0.02470 (R=    40 m)  a_lat= 3.50  strPrs=True slSat=False blnk=False
+    13:57:21  v= 26.8 mph  k=0.02491 (R=    40 m)  a_lat= 3.59  strPrs=True slSat=False blnk=False
+    13:57:22  v= 26.8 mph  k=0.02620 (R=    38 m)  a_lat= 3.77  strPrs=True slSat=False blnk=False
+    13:57:23  v= 26.6 mph  k=0.02740 (R=    36 m)  a_lat= 3.88  strPrs=True slSat=False blnk=False
+    13:57:24  v= 26.8 mph  k=0.02640 (R=    38 m)  a_lat= 3.80  strPrs=True slSat=False blnk=False
+    13:57:25  v= 28.0 mph  k=0.02073 (R=    48 m)  a_lat= 3.24  strPrs=True slSat=False blnk=False
+    13:57:26  v= 29.8 mph  k=0.01578 (R=    63 m)  a_lat= 2.79  strPrs=True slSat=False blnk=False
+    13:57:27  v= 32.4 mph  k=0.01115 (R=    90 m)  a_lat= 2.34  strPrs=True slSat=False blnk=False
+    13:57:28  v= 36.5 mph  k=0.00951 (R=   105 m)  a_lat= 2.53  strPrs=True slSat=False blnk=False
+    13:57:29  v= 40.0 mph  k=0.00667 (R=   150 m)  a_lat= 2.14  strPrs=True slSat=False blnk=False
+    13:57:30  v= 41.6 mph  k=0.00474 (R=   211 m)  a_lat= 1.64  strPrs=True slSat=False blnk=False
+    13:57:31  v= 42.5 mph  k=0.00292 (R=   343 m)  a_lat= 1.05  strPrs=True slSat=False blnk=False
+    13:57:32  v= 43.2 mph  k=0.00128 (R=   780 m)  a_lat= 0.48  strPrs=True slSat=False blnk=False
+    13:57:33  v= 43.8 mph  k=0.00133 (R=   751 m)  a_lat= 0.51  strPrs=False slSat=False blnk=False
+    13:57:34  v= 43.8 mph  k=0.00053 (R=  1898 m)  a_lat= 0.20  strPrs=True slSat=False blnk=False
+    13:57:34  v= 43.8 mph  k=0.00053 (R=  1898 m)  a_lat= 0.20  strPrs=True slSat=False blnk=False
+
+======================================================================================================================
+EPISODE 09-17 13:23:10 PT   2026-09-17/curvedb-first-capture   4 ticks
+PT          src   vEgo    set  icbmT  modelT   mapV   mapD  spdLim  visLat visTtc   v_vis  mdlEndX  icbmKVis  slKActl   kPeak  a_lat
+13:23:10    map   36.2   69.0   30.1    25.3   25.3    100    30.0    1.08    1.0     inf      174   0.00419  0.00406 0.00618   1.62
+13:23:11    map   36.9   69.0   35.2    25.3   25.3    112    30.0    1.05    1.0     inf      174   0.00381  0.00354 0.00384   1.05
+13:23:12    map   36.7   69.0   43.0    25.3   25.3    125    30.0    0.74    1.0     inf      170   0.00280  0.00363 0.00380   1.02
+13:23:13    map   35.1   69.0   54.8    25.3   25.3    137    30.0    0.55    1.0     inf      159   0.00222  0.00292 0.00301   0.74
+  --- the 21 s after the last decision tick (the curve itself) ---
+    13:23:14  v= 33.8 mph  k=0.00206 (R=   484 m)  a_lat= 0.47  strPrs=False slSat=False blnk=False
+    13:23:15  v= 33.3 mph  k=0.00135 (R=   739 m)  a_lat= 0.30  strPrs=False slSat=False blnk=False
+    13:23:16  v= 31.3 mph  k=0.00118 (R=   851 m)  a_lat= 0.23  strPrs=False slSat=False blnk=False
+    13:23:17  v= 27.5 mph  k=0.00261 (R=   383 m)  a_lat= 0.40  strPrs=True slSat=False blnk=True
+    13:23:18  v= 25.5 mph  k=0.01590 (R=    63 m)  a_lat= 2.07  strPrs=True slSat=False blnk=True
+    13:23:19  v= 24.6 mph  k=0.01744 (R=    57 m)  a_lat= 2.11  strPrs=True slSat=False blnk=True
+    13:23:20  v= 24.2 mph  k=0.02126 (R=    47 m)  a_lat= 2.48  strPrs=True slSat=False blnk=True
+    13:23:21  v= 23.5 mph  k=0.02508 (R=    40 m)  a_lat= 2.76  strPrs=True slSat=False blnk=True
+    13:23:22  v= 21.9 mph  k=0.02509 (R=    40 m)  a_lat= 2.41  strPrs=True slSat=False blnk=True
+    13:23:23  v= 18.3 mph  k=0.02497 (R=    40 m)  a_lat= 1.68  strPrs=True slSat=False blnk=True
+    13:23:24  v= 14.1 mph  k=0.03641 (R=    27 m)  a_lat= 1.45  strPrs=True slSat=False blnk=False
