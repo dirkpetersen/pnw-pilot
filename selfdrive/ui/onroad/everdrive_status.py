@@ -9,10 +9,10 @@ digits change.
 
 Driver-approved formats (2026-09-20 revision -- compact shapes, `m` for miles, and the pack's energy
 in kWh beside the range it buys):
-    charging, moving:    1.4kw,100m(55.345kwh)->110m
-    charging, stopped:   1.4kw,100m(55.345kwh),+2.7m/h
-    not charging:        --,100m(55.345kwh)
-    effOk False:         1.4kw,100m(55.345kwh)
+    charging, moving:    1.4kw,100m(55.35kwh)->110m
+    charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
+    not charging:        --,100m(55.35kwh)
+    effOk False:         1.4kw,100m(55.35kwh)
     no capKwh/socPct:    the (kwh) parenthetical is OMITTED, never shown as 0.000
 
 The kWh is socPct x capKwh, where capKwh is DERIVED by the producer from the truck's own
@@ -118,7 +118,7 @@ _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple o
 
 # BOX WIDTH: the background hugs the ACTUAL text. Driver, 2026-09-20 -- the previous fixed-exemplar
 # box left 4-5 characters of empty black to the left of the line, because the widest exemplar
-# ("00.0kw,000m(000.000kwh),+00.0m/h") is several characters longer than a real line like
+# ("00.0kw,000m(000.00kwh),+00.0m/h") is several characters longer than a real line like
 # "1.4kw,98m(56.278kwh),+2.7m/h".
 #
 # This does NOT reintroduce the dancing the exemplars existed to prevent. The box is anchored to the
@@ -254,15 +254,16 @@ class EverDriveStatusRenderer(Widget):
     # no hardcoded capacity here. Both inputs must be real: if either is missing the parenthetical is
     # OMITTED rather than shown as 0.000 -- Rule 2, the same discipline as every other term.
     #
-    # !! 3 decimals is the DRIVER'S CHOSEN FORMAT and it over-states the resolution: SoC is 0.01%/bit,
-    # !! so one LSB is ~0.013 kWh and only the first two decimals carry information. The third is
-    # !! quantisation. It is kept because finer digits make the value easier to watch change on a
-    # !! drive, which is what it was asked for. Do not read the last digit as precision.
+    # 2 decimals, and that is exactly the resolution the signal carries: SoC is 0.01 %/bit, so one
+    # LSB is ~0.013 kWh -- the second decimal is the last digit that means anything. This shipped
+    # briefly at 3 decimals (driver's initial format, 2026-09-20) with a note that the third digit
+    # was quantisation rather than precision; the driver then asked for 2, which removes the false
+    # precision instead of merely documenting it. Do not add digits back.
     cap_kwh = st.get("capKwh")
     soc_pct = st.get("socPct")
     pack = ""
     if cap_kwh is not None and soc_pct is not None:
-      pack = f"({_f(soc_pct) / 100.0 * _f(cap_kwh):.3f}kwh)"
+      pack = f"({_f(soc_pct) / 100.0 * _f(cap_kwh):.2f}kwh)"
 
     # acSeen False == the EverDrive CAN message has not been received, so acKw is a pre-filled 0.0 and
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).

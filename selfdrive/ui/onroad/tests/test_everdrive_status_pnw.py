@@ -144,8 +144,8 @@ with _stubbed():
 #   effWhKm 320.0 is VehElEffAvg_No_Dsply, raw 42, constant for the whole 13-minute drive
 BASE = {"ts": 0.0, "acKw": 1.4, "acSeen": True, "rangeKm": 180.2, "effWhKm": 320.0,
         "effOk": True, "socPct": 49.99, "vMs": 0.0, "capKwh": 127.0}
-# everdrive2pnw 2026-09-20: 49.99 % of the derived 127.0 kWh -> the "(63.487kwh)" every form carries.
-PACK = "(63.487kwh)"
+# everdrive2pnw 2026-09-20: 49.99 % of the derived 127.0 kWh -> the "(63.49kwh)" every form carries.
+PACK = "(63.49kwh)"
 MPH = 1.0 / 2.23694
 
 
@@ -190,43 +190,43 @@ class TestTheFiveDocumentedOutputs:
   space after the colon, comma separators, ASCII `->`."""
 
   def test_charging_and_moving_projects_the_range(self, widget, now):
-    assert widget._build_text(st(now, vMs=62 * MPH)) == "1.4kw,112m(63.487kwh)->117m"
+    assert widget._build_text(st(now, vMs=62 * MPH)) == "1.4kw,112m(63.49kwh)->117m"
 
   def test_charging_and_stopped_shows_the_gain_rate(self, widget, now):
-    assert widget._build_text(st(now, vMs=0.0)) == "1.4kw,112m(63.487kwh),+2.7m/h"
+    assert widget._build_text(st(now, vMs=0.0)) == "1.4kw,112m(63.49kwh),+2.7m/h"
 
   def test_acSeen_false_is_not_charging_and_never_a_manufactured_zero(self, widget, now):
     """acSeen False means the EverDrive message has NOT been received, so acKw is a CANParser
     pre-fill. "0.0 kW" would be a fabricated reading presented as a measurement."""
     out = widget._build_text(st(now, acSeen=False, acKw=0.0, vMs=62 * MPH))
-    assert out == "--,112m(63.487kwh)"
+    assert out == "--,112m(63.49kwh)"
     # Assert the POWER FIELD specifically, not a bare substring: since 2026-09-20 the line carries a
-    # "(NN.NNNkwh)" energy term, so "kw" appears in every form and is no longer a proxy for "a power
+    # "(NN.NNkwh)" energy term, so "kw" appears in every form and is no longer a proxy for "a power
     # reading was printed". What must never appear is a fabricated 0.0 kW power term.
     assert out.startswith("--,"), out
     assert "0.0kw" not in out and "kw," not in out, out
     # and the guard is on acSeen ALONE, not on the value: a payload claiming power while saying the
     # message was never received is not trustworthy at any magnitude
-    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=62 * MPH)) == "--,112m(63.487kwh)"
-    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=0.0)) == "--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=62 * MPH)) == "--,112m(63.49kwh)"
+    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=0.0)) == "--,112m(63.49kwh)"
 
   def test_a_real_measured_zero_reads_the_same_way_to_the_driver(self, widget, now):
     """Charger unplugged, meter live: a genuine 0 kW. Same form -- "not charging" is the truth in
     both cases -- but it must come from the acKw <= _AC_ZERO_KW branch, not from acSeen."""
-    assert widget._build_text(st(now, acSeen=True, acKw=0.0, vMs=62 * MPH)) == "--,112m(63.487kwh)"
-    assert widget._build_text(st(now, acSeen=True, acKw=ed._AC_ZERO_KW, vMs=62 * MPH)) == "--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=True, acKw=0.0, vMs=62 * MPH)) == "--,112m(63.49kwh)"
+    assert widget._build_text(st(now, acSeen=True, acKw=ed._AC_ZERO_KW, vMs=62 * MPH)) == "--,112m(63.49kwh)"
     assert widget._build_text(st(now, acSeen=True, acKw=0.06, vMs=0.0)).startswith("0.1kw,")
 
   def test_effOk_false_drops_the_projection_and_substitutes_nothing(self, widget, now):
     """effWhKm at its -100 Wh/km encoding floor is "not available". A default efficiency would
     manufacture a confident projection out of a signal we do not have."""
     out = widget._build_text(st(now, effOk=False, effWhKm=-100.0, vMs=62 * MPH))
-    assert out == "1.4kw,112m(63.487kwh)"
+    assert out == "1.4kw,112m(63.49kwh)"
     assert "->" not in out and "mi/h" not in out
     # and the guard is on effOk ALONE: a payload that says "not usable" while carrying a
     # usable-looking number must still be believed about the flag, not about the number
-    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=62 * MPH)) == "1.4kw,112m(63.487kwh)"
-    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=0.0)) == "1.4kw,112m(63.487kwh)"
+    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=62 * MPH)) == "1.4kw,112m(63.49kwh)"
+    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=0.0)) == "1.4kw,112m(63.49kwh)"
 
   def test_a_stale_ts_hides_the_box(self, widget, now):
     assert widget._build_text(st(now, ts=now[0] - 12.0, vMs=62 * MPH)) is None
@@ -251,7 +251,7 @@ class TestTheFiveDocumentedOutputs:
     reaching toward the green driving path. Checked in characters -- the stub measurement is not the
     device font -- across the whole PLAUSIBLE domain: a 9.6 kW L2 charger, the DBC's maximum range,
     and both ends of the efficiency band. The real px ceiling is pinned separately."""
-    widest = 36     # chars: the longest shape the formatter can emit, "00.0kw,000m(000.000kwh),+00.0m/h"
+    widest = 35     # chars: the longest shape the formatter can emit, "00.0kw,000m(000.00kwh),+00.0m/h"
     cases = [st(now, **o) for o in (
       {"vMs": 62 * MPH}, {"vMs": 0.0}, {"acSeen": False}, {"effOk": False},
       {"acKw": 9.6, "rangeKm": 409.3, "vMs": 0.0},
@@ -277,8 +277,8 @@ class TestTheFiveDocumentedOutputs:
     Showing LESS is honest; a clipped number silently corrupts the whole line, not just its last
     term (Rule 2). The change of form is the visible signal, exactly as it is for the projection."""
     out = widget._build_text(st(now, acKw=99.9, vMs=0.0))
-    assert out == "99.9kw,112m(63.487kwh)", "the un-showable gain term must be dropped, not clipped"
-    assert len(out) <= 36, "must stay within the longest shape the formatter can emit"
+    assert out == "99.9kw,112m(63.49kwh)", "the un-showable gain term must be dropped, not clipped"
+    assert len(out) <= 35, "must stay within the longest shape the formatter can emit"
 
 
 # ---------------------------------------------------------------- T9
@@ -342,7 +342,7 @@ class TestGuards:
     for mph in (0.0, 0.5, 1.0, 2.0, 3.0):
       out = widget._build_text(st(now, vMs=mph * MPH))
       assert "->" not in out, f"{mph} mph projected: {out}"
-      assert out == "1.4kw,112m(63.487kwh),+2.7m/h"
+      assert out == "1.4kw,112m(63.49kwh),+2.7m/h"
 
   def test_the_projection_switches_on_only_once_it_is_credible(self, widget, now):
     """Positive control for the test above: above the cutoff the projection DOES appear, and it
@@ -375,7 +375,7 @@ class TestGuards:
     out = widget._build_text(st(now, effWhKm=3.0, vMs=60 * MPH))
     assert "->" not in out, "an absurd projection must not print"
     assert not out.endswith("mi/h"), "a gain derived from an absurd efficiency must not print either"
-    assert out == "1.4kw,112m(63.487kwh)"
+    assert out == "1.4kw,112m(63.49kwh)"
 
   def test_the_disable_toggle_hides_the_box_and_backs_the_poll_off(self, widget, now):
     assert poll(widget, st(now, vMs=62 * MPH), disabled=True) is None
@@ -466,35 +466,35 @@ class TestGuards:
 
 
 class TestThePackEnergyTerm:
-  """everdrive2pnw (driver req 2026-09-20): "(NN.NNNkwh)" beside the range it buys.
+  """everdrive2pnw (driver req 2026-09-20): "(NN.NNkwh)" beside the range it buys.
 
   The value is socPct x capKwh, and capKwh is DERIVED by the producer from the truck's own
   RngPerChrgAvg x VehElEffAvg -- nothing is hardcoded here. Both inputs must be real."""
 
   def test_the_term_is_socPct_times_capKwh(self, widget, now):
     out = widget._build_text(st(now, socPct=49.99, capKwh=127.0, vMs=62 * MPH))
-    assert "(63.487kwh)" in out, out
+    assert "(63.49kwh)" in out, out
 
   def test_it_tracks_both_inputs(self, widget, now):
     """A positive control: if it were a constant, these would not move."""
-    assert "(25.400kwh)" in widget._build_text(st(now, socPct=20.0, capKwh=127.0, vMs=62 * MPH))
-    assert "(65.500kwh)" in widget._build_text(st(now, socPct=50.0, capKwh=131.0, vMs=62 * MPH))
+    assert "(25.40kwh)" in widget._build_text(st(now, socPct=20.0, capKwh=127.0, vMs=62 * MPH))
+    assert "(65.50kwh)" in widget._build_text(st(now, socPct=50.0, capKwh=131.0, vMs=62 * MPH))
 
   @pytest.mark.parametrize("missing", ["capKwh", "socPct"])
   def test_the_term_is_OMITTED_when_an_input_is_missing_never_zero(self, widget, now, missing):
-    """Rule 2. "(0.000kwh)" would read as an empty pack to a driver -- the most alarming possible
+    """Rule 2. "(0.00kwh)" would read as an empty pack to a driver -- the most alarming possible
     lie this box could tell, and it would be pure fabrication from a missing signal."""
     out = widget._build_text(st(now, **{missing: None}, vMs=62 * MPH))
     assert "kwh" not in out, out
-    assert "0.000" not in out, out
+    assert "0.00" not in out, out
     assert out == "1.4kw,112m->117m", out      # the rest of the line is unaffected
 
   def test_the_term_appears_in_every_form_that_shows_a_range(self, widget, now):
     """Consistency: the driver should not have to wonder why it vanished at a stoplight."""
-    assert "(63.487kwh)" in widget._build_text(st(now, vMs=62 * MPH))          # moving
-    assert "(63.487kwh)" in widget._build_text(st(now, vMs=0.0))               # stopped
-    assert "(63.487kwh)" in widget._build_text(st(now, acSeen=False))          # not charging
-    assert "(63.487kwh)" in widget._build_text(st(now, effOk=False))           # no efficiency
+    assert "(63.49kwh)" in widget._build_text(st(now, vMs=62 * MPH))          # moving
+    assert "(63.49kwh)" in widget._build_text(st(now, vMs=0.0))               # stopped
+    assert "(63.49kwh)" in widget._build_text(st(now, acSeen=False))          # not charging
+    assert "(63.49kwh)" in widget._build_text(st(now, effOk=False))           # no efficiency
 
   def test_miles_are_abbreviated_m_not_mi(self, widget, now):
     """Driver req 2026-09-20 -- "mi" -> "m" is what bought the width for the kWh term at _FS 48."""
