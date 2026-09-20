@@ -87,6 +87,49 @@ is product code that affects UI startup.
 **Validation:** 10 sequential runs green, then **20 as two CONCURRENT loops — 20/20**, where that same
 setup was 3 red of 20 before. Then two more full gate runs at `f3f19d2cb1`: **3,473 passed, both.**
 
+## 🟠 ICBM phantom re-measure: BLOCKED. Posted-limit clamp: DESIGNED, not built.
+
+Owner asked for both (and chose **option (b)**, the posted-limit sanity clamp, over raising
+`ICBM_FLOOR_MAX_LIMIT`). Neither could be finished, and the reasons are worth keeping.
+
+### The phantom cannot be re-measured yet — three verified blockers
+1. The offline corpus ends **2026-09-17**; the map-rating floor shipped **09-18 19:27**.
+2. **`mapRaw` / `mapEff` are DEAD TELEMETRY** — `0.0` or `None` on **all 71,136** offline ticks *and*
+   **all 57,411** device records. `mapRaw` is the candidate's own mapd rating, i.e. exactly what
+   `icbm_map_floor_ms()` floors against, so **the floor cannot be modelled offline at all.** Same
+   failure mode as [[vtscstatus-telemetry-not-logged]]: emitted, looks populated, carries nothing.
+3. The device retains only **106 ICBM ticks**, every one `secondary`/`tertiary` at 25 mph posted.
+   No post-floor highway ICBM data exists.
+
+> ✅ **Checked before reporting:** `icbmMapFlrHit` reads true on **102 of 102** ticks, which looks like
+> an always-true flag. It is not — `target > penalised` means "the floor gave penalty back", and at
+> `icbm_map_floor_frac = 1.0` it nearly always does. Read the source rather than filing a bug.
+
+### The clamp's naive form is DEAD, and the measurement says so
+
+| 2026-09-08 event | gap below posted | peak achLat |
+|---|---|---|
+| **20:28:51 PHANTOM** (69 → 43 on a 60 road) | **15.8 mph** | **−0.70 m/s²** (straight) |
+| 19:44:07 REAL CURVE | **25.9 mph** | **−3.13 m/s²** (genuine) |
+
+**The real curve has the BIGGER gap.** A "more than N mph below posted" rule fires *harder* on the
+genuine slowdown than on the phantom, and corpus-wide the gap's p90 is 14.2 / p95 16.5 mph — the
+phantom is not even an outlier. So `when there is no curve` is not a refinement of option (b), **it is
+the entire rule**, and N is meaningless without it.
+
+**Every "is there a curve?" witness is currently unusable:** `mapRaw` dead; `visK` dead in corpus
+(p50, p90 **and** max all exactly 0.00000 over 819 ticks); `achLat` lags, so using it would cancel
+real anticipatory braking — the dangerous direction; `hwyClass` alive but `motorway` ≠ "no curve".
+
+**Building it now would put a rule into the CONTROL PATH that cannot tell the phantom from a real
+curve on the only data we have.** Stopped instead.
+
+### What unblocks both — already half-done
+**`visKMax` went live yesterday** (`viskvis2pnw`, verified on the truck) and records on EVERY tick
+rather than only where ICBM already acted. **One highway drive with the floor live** yields the
+phantom's post-floor recurrence, `visKMax` on a real curve vs a phantom, and therefore both
+thresholds. Fixing `mapRaw` first is a small change and would make the floor modellable offline too.
+
 ## 📌 Not pushed, deliberately
 Seven worktrees carry unpushed commits that are **not** part of this effort — `redlight-stop2pnw`,
 `mapdstate2pnw`, `lcabort2pnw`, `mapdlog2pnw`, `policemiss2pnw`, `speedadjustreset2pnw`, `uicpu2pnw`.
