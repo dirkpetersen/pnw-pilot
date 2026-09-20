@@ -7,12 +7,16 @@ the middle of the screen. That is the driver's hard layout constraint, inherited
 box docstring; the width is fixed from exemplars (below) precisely so it cannot creep toward centre as
 digits change.
 
-Driver-approved formats (2026-09-19, revised to the COMPACT shapes at _FS 48 on 2026-09-19 so the
-box matches the font size of the CES box stacked directly above it -- ces_status._FS_SM is 48):
-    charging, moving:    ED:1.4kw,112mi->117mi
-    charging, stopped:   ED:1.4kw,112mi,+2.7mi/h
-    not charging:        ED:--,112mi
-    effOk False:         ED:1.4kw,112mi
+Driver-approved formats (2026-09-20 revision -- compact shapes, `m` for miles, and the pack's energy
+in kWh beside the range it buys):
+    charging, moving:    ED:1.4kw,100m(55.345kwh)->110m
+    charging, stopped:   ED:1.4kw,100m(55.345kwh),+2.7m/h
+    not charging:        ED:--,100m(55.345kwh)
+    effOk False:         ED:1.4kw,100m(55.345kwh)
+    no capKwh/socPct:    the (kwh) parenthetical is OMITTED, never shown as 0.000
+
+The kWh is socPct x capKwh, where capKwh is DERIVED by the producer from the truck's own
+RngPerChrgAvg x VehElEffAvg -- no capacity is hardcoded anywhere. See everdrive_pnw.py.
 
 `->` is ASCII on purpose. The device font atlas is built by selfdrive/assets/fonts/process.py from
 `chr(32..126)` plus a short EXTRA_CHARS list that does NOT contain U+2192 "→" — a unicode arrow would
@@ -53,21 +57,33 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
                           #   a RED alarm that must not false-fire during spin-up. This box has no
                           #   alarm — its stale action is "hide", which is also its state before the
                           #   first publish — so a grace timer would change nothing here.)
-# Font size. Raised 48 -> 56 on driver request 2026-09-20: match the LOCATION SERVICES box
-# (location_services_status.py `_FS_STEPS`, whose base size is 56), not the CES box's 48. The compact
-# format (chosen 2026-09-19) is what makes 56 affordable at all -- the roomy format at 56 would be
-# 862 px of text.
+# Font size. MEASURED against the real Inter-Medium.fnt on the device (atlas base 200) at the
+# device's FONT_SCALE=1.16 -- raylib scales glyph advances by fontSize/baseSize, so width is linear
+# in _FS and these numbers are exact, not estimates.
 #
-# MEASURED, not estimated, against the real Inter-Medium.fnt on the device (atlas base size 200) at
-# the device's FONT_SCALE=1.16 -- raylib scales glyph advances by fontSize/baseSize, so width is
-# linear in _FS and these numbers are exact:
-#     _FS=48  text 633.1 px  box 681.1 px  left edge x=1408.9  -> 328.9 px clear of screen centre
-#     _FS=56  text 738.6 px  box 786.6 px  left edge x=1303.4  -> 223.4 px clear of screen centre
-# The driver's hard constraint is that the box stays out of the green driving path down the middle.
-# 56 spends ~105 px of that clearance and still leaves the box entirely right of centre; if it ever
-# needs to come back, 52 is the middle option (733.8 px box, 276.2 px clear).
-_FS = 56
-_LINE_H = 70              # _FS * 1.25, the ratio ces_status.py and location_services_status.py both use
+# HISTORY: 48 -> 56 on 2026-09-20 to match the location box, then BACK TO 48 the same day when the
+# driver asked for the pack kWh inline. The kWh parenthetical is ~50% more text, and at 56 the box
+# crosses screen centre -- into the green driving path this box must never enter. At _FS=48, with the
+# "m" abbreviation that bought the width back:
+#     widest exemplar  925.4 px text -> 973.4 px box
+#     bx = 2130 (content right edge) - 40 (_MARGIN) - 973.4 = 1116.6
+#     centre is 1080.0  ->  +36.6 px clear
+# (Corrected after the Fable review: an earlier version of this comment said "left edge x=1156.6",
+# which forgot to subtract _MARGIN. The +36.6 px clearance was right; the x was not.)
+#
+# TIGHT, and deliberately so -- the driver chose 48 with these numbers in front of him. If it crowds
+# the path on the road, the one-constant fixes are _FS=44 (+116 px clear) or dropping the kWh from
+# the STOPPED form only (+86 px at 48); the stopped form is the widest exemplar, not the moving one.
+#
+# DIGITS ARE PROPORTIONAL IN INTER and the exemplars use '0', which is not the widest: '4' is 108 vs
+# '0' at 106 (atlas units). An all-4s stopped form measures 933.8 px, 8.4 px OVER the exemplar. That
+# does not clip and does not move the box edge -- _render right-aligns the text inside the
+# fixed-width box, so an overrun eats left padding (24 -> 15.6 px) and nothing else. The physically
+# bounded worst case, ED:27.7kw,254m(254.999kwh),+99.9m/h, is 912.3 px, comfortably under the
+# exemplar: the producer's AC band caps kW at 27.7, range at 254 mi, capacity at 470.7 kWh, and
+# _GAIN_MAX_MI_H caps the rate at 99.9. (All verified with real raylib on the device, Fable 2026-09-20.)
+_FS = 48
+_LINE_H = 60              # _FS * 1.25, the ratio ces_status.py and location_services_status.py both use
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
@@ -106,9 +122,9 @@ _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple o
 # digits of kW, 3 of miles, 2 of mi/h. A 4-digit mileage would overflow the fixed box and clip — which
 # is why _PROJ_MAX_RATIO clamps the projection rather than letting it print whatever it computes.
 _EXEMPLARS = (
-  "ED:00.0kw,000mi->000mi",        # charging + moving  (projection)
-  "ED:00.0kw,000mi,+00.0mi/h",     # charging + stopped (gain rate)  <- widest, 633.1 px at _FS 48
-  "ED:--,000mi",                   # not charging
+  "ED:00.0kw,000m(000.000kwh)->000m",        # charging + moving  (projection)
+  "ED:00.0kw,000m(000.000kwh),+00.0m/h",     # charging + stopped (gain rate)  <- WIDEST
+  "ED:--,000m(000.000kwh)",                  # not charging
 )
 
 
@@ -212,20 +228,35 @@ class EverDriveStatusRenderer(Widget):
     range_mi = _f(st.get("rangeKm")) / _KM_PER_MI
     eff_wh_km = _f(st.get("effWhKm"))
     eff_wh_mi = eff_wh_km * _KM_PER_MI
-    rng = f"{range_mi:.0f}" if range_mi > 0.0 else "--"   # no dash range signal is "--", never "0 mi"
+    rng = f"{range_mi:.0f}" if range_mi > 0.0 else "--"   # no dash range signal is "--", never "0 m"
+
+    # everdrive2pnw (driver req 2026-09-20): the pack's energy in kWh, beside the range it buys.
+    # capKwh is DERIVED by the producer from the truck's own RngPerChrgAvg x VehElEffAvg, so there is
+    # no hardcoded capacity here. Both inputs must be real: if either is missing the parenthetical is
+    # OMITTED rather than shown as 0.000 -- Rule 2, the same discipline as every other term.
+    #
+    # !! 3 decimals is the DRIVER'S CHOSEN FORMAT and it over-states the resolution: SoC is 0.01%/bit,
+    # !! so one LSB is ~0.013 kWh and only the first two decimals carry information. The third is
+    # !! quantisation. It is kept because finer digits make the value easier to watch change on a
+    # !! drive, which is what it was asked for. Do not read the last digit as precision.
+    cap_kwh = st.get("capKwh")
+    soc_pct = st.get("socPct")
+    pack = ""
+    if cap_kwh is not None and soc_pct is not None:
+      pack = f"({_f(soc_pct) / 100.0 * _f(cap_kwh):.3f}kwh)"
 
     # acSeen False == the EverDrive CAN message has not been received, so acKw is a pre-filled 0.0 and
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
     if not st.get("acSeen") or ac_kw <= _AC_ZERO_KW:
-      return f"ED:--,{rng}mi"
+      return f"ED:--,{rng}m{pack}"
 
     kw = f"ED:{ac_kw:.1f}kw"
     # effOk False == effWhKm is sitting at its -100 encoding floor, i.e. the truck is not telling us its
     # reference efficiency. No projection and no gain rate then, and NO substituted default efficiency:
     # a made-up constant would produce a confident number out of a signal we do not have.
     if not st.get("effOk") or eff_wh_km <= 0.0 or range_mi <= 0.0:
-      return f"{kw},{rng}mi"
+      return f"{kw},{rng}m{pack}"
 
     # The projection deliberately uses the truck's OWN efficiency constant rather than a measured
     # consumption, so the projected figure stays internally consistent with the range printed beside it.
@@ -233,7 +264,7 @@ class EverDriveStatusRenderer(Widget):
     if p_assumed > ac_kw * _PROJ_HEADROOM:
       proj = range_mi * p_assumed / (p_assumed - ac_kw)
       if proj <= range_mi * _PROJ_MAX_RATIO:
-        return f"{kw},{range_mi:.0f}mi->{proj:.0f}mi"
+        return f"{kw},{range_mi:.0f}m{pack}->{proj:.0f}m"
     # Crawling (the projection diverges) or the clamp tripped -> the stopped form. gainMiPerH is
     # EverDrive's CONTRIBUTION to range, not the rate the pack's state of charge rises: measured on this
     # truck the truck's own awake load ate about 1.0 kW of a 1.36 kW input while parked, so SoC climbed
@@ -241,15 +272,15 @@ class EverDriveStatusRenderer(Widget):
     # because that awake load would be drawn anyway.
     gain = ac_kw / (eff_wh_mi / 1000.0)
     # everdrive2pnw: the same fixed-width discipline the projection gets from _PROJ_MAX_RATIO. The
-    # exemplar budgets TWO integer digits for mi/h ("+00.0"); three would overflow the box and CLIP,
+    # exemplar budgets TWO integer digits for m/h ("+00.0"); three would overflow the box and CLIP,
     # which is a silent corruption of the whole line, not just of this term. The producer's AC band
     # already bounds this to ~53.8 mi/h, so reaching here means the producer's guard was bypassed or
     # effWhKm is implausibly small -- either way the inputs are wrong. Drop the term rather than print
     # a clipped one: showing LESS is honest, showing a truncated number is not (Rule 2). The change of
     # form is the visible signal, exactly as it is for the projection.
     if gain >= _GAIN_MAX_MI_H:
-      return f"{kw},{rng}mi"
-    return f"{kw},{range_mi:.0f}mi,+{gain:.1f}mi/h"
+      return f"{kw},{rng}m{pack}"
+    return f"{kw},{range_mi:.0f}m{pack},+{gain:.1f}m/h"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
