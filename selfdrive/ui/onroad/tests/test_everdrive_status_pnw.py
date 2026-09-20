@@ -500,3 +500,137 @@ class TestThePackEnergyTerm:
     """Driver req 2026-09-20 -- "mi" -> "m" is what bought the width for the kWh term at _FS 48."""
     for out in (widget._build_text(st(now, vMs=62 * MPH)), widget._build_text(st(now, vMs=0.0))):
       assert "mi" not in out, out
+
+
+class TestTheComputedRangeAtCurrentSpeed:
+  """everdrive2pnw (driver req 2026-09-20): the FIRST number becomes `energyKwh / grossKw * mph` --
+  the range at the speed being driven right now -- and falls back to the truck's own estimate.
+
+  Both inputs are producer-published. `grossKw` is GROSS of the EverDrive input precisely so the
+  existing `range * P/(P - acKw)` projection does not count the charger twice, and it is None
+  whenever the producer has no credible measurement (stopped, below ~10 mph, window not filled)."""
+
+  # 59.35 kWh at 20 kW and 62 mph -> 183.985 mi, and the projection at 1.4 kW in -> 197.8 mi
+  MEAS = {"energyKwh": 59.35, "grossKw": 20.0, "vMs": 62 * MPH}
+
+  def test_the_first_number_is_energy_over_consumption_times_speed(self, widget, now):
+    out = widget._build_text(st(now, **self.MEAS))
+    assert out.startswith("1.4kw,@184m"), out
+    assert 59.35 / 20.0 * 62 == pytest.approx(183.985)
+
+  def test_it_tracks_speed_energy_and_consumption(self, widget, now):
+    """Positive control: a constant would not move when any of the three inputs does."""
+    def first(**o):
+      return widget._build_text(st(now, **{**self.MEAS, **o})).split(",")[1].split("m")[0]
+    assert first() == "@184"
+    assert first(vMs=31 * MPH) == "@92", "halving the speed must halve the range"
+    assert first(energyKwh=29.675) == "@92", "halving the energy must halve the range"
+    assert first(grossKw=40.0) == "@92", "doubling the consumption must halve the range"
+
+  def test_the_computed_number_is_visibly_different_from_the_trucks_own(self, widget, now):
+    """The driver must be able to tell which quantity he is looking at. The computed one carries a
+    leading '@'; the fallback prints exactly what this box has always printed."""
+    computed = widget._build_text(st(now, **self.MEAS))
+    fallback = widget._build_text(st(now, vMs=62 * MPH))          # no grossKw/energyKwh in BASE
+    assert "@" in computed and "@" not in fallback, (computed, fallback)
+    assert fallback == "1.4kw,112m(63.49kwh)->117m", "the fallback must be byte-identical to today"
+
+  @pytest.mark.parametrize("over", [
+    {"grossKw": None},                       # stopped / below 10 mph / window not filled
+    {"energyKwh": None},                     # socPct or capKwh missing upstream
+    {"grossKw": 0.0},                        # would be a division by zero
+    {"grossKw": -5.0},                       # would be a NEGATIVE range
+    {"energyKwh": 0.0},                      # an empty pack is not a range of zero miles
+  ])
+  def test_every_unusable_input_falls_back_to_the_trucks_own_range(self, widget, now, over):
+    out = widget._build_text(st(now, **{**self.MEAS, **over}))
+    assert out == "1.4kw,112m(63.49kwh)->117m", out
+    assert "@" not in out, "a fallback must not be dressed up as a measurement"
+
+  def test_a_stationary_truck_never_prints_a_computed_zero(self, widget, now):
+    """Kills mutation U8 (`0.0 < r` -> `0.0 <= r`). At 0 mph the computed range is exactly 0, and
+    "@0m" would tell the driver he has no range while the truck sits with a half-full pack. The
+    producer already withholds grossKw below ~10 mph, but this box does not get to assume that --
+    acKw arrives over a mem-param from an aftermarket module and the whole payload is untrusted."""
+    out = widget._build_text(st(now, energyKwh=59.35, grossKw=20.0, vMs=0.0))
+    assert "@" not in out and "@0" not in out, out
+    assert out == "1.4kw,112m(63.49kwh),+2.7m/h", out
+
+  def test_a_missing_grossKw_key_entirely_is_the_fallback_not_a_crash(self, widget, now):
+    """An older producer, or the very first payload of a session, simply has no such key."""
+    s = st(now, vMs=62 * MPH)
+    assert "grossKw" not in s and "energyKwh" not in s
+    assert widget._build_text(s) == "1.4kw,112m(63.49kwh)->117m"
+
+  def test_an_absurd_computed_range_falls_back_rather_than_printing_it(self, widget, now):
+    """_RANGE_MAX_MI. A long descent can regenerate most of a window's energy back, leaving a tiny
+    consumption and a range that is arithmetic rather than a prediction. It would also add a fourth
+    digit to the projection and push the box toward the green driving path."""
+    out = widget._build_text(st(now, energyKwh=59.35, grossKw=1.0, vMs=62 * MPH))
+    assert 59.35 / 1.0 * 62 == pytest.approx(3679.7), "positive control: this really is absurd"
+    assert out == "1.4kw,112m(63.49kwh)->117m", out
+    # ... and the boundary is where the constant says it is, not somewhere else. Deliberately NOT
+    # probed at exactly _RANGE_MAX_MI: `59.35 / 20 * (499 * 20 / 59.35)` is 499.00000000000006 in
+    # binary floating point, so an exact-boundary assertion would be testing float rounding, not the
+    # constant. One mile either side is unambiguous.
+    def mph_for(miles):
+      return miles * 20.0 / 59.35
+    assert "@498" in widget._build_text(st(now, energyKwh=59.35, grossKw=20.0,
+                                           vMs=mph_for(498.0) * MPH))
+    assert "@" not in widget._build_text(st(now, energyKwh=59.35, grossKw=20.0,
+                                            vMs=mph_for(500.0) * MPH))
+
+  def test_the_projection_uses_grossKw_and_so_cannot_double_count_the_charger(self, widget, now):
+    """THE reason grossKw is published gross. `range * P/(P - acKw)` is only correct when P is what
+    the truck would draw WITHOUT the charger. Handing it a net P (i.e. 20 - 1.4 = 18.6) would shift
+    the projection up by the charger's contribution a second time."""
+    out = widget._build_text(st(now, **self.MEAS))
+    r, p = 59.35 / 20.0 * 62, 20.0
+    assert out == f"1.4kw,@{r:.0f}m(63.49kwh)->{r * p / (p - 1.4):.0f}m", out
+    net = r * 18.6 / (18.6 - 1.4)
+    assert abs(net - r * p / (p - 1.4)) > 1.0, "positive control: net vs gross really do differ here"
+
+  def test_effOk_false_no_longer_costs_the_projection_when_it_is_MEASURED(self, widget, now):
+    """The efficiency constant is only needed for the FALLBACK projection. A measured consumption
+    does not depend on it, so a truck that stops reporting VehElEffAvg keeps the computed range."""
+    out = widget._build_text(st(now, **self.MEAS, effOk=False, effWhKm=-100.0))
+    assert out.startswith("1.4kw,@184m"), out
+    assert "->" in out, "a measured projection must survive effOk False"
+
+  def test_the_gain_rate_rides_the_same_basis_as_the_range_beside_it(self, widget, now):
+    """When the projection clamp trips while measured, the stopped form prints a gain rate. It must
+    come from the MEASURED mi/kWh (mph / grossKw), not from the truck's reference efficiency -- and
+    on that path effWhKm may legitimately be zero, which would otherwise be a divide-by-zero in the
+    UI render loop (this fork's documented brick scenario)."""
+    # ac 9.6 kW against gross 15 kW -> proj/range = 15/5.4 = 2.8 > _PROJ_MAX_RATIO, so the clamp trips
+    out = widget._build_text(st(now, energyKwh=59.35, grossKw=15.0, vMs=62 * MPH,
+                                acKw=9.6, effOk=False, effWhKm=-100.0))
+    assert "->" not in out, "positive control: the projection clamp must have tripped"
+    assert out.endswith(f",+{9.6 * 62 / 15.0:.1f}m/h"), out
+    assert "39.7m/h" in out
+    # ... and THIS branch must still mark the range as measured. It did not: the gain-form return
+    # re-formatted range_mi instead of reusing `rng`, so the "@" -- the only thing distinguishing a
+    # computed range from the truck's own -- silently vanished on exactly this path.
+    assert out == f"9.6kw,@{59.35 / 15.0 * 62:.0f}m(63.49kwh),+39.7m/h", out
+    assert out.startswith("9.6kw,@245m"), out
+
+  def test_the_widest_line_this_can_emit_stays_inside_the_ceiling(self, widget, now):
+    """Character-count guard (the stub measurement is not the device font; the real px worst case is
+    pinned in the _FS comment, measured against the device's own Inter-Medium.fnt). 32 chars is
+    '44.4kw,@444m(444.44kwh),+44.4m/h' -- every range term is bounded to 3 digits by _RANGE_MAX_MI
+    (499, so the projection is <= 998) and the truck's own 254 mi band."""
+    widest = 32
+    cases = [
+      st(now, **self.MEAS),
+      st(now, **self.MEAS, acKw=27.7),
+      st(now, energyKwh=474.63, grossKw=59.0, vMs=62 * MPH, acKw=27.7, socPct=100.0, capKwh=474.63),
+      st(now, energyKwh=59.35, grossKw=15.0, vMs=62 * MPH, acKw=9.6, socPct=100.0, capKwh=474.63),
+      st(now, energyKwh=0.5, grossKw=277.7, vMs=10 * MPH, acKw=27.7, socPct=100.0, capKwh=474.63),
+      st(now, **self.MEAS, acSeen=False),
+    ]
+    for s in cases:
+      out = widget._build_text(s)
+      assert out is not None
+      assert len(out) <= widest, f"{out!r} ({len(out)}) is wider than the bounded worst case"
+      assert all(32 <= ord(c) <= 126 for c in out), repr(out)   # '@' is 64, in the device atlas
+

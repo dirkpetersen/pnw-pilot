@@ -40,14 +40,21 @@ and what it buys in range.
 
 ## 1. What it displays
 
-Four states, all right-aligned and bottom-anchored in the lower-right corner:
+Four states, all right-aligned and bottom-anchored in the lower-right corner. **Updated 2026-09-20**
+to the shipped format — the `ED:` prefix was dropped, `mi` shortened to `m`, the pack's energy added
+inline, and the first number became the *measured* range at the current speed (§3.4):
 
 ```
-charging, moving:    ED:1.4kw,112mi->117mi
-charging, stopped:   ED:1.4kw,112mi,+2.7mi/h
-not charging:        ED:--,112mi
+charging, moving:    1.4kw,@132m(63.49kwh)->137m
+charging, stopped:   1.4kw,112m(63.49kwh),+2.7m/h
+not charging:        --,112m(63.49kwh)
 no EverDrive fitted: (nothing at all)
 ```
+
+**`@132m` and `112m` are NOT the same quantity.** `@132m` is the range at the speed being driven
+*right now*, computed from measured consumption; a bare `112m` is the truck's own dash estimate, and
+is the **fallback** whenever that measurement is unavailable. The `@` ("at") is the whole signal —
+no legend, no second line, and the fallback prints exactly as it has since 2026-09-19.
 
 **Format decision (driver, 2026-09-19).** The roomy form (`ED: 1.4 kW   112 -> 117 mi`) does not fit
 the width budget at the CES box's own font size — measured against the real `Inter-Medium` metrics at
@@ -162,6 +169,88 @@ needs a steady-highway run that has not happened yet (§7).
 ~1.0 kW awake load is drawn whether or not EverDrive is connected, so EverDrive's full input
 genuinely offsets it. Its **contribution** to range is `1.363 kW ÷ 0.515 kWh/mi ≈ 2.7 mi/h`. The 21 %
 figure explains why the *pack SoC* barely moved; it does not mean the contribution is smaller.
+
+### 3.4 Real-time range at the current speed (2026-09-20)
+
+The first number is now **measured**, not the truck's estimate:
+
+```
+energyKwh    = socPct * capKwh / 100                      # remaining pack energy
+netKw        = -(d energyKwh / dt) over a rolling window  # +ve = discharging
+grossKw      = netKw + acKw                               # EverDrive input added back
+rangeAtSpeed = energyKwh / grossKw * mph                  # miles, at the CURRENT speed held constant
+```
+
+**What unblocked it (2026-09-20, read over UDS, not re-derived):**
+
+| PID | Meaning | Value |
+|---|---|---|
+| `0x224848` `Energy` | HVB energy to empty | **59.350 kWh** |
+| `0x224801` `HvbSoc` | true SoC | **47.120 %** |
+| `0x224845` `HvbSocD` | *displayed* SoC | 49.0 % |
+| broadcast `0x24C` `BattTracSoc2_Pc_Actl` | — | **47.12 %** — identical to `HvbSoc` |
+
+Two consequences, both load-bearing. **Usable capacity = 59.350 / 0.4712 = 125.96 kWh, MEASURED** —
+the derived `capKwh` (`RngPerChrgAvg × VehElEffAvg`) read 127.26 kWh at the same moment, **1.0 % off**,
+so it stays derived (it tracks the truck) but is now *validated* rather than a guess. And **the
+broadcast SoC is the true SoC**, so remaining energy needs no UDS at all. This closes the
+`🔴 kWh per % of SoC` blocker in `ENERGY-RANGE-SIGNALS.md` §2, which is why §3.1's "no usable
+broadcast source for battery power" no longer forces the reference-efficiency projection.
+
+**Why `grossKw` and not `netKw`.** A SoC-derived consumption is already net of whatever the charger
+is feeding in. Handing the UI a net figure and then letting it apply its existing
+`range × P/(P − acKw)` projection would count the charger **twice**. `grossKw` is "what the truck
+would draw with no EverDrive fitted", so the projection keeps meaning what it always did.
+
+**The window** (`everdrive_pnw._gross_kw`), all constants justified at their definition:
+
+| | | Why |
+|---|---|---|
+| accumulate above | **10 mph** (`MOVING_MS`) | driver's explicit spec. Below it the truck draws accessories with no distance, and `energy/grossKw × speed` would extrapolate a road-speed average down to walking pace |
+| ΔSoC floor | **0.20 %** (`MIN_DSOC_PCT`) | SoC is 0.01 %/bit = **12.6 Wh per LSB** at 125.96 kWh. Differencing two quantised readings carries ±1 LSB regardless of separation, so 0.20 % = 20 LSB = **±5 %** worst case. Below the floor the producer publishes **`None`**, never a provisional value |
+| window | **60–180 s** (`WINDOW_MIN_S`/`WINDOW_MAX_S`) | 0.252 kWh takes 907/P seconds: 23 s at 40 kW, 45 s at 20 kW, 91 s at 10 kW, 151 s at 6 kW. 180 s (wall-clock, so a long stop ages it out) covers down to ~5 kW; the window shortens toward 60 s whenever the floor still clears, which at 20 kW is 26 LSB = ±3.8 % and tracks a change of road within a minute |
+| plausibility | **250 kW** (`NET_KW_MAX`) | the BECM's SoC is an *estimate* and can step. A 5 % step is 6.3 kWh ≈ 378 kW over a minute, which the UI would render as a 9-mile range on a healthy truck |
+
+**Two traps that cost real time here, recorded so they are not reintroduced:**
+
+1. **The increment is `ΔSoC × capacity`, never `Δ(SoC × capacity)`.** `capKwh` is a quantised product,
+   and **one LSB of `VehElEffAvg` (10 Wh/km) moves it by ~4 kWh** — about 2 kWh of apparent energy
+   appearing in a single 0.2 s step, i.e. ~100 kW of pure artifact, *inside* `NET_KW_MAX` and so
+   published as fact. Differencing the SoC alone makes a capacity revision rescale future increments
+   instead of injecting a step.
+2. **Shortening the window by discarding history is irreversible.** The first implementation popped
+   the old snapshots; the window then settles at 60 s and, the moment consumption dips, the floor
+   stops clearing and there is nothing left to grow back into. Replayed against route
+   `000001b8--a46fe398b3` that produced **10 on/off blocks of median 14 s** — the first number
+   flickering between two different quantities. Choosing a newer *baseline* while keeping the
+   snapshots gives 5 blocks of median 72 s.
+
+**Replay validation** — route `000001b8--a46fe398b3`, 2026-09-19, decoded on the device and run
+through the shipped `_gross_kw`:
+
+| | |
+|---|---|
+| SoC | 49.99 → 48.97 % over **864.9 s** (ΔSoC 1.02 %) |
+| `0x2A7` | 865 frames, **0 non-zero** — charger unplugged, so `grossKw == netKw` |
+| energy at the measured 125.96 kWh | **1.285 kWh** → **2.96 mi/kWh** against the trip meter's 3.8 mi |
+| energy at the derived 127.17 kWh | 1.297 kWh → 2.93 mi/kWh |
+
+**That ~22 % gap against the trip meter's 3.8 mi/kWh is CORRECT, not a bug.** The trip meter counts
+traction; the pack counts everything. The difference is 0.285 kWh over 864.9 s = **1.19 kW of
+accessory load**, which independently matches the ~1.38 kW implied by the motor-power integral in
+§4.1. For a *range* prediction the pack figure is the right one.
+
+Coverage on that route was **37 %** of the drive, against a ceiling of **71 %** — which is simply how
+much of a stop-and-go city drive (max 31.7 mph) was spent above 10 mph at all. On a highway the
+window clears its floor with ~2.6× margin and reports continuously. When it does not report, the box
+degrades to exactly what shipped on 2026-09-19.
+
+**Width.** Worst case `44.4kw,@444m(444.44kwh),+44.4m/h` = **922.5 px box, +87.5 px clear** of screen
+centre, measured against the device's own `Inter-Medium.fnt`; a 145,800-payload sweep over the
+producer's real bands tops out at 897.1 px, +112.9 px clear. `_RANGE_MAX_MI = 499` keeps both range
+terms at three digits (the projection is ≤ 2×). ⚠️ The width numbers previously carried in
+`everdrive_status.py` were **stale by 103 px** — they described the format *before* the `ED:` prefix
+was dropped and the kWh term went to 2 decimals; corrected in place.
 
 ### 3.3 Guards — each must fail visibly, never silently
 
@@ -279,6 +368,9 @@ Mem param `"EverDriveStatus"`, registered `{CLEAR_ON_MANAGER_START, JSON}`, publ
 | `effWhKm` | float | `VehElEffAvg_No_Dsply` |
 | `effOk` | bool | False when `effWhKm` sits at its −100 encoding floor |
 | `socPct` | float | `BattTracSoc2_Pc_Actl` |
+| `capKwh` | float \| None | derived usable capacity, `RngPerChrgAvg × VehElEffAvg`; validated to 1.0 % against UDS 2026-09-20 |
+| `energyKwh` | float \| None | remaining pack energy, `socPct × capKwh / 100`. **None if either input is None** |
+| `grossKw` | float \| None | rolling consumption with the EverDrive input added back. **None until the window clears its ΔSoC floor**, and while stopped or below 10 mph — see §3.4 |
 | `vMs` | float | vehicle speed, m/s |
 
 ### 5.2 Why `acSeen` exists — the Rule 2 crux
