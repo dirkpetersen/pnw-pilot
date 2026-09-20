@@ -53,15 +53,21 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
                           #   a RED alarm that must not false-fire during spin-up. This box has no
                           #   alarm — its stale action is "hide", which is also its state before the
                           #   first publish — so a grace timer would change nothing here.)
-_FS = 48                  # font size == ces_status._FS_SM, so this box does not read noticeably smaller
-                          #   than the CES box stacked directly on top of it (owner decision 2026-09-19,
-                          #   which is also why the COMPACT format above replaced the roomy one).
-                          #   Measured against the real Inter-Medium .fnt metrics at the device's
-                          #   FONT_SCALE=1.16: the widest COMPACT exemplar is 633.1 px of text -> a
-                          #   681.1 px box, inside the driver's ~700 px budget. (The roomy format at 48
-                          #   would have been 721.6 px of text / 769.6 px of box -- over budget, which is
-                          #   the trade the compact shapes buy back.)
-_LINE_H = 60              # _FS * 1.25, the same line-height ratio ces_status.py uses
+# Font size. Raised 48 -> 56 on driver request 2026-09-20: match the LOCATION SERVICES box
+# (location_services_status.py `_FS_STEPS`, whose base size is 56), not the CES box's 48. The compact
+# format (chosen 2026-09-19) is what makes 56 affordable at all -- the roomy format at 56 would be
+# 862 px of text.
+#
+# MEASURED, not estimated, against the real Inter-Medium.fnt on the device (atlas base size 200) at
+# the device's FONT_SCALE=1.16 -- raylib scales glyph advances by fontSize/baseSize, so width is
+# linear in _FS and these numbers are exact:
+#     _FS=48  text 633.1 px  box 681.1 px  left edge x=1408.9  -> 328.9 px clear of screen centre
+#     _FS=56  text 738.6 px  box 786.6 px  left edge x=1303.4  -> 223.4 px clear of screen centre
+# The driver's hard constraint is that the box stays out of the green driving path down the middle.
+# 56 spends ~105 px of that clearance and still leaves the box entirely right of centre; if it ever
+# needs to come back, 52 is the middle option (733.8 px box, 276.2 px clear).
+_FS = 56
+_LINE_H = 70              # _FS * 1.25, the ratio ces_status.py and location_services_status.py both use
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
