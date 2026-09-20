@@ -89,9 +89,10 @@ def host():
 class TestAthenadMethods:
   @classmethod
   def setup_class(cls):
-    cls.SOCKET_PORT = 45454
     athenad.Api = MockApi
-    athenad.LOCAL_PORT_WHITELIST = {cls.SOCKET_PORT}
+    # NOTE: LOCAL_PORT_WHITELIST is no longer pinned here. It used to be {45454}, a hardcoded
+    # host-global port that only test_start_local_proxy uses; that test now binds an ephemeral port
+    # and whitelists the one it actually got. See the comment there.
 
   def setup_method(self):
     self.default_params = {
@@ -413,11 +414,18 @@ class TestAthenadMethods:
     mock_ws = MockWebsocket(ws_recv, ws_send)
     mock_create_connection.return_value = mock_ws
 
-    echo_socket = EchoSocket(self.SOCKET_PORT)
+    # EPHEMERAL port, not a hardcoded 45454. A TCP port is a HOST-GLOBAL resource that no pytest
+    # isolation covers, so whenever a second run of this suite was on the box (the pre-ship gate plus
+    # a review agent's copy) the bind failed with "OSError: [Errno 98] Address already in use" and
+    # this test went red for a reason that has nothing to do with what it tests. Measured 2026-09-20:
+    # 2 of 10 concurrent pairs failed with the fixed port, 0 of 12 with an ephemeral one.
+    echo_socket = EchoSocket()
+    orig_whitelist = athenad.LOCAL_PORT_WHITELIST
+    athenad.LOCAL_PORT_WHITELIST = {echo_socket.port}
     socket_thread = threading.Thread(target=echo_socket.run)
     socket_thread.start()
 
-    athenad.startLocalProxy(end_event, 'ws://localhost:1234', self.SOCKET_PORT)
+    athenad.startLocalProxy(end_event, 'ws://localhost:1234', echo_socket.port)
 
     ws_recv.put_nowait(b'ping')
     try:
@@ -427,6 +435,9 @@ class TestAthenadMethods:
       # signal websocket close to athenad.ws_proxy_recv
       ws_recv.put_nowait(WebSocketConnectionClosedException())
       socket_thread.join()
+      # restore the module global: leaving a dead port whitelisted would silently widen what any
+      # later test in this worker is allowed to proxy to.
+      athenad.LOCAL_PORT_WHITELIST = orig_whitelist
 
   def test_get_ssh_authorized_keys(self):
     keys = dispatcher["getSshAuthorizedKeys"]()

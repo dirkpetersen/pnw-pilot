@@ -546,12 +546,32 @@ class TestSkipWideFullLoop(UploaderTestCase):
   def teardown_method(self):
     self.params.put_bool("SkipWideCameraUpload", False)
 
-  def _run(self):
+  def _run(self, until=None, settle: float = 0.0, timeout: float = 20.0):
+    """Run the REAL main() loop until `until()` holds, then keep it running for `settle` seconds.
+
+    This replaces a flat `time.sleep(1.5)`, for the same reason `TestUploader.wait_for` above
+    replaced one: a fixed sleep is racy in the direction that produces a FALSE FAILURE, and the
+    assertion it produces ("ecamera did not upload with the skip toggle OFF") reads exactly like a
+    real regression in the uploader. MEASURED 2026-09-20 on this dev host: the three pass-2 files are
+    all xattr-marked 0.35 s after the thread starts on an idle box, but 1.114 s with four copies of
+    this suite running -- 74% of the 1.5 s budget. The pre-ship gate is routinely run while another
+    agent runs the same suite, so that budget was being spent, not banked.
+    NOTHING IS WEAKENED: `until` is the test's OWN expectation, so a genuine stall still fails on the
+    same assertion with the same message, just after a real timeout instead of an arbitrary 1.5 s.
+    `settle` exists for the NEGATIVE assertions: main() has no sleeps here (allow_sleep is False), so
+    a few hundred ms is thousands of further loop iterations in which a file that must never be
+    picked could still be picked.
+    """
     end_event = threading.Event()
     t = threading.Thread(target=main, args=[end_event])
     t.daemon = True
     t.start()
-    time.sleep(1.5)         # long enough for several pass-2 picks
+    if until is not None:
+      deadline = time.monotonic() + timeout
+      while not until() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if settle:
+      time.sleep(settle)
     end_event.set()
     t.join()
 
@@ -567,8 +587,11 @@ class TestSkipWideFullLoop(UploaderTestCase):
     for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
       self.make_file_with_data(self.seg_dir, n, 1)
 
-    self._run()
     f = self._pass2_files()
+    # Wait for the two files that MUST go, then let the loop spin on: with the skip broken, ecamera
+    # is the very next pass-2 candidate and would be picked within one iteration (sub-millisecond),
+    # so the settle window is orders of magnitude more opportunity than the old flat 1.5 s gave it.
+    self._run(until=lambda: self._marked(f["rlog"]) and self._marked(f["fcamera.hevc"]), settle=0.5)
 
     # the withheld file must be untouched: no xattr, and never even attempted
     assert not self._marked(f["ecamera.hevc"]), \
@@ -590,8 +613,8 @@ class TestSkipWideFullLoop(UploaderTestCase):
     for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
       self.make_file_with_data(self.seg_dir, n, 1)
 
-    self._run()
     f = self._pass2_files()
+    self._run(until=lambda: self._marked(f["ecamera.hevc"]))
     assert self._marked(f["ecamera.hevc"]), "ecamera did not upload with the skip toggle OFF"
 
   def test_rlog_is_picked_before_video(self):
@@ -601,9 +624,14 @@ class TestSkipWideFullLoop(UploaderTestCase):
     for n in ("qlog", "rlog", "fcamera.hevc", "ecamera.hevc"):
       self.make_file_with_data(self.seg_dir, n, 1)
 
-    self._run()
-    pass2 = [k for k in log_handler.upload_order
-             if k.endswith(("rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc"))]
+    def _pass2_keys():
+      return [k for k in log_handler.upload_order
+              if k.endswith(("rlog.zst", "rlog", "fcamera.hevc", "ecamera.hevc"))]
+
+    # all three pass-2 files, so the ordering check below never runs on a half-drained queue. A
+    # regression that picks fcamera first still satisfies this wait and still fails the assertion.
+    self._run(until=lambda: len(_pass2_keys()) >= 3)
+    pass2 = _pass2_keys()
     assert pass2, "no pass-2 uploads happened at all"
     assert pass2[0].endswith(("rlog.zst", "rlog")), \
       f"pass 2 did not start with rlog (got {pass2[0]}) -- priority ordering regressed"

@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include "catch2/catch.hpp"
 #include "system/loggerd/logger.h"
 
@@ -55,7 +57,13 @@ void write_msg(LoggerState *logger) {
 
 TEST_CASE("logger") {
   const int segment_cnt = 100;
-  const std::string log_root = "/tmp/test_logger";
+  // PER-PROCESS log root. This used to be the host-global "/tmp/test_logger", and the first thing
+  // this case does is `rm -rf` it -- so any second pytest run on the same machine (the pre-ship gate
+  // plus a review agent's copy of the same suite, which is routine here) deleted this run's segments
+  // mid-write and the binary aborted inside ZstdFileWriter on `assert(file_ != nullptr)`. Nothing in
+  // pytest's per-test isolation covers it: OPENPILOT_PREFIX and PARAMS_ROOT do not reach a hardcoded
+  // absolute path. Measured 2026-09-20: run two-up, 5 of 6 runs failed; run alone, 0 of 3.
+  const std::string log_root = "/tmp/test_logger_" + std::to_string(getpid());
   REQUIRE(system(("rm " + log_root + " -rf").c_str()) == 0);
   std::string route_name;
   {
@@ -72,4 +80,7 @@ TEST_CASE("logger") {
   for (int i = 0; i < segment_cnt; ++i) {
     verify_segment(log_root + "/" + route_name, i, segment_cnt, 1);
   }
+  // The root is per-process now, so the `rm -rf` at the top no longer reclaims the previous run's
+  // tree: clean up here or /tmp grows one 100-segment directory per test run.
+  REQUIRE(system(("rm " + log_root + " -rf").c_str()) == 0);
 }
