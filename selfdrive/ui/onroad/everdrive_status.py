@@ -9,10 +9,10 @@ digits change.
 
 Driver-approved formats (2026-09-20 revision -- compact shapes, `m` for miles, and the pack's energy
 in kWh beside the range it buys):
-    charging, moving:    ED:1.4kw,100m(55.345kwh)->110m
-    charging, stopped:   ED:1.4kw,100m(55.345kwh),+2.7m/h
-    not charging:        ED:--,100m(55.345kwh)
-    effOk False:         ED:1.4kw,100m(55.345kwh)
+    charging, moving:    1.4kw,100m(55.345kwh)->110m
+    charging, stopped:   1.4kw,100m(55.345kwh),+2.7m/h
+    not charging:        --,100m(55.345kwh)
+    effOk False:         1.4kw,100m(55.345kwh)
     no capKwh/socPct:    the (kwh) parenthetical is OMITTED, never shown as 0.000
 
 The kWh is socPct x capKwh, where capKwh is DERIVED by the producer from the truck's own
@@ -116,16 +116,28 @@ _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple o
                           #   rate), every term of which is still true. The change of form is the
                           #   visible failure signal (Rule 2), not a silently bent number.
 
-# STABLE WIDTH: measured ONCE from these fixed worst-case strings with the real font — never from live
-# values — so the box cannot dance left/right as digits change (the same discipline ces_status.py's
-# standstill card uses). DIGIT-WIDTH ASSUMPTION, unchanged by the compact reshape: at most 2 integer
-# digits of kW, 3 of miles, 2 of mi/h. A 4-digit mileage would overflow the fixed box and clip — which
-# is why _PROJ_MAX_RATIO clamps the projection rather than letting it print whatever it computes.
-_EXEMPLARS = (
-  "ED:00.0kw,000m(000.000kwh)->000m",        # charging + moving  (projection)
-  "ED:00.0kw,000m(000.000kwh),+00.0m/h",     # charging + stopped (gain rate)  <- WIDEST
-  "ED:--,000m(000.000kwh)",                  # not charging
-)
+# BOX WIDTH: the background hugs the ACTUAL text. Driver, 2026-09-20 -- the previous fixed-exemplar
+# box left 4-5 characters of empty black to the left of the line, because the widest exemplar
+# ("00.0kw,000m(000.000kwh),+00.0m/h") is several characters longer than a real line like
+# "1.4kw,98m(56.278kwh),+2.7m/h".
+#
+# This does NOT reintroduce the dancing the exemplars existed to prevent. The box is anchored to the
+# RIGHT edge and the text is right-aligned inside it, so the text's right edge sits at a FIXED x and
+# the TEXT NEVER MOVES -- only the background's left edge does. Within a form that edge is stable to
+# ~2 px anyway (Inter's digits are 106-108 atlas units, near-tabular); it shifts visibly only when the
+# FORM changes, which is a real content change the driver should see.
+_MAX_BOX_W = 1000.0       # Rule 2 tripwire, NOT a clamp. The driver's hard constraint is that this box
+                          #   never enters the green driving path down screen centre: content right
+                          #   edge 2130 - _MARGIN 40 - 1000 = 1090, i.e. 10 px clear of centre (1080).
+                          #   The producer's bands make it unreachable (kW <= 27.7, range <= 254 mi,
+                          #   capacity <= 470.7 kWh, rate <= 99.9), so tripping it means an input is
+                          #   out of band -- which must be SAID, not silently drawn over the road.
+                          #   Clamping instead would hide exactly the fault worth knowing about.
+_CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a fraction of the SHORTER
+                          #   side, so ces_status's literal 0.12 gives ITS tall box ~10 px but gives
+                          #   this short, wide one-line box only ~6.5 px -- which reads as square next
+                          #   to the other overlays. Expressed in px and converted at draw time so the
+                          #   corners match regardless of how wide the line happens to be.
 
 
 class _C:
@@ -155,7 +167,7 @@ class EverDriveStatusRenderer(Widget):
       self._mem = None
     self._last_poll = 0.0
     self._poll_interval = _REFRESH_S
-    self._box_w: float | None = None      # exemplar width, measured LAZILY on first actual display
+    self._too_wide_logged = False         # Rule 2 tripwire, fires at most once per session
     self._cached_layout: tuple[str, float, float] | None = None   # (text, box_w, text_w); None == hidden
     # Log each DISTINCT read fault once (not 5x/s), with a flag per fault: sharing one flag would let
     # the second, different failure go completely unlogged.
@@ -208,12 +220,19 @@ class EverDriveStatusRenderer(Widget):
     text = self._build_text(st)
     if text is None:
       return          # producer went silent (stale ts) -> hide; keep polling fast so it can come back
-    if self._box_w is None:
-      # First time the box is actually shown. Measuring here (not in __init__, not per poll) is what
-      # keeps a device with no EverDrive from ever paying for the text measurement at all.
-      self._box_w = max(measure_text_cached(self.font, t, _FS).x for t in _EXEMPLARS) + _PAD * 2
-    # The live line's own width is measured HERE (5 Hz) and cached, so _render does nothing but draw.
-    self._cached_layout = (text, self._box_w, measure_text_cached(self.font, text, _FS).x)
+    # Measured HERE (5 Hz) and cached, so _render does nothing but draw. A device with no EverDrive
+    # never reaches this line at all, so it never pays for a text measurement.
+    text_w = measure_text_cached(self.font, text, _FS).x
+    box_w = text_w + _PAD * 2
+    # Rule 2: the box must never reach into the green driving path. The producer's bands make this
+    # unreachable, so if it ever fires an input is out of band -- say so rather than quietly drawing
+    # over the road. Once per session; this is a tripwire, not a clamp (clamping would hide it).
+    if box_w > _MAX_BOX_W and not self._too_wide_logged:
+      self._too_wide_logged = True
+      cloudlog.error("everdrive2pnw: line %.1f px wide (box %.1f) exceeds the %.0f px ceiling -- " +
+                     "the box now reaches toward screen centre. An input must be out of band: %r",
+                     text_w, box_w, _MAX_BOX_W, text)
+    self._cached_layout = (text, box_w, text_w)
 
   def _build_text(self, st: dict) -> str | None:
     """The one line, or None to hide. Every guard below fails to a VISIBLY different form — never to a
@@ -249,9 +268,9 @@ class EverDriveStatusRenderer(Widget):
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
     if not st.get("acSeen") or ac_kw <= _AC_ZERO_KW:
-      return f"ED:--,{rng}m{pack}"
+      return f"--,{rng}m{pack}"
 
-    kw = f"ED:{ac_kw:.1f}kw"
+    kw = f"{ac_kw:.1f}kw"
     # effOk False == effWhKm is sitting at its -100 encoding floor, i.e. the truck is not telling us its
     # reference efficiency. No projection and no gain rate then, and NO substituted default efficiency:
     # a made-up constant would produce a confident number out of a signal we do not have.
@@ -288,9 +307,13 @@ class EverDriveStatusRenderer(Widget):
       return
     text, box_w, text_w = self._cached_layout
     # Anchored to the RIGHT EDGE and the bottom, exactly as ces_status.py does — this is what keeps the
-    # box out of the green driving path down the middle of the screen. The text is right-aligned inside
-    # the fixed-width box (also as ces_status.py does), so "mi" stays put as the digits change.
+    # box out of the green driving path down the middle of the screen. The text is right-aligned, so
+    # its right edge sits at a fixed x and the TEXT never moves as digits or form change.
     bx = rect.x + rect.width - box_w - _MARGIN
     by = rect.y + rect.height - _BOX_H - _MARGIN
-    rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, _BOX_H), 0.12, 8, _C.BG)
+    # raylib: radius = roundness * min(w, h) / 2. Converting from a PIXEL radius keeps the corners
+    # looking like the CES and location boxes regardless of how wide this line happens to be --
+    # passing ces_status's literal 0.12 would give this short, wide box only ~6.5 px and read square.
+    roundness = min(1.0, 2.0 * _CORNER_R / min(box_w, _BOX_H))
+    rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, _BOX_H), roundness, 8, _C.BG)
     rl.draw_text_ex(self.font, text, rl.Vector2(bx + box_w - _PAD - text_w, by + _PAD), _FS, 0, _C.WHITE)

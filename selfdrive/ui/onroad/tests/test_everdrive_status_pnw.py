@@ -190,43 +190,43 @@ class TestTheFiveDocumentedOutputs:
   space after the colon, comma separators, ASCII `->`."""
 
   def test_charging_and_moving_projects_the_range(self, widget, now):
-    assert widget._build_text(st(now, vMs=62 * MPH)) == "ED:1.4kw,112m(63.487kwh)->117m"
+    assert widget._build_text(st(now, vMs=62 * MPH)) == "1.4kw,112m(63.487kwh)->117m"
 
   def test_charging_and_stopped_shows_the_gain_rate(self, widget, now):
-    assert widget._build_text(st(now, vMs=0.0)) == "ED:1.4kw,112m(63.487kwh),+2.7m/h"
+    assert widget._build_text(st(now, vMs=0.0)) == "1.4kw,112m(63.487kwh),+2.7m/h"
 
   def test_acSeen_false_is_not_charging_and_never_a_manufactured_zero(self, widget, now):
     """acSeen False means the EverDrive message has NOT been received, so acKw is a CANParser
     pre-fill. "0.0 kW" would be a fabricated reading presented as a measurement."""
     out = widget._build_text(st(now, acSeen=False, acKw=0.0, vMs=62 * MPH))
-    assert out == "ED:--,112m(63.487kwh)"
+    assert out == "--,112m(63.487kwh)"
     # Assert the POWER FIELD specifically, not a bare substring: since 2026-09-20 the line carries a
     # "(NN.NNNkwh)" energy term, so "kw" appears in every form and is no longer a proxy for "a power
     # reading was printed". What must never appear is a fabricated 0.0 kW power term.
-    assert out.startswith("ED:--,"), out
+    assert out.startswith("--,"), out
     assert "0.0kw" not in out and "kw," not in out, out
     # and the guard is on acSeen ALONE, not on the value: a payload claiming power while saying the
     # message was never received is not trustworthy at any magnitude
-    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=62 * MPH)) == "ED:--,112m(63.487kwh)"
-    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=0.0)) == "ED:--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=62 * MPH)) == "--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=False, acKw=1.4, vMs=0.0)) == "--,112m(63.487kwh)"
 
   def test_a_real_measured_zero_reads_the_same_way_to_the_driver(self, widget, now):
     """Charger unplugged, meter live: a genuine 0 kW. Same form -- "not charging" is the truth in
     both cases -- but it must come from the acKw <= _AC_ZERO_KW branch, not from acSeen."""
-    assert widget._build_text(st(now, acSeen=True, acKw=0.0, vMs=62 * MPH)) == "ED:--,112m(63.487kwh)"
-    assert widget._build_text(st(now, acSeen=True, acKw=ed._AC_ZERO_KW, vMs=62 * MPH)) == "ED:--,112m(63.487kwh)"
-    assert widget._build_text(st(now, acSeen=True, acKw=0.06, vMs=0.0)).startswith("ED:0.1kw,")
+    assert widget._build_text(st(now, acSeen=True, acKw=0.0, vMs=62 * MPH)) == "--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=True, acKw=ed._AC_ZERO_KW, vMs=62 * MPH)) == "--,112m(63.487kwh)"
+    assert widget._build_text(st(now, acSeen=True, acKw=0.06, vMs=0.0)).startswith("0.1kw,")
 
   def test_effOk_false_drops_the_projection_and_substitutes_nothing(self, widget, now):
     """effWhKm at its -100 Wh/km encoding floor is "not available". A default efficiency would
     manufacture a confident projection out of a signal we do not have."""
     out = widget._build_text(st(now, effOk=False, effWhKm=-100.0, vMs=62 * MPH))
-    assert out == "ED:1.4kw,112m(63.487kwh)"
+    assert out == "1.4kw,112m(63.487kwh)"
     assert "->" not in out and "mi/h" not in out
     # and the guard is on effOk ALONE: a payload that says "not usable" while carrying a
     # usable-looking number must still be believed about the flag, not about the number
-    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=62 * MPH)) == "ED:1.4kw,112m(63.487kwh)"
-    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=0.0)) == "ED:1.4kw,112m(63.487kwh)"
+    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=62 * MPH)) == "1.4kw,112m(63.487kwh)"
+    assert widget._build_text(st(now, effOk=False, effWhKm=320.0, vMs=0.0)) == "1.4kw,112m(63.487kwh)"
 
   def test_a_stale_ts_hides_the_box(self, widget, now):
     assert widget._build_text(st(now, ts=now[0] - 12.0, vMs=62 * MPH)) is None
@@ -243,15 +243,15 @@ class TestTheFiveDocumentedOutputs:
       if out is None:
         continue
       assert all(32 <= ord(c) <= 126 for c in out), repr(out)
-    for exemplar in ed._EXEMPLARS:
-      assert all(32 <= ord(c) <= 126 for c in exemplar), repr(exemplar)
 
-  def test_the_exemplars_cover_every_shape_the_formatter_can_emit(self, widget, now):
-    """The box width is fixed from _EXEMPLARS, so a live string longer than all of them would clip.
-    Checked in characters (the stub measurement is not the device font) across the whole PLAUSIBLE
-    input domain: up to a 9.6 kW L2 charger, the DBC's maximum range (409.3 km), and the efficiency
-    band's real-world ends. See test_KNOWN_GAP_... below for what is NOT covered."""
-    widest = max(len(e) for e in ed._EXEMPLARS)
+
+  def test_no_plausible_line_reaches_the_width_ceiling(self, widget, now):
+    """REPLACED the exemplar-coverage test 2026-09-20, when the box started hugging the text. The
+    risk is no longer clipping (the box grows to fit) but WIDTH: past _MAX_BOX_W the box begins
+    reaching toward the green driving path. Checked in characters -- the stub measurement is not the
+    device font -- across the whole PLAUSIBLE domain: a 9.6 kW L2 charger, the DBC's maximum range,
+    and both ends of the efficiency band. The real px ceiling is pinned separately."""
+    widest = 36     # chars: the longest shape the formatter can emit, "00.0kw,000m(000.000kwh),+00.0m/h"
     cases = [st(now, **o) for o in (
       {"vMs": 62 * MPH}, {"vMs": 0.0}, {"acSeen": False}, {"effOk": False},
       {"acKw": 9.6, "rangeKm": 409.3, "vMs": 0.0},
@@ -277,8 +277,8 @@ class TestTheFiveDocumentedOutputs:
     Showing LESS is honest; a clipped number silently corrupts the whole line, not just its last
     term (Rule 2). The change of form is the visible signal, exactly as it is for the projection."""
     out = widget._build_text(st(now, acKw=99.9, vMs=0.0))
-    assert out == "ED:99.9kw,112m(63.487kwh)", "the un-showable gain term must be dropped, not clipped"
-    assert len(out) <= max(len(e) for e in ed._EXEMPLARS), "must now fit the fixed-width box"
+    assert out == "99.9kw,112m(63.487kwh)", "the un-showable gain term must be dropped, not clipped"
+    assert len(out) <= 36, "must stay within the longest shape the formatter can emit"
 
 
 # ---------------------------------------------------------------- T9
@@ -296,11 +296,11 @@ class TestGuards:
   def test_a_missing_key_backs_the_poll_off_but_never_permanently(self, widget, now):
     assert poll(widget, None) is None
     assert widget._poll_interval == ed._ABSENT_REFRESH_S
-    assert widget._box_w is None, "exemplar measurement must be deferred to first actual display"
+    assert widget._cached_layout is None, "no layout work at all while hidden"
     # ... and the charger can still be plugged in mid-drive
     assert poll(widget, st(now, vMs=62 * MPH)) is not None
     assert widget._poll_interval == ed._REFRESH_S
-    assert widget._box_w is not None and widget.stack_height > 0.0
+    assert widget._cached_layout is not None and widget.stack_height > 0.0
     # and it goes back to hidden + slow when the module is unplugged again
     assert poll(widget, None) is None
     assert widget._poll_interval == ed._ABSENT_REFRESH_S
@@ -312,7 +312,7 @@ class TestGuards:
     s = {"ts": now[0], "acKw": None, "acSeen": True, "rangeKm": None, "effWhKm": None,
          "effOk": True, "socPct": None, "vMs": None}
     out = widget._build_text(s)
-    assert out == "ED:--,--m", out
+    assert out == "--,--m", out
     assert "None" not in out and "nan" not in out
 
   def test_a_non_dict_payload_is_treated_as_absent(self, widget):
@@ -342,7 +342,7 @@ class TestGuards:
     for mph in (0.0, 0.5, 1.0, 2.0, 3.0):
       out = widget._build_text(st(now, vMs=mph * MPH))
       assert "->" not in out, f"{mph} mph projected: {out}"
-      assert out == "ED:1.4kw,112m(63.487kwh),+2.7m/h"
+      assert out == "1.4kw,112m(63.487kwh),+2.7m/h"
 
   def test_the_projection_switches_on_only_once_it_is_credible(self, widget, now):
     """Positive control for the test above: above the cutoff the projection DOES appear, and it
@@ -375,7 +375,7 @@ class TestGuards:
     out = widget._build_text(st(now, effWhKm=3.0, vMs=60 * MPH))
     assert "->" not in out, "an absurd projection must not print"
     assert not out.endswith("mi/h"), "a gain derived from an absurd efficiency must not print either"
-    assert out == "ED:1.4kw,112m(63.487kwh)"
+    assert out == "1.4kw,112m(63.487kwh)"
 
   def test_the_disable_toggle_hides_the_box_and_backs_the_poll_off(self, widget, now):
     assert poll(widget, st(now, vMs=62 * MPH), disabled=True) is None
@@ -408,18 +408,53 @@ class TestGuards:
     poll(widget, None)
     assert len(LOG.calls) == 2, LOG.calls
 
-  def test_the_exemplar_width_is_measured_once_and_never_from_live_values(self, widget, now):
-    """A box sized from the live string would dance left/right as digits change -- and could creep
-    toward the green driving path down the middle of the screen."""
-    poll(widget, st(now, vMs=62 * MPH))
-    exemplar_measures = [t for t in MEASURED if t in ed._EXEMPLARS]
-    assert sorted(exemplar_measures) == sorted(ed._EXEMPLARS), MEASURED
-    w0 = widget._box_w
-    MEASURED.clear()
-    for mph, kw in ((0.0, 1.4), (62.0, 9.6), (35.0, 0.0)):
-      poll(widget, st(now, vMs=mph * MPH, acKw=kw))
-      assert widget._box_w == w0, "the box width must not follow the live text"
-    assert not [t for t in MEASURED if t in ed._EXEMPLARS], "exemplars must be measured only once"
+  def test_the_box_hugs_the_text_and_the_text_right_edge_never_moves(self, widget, now):
+    """REPLACED the exemplar-width test 2026-09-20. The box used to be sized from fixed worst-case
+    exemplars so it could not dance; the driver reported that this left 4-5 characters of empty black
+    beside the line, so the box now hugs the ACTUAL text.
+
+    That is safe for the reason the exemplars existed: the box is right-anchored and the text is
+    right-aligned inside it, so shrinking the box moves only the BACKGROUND's left edge -- the text's
+    right edge is invariant. This test pins both halves."""
+    seen = []
+    for mph, kw in ((62.0, 1.4), (0.0, 1.4), (62.0, 9.6), (35.0, 0.0)):
+      text, box_w, text_w = poll(widget, st(now, vMs=mph * MPH, acKw=kw))
+      assert box_w == pytest.approx(text_w + 2 * ed._PAD), "the box must hug the text"
+      seen.append((box_w, text_w))
+    # right edge of the text = (right margin) + _PAD, independent of box_w -- so it cannot move
+    right_edges = {round(bw - tw - ed._PAD, 6) for bw, tw in seen}
+    assert len(right_edges) == 1, f"the text's right inset must be constant, got {right_edges}"
+    assert len({bw for bw, _ in seen}) > 1, "positive control: the box SHOULD resize with the form"
+
+  def test_a_line_wider_than_the_ceiling_is_reported_not_silently_drawn(self, widget, now):
+    """Rule 2 tripwire. _MAX_BOX_W is the width at which the box would start reaching toward the
+    green driving path. The producer's bands make it unreachable, so tripping it means an input is
+    out of band -- it must be logged, and NOT clamped (clamping would hide the fault)."""
+    assert ed._MAX_BOX_W == 1000.0
+    widget._too_wide_logged = False
+    LOG.calls.clear()
+    text, box_w, _ = poll(widget, st(now, vMs=62 * MPH))
+    assert box_w <= ed._MAX_BOX_W, "this realistic line must NOT trip the ceiling"
+    assert not LOG.calls, "and must not log"
+
+    # Now FORCE an over-wide line. No plausible payload can reach the ceiling (the formatter tops out
+    # around 32 chars and the stub measures len*fs*0.5), so the only way to exercise the tripwire is
+    # to hand _update_state a pathological string directly. Without this, swapping the report for a
+    # silent clamp survives the whole suite -- mutation W3 did exactly that.
+    widget._too_wide_logged = False
+    LOG.calls.clear()
+    widget._build_text = lambda _st: "X" * 60
+    widget._last_poll = -1e9
+    widget._update_state()
+    _t, wide_box_w, wide_text_w = widget._cached_layout
+    assert wide_box_w > ed._MAX_BOX_W, "the box must NOT be clamped -- clamping hides the fault"
+    assert wide_box_w == pytest.approx(wide_text_w + 2 * ed._PAD), "still hugging, not clamped"
+    assert [c for c in LOG.calls if "exceeds" in str(c)], "Rule 2: an over-wide line must be LOGGED"
+
+    n = len(LOG.calls)
+    widget._last_poll = -1e9
+    widget._update_state()
+    assert len(LOG.calls) == n, "and logged at most once per session, not every poll"
 
   def test_the_stack_height_is_exactly_zero_while_hidden(self, widget, now):
     """augmented_road_view subtracts this from the CES box position every frame. Anything other
@@ -452,7 +487,7 @@ class TestThePackEnergyTerm:
     out = widget._build_text(st(now, **{missing: None}, vMs=62 * MPH))
     assert "kwh" not in out, out
     assert "0.000" not in out, out
-    assert out == "ED:1.4kw,112m->117m", out      # the rest of the line is unaffected
+    assert out == "1.4kw,112m->117m", out      # the rest of the line is unaffected
 
   def test_the_term_appears_in_every_form_that_shows_a_range(self, widget, now):
     """Consistency: the driver should not have to wonder why it vanished at a stoplight."""
