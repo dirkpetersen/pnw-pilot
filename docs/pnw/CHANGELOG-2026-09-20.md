@@ -94,10 +94,19 @@ Owner asked for both (and chose **option (b)**, the posted-limit sanity clamp, o
 
 ### The phantom cannot be re-measured yet — three verified blockers
 1. The offline corpus ends **2026-09-17**; the map-rating floor shipped **09-18 19:27**.
-2. **`mapRaw` / `mapEff` are DEAD TELEMETRY** — `0.0` or `None` on **all 71,136** offline ticks *and*
-   **all 57,411** device records. `mapRaw` is the candidate's own mapd rating, i.e. exactly what
-   `icbm_map_floor_ms()` floors against, so **the floor cannot be modelled offline at all.** Same
-   failure mode as [[vtscstatus-telemetry-not-logged]]: emitted, looks populated, carries nothing.
+2. ~~**`mapRaw` / `mapEff` are DEAD TELEMETRY**~~ — ❌ **RETRACTED SAME DAY. I was wrong, twice, and
+   this was pushed before it was checked.**
+
+   **(a) The field is not dead.** `vtscState = 'idle'` on **all 58,614** device records — only 1,781
+   ticks moving >5 m/s, `reason='stopLatch'` on 56,304. **VTSC never triggered**, and `cap()` resets
+   `_tele_map_raw = 0.0` at the top of every tick, so `0.0` is the CORRECT idle value. The offline
+   corpus cannot contradict it: it carries no `vtscState` at all. **This is the uniform-zero trap in
+   Rule 2** — quoted repeatedly in this very changelog, then walked into. My own filter made it
+   worse by treating `''`/`'none'`/`-1.0` as "not alive" when those ARE the idle values.
+
+   **(b) `mapRaw` is not the field the floor uses anyway.** `icbm_map_floor_ms()` is fed
+   `sig["map_target_v"]` (`ces_pnw.py:4796`) and the result is logged as **`icbmMapFlr`, which IS
+   alive** (103 non-zero). It never blocked anything.
 3. The device retains only **106 ICBM ticks**, every one `secondary`/`tertiary` at 25 mph posted.
    No post-floor highway ICBM data exists.
 
@@ -128,7 +137,8 @@ curve on the only data we have.** Stopped instead.
 **`visKMax` went live yesterday** (`viskvis2pnw`, verified on the truck) and records on EVERY tick
 rather than only where ICBM already acted. **One highway drive with the floor live** yields the
 phantom's post-floor recurrence, `visKMax` on a real curve vs a phantom, and therefore both
-thresholds. Fixing `mapRaw` first is a small change and would make the floor modellable offline too.
+thresholds. **Nothing needs to be coded first** — the "fix `mapRaw` first" advice in the retracted
+item above was based on the same two errors.
 
 ## 📌 Not pushed, deliberately
 Seven worktrees carry unpushed commits that are **not** part of this effort — `redlight-stop2pnw`,
