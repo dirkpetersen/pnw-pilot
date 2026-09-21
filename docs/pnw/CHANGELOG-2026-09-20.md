@@ -140,6 +140,128 @@ phantom's post-floor recurrence, `visKMax` on a real curve vs a phantom, and the
 thresholds. **Nothing needs to be coded first** — the "fix `mapRaw` first" advice in the retracted
 item above was based on the same two errors.
 
+## ✅ The CANbus session's push VALIDATED — Fable: SHIP
+
+`everdrive2pnw` was pushed by the **other concurrent Claude session** (Rule 10) and had not been
+reviewed. Validated to the same standard as our own work: **Fable review + Rule 9 gate**.
+
+**Verdict SHIP, nothing reverted.** The `opendbc` half (car code, the higher risk) returns **`None`,
+never a number**, when inputs are missing, zero or the DBC start value — and `RPC_KM_BAND`'s upper
+bound of `409.25` is genuinely right, because `4092*0.1 == 409.20000000000005` so `409.2` would have
+rejected the largest real value. **Tesla untouched** (constructed only in Ford `carstate.py`, no
+fingerprint branching, panda untouched). **23/26 mutants killed, 0 NOT BUILT.**
+
+The unit-ambiguity worry ([[lightning-set-speed-follows-cluster-unit]]) does **not** apply: the
+180.2 km reading was taken with the dash showing "112 mi", the one regime where a cluster-following
+signal would have read miles. Fable also rebuilt the raylib font atlas to reproduce the width claim
+— and discarded its own first measurement when it realised Pillow uses em-height vs raylib's
+ascender-descender. Four non-blocking follow-ups, the useful one being that the gap-log latches on
+the FIRST `None`, so a boot transient can spend it and a real later gap never logs.
+
+Two later cosmetic commits (`34968ab0d7`, `9b144ea904`) were **not** individually reviewed, but were
+covered by the gate. **Installed and live on the truck** (`9b144ea`, `DisableEverDrive=0`); the box
+stays hidden until the EverDrive CAN message actually arrives, which is its documented normal state.
+
+## ⛔ Bluetooth tethering: ASKED, MEASURED, DEAD END — [`BLUETOOTH-FEASIBILITY.md`](../../../docs/BLUETOOTH-FEASIBILITY.md)
+
+Three independent blockers, any one sufficient. **The AGNOS kernel has `CONFIG_BT` not set** — the
+WCN3990 radio and its Qualcomm firmware are physically present (comma flashes BT firmware it never
+uses) but there is no kernel stack, `/lib/modules/` is empty and no bluez. StarPilot has Bluetooth
+only because they ship their **own kernel + 4.7 GB rootfs**. Pass 2 needs **21.5 Mbps** vs BT PAN's
+~1, and it routes over the same cellular plan as the WiFi hotspot so it saves no data. And
+`NetworkType` has no bluetooth value, so such a link reads **unmetered** and would upload over
+cellular silently — a Rule 2 violation by construction.
+
+**Two premises corrected:** StarPilot's feature is **not tethering** (`org.bluez.Network1` appears
+**0 times** in all 6 files — it is A2DP audio + HID input), and that repo is **firestar5683**, not
+jc01rho's. **Actionable finding, separate from Bluetooth:** the device records at **21.8 Mbps** and
+uploads at **5** (`FirehoseSpeed`) — already **4.3× underwater**.
+
+## ✅ VERIFIED on the device: maps stopped, uploads clean
+
+**Maps.** Last tile written **2026-09-14 18:51 PT**; `mapd_configd` region-requests read 17 on 09-14,
+4 on 09-15, then **ZERO from 09-16 onward**. `mapdgrace2pnw` installed 09-14 19:15. The decisive part
+is the **boots**: the old bug fired on *every* boot (~170 MB whole-state re-download), and the device
+has booted **6+ times since** with **nothing downloaded**. The ~14–17 GB/month LTE leak is closed.
+
+> ⚠️ **Method correction:** my first pass grepped `downloading` in the swaglogs and got 88 hits
+> including today's. Those are the **updater's** `"caught SIGHUP, attempting to download"` — messages
+> *I* generated with my own `pkill -HUP`. Reporting that count would have said maps were still
+> downloading. Tile mtimes and `mapd_configd` region-requests are the real measures.
+
+**Uploads.** **2,714 files, 75.2 GB retained, 0 not uploaded** — zero backlog. The full set including
+`fcamera.hevc` (41.8 MB) and `ecamera.hevc` (41.6 MB) landed on home WiFi, which only happens on an
+unmetered link. ⚠️ **Do not repeat "75 GB backlog"** — 75.2 GB is what is RETAINED, not pending; an
+earlier draft of the Bluetooth analysis called it a backlog and it is wrong.
+
+## ❌ RETRACTED: the "brown-out reboots" flag
+
+I reported three unprompted boots on 09-19 (10:42 / 11:55 / 12:14 PT) as possible 12 V brown-outs,
+reaching for the open 12 V item. **The owner suggested the other session; the evidence says neither.**
+The git reflog shows every HEAD change is the updater's `Reset to FETCH_HEAD` on its ~1.5 h cycle,
+and `everdrive2pnw` was not fetched until the next morning — so no deploy happened. Each boot sits
+inside a run of **real drive routes** (`000001b8` with 14 segments, then `b9`, `ba`, `bc`, `bd`):
+ignition cycles while running errands, with the device powering off on its own 11.8 V protection
+between them. **Boot count alone says nothing** — the discriminator is whether a boot is followed by
+route segments.
+
+## 🗂️ `workdir/` — the workbench layer is now under version control
+
+`CLAUDE.md`, `docs/` and `scripts/` moved from loose files at `~/gh/comma/` into
+**`~/gh/comma/workdir/`** (branch `dirk`), symlinked back at the old paths — load-bearing, since
+`gh/comma/docs` is hardcoded in **546 files** and memory/skills use absolute paths. 146 files tracked;
+the five `*.arm64` binaries (63 of 68 MB) gitignored as CI artifacts. **⚠️ No remote yet**, so the
+single-disk problem is *not* solved, only made recoverable from local history.
+
+The move immediately broke `audit-docs.sh`: `find docs` without `-L` stopped at the symlink and
+reported **`total=0 unindexed=0`**, which **reads as a pass**. Fixed. Also surfaced that the **CANbus
+session is editing this repo without knowing it** — `docs/EVERDRIVE2PNW.md` modified 6 minutes after
+the move; now announced at the top of `CLAUDE.md` where both sessions read it.
+
+## 📋 WHAT WAS **NOT** DONE — the other half of the record
+
+Written down because a changelog of only what shipped is a misleading record.
+
+### Asked for and NOT delivered
+| item | why |
+|---|---|
+| **Re-measure the ICBM phantom** against the live floor | **Blocked on data, not analysis.** Only **106 ICBM ticks** retained, every one `secondary`/`tertiary` at 25 mph; the offline corpus ends 09-17 and the floor shipped 09-18. Needs **one highway drive**. |
+| **Build the posted-limit sanity clamp** (owner chose option b) | **Designed, deliberately not built.** The measurement killed its naive form: the PHANTOM's gap is **15.8 mph** but the REAL curve's is **25.9** — a gap-only rule fires *harder* on genuine slowdowns. Every "no curve" witness is currently unusable. Building it would put a rule in the CONTROL PATH that cannot tell the two apart. |
+| **Scope Chestnut / 0.11.2** | Not started — the flaky gate and the Bluetooth question took the day. **Still owed, and time-sensitive** (the GPU is coming). |
+
+### Verified ON the car
+Park gate (1 Hz → 60 s heartbeat, hold explicitly marked), `viskvis2pnw` (`visKMax` on a tick ICBM did
+NOT act on), curvedb shadow (`cdbOn="on"`), the everdrive box installed, maps stopped, uploads clean.
+
+### NOT verifiable without the driver
+* **Red light IN DRIVE** — the park gate's other half. Park proves suppression; only a stop *in gear*
+  proves it reads **gear, not speed**. If it goes quiet there, the gate is wrong in the way that matters.
+* **Tesla drive** — the over-steer A/B (the single highest-severity open item). One ignition cycle,
+  a JSON edit, **no deploy and no push**. Device is in the Lightning.
+* **Highway drive** — unblocks both ICBM items above.
+* **12 V multimeter**, and a **light-hand Tesla drive** (coop-steer actuation prerequisite).
+
+### Deliberately NOT touched
+* **Seven worktrees with unpushed commits.** `PENDING-WORK.md` flags them as landmines —
+  **`policemiss2pnw` would revert `policeship2pnw`'s TTL re-check**, and `lcabort2pnw` is held by an
+  explicit owner decision. Shipping any needs a rebase, a check of what it reverts, and a review.
+* **`CANbus/`** — another live session's work; moving or committing it is not mine to decide.
+* **The nudgeless lane-change curve gate** — owner said no change, twice. DO-NOT-BUILD.
+* **`application.py` building a window at import time** — the real defect behind the UI windows. It is
+  product code affecting UI startup; flagged, not touched.
+
+### Owner decisions outstanding
+1. **A remote for `workdir`** (should be private — `docs/` names the Waze key's location, S3 gateway
+   hostnames, car VINs, home SSIDs).
+2. **`MapdUseCarGps`** is ON as a device-local param only; `params_keys.h` still defaults it OFF, so a
+   factory reset or a fresh install on another device loses it.
+
+### Corrections I made to my own work today
+`mapRaw` "dead telemetry" — **retracted, wrong twice** · "brown-out reboots" — **retracted**, they were
+ignition cycles · the swaglog `downloading` count — my own SIGHUPs · "75 GB backlog" — it is retained,
+not pending · the `PARAMS_ROOT` flake diagnosis — **wrong, and written into the shared script** before
+being checked.
+
 ## 📌 Not pushed, deliberately
 Seven worktrees carry unpushed commits that are **not** part of this effort — `redlight-stop2pnw`,
 `mapdstate2pnw`, `lcabort2pnw`, `mapdlog2pnw`, `policemiss2pnw`, `speedadjustreset2pnw`, `uicpu2pnw`.
