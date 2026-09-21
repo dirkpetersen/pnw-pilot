@@ -170,7 +170,7 @@ _MAX_BOX_W = 1000.0       # Rule 2 tripwire, NOT a clamp. The driver's hard cons
                           #   never enters the green driving path down screen centre: content right
                           #   edge 2130 - _MARGIN 40 - 1000 = 1090, i.e. 10 px clear of centre (1080).
                           #   The producer's bands make it unreachable (kW <= 27.7, range <= 254 mi,
-                          #   capacity <= 470.7 kWh, rate <= 99.9), so tripping it means an input is
+                          #   capacity <= 474.7 kWh, rate <= 99.9), so tripping it means an input is
                           #   out of band -- which must be SAID, not silently drawn over the road.
                           #   Clamping instead would hide exactly the fault worth knowing about.
 _CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a fraction of the SHORTER
@@ -302,8 +302,12 @@ class EverDriveStatusRenderer(Widget):
     # THE FALLBACK IS THE TRUCK'S OWN RANGE, PRINTED EXACTLY AS IT SHIPS TODAY, and the computed
     # number carries a leading "@" ("at this speed"). The marker is on the COMPUTED value rather than
     # on the fallback for two reasons: the degraded path then stays bit-identical to the shipped box,
-    # and the extra character lands in the MOVING form, which is the narrower of the two -- the
-    # widest line the box can emit is the stopped form, which always falls back and so is unchanged.
+    # and it marks the one quantity whose meaning changes underneath the driver.
+    # CORRECTED (Fable review 2026-09-20): an earlier version of this comment claimed the "@" only
+    # ever lands in the moving form, the narrower of the two. That is FALSE -- the stopped/gain form
+    # also carries it whenever the projection clamp trips while moving (see the gain branch below,
+    # covered by test_the_gain_rate_rides_the_same_basis...). The worst-case table at the top of this
+    # file already includes that form, so the width numbers there are right; only this prose was wrong.
     gross_kw = st.get("grossKw")
     energy_kwh = st.get("energyKwh")
     measured_mi = None
