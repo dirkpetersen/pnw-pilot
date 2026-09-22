@@ -180,6 +180,24 @@ class TestOpLongResetUnderFixedSourceFingerprint:
       assert params.get_bool("AlphaLongitudinalEnabled") is False
 
 
+def _oplong_native_raises(monkeypatch):
+  """Replace card's PnwVehicle with a proxy that behaves exactly like the real one except that reading
+  `op_long_native` raises -- the one capability the op-long reset's try/except reads (card.py)."""
+  import openpilot.selfdrive.car.card as card_mod
+  real = card_mod.PnwVehicle
+
+  class _OpLongNativeRaises:
+    def __init__(self, CP):
+      self._real = real(CP)
+
+    def __getattr__(self, name):
+      if name == "op_long_native":
+        raise RuntimeError("boom")
+      return getattr(self._real, name)
+
+  monkeypatch.setattr(card_mod, "PnwVehicle", _OpLongNativeRaises)
+
+
 class TestOpLongResetFailureRetry:
   """Fix B (Gemini F2, SHOULD-FIX, review pass 3): a failed AlphaLongitudinalEnabled write must not
   permanently skip the reset. card.py's Params (common.params_pyx.Params) is a Cython extension type
@@ -188,7 +206,14 @@ class TestOpLongResetFailureRetry:
   PnwVehicle(self.CP) raise -- the EXACT SAME try/except block in
   _maybe_reset_calibration_on_car_change wraps both the PnwVehicle construction/capability read AND
   the AlphaLongitudinalEnabled write, so a raise from either exercises the identical
-  oplong_reset_ok=False path and the identical CalibrationCar-gating consequence under test."""
+  oplong_reset_ok=False path and the identical CalibrationCar-gating consequence under test.
+
+  2026-09-21: the raise is now confined to `op_long_native` (_oplong_native_raises). These tests used to
+  replace PnwVehicle module-wide, which stopped working on 2026-09-05 when mads2pnw (86b868a5a5) added a
+  SECOND, unguarded PnwVehicle(self.CP) call in Car._alternative_experience(): the injected raise fired
+  there first and escaped Car.__init__, so both tests were red from 09-05 to 09-21 unseen -- the
+  channel-tip checker did not run selfdrive/car/tests. Whether that unguarded call SHOULD crash card is
+  a separate open design question (docs/PENDING-WORK.md), not decided here."""
 
   def test_reset_failure_blocks_calibration_car_advance_and_arms_retry(self, monkeypatch):
     with OpenpilotPrefix():
@@ -196,10 +221,7 @@ class TestOpLongResetFailureRetry:
       params.put("CalibrationCar", TESLA)
       params.put_bool("AlphaLongitudinalEnabled", True)
 
-      def _boom(*_a, **_kw):
-        raise RuntimeError("boom")
-
-      monkeypatch.setattr("openpilot.selfdrive.car.card.PnwVehicle", _boom)
+      _oplong_native_raises(monkeypatch)
       _run_card(_make_cp("ford", LIGHTNING, op_long=True))
       # the reset attempt failed -- AlphaLongitudinalEnabled is UNCHANGED (still True: the write
       # never landed), and CalibrationCar must NOT advance so the swap is retried next boot.
@@ -213,10 +235,7 @@ class TestOpLongResetFailureRetry:
       params.put("CalibrationCar", TESLA)
       params.put_bool("AlphaLongitudinalEnabled", True)
 
-      def _boom(*_a, **_kw):
-        raise RuntimeError("boom")
-
-      monkeypatch.setattr("openpilot.selfdrive.car.card.PnwVehicle", _boom)
+      _oplong_native_raises(monkeypatch)
       _run_card(_make_cp("ford", LIGHTNING, op_long=True))
       assert params.get("CalibrationCar") == TESLA  # still stale after the failed attempt
       monkeypatch.undo()  # restore the real PnwVehicle for the retry pass below
