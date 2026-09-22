@@ -39,7 +39,8 @@ def _registered(parsers):
 
 class FakeSM:
   def __init__(self):
-    self.data = {"carControl": structs.CarControl(), "onroadEvents": [], "pandaStates": []}
+    self.data = {"carControl": structs.CarControl(), "onroadEvents": [], "pandaStates": [],
+                 "onroadEventsPnw": SimpleNamespace(events=[])}  # capnpfork2pnw: the fork's own events
     self.updated = {"onroadEvents": False, "pandaStates": False}
 
   def __getitem__(self, k):
@@ -91,8 +92,11 @@ class Bench:
     self.cs.cruiseState.available = stat in (3, 4, 5)
     self.cs.accFaulted = stat in (1, 2)
 
-  def events(self, *names):
+  def events(self, *names, pnw=()):
+    """As selfdrived publishes them: upstream names on onroadEvents, the fork's on onroadEventsPnw
+    (sent first in the same frame, so only onroadEvents' update is the trigger)."""
     self.sm.data["onroadEvents"] = [SimpleNamespace(name=n) for n in names]
+    self.sm.data["onroadEventsPnw"] = SimpleNamespace(events=[SimpleNamespace(name=n) for n in pnw])
     self.sm.updated["onroadEvents"] = True
 
   def run(self, seconds, sends=None, every_tick=False):
@@ -181,6 +185,20 @@ def test_sun_140546_no_input_standby_produces_one_self_explaining_record():
   assert rows[0][0] <= -2.9 and rows[-1][0] >= 0.9 and len(rows) >= 40
   assert [r for r in rows if r[0] == 0.0], "the edge tick itself is in the trace"
   assert rec["tx083"] == []
+
+
+def test_the_forks_own_events_still_reach_the_ev_channel():
+  """capnpfork2pnw moved cruiseOffRequested / madsLateralOnly & co. out of onroadEvents onto
+  onroadEventsPnw. They are exactly the names that explain an ACC drop the driver asked for, so losing
+  them from this record would be a silent regression of the logger."""
+  b = Bench()
+  b.steady_active()
+  b.run(4.0)
+  b.cruise(3)
+  b.events("pcmDisable", pnw=("madsLateralOnly", "cruiseOffRequested"))
+  b.run(1.2)
+  (rec,) = b.parsed()
+  assert [0.0, {"names": ["cruiseOffRequested", "madsLateralOnly", "pcmDisable"]}] in rec["chg"]["ev"]["rows"]
 
 
 def test_every_state_change_emits_exactly_one_record_and_steady_state_none():

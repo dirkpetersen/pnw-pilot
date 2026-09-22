@@ -104,6 +104,11 @@ _services: dict[str, tuple] = {
   "customReservedRawData2": (True, 0.),
   "vtscState": (True, 20., 5),      # vtsc (ces2xnor): curve speed control decision, logged @ 20 Hz
   "madsState": (True, 100., 10),    # madsop2pnw: parallel lateral authority, published beside selfdriveState
+  # capnpfork2pnw: the fork's own events/panda fields, moved OUT of upstream's log.capnp (see
+  # docs/pnw/CAPNP-FORK-ORDINALS.md). Same rate and decimation as the upstream message each one
+  # accompanies, so a qlog holds them wherever it holds onroadEvents / pandaStates.
+  "onroadEventsPnw": (True, 1., 1),
+  "pandaStatesPnw": (True, 10., 1),
   # mapd2pnw: official pfeiferj mapd v2.0.6 services. Queue size MUST be MEDIUM (2MB) to match the
   # binary's settings/const.go (QUEUE_SIZE_MEDIUM). mapdOut @ 20 Hz (primary driving output),
   # mapdExtendedOut @ 1 Hz (download progress + path; not logged, per mapd outputs.md), mapdIn is

@@ -79,10 +79,70 @@ struct MadsState @0xcb9fd56c7057593a {
   disengageOnBrake @4 :Bool;
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+# capnpfork2pnw: the fork's OWN onroad events, published by selfdrived as `onroadEventsPnw` in the
+# same frame as (and just before) `onroadEvents`. Reuses the CustomReserved11 wire ID -- same slot,
+# renamed, exactly as VtscState/MadsState did.
+#
+# WHY THEY ARE NOT IN log.capnp ANY MORE. They used to be enumerants @99-@104 of upstream's
+# OnroadEvent.EventName, and upstream has since allocated every one of those ordinals itself
+# (@99 lateralManeuver in 0.11.1; @100-@103 bigModel*/carNotReady in 0.11.2; @104
+# userBookmarkNotPaired on master). A capnp ordinal is WIRE FORMAT, so that was a silent collision:
+# on a newer upstream base our madsControlsMismatchLateral @102 decodes as bigModelFailed. Here they
+# are in an enum only this fork allocates. docs/pnw/CAPNP-FORK-ORDINALS.md has the whole story and
+# the migration for logs recorded with the old ordinals
+# (selfdrive/test/process_replay/migration.py: migrate_pnwOnroadEvents).
+struct OnroadEventsPnw @0xc2243c65e0340384 {
+  events @0 :List(OnroadEventPnw);
 }
 
-struct CustomReserved12 @0x9ccdc8676701b412 {
+struct OnroadEventPnw @0x84ddbb3c1051f1d9 {
+  name @0 :EventName;
+
+  # event types: the same fields, ordinals and meaning as log.capnp OnroadEvent
+  enable @1 :Bool;
+  noEntry @2 :Bool;
+  warning @3 :Bool;
+  userDisable @4 :Bool;
+  softDisable @5 :Bool;
+  immediateDisable @6 :Bool;
+  preEnable @7 :Bool;
+  permanent @8 :Bool;
+  overrideLateral @10 :Bool;
+  overrideLongitudinal @9 :Bool;
+
+  # APPEND ONLY. An ordinal here is wire format exactly as it is upstream: never renumber, never
+  # reuse -- retire a name by renaming it ...DEPRECATED. The order below is deliberately the order
+  # the events had in log.capnp (@99..@104), so the relative sort order of the fork's events -- which
+  # decides AlertManager ties -- is unchanged.
+  enum EventName {
+    greenLight @0;                   # was log.capnp EventName @99  (greenlight2pnw)
+    leadDeparting @1;                # was @100 (greenlead2pnw)
+    madsLateralOnly @2;              # was @101 (madsop2pnw)
+    madsControlsMismatchLateral @3;  # was @102 (madsheartbeat2pnw) -- the MADS safety event
+    cruiseOffRequested @4;           # was @103 (onebutton2pnw)
+    madsResumeSetTooHigh @5;         # was @104 (engagegoal2pnw; nothing raises it since nosetcancel2pnw)
+  }
+}
+
+# capnpfork2pnw: per-panda fields that are the fork's own and have no upstream-reserved slot in
+# log.capnp's PandaState. Published by pandad as `pandaStatesPnw` right after `pandaStates`, one
+# entry per panda in the SAME ORDER. Reuses the CustomReserved12 wire ID.
+#
+# Only fields that fit NO upstream-reserved PandaState slot live here. PandaState keeps
+# controlsAllowedLateral (@38) and healthPacketMismatch (@39), both Bools in the two Bool slots
+# upstream reserved for forks, because selfdrived's lateral mismatch detector must read them from
+# the SAME message as controlsAllowed.
+struct PandaStatesPnw @0x9ccdc8676701b412 {
+  pandas @0 :List(PandaStatePnw);
+}
+
+struct PandaStatePnw @0x897372de8fe0decd {
+  # madsheartbeat2pnw: the DisengageReason that last took lateral authority down
+  # (opendbc/safety/pnw/mads_declarations.h). Diagnostic only; 0 = none. Was PandaState @39 :UInt8
+  # until capnpfork2pnw -- a TYPE collision with upstream's reserved `controlsAllowedRESERVED2 :Bool`.
+  # Logs recorded before capnpfork2pnw still hold it (data byte 74 of PandaState); read those with
+  # the writer's own schema, it is NOT migrated (see docs/pnw/CAPNP-FORK-ORDINALS.md).
+  madsDisengageReason @0 :UInt8;
 }
 
 struct CustomReserved13 @0xcd96dafb67a082d0 {

@@ -342,7 +342,10 @@ class AccDropLogger:
         row.append(vl[sig] if ts[sig] else None)
       self._trace.append(row)
     if sm.updated['onroadEvents']:
-      self._ev.feed(now, (tuple(sorted(str(e.name) for e in sm['onroadEvents'])),))
+      # capnpfork2pnw: the fork's events (cruiseOffRequested, madsLateralOnly, ...) left onroadEvents for
+      # onroadEventsPnw. selfdrived sends that one FIRST in the same frame, so it is already current here.
+      names = [str(e.name) for e in sm['onroadEvents']] + [str(e.name) for e in sm['onroadEventsPnw'].events]
+      self._ev.feed(now, (tuple(sorted(names)),))
     if sm.updated['pandaStates']:
       self._panda.feed(now, _panda_vals(sm['pandaStates']))
     if edge:

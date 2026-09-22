@@ -88,12 +88,6 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     lowMemory @51;
     stockAeb @52;
     stockLkas @98;
-    greenLight @99;  # greenlight2pnw: model released a held standstill with NO lead (green-light ding) — display/sound only
-    leadDeparting @100;  # greenlead2pnw: stopped lead pulled away while we sit at a standstill — display/sound only
-    madsLateralOnly @101;  # madsop2pnw: steering is live while openpilot's own engagement is gone — banner only, no control path
-    madsControlsMismatchLateral @102;  # madsheartbeat2pnw: the panda revoked lateral authority while MADS was still commanding it
-    cruiseOffRequested @103;  # onebutton2pnw: driver pressed the ACC ON/OFF button asking for everything off; blocks re-engagement briefly so the cancel lands
-    madsResumeSetTooHigh @104;  # engagegoal2pnw: our own SET/RES brought the stock set back >3 mph too high; one-frame disengage so the cancel lands
     ldw @53;
     carUnrecognized @54;
     invalidLkasSetting @55;
@@ -600,13 +594,15 @@ struct PandaState @0xa7649e2575e4591e {
   sbu1Voltage @35 :Float32;
   sbu2Voltage @36 :Float32;
   soundOutputLevel @37 :UInt16;
+  # @38 and @39 are the two slots upstream RESERVED for forks (controlsAllowedRESERVED1/2 :Bool from
+  # 0.11.1 on). A fork field may use them only with upstream's type, Bool -- and no other ordinal
+  # at all: anything else goes in custom.capnp (PandaStatesPnw). Enforced by
+  # selfdrive/selfdrived/tests/test_capnp_fork_ordinals_pnw.py; see docs/pnw/CAPNP-FORK-ORDINALS.md.
+  #
   # madsheartbeat2pnw: the panda's own answer to "is LATERAL tx permitted?", i.e.
   # (controls_allowed || controls_allowed_lateral) from board/health.h. Equals
   # controlsAllowed on any panda without the MADS safety build.
   controlsAllowedLateral @38 :Bool;
-  # madsheartbeat2pnw: the DisengageReason that last took lateral authority down
-  # (opendbc/safety/pnw/mads_declarations.h). Diagnostic only; 0 = none.
-  madsDisengageReason @39 :UInt8;
   # madsheartbeat2pnw: pandad's health read for this panda returned a DIFFERENT number of bytes
   # than this build's health_t, i.e. the flashed firmware has another health_t layout. The only
   # such panda in this fleet is the Tesla Raven's second (black F4) panda, flashed from the frozen
@@ -614,12 +610,16 @@ struct PandaState @0xa7649e2575e4591e {
   # is NOT a prefix of ours -- it inserts fan_stall_count at byte 52. Bytes 0-51 are layout-
   # identical to ours (controlsAllowed, safetyModel, safetyParam, heartbeatLost, alternative-
   # Experience, faults, safetyRxChecksInvalid), so those are trustworthy; EVERYTHING FROM BYTE 52
-  # ON (sbu1Voltage, sbu2Voltage, soundOutputLevel, controlsAllowedLateral, madsDisengageReason)
-  # is unreliable on a mismatched panda -- treat it as UNKNOWN, not as false/zero.
+  # ON (sbu1Voltage, sbu2Voltage, soundOutputLevel, controlsAllowedLateral, and pandaStatesPnw's
+  # madsDisengageReason) is unreliable on a mismatched panda -- treat it as UNKNOWN, not as false/zero.
   # Set once, definitive (a comms error never sets it -- see selfdrive/pandad/panda.cc get_state).
-  # Fork fields normally go in custom.capnp, but PandaState lives here and @38/@39 above set the
-  # precedent for extending it in place.
-  healthPacketMismatch @40 :Bool;
+  #
+  # capnpfork2pnw: this was @40 (a slot upstream never reserved) until the fix; @39 was then
+  # madsDisengageReason :UInt8, a TYPE collision with upstream's `controlsAllowedRESERVED2 :Bool`.
+  # capnp lays a Bool @39 out on data bit 482 -- the very bit the old Bool @40 occupied -- so logs
+  # recorded before the move read back unchanged under this schema, in both directions, with no
+  # migration. That is measured, not assumed: test_capnp_fork_ordinals_pnw.py pins the bit offset.
+  healthPacketMismatch @39 :Bool;
 
   # can health
   canState0 @29 :PandaCanState;
@@ -2674,8 +2674,8 @@ struct Event {
     customReserved8 @115 :Custom.CustomReserved8;
     vtscState @116 :Custom.VtscState;  # ces2pnw: renamed from CustomReserved9 (same @116 wire slot)
     madsState @136 :Custom.MadsState;  # madsop2pnw: renamed from CustomReserved10 (same @136 wire slot)
-    customReserved11 @137 :Custom.CustomReserved11;
-    customReserved12 @138 :Custom.CustomReserved12;
+    onroadEventsPnw @137 :Custom.OnroadEventsPnw;  # capnpfork2pnw: renamed from CustomReserved11 (same @137 slot) -- the fork's onroad events
+    pandaStatesPnw @138 :Custom.PandaStatesPnw;    # capnpfork2pnw: renamed from CustomReserved12 (same @138 slot) -- fork-only per-panda fields
     customReserved13 @139 :Custom.CustomReserved13;
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;

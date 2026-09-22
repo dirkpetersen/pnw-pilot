@@ -12,6 +12,7 @@ from openpilot.selfdrive.test.process_replay.migration import migrate_all
 
 if __name__ == "__main__":
   cnt_events: Counter = Counter()
+  cnt_events_pnw: Counter = Counter()  # capnpfork2pnw: the fork's own events (custom.capnp), on onroadEventsPnw
 
   cams = [s for s in SERVICE_LIST if s.endswith('CameraState')]
   cnt_cameras = dict.fromkeys(cams, 0)
@@ -34,6 +35,10 @@ if __name__ == "__main__":
       if len(events) == 0 or ae != events[-1][1]:
         events.append((t, ae))
 
+    elif msg.which() == 'onroadEventsPnw':
+      for e in msg.onroadEventsPnw.events:
+        cnt_events_pnw[str(e.name)] += 1
+
     elif msg.which() == 'selfdriveState':
       at = msg.selfdriveState.alertType
       if "/override" not in at or "lanechange" in at.lower():
@@ -52,6 +57,8 @@ if __name__ == "__main__":
 
   print("Events")
   pprint(cnt_events)
+  print("Events (pnw fork, onroadEventsPnw)")
+  pprint(cnt_events_pnw)
 
   print("\n")
   print("Events")

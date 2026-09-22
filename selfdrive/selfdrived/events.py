@@ -4,8 +4,9 @@ import math
 import os
 from enum import IntEnum
 from collections.abc import Callable
+from types import SimpleNamespace
 
-from cereal import log, car
+from cereal import log, car, custom
 import cereal.messaging as messaging
 from openpilot.common.constants import CV
 from openpilot.common.git import get_short_branch
@@ -46,8 +47,35 @@ class ET:
   PERMANENT = 'permanent'
 
 
+# capnpfork2pnw: THE FORK'S OWN EVENTS ARE NOT IN log.capnp. They live in custom.capnp
+# (OnroadEventPnw.EventName) and go out on their own service, onroadEventsPnw -- upstream allocated
+# the log.capnp ordinals they used to occupy (@99-@104), so there they collided on the wire.
+# docs/pnw/CAPNP-FORK-ORDINALS.md.
+#
+# They still share ONE Events object with upstream's events, because they take part in openpilot's
+# own state machine exactly as before: cruiseOffRequested is a NO_ENTRY, madsControlsMismatchLateral
+# an IMMEDIATE_DISABLE that mads_pnw.has_blocking_event() must see. The two enums are both small
+# ints, so each fork event is keyed PNW_EVENT_BASE + its own ordinal. capnp enumerants are UInt16 on
+# the wire, so no upstream EventName can ever reach 1 << 16, and the fork's events keep sorting AFTER
+# every upstream one -- the same relative order they had at @99-@104, which is what decides
+# AlertManager ties.
+PNW_EVENT_BASE = 1 << 16
+EventNamePnw = SimpleNamespace(**{k: PNW_EVENT_BASE + v for k, v in custom.OnroadEventPnw.EventName.schema.enumerants.items()})
+
+
+def is_pnw_event(event_name: int) -> bool:
+  return event_name >= PNW_EVENT_BASE
+
+
 # get event name from enum
 EVENT_NAME = {v: k for k, v in EventName.schema.enumerants.items()}
+_EVENT_NAME_PNW = {v: k for k, v in vars(EventNamePnw).items()}
+if max(EVENT_NAME) >= PNW_EVENT_BASE or set(EVENT_NAME.values()) & set(_EVENT_NAME_PNW.values()):
+  # An upstream name equal to a fork name would make two different events render the same alertType.
+  raise ImportError("capnpfork2pnw: a custom.capnp OnroadEventPnw name collides with log.capnp's EventName -- rename the fork event")
+EVENT_NAME.update(_EVENT_NAME_PNW)
+
+_ONROAD_EVENT_SCHEMA_ID = log.OnroadEvent.schema.node.id
 
 
 class Events:
@@ -95,14 +123,35 @@ class Events:
     return ret
 
   def add_from_msg(self, events):
+    # capnpfork2pnw: log.OnroadEvent only. An OnroadEventPnw's raw ordinal is 0..5, i.e. upstream's
+    # canError..seatbeltNotLatched -- inserting it here would silently become the wrong event.
+    if len(events) and events[0].schema.node.id != _ONROAD_EVENT_SCHEMA_ID:
+      raise TypeError(f"Events.add_from_msg takes log.OnroadEvent, got {events[0].schema.node.displayName}")
     for e in events:
       bisect.insort(self.events, e.name.raw)
 
   def to_msg(self):
+    """This frame's UPSTREAM events, as log.OnroadEvent (the onroadEvents service)."""
     ret = []
     for event_name in self.events:
+      if is_pnw_event(event_name):
+        continue  # published by to_msg_pnw() on onroadEventsPnw
       event = log.OnroadEvent.new_message()
       event.name = event_name
+      for event_type in EVENTS.get(event_name, {}):
+        setattr(event, event_type, True)
+      ret.append(event)
+    return ret
+
+  def to_msg_pnw(self):
+    """capnpfork2pnw: this frame's FORK events, as custom.OnroadEventPnw (the onroadEventsPnw
+    service). to_msg() + to_msg_pnw() together carry every event exactly once."""
+    ret = []
+    for event_name in self.events:
+      if not is_pnw_event(event_name):
+        continue
+      event = custom.OnroadEventPnw.new_message()
+      event.name = event_name - PNW_EVENT_BASE
       for event_type in EVENTS.get(event_name, {}):
         setattr(event, event_type, True)
       ret.append(event)
@@ -494,7 +543,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # disengaged; Priority.LOW so any real alert wins; AudibleAlert.prompt = the existing single
   # pleasant chime (no new sound asset). The green background is keyed on this alertType in
   # selfdrive/ui/onroad/alert_renderer.py. Display/sound only — no control path.
-  EventName.greenLight: {
+  EventNamePnw.greenLight: {
     ET.PERMANENT: Alert(
       "Light is green",
       "",
@@ -507,7 +556,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # a lead departing while we already roll raises neither). Same style on purpose: ET.PERMANENT,
   # Priority.LOW, AudibleAlert.prompt, green banner keyed on the alertType in alert_renderer.py.
   # Display/sound only — no control path.
-  EventName.leadDeparting: {
+  EventNamePnw.leadDeparting: {
     ET.PERMANENT: Alert(
       "Car ahead is leaving",
       "",
@@ -530,7 +579,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # It carries a REAL alert, not a silent one: a NO_ENTRY that says nothing is indistinguishable
   # from a feature that quietly stopped working, which is the failure mode this whole effort keeps
   # running into.
-  EventName.cruiseOffRequested: {
+  EventNamePnw.cruiseOffRequested: {
     # NOT NoEntryAlert. That renders "openpilot Unavailable" with AudibleAlert.refuse -- an error
     # chime and a red-flavoured banner -- which is what the driver saw when this feature misfired,
     # and it is wrong even when it fires CORRECTLY: turning a system off on purpose should not be
@@ -544,10 +593,11 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   # nosetcancel2pnw (owner decision 2026-09-14, "remove it"): engagegoal2pnw's overshoot cancel, which raised this
   # event, is gone and nothing raises it. No alert types, so even a stray raise cannot disengage, chime or show text.
-  # The entry stays (like stockFcw) because log.capnp keeps @104 reserved and test_alerts requires every name here.
-  EventName.madsResumeSetTooHigh: {},
+  # The entry stays (like stockFcw) because custom.capnp keeps its ordinal reserved (it was log.capnp @104 before
+  # capnpfork2pnw, and old logs carry it) and test_alerts requires every name here.
+  EventNamePnw.madsResumeSetTooHigh: {},
 
-  EventName.madsLateralOnly: {
+  EventNamePnw.madsLateralOnly: {
     ET.PERMANENT: Alert(
       "Steering only",
       "Cruise is off - openpilot is still steering",
@@ -1005,7 +1055,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # exists to remove. Duration 4 s because the event fires for a SINGLE frame: it ends the
   # lateral-only state, which resets the counter, which stops it being raised.
   # (Fable review 2026-09-05.)
-  EventName.madsControlsMismatchLateral: {
+  EventNamePnw.madsControlsMismatchLateral: {
     ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Controls Mismatch: Lateral"),
     ET.NO_ENTRY: NoEntryAlert("Controls Mismatch: Lateral"),
     ET.PERMANENT: Alert(

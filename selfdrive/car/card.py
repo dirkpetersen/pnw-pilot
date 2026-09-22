@@ -109,7 +109,9 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
+    # capnpfork2pnw: onroadEventsPnw is read ONLY by the accdrop logger (the fork's own event names, which
+    # used to ride in onroadEvents). card's gates are scoped to carControl, so it adds no check.
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'onroadEventsPnw'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
 
     self.can_rcv_cum_timeout_counter = 0

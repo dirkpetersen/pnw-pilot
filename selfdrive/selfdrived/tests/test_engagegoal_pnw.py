@@ -22,7 +22,7 @@ from cereal import log
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager
-from openpilot.selfdrive.selfdrived.events import ET, AudibleAlert, Events
+from openpilot.selfdrive.selfdrived.events import ET, AudibleAlert, Events, EventNamePnw, EVENT_NAME
 from openpilot.selfdrive.selfdrived.mads_pnw import MadsPnw, MADS_BRAKE_GRACE_FRAMES, has_blocking_event
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.selfdrived.state import StateMachine
@@ -57,10 +57,14 @@ def _window(name):
   return frames, w["truck_records"]
 
 
+# capnpfork2pnw: the recorded names are upstream's AND the fork's (custom.capnp) -- look up both.
+_EVENT_KEY = {v: k for k, v in EVENT_NAME.items()}
+
+
 def _events(names):
   e = Events()
   for n in names:
-    e.add(getattr(EventName, n))
+    e.add(_EVENT_KEY[n])
   return e
 
 
@@ -148,7 +152,7 @@ class TestTheOnOffButtonOnTheTrucksOwnInputs:
       if mads.active and not active:
         sm.current_alert_types.append(ET.WARNING)
       if mads.lateral_only:
-        events.add(EventName.madsLateralOnly)
+        events.add(EventNamePnw.madsLateralOnly)
       clear = set() if ET.WARNING in sm.current_alert_types else {ET.WARNING}
       if enabled:
         clear.add(ET.NO_ENTRY)
@@ -249,7 +253,7 @@ def _drive_2116(pcm_set_ms=24.59, driver_plus_at=None):
     if mads.active and not active:
       sm.current_alert_types.append(ET.WARNING)
     if mads.lateral_only:
-      events.add(EN.madsLateralOnly)
+      events.add(EventNamePnw.madsLateralOnly)
     clear = set() if ET.WARNING in sm.current_alert_types else {ET.WARNING}
     if enabled:
       clear.add(ET.NO_ENTRY)
@@ -345,12 +349,12 @@ class TestTheSelfdrivedWiringWithoutTheCancel:
     """log.capnp keeps @104 reserved; its EVENTS entry has no alert types. Raised on an engaged, steering frame through
     the real Events, StateMachine, MadsPnw and AlertManager, it changes nothing."""
     from openpilot.selfdrive.selfdrived.events import EVENTS
-    assert EVENTS[EventName.madsResumeSetTooHigh] == {}
+    assert EVENTS[EventNamePnw.madsResumeSetTooHigh] == {}
     sm, mads, am = StateMachine(), MadsPnw(ALTERNATIVE_EXPERIENCE.ENABLE_MADS), AlertManager()
     for f in range(20):
       events = _events(["pcmEnable"] if f == 0 else [])
       if f == 10:
-        events.add(EventName.madsResumeSetTooHigh)
+        events.add(EventNamePnw.madsResumeSetTooHigh)
       enabled, active = sm.update(events)
       mads.update(enabled, active, False, True, events, True, False)
       am.add_many(f, events.create_alerts(sm.current_alert_types))

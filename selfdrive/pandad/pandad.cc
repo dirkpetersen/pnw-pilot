@@ -185,9 +185,8 @@ void fill_panda_state(cereal::PandaState::Builder &ps, cereal::PandaState::Panda
   // madsheartbeat2pnw: the panda's own lateral authority, so selfdrived can detect a revoke
   // it did not ask for. Equals controlsAllowed on any panda without the MADS safety build.
   ps.setControlsAllowedLateral((bool)(health.controls_allowed_lateral_pkt));
-  // madsheartbeat2pnw: WHY the panda last took lateral down (opendbc DisengageReason).
-  // Diagnostic only -- nothing reads it for control.
-  ps.setMadsDisengageReason(health.mads_disengage_reason_pkt);
+  // madsheartbeat2pnw: WHY the panda last took lateral down now goes out on pandaStatesPnw
+  // (send_panda_states) -- capnpfork2pnw: log.capnp's PandaState had no upstream-reserved slot for it.
   // madsheartbeat2pnw: tells the consumer that this panda's health_t layout is NOT this build's.
   // The Raven's F4 panda (frozen prebuilt DEV-fd39c10f, 58 bytes) inserts fan_stall_count at byte
   // 52, so bytes 0-51 above are trustworthy and everything from byte 52 on -- sbu1/sbu2 voltage,
@@ -328,6 +327,19 @@ std::optional<bool> send_panda_states(PubMaster *pm, const std::vector<Panda *> 
   }
 
   pm->send("pandaStates", msg);
+
+  // capnpfork2pnw: the fork's per-panda fields that fit no upstream-reserved PandaState slot
+  // (log.capnp's PandaState may only use the two Bools upstream reserved; see
+  // docs/pnw/CAPNP-FORK-ORDINALS.md). Same pandas, same order, same validity as pandaStates above.
+  MessageBuilder msg_pnw;
+  auto evt_pnw = msg_pnw.initEvent(evt.getValid());
+  auto pss_pnw = evt_pnw.initPandaStatesPnw().initPandas(pandas_cnt);
+  for (uint32_t i = 0; i < pandas_cnt; i++) {
+    // madsheartbeat2pnw: WHY the panda last took lateral down (opendbc DisengageReason).
+    // Diagnostic only -- nothing reads it for control.
+    pss_pnw[i].setMadsDisengageReason(pandaStates[i].mads_disengage_reason_pkt);
+  }
+  pm->send("pandaStatesPnw", msg_pnw);
   return ignition_local;
 }
 
@@ -483,7 +495,7 @@ void pandad_run(std::vector<Panda *> &pandas) {
   // madsheartbeat2pnw: 'madsState' carries the LATERAL half of the heartbeat. It is published by
   // selfdrived at the same 100 Hz as selfdriveState.
   SubMaster sm({"selfdriveState", "madsState"});
-  PubMaster pm({"can", "pandaStates", "peripheralState"});
+  PubMaster pm({"can", "pandaStates", "peripheralState", "pandaStatesPnw"});  // pandaStatesPnw: capnpfork2pnw
   PandaSafety panda_safety(pandas);
   Panda *peripheral_panda = pandas[0];
   bool engaged = false;

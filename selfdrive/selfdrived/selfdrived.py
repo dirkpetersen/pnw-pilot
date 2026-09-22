@@ -17,7 +17,7 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_specific import CarSpecificEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET, EVENT_NAME  # EVENT_NAME: takecontrol2pnw
+from openpilot.selfdrive.selfdrived.events import Events, ET, EVENT_NAME, EventNamePnw  # EVENT_NAME: takecontrol2pnw; EventNamePnw: capnpfork2pnw
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
@@ -97,7 +97,7 @@ class SelfdriveD:
     self.excessive_actuation = self.params.get("Offroad_ExcessiveActuation") is not None
 
     # Setup sockets
-    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents', 'madsState'])  # madsop2pnw
+    self.pm = messaging.PubMaster(['selfdriveState', 'onroadEvents', 'madsState', 'onroadEventsPnw'])  # madsop2pnw, capnpfork2pnw
 
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
@@ -276,7 +276,7 @@ class SelfdriveD:
     # were behind pulled away. Mutually exclusive by construction (one classification per tick);
     # a lead departing while we are already MOVING raises NEITHER (telemetry only, driver rule).
     if self.ces_pnw.green_light:
-      self.events.add(EventName.greenLight)          # ALWAYS — the traffic-light nudge is never
+      self.events.add(EventNamePnw.greenLight)          # ALWAYS — the traffic-light nudge is never
                                                      # gated on attention (driver directive 2026-07-13)
     if self.ces_pnw.lead_departing:
       # dmgate2pnw (driver directive 2026-07-13): the LEAD-departure nudge is suppressed when driver
@@ -292,7 +292,7 @@ class SelfdriveD:
       except Exception:
         attentive = False
       if not attentive:
-        self.events.add(EventName.leadDeparting)
+        self.events.add(EventNamePnw.leadDeparting)
 
     # Don't add any more events while in dashcam mode
     if self.CP.passive:
@@ -345,7 +345,7 @@ class SelfdriveD:
            for be in CS.buttonEvents):
       self.off_request_t = 0.0
     if self.off_request_t and (self.sm.frame * DT_CTRL - self.off_request_t) <= OFF_REQUEST_HOLD_S:
-      self.events.add(EventName.cruiseOffRequested)
+      self.events.add(EventNamePnw.cruiseOffRequested)
 
     # Block resume if cruise never previously enabled
     resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
@@ -477,7 +477,7 @@ class SelfdriveD:
     # simply stops steering with nothing said. Outside the loop because it is one state, not one
     # per panda. Unreachable unless MADS is available AND holding lateral alone (see data_sample).
     if self.lateral_mismatch_counter >= 200:
-      self.events.add(EventName.madsControlsMismatchLateral)
+      self.events.add(EventNamePnw.madsControlsMismatchLateral)
 
     # Handle HW and system malfunctions
     # Order is very intentional here. Be careful when modifying this.
@@ -750,9 +750,20 @@ class SelfdriveD:
 
     # onroadEvents - logged every second or on change
     if (self.sm.frame % int(1. / DT_CTRL) == 0) or (self.events.names != self.events_prev):
-      ce_send = messaging.new_message('onroadEvents', len(self.events))
+      # capnpfork2pnw: the fork's own events are not in log.capnp's EventName any more (events.py), so
+      # they go out on onroadEventsPnw, in the same frame and under the same condition -- one is never
+      # published without the other. FIRST, so a consumer that reacts to onroadEvents changing (card's
+      # accdrop logger) already holds this frame's fork events when it does -- the same reason
+      # madsState goes out before selfdriveState.
+      pe_send = messaging.new_message('onroadEventsPnw')
+      pe_send.valid = True
+      pe_send.onroadEventsPnw.events = self.events.to_msg_pnw()
+      self.pm.send('onroadEventsPnw', pe_send)
+
+      upstream_events = self.events.to_msg()
+      ce_send = messaging.new_message('onroadEvents', len(upstream_events))
       ce_send.valid = True
-      ce_send.onroadEvents = self.events.to_msg()
+      ce_send.onroadEvents = upstream_events
       self.pm.send('onroadEvents', ce_send)
     self.events_prev = self.events.names.copy()
 
@@ -799,7 +810,7 @@ class SelfdriveD:
       # ET.PERMANENT only -- no disable/no-entry type, so adding it here cannot influence the state
       # machine that already ran, and cannot change ss.engageable. It exists so the car is never
       # steering behind a UI that just says "disengaged".
-      self.events.add(EventName.madsLateralOnly)
+      self.events.add(EventNamePnw.madsLateralOnly)
 
     self.update_alerts(CS)
 

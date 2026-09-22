@@ -21,13 +21,13 @@ import textwrap
 
 import pytest
 
-from cereal import car, log
+from cereal import car, custom, log
 from openpilot.common.realtime import DT_CTRL
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
 from openpilot.selfdrive.car.card import Car
 from openpilot.selfdrive.controls.controlsd import Controls
-from openpilot.selfdrive.selfdrived.events import EVENTS, ET, Events, AudibleAlert
+from openpilot.selfdrive.selfdrived.events import EVENTS, ET, Events, AudibleAlert, EventNamePnw
 from openpilot.selfdrive.selfdrived.selfdrived import SelfdriveD
 from openpilot.selfdrive.selfdrived.mads_pnw import (LATERAL_DISABLE_TYPES, MADS_TOLERATED_EVENTS,
                                                      MadsPnw, has_blocking_event)
@@ -308,8 +308,8 @@ class TestMadsLateralAuthority:
     # madsLateralOnly is added to self.events by selfdrived AFTER mads.update() runs, but it will
     # still be present on the NEXT frame's... no: events are cleared each frame. Belt and braces --
     # if it ever carried a disable type it would latch MADS off one frame after arming it.
-    assert not has_blocking_event(ev(EventName.madsLateralOnly))
-    assert set(EVENTS[EventName.madsLateralOnly]) == {ET.PERMANENT}
+    assert not has_blocking_event(ev(EventNamePnw.madsLateralOnly))
+    assert set(EVENTS[EventNamePnw.madsLateralOnly]) == {ET.PERMANENT}
 
 
 class TestControlsdFallback:
@@ -500,8 +500,8 @@ class TestNeverSuppresses:
     # the alert must be raised, and raised on the lateral-only condition -- not unconditionally,
     # and not behind a constant.
     assert "if self.mads.lateral_only:\n      " in src
-    assert src.index("self.mads.update(") < src.index("EventName.madsLateralOnly")
-    assert src.index("EventName.madsLateralOnly") < src.index("self.update_alerts(CS)")
+    assert src.index("self.mads.update(") < src.index("EventNamePnw.madsLateralOnly")
+    assert src.index("EventNamePnw.madsLateralOnly") < src.index("self.update_alerts(CS)")
 
   def test_brake_input_includes_regen_braking(self):
     # The panda's `is_braking` is `brake_pressed || regen_braking`. On an EV, regen alone is the
@@ -723,18 +723,22 @@ class TestLateralMismatchDetector:
       sd.data_sample()
     assert sd.lateral_mismatch_counter == 5, "complete-read panda must still be held to it"
 
-  def test_health_packet_mismatch_has_the_next_free_ordinal(self):
+  def test_health_packet_mismatch_sits_in_an_upstream_reserved_slot(self):
+    """capnpfork2pnw: PandaState may only use the two Bool slots upstream reserved (@38/@39).
+    healthPacketMismatch moved @40 -> @39; madsDisengageReason (a UInt8, a TYPE collision at @39)
+    moved to custom.capnp's PandaStatesPnw. The general rule is test_capnp_fork_ordinals_pnw.py."""
     fields = {f.name: f for f in log.PandaState.schema.node.struct.fields}
-    assert 'healthPacketMismatch' in fields
-    assert fields['healthPacketMismatch'].ordinal.explicit == 40
     assert fields['controlsAllowedLateral'].ordinal.explicit == 38
-    assert fields['madsDisengageReason'].ordinal.explicit == 39
+    assert fields['healthPacketMismatch'].ordinal.explicit == 39
+    assert 'madsDisengageReason' not in fields
+    pnw_fields = {f.name for f in custom.PandaStatePnw.schema.node.struct.fields}
+    assert 'madsDisengageReason' in pnw_fields
 
   # ---- the event ---------------------------------------------------------------------------
 
   def test_event_is_raised_at_two_seconds(self):
     src = inspect.getsource(SelfdriveD.update_events)
-    assert "if self.lateral_mismatch_counter >= 200:\n      self.events.add(EventName.madsControlsMismatchLateral)" in src
+    assert "if self.lateral_mismatch_counter >= 200:\n      self.events.add(EventNamePnw.madsControlsMismatchLateral)" in src
 
   def test_event_ends_the_lateral_only_state(self):
     """THE consequence: openpilot must stop commanding lateral into a panda that is blocking it."""
@@ -743,14 +747,14 @@ class TestLateralMismatchDetector:
     brake_release_cruise(mads)
     assert mads.enabled and mads.lateral_only
     mads.update(op_enabled=False, op_active=False, braking=False, cruise_enabled=False,
-                events=ev(EventName.pcmDisable, EventName.madsControlsMismatchLateral))
+                events=ev(EventName.pcmDisable, EventNamePnw.madsControlsMismatchLateral))
     assert not mads.enabled
     assert not mads.active
 
   def test_event_carries_immediate_disable(self):
-    assert ET.IMMEDIATE_DISABLE in EVENTS[EventName.madsControlsMismatchLateral]
-    assert has_blocking_event(ev(EventName.madsControlsMismatchLateral))
-    assert EventName.madsControlsMismatchLateral not in MADS_TOLERATED_EVENTS
+    assert ET.IMMEDIATE_DISABLE in EVENTS[EventNamePnw.madsControlsMismatchLateral]
+    assert has_blocking_event(ev(EventNamePnw.madsControlsMismatchLateral))
+    assert EventNamePnw.madsControlsMismatchLateral not in MADS_TOLERATED_EVENTS
 
   def test_event_actually_reaches_the_driver(self):
     """In the lateral-only state openpilot's own state machine sits in `disabled`, whose
@@ -758,15 +762,15 @@ class TestLateralMismatchDetector:
     therefore produce NO text and NO sound -- the exact silent failure this feature removes.
     (Fable review 2026-09-05.)"""
     from openpilot.selfdrive.selfdrived.state import StateMachine
-    types = EVENTS[EventName.madsControlsMismatchLateral]
+    types = EVENTS[EventNamePnw.madsControlsMismatchLateral]
     assert ET.PERMANENT in types, "must be displayable from the `disabled` state"
 
     sm = StateMachine()
-    sm.update(ev(EventName.madsControlsMismatchLateral))
+    sm.update(ev(EventNamePnw.madsControlsMismatchLateral))
     assert sm.state == State.disabled
     assert ET.PERMANENT in sm.current_alert_types
 
-    alerts = ev(EventName.madsControlsMismatchLateral).create_alerts(
+    alerts = ev(EventNamePnw.madsControlsMismatchLateral).create_alerts(
       sm.current_alert_types, [None, None, None, False, 0, 0])
     assert len(alerts) == 1, "the driver must get an alert, not just a log line"
     assert alerts[0].audible_alert != AudibleAlert.none, "and a sound"
@@ -838,8 +842,11 @@ class TestPandadHeartbeatPlumbing:
     assert "health_packet_mismatch.exchange(true)" in body, "log once, not every 100 ms"
 
   def test_the_disengage_reason_is_published(self):
+    """capnpfork2pnw: on pandaStatesPnw now, one entry per panda in pandaStates' order."""
     src = (self.PANDAD / "pandad.cc").read_text()
-    assert "ps.setMadsDisengageReason(health.mads_disengage_reason_pkt);" in src
+    assert "pss_pnw[i].setMadsDisengageReason(pandaStates[i].mads_disengage_reason_pkt);" in src
+    assert 'pm->send("pandaStatesPnw", msg_pnw);' in src
+    assert '"pandaStatesPnw"});' in src, "pandad must declare the publisher"
 
 
 class TestNoDisengageOnBrakeIsGone:

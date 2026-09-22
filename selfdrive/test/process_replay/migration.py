@@ -3,9 +3,14 @@ from collections.abc import Callable
 from typing import cast
 import capnp
 import functools
+import os
+import re
+import subprocess
 import traceback
+import warnings
 
-from cereal import messaging, car, log
+from cereal import messaging, car, custom, log
+from openpilot.common.basedir import BASEDIR
 from opendbc.car.fingerprints import MIGRATION
 from opendbc.car.toyota.values import EPS_SCALE, ToyotaSafetyFlags
 from opendbc.car.ford.values import CAR as FORD, FordFlags, FordSafetyFlags
@@ -43,6 +48,7 @@ def migrate_all(lr: LogIterable, manager_states: bool = False, panda_states: boo
     migrate_driverAssistance,
     migrate_drivingModelData,
     migrate_onroadEvents,
+    migrate_pnwOnroadEvents,  # capnpfork2pnw: always on -- an unmigrated old log names the wrong events
     migrate_driverMonitoringState,
     migrate_longitudinalPlan,
   ]
@@ -476,3 +482,148 @@ def migrate_driverMonitoringState(msgs):
     ops.append((index, msg.as_reader()))
 
   return ops, [], []
+
+
+# ---------------------------------------------------------------------------------------------------
+# capnpfork2pnw: logs recorded BEFORE the fork's own events left log.capnp.
+#
+# Until capnpfork2pnw the fork put six events at log.capnp OnroadEvent.EventName @99-@104. Upstream
+# has since allocated every one of those ordinals (@99 lateralManeuver in 0.11.1, @100-@103
+# bigModel*/carNotReady in 0.11.2, @104 userBookmarkNotPaired on master). The events now live in
+# custom.capnp (OnroadEventPnw) on their own service, onroadEventsPnw. An old log still carries them
+# as raw @99-@104 inside onroadEvents: under this schema reading one raises "Member was null", and on
+# a newer upstream base it would silently read as the WRONG event -- @102, the MADS safety event
+# madsControlsMismatchLateral, as bigModelFailed. This migration moves them to onroadEventsPnw.
+#
+# WHO WROTE THE LOG decides it, and it is never guessed from the content: after a rebase an old
+# @99 is a perfectly valid upstream enumerant. The writer is identified by initData.gitCommit, and
+# the answer is the writer's OWN log.capnp, read from git. Anything that stops that from being
+# certain -- no initData, several commits, a dirty tree, a commit git does not have, an ordinal the
+# writer's schema does not define -- raises PnwLogSchemaError. docs/pnw/CAPNP-FORK-ORDINALS.md.
+
+# Our upstream base's EventName ends at @98 (stockLkas). Nothing below it was ever the fork's.
+PNW_FIRST_FORK_ORDINAL = 99
+
+# The ONE assignment any pnw-pilot build ever used: every fork branch among the 195 refs (2026-09-21)
+# carries a prefix of it, and all 115 writer commits in the recorded corpus agree. A writer schema that
+# disagrees is a build nobody audited, and raises. Also what the explicit override below asserts.
+PNW_FORK_V1_ORDINALS = {
+  99: "greenLight",
+  100: "leadDeparting",
+  101: "madsLateralOnly",
+  102: "madsControlsMismatchLateral",
+  103: "cruiseOffRequested",
+  104: "madsResumeSetTooHigh",
+}
+
+# For a log whose writer git cannot resolve (a commit that was never pushed, a foreign clone). A human
+# asserting what wrote it -- never a default. "fork-v1": the writer used PNW_FORK_V1_ORDINALS.
+# "upstream": its @99+ are not the fork's. Every use is warned about.
+PNW_WRITER_SCHEMA_ENV = "PNW_LOG_WRITER_SCHEMA"
+
+_ONROAD_EVENT_FLAGS = ("enable", "noEntry", "warning", "userDisable", "softDisable", "immediateDisable",
+                       "preEnable", "permanent", "overrideLateral", "overrideLongitudinal")
+
+
+class PnwLogSchemaError(Exception):
+  """The migration cannot establish which schema wrote this log. Never guessed."""
+
+
+def _parse_event_names(text: str, where: str) -> dict[int, str]:
+  m = re.search(r"struct OnroadEvent @0x[0-9a-f]+ \{.*?enum EventName(?: @0x[0-9a-f]+)? \{(.*?)\}", text, re.S)
+  if m is None:
+    raise PnwLogSchemaError(f"{where}: no OnroadEvent.EventName enum found")
+  entries = re.findall(r"^\s*(\w+)\s*@(\d+)\s*;", m.group(1), re.M)
+  names = {int(o): n for n, o in entries}
+  if len(names) != len(entries) or sorted(names) != list(range(len(names))):
+    raise PnwLogSchemaError(f"{where}: EventName did not parse as contiguous ordinals 0..N ({len(entries)} entries)")
+  return names
+
+
+@functools.cache
+def pnw_writer_event_names(git_commit: str) -> dict[int, str]:
+  """{ordinal: name} of OnroadEvent.EventName as the build at `git_commit` defined it."""
+  errs = []
+  for path in ("cereal/log.capnp", "openpilot/cereal/log.capnp"):  # 0.11.1 layout, 0.11.2 layout
+    r = subprocess.run(["git", "-C", BASEDIR, "show", f"{git_commit}:{path}"], capture_output=True, text=True)
+    if r.returncode == 0:
+      return _parse_event_names(r.stdout, f"{git_commit[:12]}:{path}")
+    errs.append(r.stderr.strip())
+  raise PnwLogSchemaError(f"the log's writer commit {git_commit} cannot be read from the git repo at {BASEDIR} " +
+                          f"({'; '.join(errs)}). Fetch it, or set {PNW_WRITER_SCHEMA_ENV} if you KNOW what wrote the log.")
+
+
+def _pnw_fork_ordinals(msgs, present: set[int]) -> dict[int, str]:
+  """raw ordinal -> fork event name, for the contested ordinals `present` in this log.
+
+  Raises PnwLogSchemaError rather than guess."""
+  override = os.environ.get(PNW_WRITER_SCHEMA_ENV)
+  if override is not None:
+    warnings.warn(f"capnpfork2pnw: {PNW_WRITER_SCHEMA_ENV}={override!r} -- the writer schema is ASSERTED, not established",
+                  stacklevel=2)
+    if override == "fork-v1":
+      unknown = present - PNW_FORK_V1_ORDINALS.keys()
+      if unknown:
+        raise PnwLogSchemaError(f"{PNW_WRITER_SCHEMA_ENV}=fork-v1, but the log has @{sorted(unknown)}, which fork-v1 never defined")
+      return {o: PNW_FORK_V1_ORDINALS[o] for o in present}
+    if override == "upstream":
+      return {}
+    raise PnwLogSchemaError(f"{PNW_WRITER_SCHEMA_ENV} must be 'fork-v1' or 'upstream', got {override!r}")
+
+  inits = [m.initData for _, m in msgs if m.which() == "initData"]
+  where = f"onroadEvents carry EventName @{sorted(present)}, but"
+  if not inits:
+    raise PnwLogSchemaError(f"{where} the log has no initData, so its writer is unknown")
+  commits = {i.gitCommit for i in inits}
+  if len(commits) != 1 or "" in commits:
+    raise PnwLogSchemaError(f"{where} its initData names {len(commits)} writer commit(s) {sorted(commits)}; need exactly one")
+  commit = commits.pop()
+  if any(i.dirty for i in inits):
+    raise PnwLogSchemaError(f"{where} its writer {commit[:12]} ran a DIRTY tree, so git cannot say what schema it ran")
+
+  writer = pnw_writer_event_names(commit)
+  reader = {v: k for k, v in log.OnroadEvent.EventName.schema.enumerants.items()}
+  fork_names = custom.OnroadEventPnw.EventName.schema.enumerants
+  fork = {}
+  for o in sorted(present):
+    name = writer.get(o)
+    if name is None:
+      raise PnwLogSchemaError(f"{where} writer {commit[:12]}'s own schema has no @{o} -- this log does not match its initData")
+    if name in fork_names:
+      if PNW_FORK_V1_ORDINALS.get(o) != name:
+        raise PnwLogSchemaError(f"writer {commit[:12]} put fork event {name} at @{o}; no audited build did -- audit it first")
+      fork[o] = name
+    elif reader.get(o) != name:
+      raise PnwLogSchemaError(f"{where} writer {commit[:12]} calls @{o} {name!r}, which is neither a fork event nor " +
+                              f"what this schema calls @{o} ({reader.get(o)!r})")
+  return fork
+
+
+@migration(inputs=["initData", "onroadEvents"], product="onroadEventsPnw")
+def migrate_pnwOnroadEvents(msgs):
+  onroad = [(i, m) for i, m in msgs if m.which() == "onroadEvents"]
+  present = {e.name.raw for _, m in onroad for e in m.onroadEvents if e.name.raw >= PNW_FIRST_FORK_ORDINAL}
+  if not present:
+    return [], [], []  # nothing at a contested ordinal: the result is the same whoever wrote the log
+  fork = _pnw_fork_ordinals(msgs, present)
+  if not fork:
+    return [], [], []  # the writer's @99+ are upstream's and this schema agrees on every one
+
+  pnw_ordinal = custom.OnroadEventPnw.EventName.schema.enumerants
+  replace_ops, add_ops = [], []
+  for index, msg in onroad:
+    kept = [e for e in msg.onroadEvents if e.name.raw not in fork]
+    moved = [e for e in msg.onroadEvents if e.name.raw in fork]
+    if moved:
+      new_msg = messaging.new_message('onroadEvents', len(kept), valid=msg.valid, logMonoTime=msg.logMonoTime)
+      new_msg.onroadEvents = [e.as_builder() for e in kept]
+      replace_ops.append((index, new_msg.as_reader()))
+    # One onroadEventsPnw per onroadEvents, as a post-fix selfdrived publishes them.
+    pnw_msg = messaging.new_message('onroadEventsPnw', valid=msg.valid, logMonoTime=msg.logMonoTime)
+    events = pnw_msg.onroadEventsPnw.init('events', len(moved))
+    for j, e in enumerate(moved):
+      events[j].name = pnw_ordinal[fork[e.name.raw]]
+      for flag in _ONROAD_EVENT_FLAGS:
+        setattr(events[j], flag, getattr(e, flag))
+    add_ops.append(pnw_msg.as_reader())
+  return replace_ops, add_ops, []

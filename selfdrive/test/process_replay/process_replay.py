@@ -436,7 +436,7 @@ CONFIGS = [
       "accelerometer", "gyroscope", "carOutput", "gpsLocationExternal", "gpsLocation", "controlsState",
       "carControl", "driverAssistance", "alertDebug", "audioFeedback",
     ],
-    subs=["selfdriveState", "onroadEvents"],
+    subs=["selfdriveState", "onroadEvents", "onroadEventsPnw"],  # onroadEventsPnw: capnpfork2pnw
     ignore=["logMonoTime"],
     config_callback=selfdrived_config_callback,
     init_callback=get_car_params_callback,
@@ -457,7 +457,7 @@ CONFIGS = [
   ),
   ProcessConfig(
     proc_name="card",
-    pubs=["pandaStates", "carControl", "onroadEvents", "can"],
+    pubs=["pandaStates", "carControl", "onroadEvents", "onroadEventsPnw", "can"],  # onroadEventsPnw: capnpfork2pnw
     subs=["sendcan", "carState", "carParams", "carOutput", "liveTracks"],
     ignore=["logMonoTime", "carState.cumLagMs"],
     init_callback=card_fingerprint_callback,
