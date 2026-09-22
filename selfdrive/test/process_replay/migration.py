@@ -6,6 +6,7 @@ import functools
 import os
 import re
 import subprocess
+import sys
 import traceback
 import warnings
 
@@ -504,8 +505,9 @@ def migrate_driverMonitoringState(msgs):
 # Our upstream base's EventName ends at @98 (stockLkas). Nothing below it was ever the fork's.
 PNW_FIRST_FORK_ORDINAL = 99
 
-# The ONE assignment any pnw-pilot build ever used: every fork branch among the 195 refs (2026-09-21)
-# carries a prefix of it, and all 115 writer commits in the recorded corpus agree. A writer schema that
+# The ONE assignment any pnw-pilot build ever used: every fork branch among the ~195 local + origin branch
+# refs (2026-09-21) carries a prefix of it, and all 115 writer commits in the 09-05+ corpus agree (xnor-era
+# writer commits are not in this repo; such logs raise below rather than migrate). A writer schema that
 # disagrees is a build nobody audited, and raises. Also what the explicit override below asserts.
 PNW_FORK_V1_ORDINALS = {
   99: "greenLight",
@@ -559,8 +561,11 @@ def _pnw_fork_ordinals(msgs, present: set[int]) -> dict[int, str]:
   Raises PnwLogSchemaError rather than guess."""
   override = os.environ.get(PNW_WRITER_SCHEMA_ENV)
   if override is not None:
-    warnings.warn(f"capnpfork2pnw: {PNW_WRITER_SCHEMA_ENV}={override!r} -- the writer schema is ASSERTED, not established",
-                  stacklevel=2)
+    msg = f"capnpfork2pnw: {PNW_WRITER_SCHEMA_ENV}={override!r} -- the writer schema is ASSERTED, not established"
+    warnings.warn(msg, stacklevel=2)
+    # warnings.warn is shown once per call site per process by the default filter, so on its own it would
+    # go quiet after the first log of a batch. The doc promises a warning on EVERY use: print it too.
+    print(msg, file=sys.stderr)
     if override == "fork-v1":
       unknown = present - PNW_FORK_V1_ORDINALS.keys()
       if unknown:

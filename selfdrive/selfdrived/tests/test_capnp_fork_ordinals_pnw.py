@@ -533,6 +533,15 @@ class TestMigrationRefusesToGuess:
       out = M.migrate_all(_with_init(self._lr(), gitCommit="0123456789abcdef0123456789abcdef01234567"))
     assert any(str(e.name) == "cruiseOffRequested" for m in out if m.which() == "onroadEventsPnw" for e in m.onroadEventsPnw.events)
 
+  def test_override_is_reported_on_every_use_not_just_the_first(self, monkeypatch, capsys):
+    # warnings.warn alone is de-duplicated per call site, so a batch of logs would warn once and then go
+    # quiet. Every migrated log must say its writer schema was asserted.
+    monkeypatch.setenv(M.PNW_WRITER_SCHEMA_ENV, "upstream")
+    with pytest.warns(UserWarning):
+      M.migrate_all(self._lr())
+      M.migrate_all(self._lr())
+    assert capsys.readouterr().err.count("writer schema is ASSERTED") == 2
+
   def test_override_upstream_leaves_the_log(self, monkeypatch):
     monkeypatch.setenv(M.PNW_WRITER_SCHEMA_ENV, "upstream")
     with pytest.warns(UserWarning):

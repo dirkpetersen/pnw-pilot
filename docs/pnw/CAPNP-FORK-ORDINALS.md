@@ -183,7 +183,7 @@ Decision, per log (`_pnw_fork_ordinals`):
 3. Otherwise the writer MUST be established, else **`PnwLogSchemaError`**: no `initData`; not exactly one
    `gitCommit`; an empty one; a **dirty** writer (`initData.dirty`); a commit git cannot read; a raw
    ordinal the writer's own schema does not define; a fork event at an ordinal no audited build used
-   (every fork branch among the 195 refs in pnw-pilot carries a prefix of the same @99..@104 table; the rest have no fork enumerants); an upstream name the current
+   (every fork branch among the ~195 local + `origin` branch refs in pnw-pilot -- of ~446 refs in all, the rest being other remotes -- carries a prefix of the same @99..@104 table; the rest have no fork enumerants); an upstream name the current
    schema cannot represent (a 0.11.2 log's `carNotReady @103` raises -- it is never turned into
    `cruiseOffRequested`).
 4. Writer's name is a fork event -> moved to a synthesized `onroadEventsPnw` (one per `onroadEvents`, same
@@ -240,7 +240,10 @@ before the port.
   rlogs/qlogs) through `migrate_all`: **0 errors** (every file with a contested ordinal was decidable),
   moved == found for every name (greenLight 61, leadDeparting 46, madsLateralOnly 11,540,
   cruiseOffRequested 367, madsResumeSetTooHigh 2), **0** contested ordinals left in `onroadEvents`, and one
-  `onroadEventsPnw` per `onroadEvents` wherever it applied. All 115 writer commits resolve in git.
+  `onroadEventsPnw` per `onroadEvents` wherever it applied. All 115 writer commits **in this corpus** resolve in git.
+  ⚠️ That is a statement about the 09-05+ corpus only (Fable review, 2026-09-21): **xnor-era writer commits
+  (`integration2xnor`, `xnor-dirk`) are not in pnw-pilot**, so an xnor-era log carrying a raw `@99+` raises
+  `PnwLogSchemaError` rather than migrating. That is the intended fail-loud behaviour, not a gap to paper over.
 - **Mutation testing** (35 mutants; each counted only if its anchor matched EXACTLY once and the result
   compiled -- `compile()` for Python, the schema loading in pycapnp for `.capnp`; files restored
   byte-for-byte, sha256-checked): **35 built, 34 killed by the test designated to catch them, 1 (a fork key
