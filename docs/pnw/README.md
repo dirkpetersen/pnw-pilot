@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-19          # git-derived; bump when you edit this file
+updated: 2026-09-21          # git-derived; bump when you edit this file
 status: current        # current | drifted | superseded | unreviewed
 ---
 
@@ -21,6 +21,7 @@ the deeper per-feature design/rationale docs.
 | [FORDLONG2PNW.md](FORDLONG2PNW.md) | Ford Lightning longitudinal (op-long / ICBM) work |
 | [FORDSAFETY2PNW.md](FORDSAFETY2PNW.md) | Ford panda safety-C changes (4-signal lateral, reset-latch hardening) |
 | [UPSTREAM2PNW.md](UPSTREAM2PNW.md) | Upstream (commaai) sync / rebase notes |
+| [CAPNP-FORK-ORDINALS.md](CAPNP-FORK-ORDINALS.md) | 🔴 **capnpfork2pnw (BUILT, not shipped)** — the fork's events/PandaState fields out of upstream's `log.capnp` (they collided with 0.11.1/0.11.2/master ordinals); the whole-schema guard; migration of old logs from the writer's own schema; on-device checks before deploy. **Read before touching `cereal/`.** |
 | [CES2PNW.md](CES2PNW.md) | Initial CES+VTSC+mapd port onto the pnw line (+ its 5 Gemini safety fixes) — port history |
 | [ICBM2PNW.md](ICBM2PNW.md) | Lightning stock-ACC curve slow-downs via SET−/SET+ taps (map-first, set-tracking, guarded restore) |
 | [VISIONBACK2PNW.md](VISIONBACK2PNW.md) | ⛔ MEASUREMENT ONLY, verdict **dead** — can vision hand back a bounded N mph of a map slowdown between 50–150 m? N=10 reaches **5.80 m/s²**, N=5 reaches 4.70, only N=2 is safe and returns 2 mph. Not an accuracy problem: the trust gate is a pass-through (vision says "no real curve" on 87 % of ticks). Nine reproducible analysis scripts in `visionback-evidence/` |
