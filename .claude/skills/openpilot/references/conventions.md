@@ -24,7 +24,8 @@ explicitly kept it generic). State the justification in the commit message.
 ## 3. The Tesla must never be impaired by truck work (and vice versa)
 
 Every Ford/Lightning feature ships with an explicit "Tesla bit-identical" argument (capability
-gating + review). Gemini reviews must be asked this question for any shared-file change.
+gating + review). The Fable review (the only reviewer — `docs/CODING-POLICY.md`) must be asked this question
+for any shared-file change.
 
 ## 4. Established fork patterns (follow, don't reinvent)
 

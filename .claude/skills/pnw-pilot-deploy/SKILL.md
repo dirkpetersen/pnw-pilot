@@ -3,7 +3,7 @@ name: pnw-pilot-deploy
 description: >-
   How to deploy code to the PNW comma 3X (Tesla Raven / Ford Lightning) and verify it — the auto-update
   promote channel (primary path), the manual git-deploy loop (urgent path), the build-on-boot model,
-  LFS/submodule handling, persistence guards, the IsOnroad/tap-reset safety gates, and the recurring
+  LFS/submodule handling, persistence guards, the reboot gate (openpilot disengaged; a panda-safety reflash also needs Park) and the tap-reset guard, and the recurring
   verification gotchas. Use whenever pushing code to the car at ~/gh/comma/pnw/pnw-pilot, debugging a
   deploy, or deciding auto-update vs manual.
 ---
@@ -26,24 +26,48 @@ snapshot. Consequences that MUST drive what you tell the driver:
 - The UI version label reads at manager start — after a files-only install it shows the OLD commit
   until the device reboots. Not a failed deploy; just the label.
 
+**THE REBOOT GATE = openpilot DISENGAGED. Nothing else. (owner rule 2026-09-03, restated
+2026-09-22 — supersedes the old "wait for gearShifter == park" gate that used to be here.)**
+Deploying (push, fetch, finalize, staging, swapping a non-control binary) is safe at ANY time, even
+mid-drive while engaged. Only the **reboot / manager restart** drops control, so it waits for
+**`selfdriveState.enabled == False`** — and that is the ONLY condition. Not parked, not stationary,
+not `vEgo≈0`, not "a good moment": if openpilot is disengaged a human is driving and cycling the
+device takes nothing from anyone (rebooting disengaged at 62 mph is fine). Do not add conditions.
+Read `enabled` LIVE, and **gate the reboot on it in a SEPARATE tool call** — never
+`print(enabled); sudo reboot` in one command (that rebooted a moving, ENGAGED car once):
+```bash
+ssh comma@$COMMA_IP "PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo:/data/pnw/agnos19-compat/site-packages timeout 5 /usr/local/venv/bin/python3 -c \"
+from cereal.messaging import SubMaster
+import time
+sm = SubMaster(['selfdriveState']); t0 = time.monotonic()
+while time.monotonic() - t0 < 4:
+    sm.update(100)
+    if sm.updated['selfdriveState']:
+        print('enabled=', sm['selfdriveState'].enabled); break
+else:
+    print('NO selfdriveState in 4 s -- cannot tell; do NOT treat as disengaged')
+\""
+```
+No message is **not** "disengaged" (Rule 2) — if the read fails, you don't know; retry or ask.
+**One exception:** a reboot that **reflashes panda safety** (a pin bump that changes safety code)
+waits for the truck STOPPED + in Park (`gearShifter == park`), because the new safety model must be
+verified before the car moves — see the DEPLOY GATE under panda safety below.
+
 **AGGRESSIVE-REBOOT POLICY (driver directive 2026-07-12, after a stale session drove a whole leg
 on the wrong longitudinal authority):** whenever ANY pending state exists — code installed but not
-loaded, a toggle changed after session start, a param restored after boot — REBOOT AUTOMATICALLY at
-the FIRST safe opportunity, unprompted. Safe gate = **gearShifter == park** (never speed-only: a
-red light reads 0 mph). Keep a background watcher after every deploy that fires the reboot the
-moment Park is seen, then verifies and tells the driver GO. Never leave a pending reboot waiting
-for the driver to ask.
+loaded, a toggle changed after session start, a param restored after boot — deploy and REBOOT
+AUTOMATICALLY at the FIRST moment openpilot is disengaged, unprompted. Keep a background watcher
+after every deploy that fires the reboot as soon as `enabled == False` is read, then verifies and
+tells the driver GO. Never leave a pending reboot waiting for the driver to ask.
 
 **Driver choreography rule (driver directive: "it needs to be automatic, tell me what to do"):**
 the driver must never have to reason about any of this. After ANY change: (1) Claude does the
-reboot HIMSELF the moment the truck is verifiably parked — gate on a LIVE `CarState.gearShifter ==
-park` (+ `vEgo≈0`) read, NOT `IsOnroad`/GPS-speed/a verbal "I'm parked" (see the EV-gotcha block in
-Deploy path 2 #1) — + touch /tmp/booted; never ask the driver to do ignition dances for code;
-(2) tell the driver exactly ONE thing in one
-sentence ("stay parked two minutes, I'll say GO"), then verify (version + car recognized + safety
-model + nothing down) and give an explicit **GO**; (3) if something needs a driver action that
-Claude cannot do (e.g. flip a Settings toggle), say the exact button and when. One instruction,
-one confirmation — nothing else.
+reboot HIMSELF the moment openpilot is disengaged (live `selfdriveState.enabled == False` read, as
+above) — + `touch /tmp/booted`; never ask the driver to do ignition dances for code; (2) tell the
+driver exactly ONE thing in one sentence ("openpilot is restarting — drive normally, don't engage
+until I say GO"), then verify (version + car recognized + safety model + nothing down) and give an
+explicit **GO**; (3) if something needs a driver action that Claude cannot do (e.g. flip a Settings
+toggle), say the exact button and when. One instruction, one confirmation — nothing else.
 
 ## 🔴 OVERRIDING RULE — PRE-DRIVE SYNC (driver directive 2026-07-11)
 
@@ -172,21 +196,12 @@ is the real car (see Verification).
 **A review agent MUST have run before code is pushed.** Not before deploy, not before reboot —
 **before `git push`**. Pushing to a channel branch is the ship action; the device auto-updates from it.
 
-**Run BOTH reviewers IN PARALLEL:**
+**The reviewer is FABLE — and only Fable** (`Agent` tool, `model: "fable"`, background). **No Gemini
+reviews**, even though the `gemini` skill is installed (owner directive 2026-09-13: too many false
+positives). Full policy — including Opus/Sonnet roles — in `~/gh/comma/docs/CODING-POLICY.md`.
 
-| reviewer | how | model |
-|---|---|---|
-| **Gemini** | the `gemini` skill | **`gemini-flash-latest`** |
-| **Fable** | `Agent` tool with `model: "fable"` | — |
-
-They run **concurrently**, not in sequence — launch both, then continue working. **Fable's review may
-complete asynchronously**: you may start the next coding task while it runs. What you may NOT do is
-push before a review has happened.
-
-**If the two disagree, FABLE HAS THE LAST WORD.** Do not average them, and do not drop a Gemini
-finding because Fable did not raise it — reconcile explicitly and say which one you followed.
-(Precedent: 2026-09-03 on `waysel2pnw`'s `curveWin`, Fable was right and Gemini reached the opposite
-conclusion.)
+**Fable's review may complete asynchronously**: you may start the next coding task while it runs. What
+you may NOT do is push before it has reported. Its verdict is final.
 
 ### Why this rule exists
 - **2026-09-03:** `waysel2pnw` (`c8bfce5b6e`) shipped unreviewed. All 8 telemetry fields read `null`
@@ -263,9 +278,7 @@ through GitHub (push to `3devpnw`) followed by a reboot.** Do not scp/patch file
 try code out; the git checkout must stay == origin/3devpnw so every on-car state is reproducible and
 the updater never fights manual edits. Path 2 below is for RECOVERY, not for shipping.
 
-1. Commit on `3devpnw`, **Gemini-review** (gemini skill, always `gemini-pro-latest`; pipe diffs through
-   `sed 's/@/[at]/g'` — the Gemini CLI treats `@token` in prompts as FILE ATTACHMENTS: raw diffs 400 with
-   "Unable to process input image" and it hallucinates from attached binaries), push.
+1. Commit on `3devpnw`, **Fable-review** (see REVIEW BEFORE PUSH above; no Gemini), push.
 2. The updater checks ~every **1.5 h**. Immediate: `pkill -HUP -f system.updated.updated`
    (SIGHUP = user-requested fetch; SIGUSR1 = check only).
 3. Watch: `UpdaterState` → `checking...` → `finalizing update...` → `idle`.
@@ -289,17 +302,16 @@ the updater never fights manual edits. Path 2 below is for RECOVERY, not for shi
 
 ## Deploy path 2 — MANUAL (urgent fixes; also the rollback tool)
 
-1. **Gate: only when genuinely PARKED — verify via a LIVE `CarState.gearShifter == park` (+ `vEgo≈0`)
-   read, NOT `IsOnroad`.** (`IsOnroad` LAGS ~15 s after parking AND stays `1` while charging — see the
-   EV gotcha immediately below; it is not a reliable parked signal on the Lightning.) Never restart
-   onroad — that restarts the control stack → disengage.
-   - **EV-SPECIFIC GOTCHA (2026-07-16 incident — cost real back-and-forth mid-drive, don't repeat it):**
-     on the Ford F-150 Lightning, `IsOnroad` is driven by the ignition/12V line (`docs/ONROAD-
-     CHARGING.md`), which reads `1` even when the truck is genuinely PARKED and simply charging —
-     "stays 1 while charging" above is not a rare edge case on this car, it's routine, and it will
-     sit at `1` indefinitely while plugged in. **Never trust a verbal "I'm parked" or `IsOnroad`
-     alone before restarting** — confirm with a LIVE read of `CarState.gearShifter`/`vEgo`, the
-     actual signal, not the ignition-line proxy:
+1. **Gate: deploy any time; REBOOT only when openpilot is DISENGAGED** — a live
+   `selfdriveState.enabled == False` read in its own tool call (snippet at the top of this skill). Not
+   parked, not stationary — disengaged is the only condition. Never restart while ENGAGED — that
+   drops control mid-maneuver.
+   - **EV-SPECIFIC NOTE (2026-07-16 incident) — only for when you genuinely need "is it parked"**
+     (e.g. recording/upload questions, NOT the reboot gate): on the Ford F-150 Lightning, `IsOnroad`
+     is driven by the ignition/12V line (`docs/ONROAD-CHARGING.md`), which reads `1` even when the
+     truck is PARKED and simply charging — routine on this car, indefinitely while plugged in; it also
+     LAGS ~15 s after parking. **Never trust a verbal "I'm parked" or `IsOnroad`** for parked-ness —
+     read `CarState.gearShifter`/`vEgo`, the actual signal:
      ```bash
      ssh comma@$COMMA_IP "source /usr/local/venv/bin/activate; PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo timeout 5 python3 -c \"
      from cereal.messaging import SubMaster
@@ -313,15 +325,12 @@ the updater never fights manual edits. Path 2 below is for RECOVERY, not for shi
              break
      \""
      ```
-     **This check is INFORMATIONAL, not a gate — corrected 2026-09-03 by the owner.** The old text
-     here said to proceed only at `gearShifter=park` / `vEgo ≈ 0`. That is wrong and it blocked
-     legitimate work: **deploying is safe at any time, including mid-drive with openpilot engaged.**
-     Staging files, `git fetch`, finalizing into `/data/safe_staging/finalized`, and swapping a
-     non-control binary (e.g. mapd) do not touch the running control stack.
-     **What requires the car to be disengaged is the REBOOT / manager restart**, because that is what
-     drops control — hand that step to the driver. Still worth *printing* the state so the log records
-     what the car was doing, and still worth knowing `gearShifter` beats `IsOnroad` as a parked
-     discriminator (`docs/ONROAD-CHARGING.md`) when you genuinely do need "is it parked".
+     **This gear check is INFORMATIONAL, never the reboot gate — corrected 2026-09-03 by the owner.**
+     The old text here said to proceed only at `gearShifter=park` / `vEgo ≈ 0`; that blocked
+     legitimate work. Deploying is safe at any time, including mid-drive engaged (staging, `git fetch`,
+     finalizing into `/data/safe_staging/finalized`, swapping a non-control binary like mapd). The
+     REBOOT waits only for disengagement, and Claude does it (choreography rule above). Printing the
+     gear is still useful so the log records what the car was doing.
 2. `cd /data/openpilot && git fetch --no-tags origin 3devpnw && GIT_LFS_SKIP_SMUDGE=1 git reset --hard <sha>
    && git lfs pull` — **always skip-smudge + separate lfs pull**: smudge-during-checkout of the ~61 MB
    model OOM'd git on the 3X (`fatal: Out of memory, realloc failed`, 2026-07-08) and left a half-reset
@@ -397,7 +406,7 @@ against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}
      mid-update.
   2. Bump the pin in pnw-pilot: `cd opendbc_repo && git fetch origin && git checkout <sha> && cd ..
      && git add opendbc_repo` (checking out the intended commit first avoids the add-clobbers-pin
-     gotcha above). Commit on `3devpnw`, Gemini-review, push.
+     gotcha above). Commit on `3devpnw`, Fable-review, push.
 - The updater runs `git submodule sync` + `update --init --recursive` + `foreach reset --hard` on
   every fetch (`system/updated/updated.py:397`), so URL changes AND pin bumps flow through
   auto-update with no manual step.
@@ -428,13 +437,14 @@ opendbc-only safety edit still reflashes the panda.
      BLOCKS the bad case (e.g. `test_reset_latch_blocked_when_disengaged` — arm latch engaged,
      disengage, prove a nonzero steer command is still blocked). Never write a test that pins a hole
      ("allowed even with controls_allowed=False") — rewrite the C.
-  4. Gemini adversarial review of the safety diff.
+  4. Fable adversarial review of the safety diff.
 - **Ported safety is NOT validated safety.** BluePilot's road-validated `ford.h` FAILS its own CI
   suite and shipped a `controls_allowed` bypass (the reset latch, ~permanently armed when disengaged
   because openpilot sends neutral frames continuously while off). We hardened it (gate the latch on
   `controls_allowed`) — feature preserved, hole closed. Audit any ported safety for `violation=false`
   paths that skip the disengaged-steering / value / controls_allowed checks.
-- **DEPLOY GATE (never auto-flash steering safety):** truck STOPPED + in Park (verify via carState
+- **DEPLOY GATE (never auto-flash steering safety) — the ONE exception to the disengaged-only reboot
+  gate (owner, 2026-09-22):** truck STOPPED + in Park (verify via carState
   vEgo≈0/gearShifter, not just IsOnroad), engine on, driver in the seat ready to take over, safe
   low-traffic area. Stage → reboot (parked) → the panda reflashes → **verify BEFORE driving**:
   `pandaStates` alive, `safetyModel` correct, `faultStatus none`, no blocked-TX flood, fingerprint

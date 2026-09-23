@@ -303,10 +303,8 @@ single most expensive trap here.
   reset + separate `git lfs pull` (smudge-during-checkout OOM'd git on the 3X) +
   `git submodule update --init <path>` for pin bumps. Host side: `git add <submodule>` records the
   LOCAL checkout and silently clobbers an `update-index --cacheinfo` pin.
-- **Gemini CLI treats `@tokens` in prompts as file attachments** — a raw diff 400s ("Unable to
-  process input image") or, worse, silently attaches binaries and hallucinates about them. Always
-  `sed 's/@/[at]/g'` diffs; always adjudicate findings against the tree (its 5-finding lebowski
-  review was 0-for-5; other reviews caught real bugs — verify, never rubber-stamp).
+- **Adjudicate every review finding against the tree** — verify, never rubber-stamp (a 5-finding
+  lebowski review was 0-for-5; other reviews caught real bugs).
 - **Every `params.get/put` in ported/copied code needs a registered key** — a snapshot port carried
   `UsbGpuPresent/UsbGpuCompiled` uses that would have crash-looped modeld; audit with a grep of
   param names vs `params_keys.h` before shipping.

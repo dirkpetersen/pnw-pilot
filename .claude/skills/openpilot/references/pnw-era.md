@@ -91,16 +91,18 @@ the fork's own modifications, host compile + on-device build.
 
 - **Live drive monitoring**: persistent Monitor over SSH-on-hotspot sampling ces_events (~22 s) +
   error counters; status line per minute, immediate alerts on modeld respawn/new errors/drive end.
-- **🔴 EV park detection — use `gearShifter`, NOT `IsOnroad` (driver directive 2026-07-18, applies
-  everywhere: restart gates AND monitoring/status checks).** On the Ford F-150 Lightning `IsOnroad`
+- **🔴 EV park detection — use `gearShifter`, NOT `IsOnroad` (driver directive 2026-07-18, applies to
+  monitoring/status checks and anything that needs "is it parked").** ⚠️ **Not the reboot gate** —
+  since 2026-09-03 a reboot/restart needs ONLY openpilot disengaged (`selfdriveState.enabled == False`,
+  read live in a separate call); see `~/gh/comma/CLAUDE.md` and the `pnw-pilot-deploy` skill. On the Ford F-150 Lightning `IsOnroad`
   is ignition/12 V-line-driven, so it reads `1` even when genuinely PARKED and charging — `IsOnroad=1`
   is ambiguous (driving OR parked+charging). The authoritative signal is a live `CarState.gearShifter
-  == park` (+ `vEgo≈0`) read via a short SubMaster in the device venv. Never gate a restart on
+  == park` (+ `vEgo≈0`) read via a short SubMaster in the device venv. Never infer "parked" from
   `IsOnroad=0`/`vEgo=0`/a verbal "I'm parked" alone. Off/asleep fallback: when the car is fully off,
   `carState` doesn't publish at all ("NO carState received") — that state is safely "not driving," and
   `IsOnroad=0` is the only signal available. See `docs/ONROAD-CHARGING.md` + the `pnw-pilot-deploy`
-  skill's EV gotcha block. Pure-python planner changes still queue until a restart (onroad processes
-  spawn fresh next drive), but the *parked* determination that authorizes that restart is gearShifter.
+  skill's EV note. Pure-python planner changes still queue until a restart (onroad processes spawn
+  fresh next drive); what authorizes that restart is disengagement, not gear.
 - **Qlog forensics**: `tools/lib/logreader` on-device over recent segment qlogs answers "which alert
   fired and why" (`onroadEvents`), and message-level inspection (e.g. livePose validity flags around
   an event timestamp) names the failing subsystem. swaglog alone often lacks alert events.

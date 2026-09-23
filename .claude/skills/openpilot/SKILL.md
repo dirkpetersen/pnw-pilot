@@ -96,20 +96,18 @@ actually cost time or nearly bricked hardware (kept additive; newest era at the 
 
 ## Operating principles (the habits that keep this safe)
 
-- **Gemini-review every change that ships** (gemini skill, `gemini-pro-latest`). Two disciplines
-  learned the hard way: (a) escape `@` in any diff you pipe to the CLI (`sed 's/@/[at]/g'`) — it
-  treats `@tokens` as file attachments and both 400s and hallucinates; (b) **adjudicate its
-  findings against the actual tree** — track record is mixed (real catches: a missing capnp-field
-  dependency, log-injection, float-compare fragility; hallucinations: pycapnp API, msgq API,
-  schema "corruption"). Verify each claim, accept or refute with evidence, record the verdict in
-  the commit message.
+- **Fable-review every change that ships** (`Agent`, `model: "fable"`) — the ONLY reviewer; no Gemini
+  reviews even though the `gemini` skill is installed (owner directive 2026-09-13). Opus architects and
+  implements; Sonnet only under an Opus design. Full policy: `~/gh/comma/docs/CODING-POLICY.md`. Give
+  Fable evidence (telemetry, mutation results), apply or refute every finding, and record the verdict
+  in the commit message.
 
 - **Telemetry-driven tuning loop.** The car logs a per-second CES event stream
-  (`/data/pnw/ces_events.jsonl`: mode/reason, vEgo/vSet/vLead/dRel, curve%, vtscCap/State, gas) and
+  (`/data/pnw/ces_events.jsonl`, legacy `/data/dirk` before 2026-08-15: mode/reason, vEgo/vSet/vLead/dRel, curve%, vtscCap/State, gas) and
   qlogs carry `onroadEvents`. The proven workflow: driver reports a moment → extract the window →
   name the exact mechanism → fix with a scenario-replay test built from the real telemetry → deploy
   at the next stop. Every drive analysis goes in `~/gh/comma/drives/<date>/<name>/DRIVE_REPORT.md`
-  (CLAUDE.md Rule 5) with the raw telemetry saved alongside.
+  (CLAUDE.md Rule 7, times rendered in Pacific) with the raw telemetry saved alongside.
 
 - **Never commit/push to a default branch** (`main`/`master`/`bp-dev` — hook-enforced) and **never
   experiment on `3testpnw`** (friends' channel).
