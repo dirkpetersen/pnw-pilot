@@ -24,7 +24,7 @@ from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_live as cl
-from openpilot.selfdrive.controls.lib.ces_pnw.tests.roaddb_fixture import FAR_ANCHOR, reader, write_db
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.roaddb_fixture import FAR_ANCHOR, SHIPPED_LAT_A, reader, write_db
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_ces_mode_read_failure_logged import LIGHTNING, _P
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import LAT0, LON0, FakeCP, _model
 
@@ -390,8 +390,9 @@ class TestA:
     db.poll_a()
     assert db.a_lat() == (2.5, "curve.json", "ok") and logs.errors == []   # mapd is not even read
 
-  @pytest.mark.parametrize("cfg,want", [(None, None), (0, None), (2.5, 2.5), (0.4, 1.0), (9.0, 3.5)])
+  @pytest.mark.parametrize("cfg,want", [(None, 2.2), (0, None), (2.5, 2.5), (0.4, 1.0), (9.0, 3.5)])   # default 2.2 (owner 2026-09-24)
   def test_the_curve_json_knob(self, tmp_path, monkeypatch, cfg, want):
+    monkeypatch.setitem(pv._CURVE_DEFAULTS, "curvedb_v2_lat_a", SHIPPED_LAT_A)   # undo the fixture pin: test the real default
     f = tmp_path / "curve.json"
     if cfg is not None:
       f.write_text(json.dumps({"lightning": {"curvedb_v2_lat_a": cfg}}))
@@ -654,3 +655,9 @@ def test_a_curve_json_A_sets_the_speed_and_is_logged_as_its_source(monkeypatch, 
     got = [t for t in _targets(on) if t is not None]
     assert got and got[-1] == pytest.approx(math.sqrt(2.5 / 0.004), abs=0.01)
     assert {(r["cdb2A"], r["cdb2ASrc"]) for r in recs} == {(2.5, "curve.json")}
+
+
+def test_the_shipped_default_is_2_2():
+  """Owner decision 2026-09-24: the Lightning's curve DB turns curvature into speed at a fixed 2.2 m/s^2."""
+  from openpilot.selfdrive.controls.lib.ces_pnw.tests.roaddb_fixture import SHIPPED_LAT_A as shipped
+  assert shipped == 2.2

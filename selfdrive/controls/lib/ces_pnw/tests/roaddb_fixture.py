@@ -49,10 +49,17 @@ def reader(a_std=2.2, personality=1):
   return lambda: (s, personality)
 
 
+import openpilot.selfdrive.controls.lib.pnw_vehicle as pv
+SHIPPED_LAT_A = pv._CURVE_DEFAULTS["curvedb_v2_lat_a"]   # the shipped Lightning default, before any test pins it
+
+
 def isolate(monkeypatch, tmp_path_factory):
   d = write_db(str(tmp_path_factory.mktemp("roaddb")), [FAR_ANCHOR])
   monkeypatch.setattr(cl, "DATA_DIR", d)
   monkeypatch.setattr(cl, "READ_PARAMS", [reader()])
   monkeypatch.setattr(cl, "BACKGROUND", [False])     # load in the constructor: no thread, no race
   monkeypatch.setattr(cl, "A_MAX_AGE_S", float("inf"))   # A is read once there and never re-polled
+  # The shipped default is a fixed 2.2 (owner 2026-09-24); these controller tests exercise the "A from mapd" path
+  # the reader above feeds, so pin the knob to 0 = mapd. test_the_shipped_default_is_2_2 covers the default itself.
+  monkeypatch.setitem(pv._CURVE_DEFAULTS, "curvedb_v2_lat_a", 0.0)
   return d
