@@ -2428,7 +2428,7 @@ class IcbmEpisode:
     self._sa_inst_idle = None           # ...as last read while idle; NOT cleared by reset()
     self._window_s = window_s
     self._clear_delay_s = clear_delay_s
-    self.phase = "idle"                 # idle | cap | restore
+    self.phase = "idle"                 # idle | cap | restore | gas (terwilliger2pnw: suspended by a gas press)
     self.ceiling = None                 # driver's own set (m/s), latched while an episode is active
     # icbmratchet2pnw: THREE distinct trackers, deliberately not conflated (Gemini review catch,
     # round 2 — a single "_min_target that's both the outlier-gating baseline AND whatever we most
@@ -2472,6 +2472,14 @@ class IcbmEpisode:
     self._bind_ref = None               # restorehold2pnw (c): binding reference of a cap that CARRIED the ceiling
     self._rcap_late_until = None        # restorehold2pnw F1: late-tap grace deadline at a mid-climb hold snapshot
     self._last_inc_t = None             # restorehold3pnw: when a restore tick last published "inc" (monotonic)
+    # terwilliger2pnw: a driver GAS press suspends the episode instead of ending it (see _gas_hold). Also cleared in
+    # reset(); `gas_res` is deliberately NOT (telemetry: the latest outcome, until the next ceiling latches).
+    self._gas_t0 = None                 # monotonic start of the running gas suspension (None = not suspended)
+    self._gas_set0 = None               # stock set when the gas went down: any unexplained move = the driver's set
+    self._gas_absorbed = False          # our own last SET- tap landing late has been absorbed once
+    self._after_gas = False             # this episode resumed after a gas press (the restore is labelled afterGas)
+    self.restore_why = None             # "curve" / "afterGas" while in the restore phase (icbmRestoreWhy)
+    self.gas_res = None                 # "hold" / "resumed" / "no:<why>" -- latest gas-resume outcome (icbmGas)
 
   def reset(self) -> None:
     self.phase = "idle"
@@ -2504,6 +2512,11 @@ class IcbmEpisode:
     self._bind_ref = None               # restorehold2pnw (c)
     self._rcap_late_until = None        # restorehold2pnw F1
     self._last_inc_t = None             # restorehold3pnw
+    self._gas_t0 = None                 # terwilliger2pnw
+    self._gas_set0 = None
+    self._gas_absorbed = False
+    self._after_gas = False
+    self.restore_why = None
 
   @property
   def bind_ceiling(self):
@@ -2655,8 +2668,10 @@ class IcbmEpisode:
     """sazoneset2pnw: fold this tick's posted limit into the episode's STICKY zone cap. Call once per tick
     BEFORE step(). Only lowers self.zone_cap and never touches self.ceiling: the ceiling is the reference a
     curve's binding is judged against during the cap phase, and lowering it there could make a real curve
-    stop binding mid-approach. The cap only ever limits the RESTORE (step's restore_cap)."""
-    if self.phase not in ("cap", "restore") or self.ceiling is None:
+    stop binding mid-approach. The cap only ever limits the RESTORE (step's restore_cap).
+    terwilliger2pnw: also while suspended by a gas press -- a limit that drops while the driver is on the power
+    still bounds the restore that follows."""
+    if self.phase not in ("cap", "restore", "gas") or self.ceiling is None:
       return
     cap, why = C.icbm_stale_zone_cap(self.ceiling, self.latch_limit, limit_now, proportional)
     if cap is not None and (self.zone_cap is None or cap < self.zone_cap):
@@ -2671,7 +2686,7 @@ class IcbmEpisode:
     zoneN catches a zone that opened and completed between two reads -- which happens when our own taps already
     had the set below the zone speed. Same contract as note_limit: call before step(); only lowers zone_cap;
     never touches the ceiling. An unreadable count at the start only loses the completed-zone case, logged via
-    icbmZoneWhy never becoming "saZone"; an in-progress zone still binds."""
+    icbmZoneWhy never becoming "saZone"; an in-progress zone still binds. Also runs while suspended by a gas press."""
     def _pos(x):
       try:
         x = float(x)
@@ -2682,7 +2697,7 @@ class IcbmEpisode:
       n = int(zone_n) if zone_n is not None else None
     except (TypeError, ValueError):
       n = None
-    if self.phase not in ("cap", "restore") or self.ceiling is None:
+    if self.phase not in ("cap", "restore", "gas") or self.ceiling is None:
       self._sa_zone_n_idle, self._sa_inst_idle = n, inst
       return
     if self.zone_n0 is None:
@@ -2741,9 +2756,108 @@ class IcbmEpisode:
     self._rcap_late_until = None
     return target, "inc"
 
+  def _gas_note(self, state, why=None, stock_set=None) -> None:
+    """terwilliger2pnw: change-only log of the gas-resume path (one event per transition, never per tick)."""
+    self.gas_res = state if why is None else f"no:{why}"
+    cloudlog.event("ces_icbm_gas_resume", state=state, why=why, stock_set=stock_set,
+                   ceiling=round(self.ceiling, 2) if self.ceiling is not None else None)
+
+  def _gas_decline(self, why, stock_set) -> None:
+    """End a gas-suspended (or resumed-but-not-yet-restoring) episode WITHOUT a restore, and say why."""
+    self._gas_note("declined", why, stock_set)
+    gas_res = self.gas_res
+    self.reset()
+    self.gas_res = gas_res
+
+  def _gas_moved(self, now, stock_set):
+    """terwilliger2pnw: the stock set moved in a way our executor cannot explain since the gas went down -> the
+    driver has taken the set speed over (SET+ / SET- / RES; a Ford SET while overriding sets the current speed).
+    The executor never presses while a pedal is down, so the ONLY movement of ours is the final SET- tap of the cap
+    phase landing late (~1 s report lag): absorbed once, within ICBM_LATE_TAP_GRACE_S, at most ICBM_LATE_TAP_TOL."""
+    if stock_set is None or stock_set <= 0.0:
+      return "noSet"
+    d = stock_set - self._gas_set0
+    if d > ICBM_RESTORE_DONE_TOL:
+      return "driverSet"
+    if d < -ICBM_RESTORE_DONE_TOL:
+      if not self._gas_absorbed and self._gas_t0 is not None and now - self._gas_t0 <= ICBM_LATE_TAP_GRACE_S \
+         and -d <= ICBM_LATE_TAP_TOL:
+        self._gas_set0, self._gas_absorbed = stock_set, True
+        return None
+      return "driverSet"
+    if stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL:
+      return "atCeiling"
+    return None
+
+  def _restore_abort(self, why, stock_set) -> None:
+    """reset() for a restore the driver interrupted. A resumed-after-gas restore (terwilliger2pnw) also says so."""
+    if self.restore_why == "afterGas":
+      self._gas_note("ended", why, stock_set)
+      gas_res = self.gas_res
+      self.reset()
+      self.gas_res = gas_res
+      return
+    self.reset()
+
+  def _rearm_cap(self) -> None:
+    """terwilliger2pnw: put the episode back at the START of its cap phase, keeping the ceiling, its road (zone caps,
+    latch limit, speedadjust identity) and the ratchet's history (_min_target / _min_published, which feed the
+    driver-lower guard). Every clear/restore timer and snapshot is dropped, so the curve must be seen clear afresh
+    (full debounce, in-curve deferral, set-movement snapshot) before a restore may begin -- the ordinary path."""
+    self.phase = "cap"
+    self._clear_t0 = None
+    self._engage_t0 = None
+    self._hold_set0 = None
+    self._late_tap_set = None
+    self._pending_low_target = None
+    self._pending_low_t0 = None
+    self._last_cap_dist = None
+    self._last_cap_vego = 0.0
+    self._apex_passed = False
+    self._t0 = None
+    self._last_stock = None
+    self._last_t = None
+    self._rcap_hold_set = None
+    self._rcap_late_until = None
+    self.ahead_cap = None
+    self.ahead_vsafe = None
+    self._ahead_clear_t0 = None
+    self._last_inc_t = None
+    self.restore_why = None
+
+  def _gas_hold(self, now, stock_set) -> bool:
+    """terwilliger2pnw (owner 2026-09-24, "yes restore"): one tick with the ACCELERATOR alone down and stock ACC still
+    engaged. True = the episode is (still) suspended; False = it ends exactly as before (logged when it had a ceiling).
+
+    Terwilliger, 12:36:13.5 PT: a gas press mid-curve hard-aborted the episode, the set sat at 48 (ICBM's cap) for 44 s
+    on open road, and the driver pressed SET+ 14 times. Now the pre-curve ceiling is KEPT through the press; once the
+    gas lifts the episode re-enters its cap phase and the ordinary restore follows, with every restore guard.
+    Declined (the episode ends, no restore, as before): the set was moved by the driver, it is already at/above the
+    ceiling, or the press outlasts the restore window. A brake or ACC off is handled by the caller (ends everything)."""
+    if self._gas_t0 is None:
+      if self.phase not in ("cap", "restore") or self.ceiling is None:
+        return False                    # no episode: exactly as before
+      if stock_set is None or stock_set <= 0.0 or stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL:
+        self._gas_decline("atCeiling" if stock_set is not None and stock_set > 0.0 else "noSet", stock_set)
+        return False
+      self._rearm_cap()
+      # its OWN phase: to the candidate logic in _icbm_step an episode suspended by the gas is NOT a running cap (as it
+      # was not before this change, when the press ended it) -- no running-cap gates (behindrun2pnw's mapPassedRun,
+      # the stale-GPS hold, the cap's bind ceiling) act while the driver is on the power.
+      self.phase = "gas"
+      self._gas_t0, self._gas_set0, self._gas_absorbed = now, float(stock_set), False
+      self._after_gas = False
+      self._gas_note("hold", None, stock_set)
+      return True
+    why = self._gas_moved(now, stock_set) or ("gasLong" if now - self._gas_t0 > self._window_s else None)
+    if why is not None:
+      self._gas_decline(why, stock_set)
+      return False
+    return True
+
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
            cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None, hold_ahead=False,
-           hold_vsafe=None):
+           hold_vsafe=None, gas_resume=False, driver_gas=False):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -2772,11 +2886,26 @@ class IcbmEpisode:
                    reads clear for ICBM_RESTORE_HOLD_CLEAR_S. The cap phase ignores it: a cap binds, and taps SET-,
                    exactly as before. The one cap-side effect is (c): a cap that interrupts a HELD restore keeps the
                    original ceiling for the restore after it (_carry_on_cap). Default False = byte-identical.
-      hold_vsafe   the curve's safe speed (m/s) from icbm_restore_ahead_hold; None = hold at the current speed."""
+      hold_vsafe   the curve's safe speed (m/s) from icbm_restore_ahead_hold; None = hold at the current speed.
+
+    terwilliger2pnw optional inputs (defaults = the previous behaviour exactly):
+      gas_resume   the car resumes an episode after a driver gas press (PnwVehicle.lightning_curve_slow);
+      driver_gas   the pedal down this tick is the ACCELERATOR alone (driver_pedal True, brake up).
+                   With both, a gas press SUSPENDS the episode (_gas_hold) instead of ending it; the brake, ACC off,
+                   a driver set change or a set already at the ceiling still end it with no restore."""
     if v_set is None or v_set <= 0.0:
+      if self._gas_t0 is not None or self._after_gas:
+        self._gas_decline("noVSet", stock_set)
       self.reset()                      # no valid driver set -> hands off everything
       return None, None
     if not stock_on or driver_pedal:
+      if gas_resume and stock_on and driver_gas and self._gas_hold(now, stock_set):
+        # suspended: a cap present right now is still FORWARDED exactly as before (dec-only; the executor never
+        # presses while a pedal is down), and nothing else is published
+        return (float(cap_target), "dec") if cap_target is not None else (None, None)
+      if self._gas_t0 is not None or self._after_gas:
+        # the brake or ACC off during/after a suspension: everything ends, exactly as before -- and says so
+        self._gas_decline("accOff" if not stock_on else "brake" if not driver_gas else "pedal", stock_set)
       # Gemini adversarial catch (ACC off/on survival): ANY pedal press or ACC-off in ANY phase
       # kills the episode entirely — no episode may exist while the driver is braking/gassing or
       # the ACC is disengaged. A cap present right now is still FORWARDED (dec-only; the executor
@@ -2787,6 +2916,22 @@ class IcbmEpisode:
       if cap_target is not None:
         return cap_target, "dec"
       return None, None
+    if self._gas_t0 is not None:
+      # terwilliger2pnw: the gas lifted. Resume the episode at the start of its cap phase (_rearm_cap ran when the
+      # press began) unless the driver took the set over while pressing; either way the tick proceeds normally.
+      why = self._gas_moved(now, stock_set)
+      if why is not None:
+        self._gas_decline(why, stock_set)
+      else:
+        self._gas_t0 = None
+        self._after_gas = True
+        self.phase = "cap"              # back at the start of the cap phase (_rearm_cap cleared its timers)
+        self._gas_note("resumed", None, stock_set)
+    elif self._after_gas and self.phase == "cap" and stock_set is not None and self._gas_set0 is not None \
+         and stock_set > self._gas_set0 + ICBM_RESTORE_DONE_TOL:
+      # after the lift, still before the restore: the cap phase only ever taps DOWN, so a rise is the driver (SET+/RES)
+      # restoring it himself -- never restore past him.
+      self._gas_decline("driverSet", stock_set)
     if cap_target is not None:
       cap_target = float(cap_target)
       # DEC ALWAYS WINS. A cap during RESTORE cancels the restore episode entirely and re-latches
@@ -2794,6 +2939,7 @@ class IcbmEpisode:
       if self.phase != "cap":
         carry = self._carry_on_cap(now, stock_set)   # restorehold2pnw (c): read BEFORE reset() wipes it
         self.reset()
+        self.gas_res = None               # terwilliger2pnw: a new episode -- the last gas outcome no longer applies
         self.phase = "cap"
         self.ceiling = float(v_set)
         # sazoneset2pnw: remember which road this ceiling belongs to (None/0 = limit unknown at latch)
@@ -2909,7 +3055,10 @@ class IcbmEpisode:
         # still lateral-loaded (e.g. long curve, or the NEXT bend of an S): hold silently — never
         # BEGIN raising the set mid-curve. Bounded: loaded too long with no re-bind -> give up.
         if (now - self._clear_t0) > ICBM_HOLD_MAX_S:
-          self.reset()
+          if self._after_gas:
+            self._gas_decline("loadedTooLong", stock_set)   # terwilliger2pnw (Rule 2)
+          else:
+            self.reset()
         return None, None
       # curve cleared (sustained) -> enter RESTORE only when the episode is cleanly ours:
       eligible = (stock_on and not driver_pedal and self.ceiling is not None
@@ -2934,6 +3083,10 @@ class IcbmEpisode:
                   and stock_set < self.ceiling - ICBM_RESTORE_DONE_TOL)
       if eligible:
         self.phase = "restore"
+        self.restore_why = "afterGas" if self._after_gas else "curve"   # terwilliger2pnw: icbmRestoreWhy
+        if self._after_gas:
+          cloudlog.event("ces_icbm_gas_resume", state="restore", why="afterGas", stock_set=stock_set,
+                         ceiling=round(self.ceiling, 2), restore_cap=restore_cap)
         self._t0 = now
         self._last_stock = stock_set
         self._last_t = now
@@ -2942,6 +3095,18 @@ class IcbmEpisode:
         if out[1] == "inc":
           self._last_inc_t = now
         return out
+      if self._after_gas:
+        # terwilliger2pnw (Rule 2): the resumed episode reached the restore gate and a guard refused it -- say which
+        if stock_set is None or stock_set <= 0.0:
+          why = "noSet"
+        elif stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL:
+          why = "atCeiling"
+        elif self._min_published is not None and stock_set < self._min_published - ICBM_DRIVER_LOWER_TOL:
+          why = "belowCommanded"
+        else:
+          why = "setMoved"
+        self._gas_decline(why, stock_set)
+        return None, None
       self.reset()
       return None, None
 
@@ -2950,6 +3115,15 @@ class IcbmEpisode:
       if (not stock_on or driver_pedal or stock_set is None or stock_set <= 0.0
           or (now - self._t0) > self._window_s
           or stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL):
+        if self.restore_why == "afterGas":   # terwilliger2pnw (Rule 2): how the resumed restore ended
+          done = stock_set is not None and stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL
+          self._gas_note("done" if done else "ended", None if done else
+                         "window" if stock_set is not None and stock_set > 0.0 and stock_on and not driver_pedal else "abort",
+                         stock_set)
+          gas_res = self.gas_res
+          self.reset()
+          self.gas_res = gas_res
+          return None, None
         self.reset()
         return None, None
       # brain-side manual-intervention detection (the executor's RestoreGuard is the fine-grained
@@ -2957,10 +3131,10 @@ class IcbmEpisode:
       if self._last_stock is not None:
         dt = max(now - (self._last_t if self._last_t is not None else now), 0.0)
         if stock_set < self._last_stock - ICBM_RESTORE_DONE_TOL:
-          self.reset()                  # set went DOWN: only a human does that during restore
+          self._restore_abort("driverSet", stock_set)   # set went DOWN: only a human does that during restore
           return None, None
         if stock_set > self._last_stock + ICBM_EXEC_STEP_MS * (dt / ICBM_TAP_PERIOD_S + 1.6):
-          self.reset()                  # rose faster than our taps can: driver holding SET+
+          self._restore_abort("driverSet", stock_set)   # rose faster than our taps can: driver holding SET+
           return None, None
       # icbmrestorecap2pnw (Fable review): while HOLDING at the posted-limit cap the brain publishes
       # nothing, so any rise beyond one in-flight tap is the driver pressing SET+. Without this a
@@ -2975,13 +3149,13 @@ class IcbmEpisode:
         # ICBM_HOLD_LATE_TAPS); more than that is the driver. At its end the snapshot is re-anchored ONCE on what
         # landed, and the strict one-tap tolerance below applies from then on.
         if stock_set > hold0 + ICBM_HOLD_LATE_TAPS * ICBM_EXEC_STEP_MS + ICBM_RESTORE_DONE_TOL:
-          self.reset()
+          self._restore_abort("driverSet", stock_set)
           return None, None
         if now >= late_until:
           self._rcap_hold_set = stock_set
           self._rcap_late_until = None
       elif hold0 is not None and stock_set > hold0 + ICBM_LATE_TAP_TOL:
-        self.reset()
+        self._restore_abort("driverSet", stock_set)
         return None, None
       self._last_stock = stock_set
       self._last_t = now
@@ -5357,6 +5531,9 @@ class CESController:
       # icbmrestore2pnw: run the episode machine — it forwards caps unchanged ('dec'), enters the
       # bounded GUARDED restore when the curve clears, and hard-aborts on any driver-intent signal.
       driver_pedal = bool(sig.get("gas")) or bool(sig.get("brake"))
+      # terwilliger2pnw: the accelerator ALONE suspends the episode (the restore resumes after the lift) on a car with
+      # the capability; the brake still ends everything. Tesla: gas_resume False -> exactly the previous behaviour.
+      driver_gas = bool(sig.get("gas")) and not bool(sig.get("brake"))
       # gpsdrgate2pnw: STALE-GPS HOLD of a running map/far cap (ICBM_GPS_STALE_HOLD_MAX_S). Vision binding this
       # tick (target set) or the fix coming back ends it at once; so does leaving the cap phase.
       hold = getattr(self, "_icbm_stale_hold", None)
@@ -5466,7 +5643,8 @@ class CESController:
                                                  cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve,
                                                  restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None,
                                                  limit_now=rcap_lim if rcap_lim > 0.0 else None,
-                                                 hold_ahead=rhold, hold_vsafe=rhold_vsafe)
+                                                 hold_ahead=rhold, hold_vsafe=rhold_vsafe,
+                                                 gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas)
       _icbm_rhold_note(self, now, rhold_src)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
@@ -5678,6 +5856,8 @@ class CESController:
       # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
       tele["icbmPhase"] = getattr(getattr(self, "_icbm_ep", None), "phase", None)
       tele["icbmZoneWhy"] = getattr(getattr(self, "_icbm_ep", None), "zone_why", None)      # sazoneset2pnw
+      tele["icbmRestoreWhy"] = getattr(getattr(self, "_icbm_ep", None), "restore_why", None)  # terwilliger2pnw
+      tele["icbmGas"] = getattr(getattr(self, "_icbm_ep", None), "gas_res", None)             # terwilliger2pnw
       tele["icbmLatchLim"] = getattr(getattr(self, "_icbm_ep", None), "latch_limit", None)  # sazoneset2pnw
       tele["icbmFlrHit"] = bool(self._icbm_floor_hit)
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
@@ -5951,6 +6131,10 @@ class CESController:
       **_rhold_tele(self),   # restorehold2pnw: icbmRHold = "poly"/"vis" while a restore is held, icbmRHoldA = m/s^2
       "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore
       "icbmZoneWhy": getattr(getattr(self, "_icbm_ep", None), "zone_why", None),      # sazoneset2pnw: prop/limit5/None
+      # terwilliger2pnw: "curve" / "afterGas" while restoring (else None); the latest gas-resume outcome
+      # ("hold" / "resumed" / "no:<why>", until the next episode latches) -- ces_icbm_gas_resume logs each transition
+      "icbmRestoreWhy": getattr(getattr(self, "_icbm_ep", None), "restore_why", None),
+      "icbmGas": getattr(getattr(self, "_icbm_ep", None), "gas_res", None),
       "icbmLatchLim": getattr(getattr(self, "_icbm_ep", None), "latch_limit", None),  # sazoneset2pnw: limit at latch
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,

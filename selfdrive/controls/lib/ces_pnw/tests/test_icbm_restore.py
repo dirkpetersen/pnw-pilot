@@ -210,9 +210,14 @@ def test_icbm_step_publishes_inc_marker_and_restore_src(tmp_path, monkeypatch):
   out = run(clear_sig, 45 * MPH, True)
   assert out.get("dir") == "inc" and abs(out["target"] - round(60 * MPH, 2)) < 0.01
   assert mgr._icbm_src == "restore" and mgr._icbm_dir == "inc"
-  # 3) driver touches the gas: hard abort -> empty publish, episode dead
+  # 3) terwilliger2pnw: the driver touches the GAS: the restore stops (empty publish) but the episode is SUSPENDED with
+  #    its ceiling kept (the Lightning resumes the restore after the lift -- test_terwilliger2pnw_gas_resume.py)
   out = run({**clear_sig, "gas": True}, 45 * MPH, True)
-  assert out == {} and mgr._icbm_ep.phase == "idle" and mgr._icbm_dir is None
+  assert out == {} and mgr._icbm_ep.phase == "gas" and mgr._icbm_dir is None
+  assert abs(mgr._icbm_ep.ceiling - 60 * MPH) < 1e-9
+  # 4) the BRAKE is still a hard abort -> empty publish, episode dead (the old step 3, unchanged)
+  out = run({**clear_sig, "gas": True, "brake": True}, 45 * MPH, True)
+  assert out == {} and mgr._icbm_ep.phase == "idle" and mgr._icbm_dir is None and mgr._icbm_ep.ceiling is None
 
 
 # ---- Gemini adversarial-review fixes (2026-07-12): the three intent-conflict guards ---------------

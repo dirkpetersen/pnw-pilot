@@ -648,7 +648,8 @@ def test_icbm_step_hold_cut_short_is_logged_as_ended(tmp_path, monkeypatch):
   step({**sig, "v_ego": 64 * MPH, "v_set": 64 * MPH, "map_target_v": 0.0, "map_target_dist": float("inf")}, active=True)
   assert mgr._icbm_rhold_on
   mgr._icbm_last_pub = _t.monotonic() - 1.0
-  step({**sig, "gas": True, "map_target_v": 0.0, "map_target_dist": float("inf")}, active=True)
+  # terwilliger2pnw: the BRAKE (not the gas, which now suspends the episode) is what cuts it short entirely
+  step({**sig, "brake": True, "map_target_v": 0.0, "map_target_dist": float("inf")}, active=True)
   last = [e for e in events if e[0] == "ces_icbm_restore_hold"][-1][1]
   assert last["state"] == "ended" and last["phase"] == "idle"
 
