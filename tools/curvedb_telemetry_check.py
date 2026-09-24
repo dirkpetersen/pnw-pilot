@@ -36,6 +36,7 @@ import math
 import statistics
 import sys
 import zoneinfo
+from openpilot.common.time_helpers import wall_time_valid
 
 PT = zoneinfo.ZoneInfo("America/Los_Angeles")   # the device runs UTC; the driver lives in Pacific
 
@@ -387,7 +388,9 @@ def check_negative_control(rep, recs, cars):
 
 
 def span_pt(recs):
-  ts = [r["t"] for r in recs if isinstance(r.get("t"), int | float) and r["t"] > 1577836800.0]
+  # clockvalid2pnw (Fable F1): the old `> 2020` floor let the unsynced-clock 2026-07-28 stamps through;
+  # use the same trust rule as the device, and honour the writer's own clockBad mark.
+  ts = [r["t"] for r in recs if isinstance(r.get("t"), int | float) and not r.get("clockBad") and wall_time_valid(r["t"])]
   if not ts:
     return "no valid wall clock (dead-RTC boot?)"
   f = "%Y-%m-%d %H:%M:%S %Z"
