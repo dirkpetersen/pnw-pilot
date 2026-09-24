@@ -44,7 +44,8 @@ returns extra m/s to subtract from a binding curve target. Non-Lightning → **0
 
 ### Descent + left-curve factors (`descentcurve2pnw`)
 
-Field evidence: two DOWNHILL LEFT washouts under op-long (18:12:16 @ 77 mph vs cap 71; 19:17–18).
+Field evidence: two DOWNHILL washouts under op-long (18:12:16 @ 77 mph vs cap 71; 19:17–18) — originally recorded as
+LEFT curves; the labels were found inverted on 2026-09-24 (18:12 was a right-hander).
 - **Descent guard:** penalty ×= 1 + `descent_gain`·min(|pitch|, `descent_pitch_cap`) when pitch < 0
   (from `carControl.orientationNED[1]`); defaults 8.0 / 0.12 rad → 5% grade = +40%. On a descent
   gravity eats the regen budget, so enter slower instead.
@@ -100,11 +101,11 @@ strict); curve.json is a *tuning* override whose calibrated end state belongs IN
 `tools/washouts.py` scans `drives/*/lightning-*/ces_events*.jsonl` for steering-override clusters
 >55 mph; checked-in fixture from the 2026-07-11 logs (**171 clusters, 35 with a binding cap** since
 the 2026-09-17 regeneration — it was 158/27, generated before `ces_events_1917.jsonl` was pulled off
-the device, and therefore stopped at 18:17 PT and silently excluded **the 19:16/19:17 downhill-LEFT
+the device, and therefore stopped at 18:17 PT and silently excluded **the 19:16/19:17 downhill (labelled LEFT; labels since found inverted)
 washouts `descent_gain` and `left_factor` were built from**; the shipped pipeline passes all 35
 unchanged), incl. the driver-cited 18:12 washout. Regression test: for every binding washout, penalty + descent(4%)
 + left factor must yield a cap ≥3 mph below the recorded entry speed. Registry sign convention:
-raw Ford `StePinComp` `strAng < 0` = left on this truck.
+raw Ford `StePinComp` `strAng > 0` = left on this truck (corrected 2026-09-24; the old text said `< 0`).
 
 ## Telemetry
 
