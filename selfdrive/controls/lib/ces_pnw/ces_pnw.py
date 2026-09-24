@@ -587,6 +587,108 @@ def map_candidate_point(points, cur_lat, cur_lon, target_dist, tol_m: float = CU
   return best
 
 
+# --- mapdpathlog2pnw (owner 2026-09-24, CURVE-MEASURED-SHAPE-DESIGN.md s8 item 0) ------------------------------------
+# mapd's PATH (the MapTargetVelocities point list every ICBM/VTSC map decision is made on) was logged NOWHERE: ces_events
+# carried only its length (mapPts) and the rlog has mapdOut, not mapdExtendedOut. So no curve decision could ever be
+# re-derived from the geometry mapd actually published, and a smoothed-curvature estimator (the design's v2) could not
+# be validated. This writes one {"ev":"mapdPath"} record per path GEOMETRY change, on every car (it is telemetry, and
+# the Tesla's VTSC uses the same path). DEVICE TELEMETRY ONLY -- location data, like the lat/lon already on every tick:
+# it goes to /data/pnw/ces_events.jsonl and never into this repo (tests use synthetic points).
+#
+# mapd's path is the WHOLE current OSM way plus the next ways (mapd math.go GetStateCurvatures), so it changes when the
+# way under the truck or the predicted next way changes -- not every tick. The change key is the geometry only (every
+# valid point at 1e-6 deg): mapd re-smooths velocities against its previous targets, and a velocity-only change would
+# re-log an identical path.
+MAPD_PATH_MAX_PTS = 256        # a record never carries more points than this (the size bound)
+MAPD_PATH_ALIGN = 128          # a longer path is logged as a window starting at a multiple of this ...
+MAPD_PATH_BACK_PTS = 8         # ... at or before this many points behind the point nearest the truck
+MAPD_PATH_LOG_S = 30.0         # Rule 2: throttle for the failure log (runs at ~1 Hz)
+
+
+def mapd_path_encode(points, cur_lat, cur_lon, max_pts: int = MAPD_PATH_MAX_PTS):
+  """mapdpathlog2pnw (PURE): (key, fragment) for mapd's point list. `key` changes exactly when the logged content would
+  (the geometry of every valid point, plus the window start when the path is longer than `max_pts`); `fragment` is the
+  record body. Positions are integer micro-degrees: the first logged point absolute (lat0/lon0), every next one a
+  delta from the previous (dla/dlo); `v` is mapd's target velocity in 0.1 m/s (null where it is not finite).
+  n = valid points, bad = points dropped as malformed / non-finite, i0 = index of the first logged point, k = count
+  logged. A path longer than max_pts is logged as the max_pts-point window starting at the MAPD_PATH_ALIGN multiple at
+  or before MAPD_PATH_BACK_PTS behind the point nearest the truck (index 0 without a fix), so the window only moves --
+  and re-logs -- when the truck crosses an alignment boundary. Never raises on bad points; they are counted."""
+  pts, bad = [], 0
+  for p in points or ():
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      bad += 1
+      continue
+    if not (math.isfinite(la) and math.isfinite(lo)):
+      bad += 1
+      continue
+    try:
+      v = float(p.get("velocity"))
+    except (TypeError, ValueError):
+      v = float("nan")
+    pts.append((int(round(la * 1e6)), int(round(lo * 1e6)), int(round(v * 10.0)) if math.isfinite(v) else None))
+  n = len(pts)
+  i0 = 0
+  if n > max_pts:
+    if cur_lat is not None and cur_lon is not None:
+      near = min(range(n), key=lambda i: _haversine_m(cur_lat, cur_lon, pts[i][0] / 1e6, pts[i][1] / 1e6))
+      i0 = (max(near - MAPD_PATH_BACK_PTS, 0) // MAPD_PATH_ALIGN) * MAPD_PATH_ALIGN
+    i0 = min(i0, n - max_pts)
+  win = pts[i0:i0 + max_pts]
+  key = (tuple((a, b) for a, b, _ in pts), i0)
+  frag = {"n": n, "bad": bad, "i0": i0, "k": len(win),
+          "lat0": win[0][0] if win else None, "lon0": win[0][1] if win else None,
+          "dla": [win[i][0] - win[i - 1][0] for i in range(1, len(win))],
+          "dlo": [win[i][1] - win[i - 1][1] for i in range(1, len(win))],
+          "v": [w[2] for w in win]}
+  return key, frag
+
+
+def mapd_path_decode(frag):
+  """mapdpathlog2pnw: the logged window back as [(lat, lon, velocity m/s or None)] -- the inverse the analysis side
+  uses, pinned here by the tests so the two cannot drift."""
+  if not frag.get("k"):
+    return []
+  la, lo = frag["lat0"], frag["lon0"]
+  out = [(la, lo)]
+  for a, b in zip(frag["dla"], frag["dlo"], strict=True):
+    la, lo = la + a, lo + b
+    out.append((la, lo))
+  return [(a / 1e6, b / 1e6, None if v is None else v / 10.0) for (a, b), v in zip(out, frag["v"], strict=True)]
+
+
+def _mapd_path_log(ctl) -> None:
+  """mapdpathlog2pnw: append one {"ev":"mapdPath"} record to ces_events when mapd's path geometry changed since the
+  last one written (see mapd_path_encode). Change-only, so a static path costs one record, not one per second. Runs
+  wherever _read_map runs (CES on, and the CES-off steer breadcrumb), on every car. TELEMETRY ONLY: nothing reads it.
+  A failure is logged (throttled, with a count) and the next refresh retries -- a broken path log must never cost the
+  map read it rides on. A module function taking the controller, like _curvelead_clear: the telemetry tests drive
+  _read_map on permissive stubs."""
+  try:
+    key, frag = mapd_path_encode(ctl._map_targets, ctl._cur_lat, ctl._cur_lon)
+    if key == getattr(ctl, "_mapd_path_key", None):
+      return
+    seq = (getattr(ctl, "_mapd_path_seq", None) or 0) + 1
+    now_wall = time.time()  # noqa: TID251 -- wall clock, for route/time correlation like every record
+    rec = {"t": round(now_wall, 1), "ev": "mapdPath", "car": getattr(ctl, "_car", ""), "seq": seq,
+           "lat": ctl._cur_lat, "lon": ctl._cur_lon, "bearing": ctl._cur_bearing, **frag}
+    if clock_bad(now_wall):
+      rec["clockBad"] = True
+    ctl._append_event(rec)
+    ctl._mapd_path_key, ctl._mapd_path_seq = key, seq
+  except Exception as e:
+    n = (getattr(ctl, "_mapd_path_err_n", None) or 0) + 1
+    now = time.monotonic()
+    if now - (getattr(ctl, "_mapd_path_err_t", None) or -1e9) > MAPD_PATH_LOG_S:
+      n_log, ctl._mapd_path_err_t, ctl._mapd_path_err_n = n, now, 0
+      cloudlog.exception(f"mapdpathlog2pnw: mapd path record FAILED ({type(e).__name__}) -- the path is not being " +
+                         f"logged ({n_log} failure(s) since the last log)")
+    else:
+      ctl._mapd_path_err_n = n
+
+
 class CurvePeak:
   """curvedbtel2pnw section 3.3 (P1-C) + 3.1 + 3.5: the 100 Hz accumulator each ces_events record
   drains. Pure arithmetic on primitives -- no I/O, no clock, no messaging, no exceptions.
@@ -4593,6 +4695,7 @@ class CESController:
     # heading data at that time" instead of silently falling through to some other sample.
     self._bearing_hist.append((time.time(), self._cur_bearing,   # noqa: TID251 -- wall clock, ~1 Hz
                                self._cur_lat is not None and self._cur_lon is not None))
+    _mapd_path_log(self)   # mapdpathlog2pnw: never raises (own guard)
 
   def enabled(self) -> bool:
     return self._enabled

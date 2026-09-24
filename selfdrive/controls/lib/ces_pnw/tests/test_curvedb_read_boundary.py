@@ -520,7 +520,8 @@ def _run(monkeypatch, tmp_path, observations, ticks=400):
   c.mem_params = Mem()
   recs = []
   c._event_log_ok = True
-  c._append_event = lambda rec: recs.append(copy.deepcopy(rec))
+  # mapdpathlog2pnw writes its own change-only {"ev":"mapdPath"} records into the same stream; these tests read ticks
+  c._append_event = lambda rec: None if rec.get("ev") == "mapdPath" else recs.append(copy.deepcopy(rec))
   decisions = []
   v_ego, stock = 27.0, 60 * MPH
   for i in range(ticks):

@@ -514,7 +514,8 @@ def _drive(monkeypatch, tmp_path, *, points, anchors, fp=LIGHTNING, brand="ford"
   if log_file is not None:
     monkeypatch.setattr(m, "CES_EVENT_LOG", str(log_file))
   else:
-    c._append_event = lambda rec: recs.append(copy.deepcopy(rec))
+    # mapdpathlog2pnw writes its own change-only {"ev":"mapdPath"} records into the same stream; these tests read ticks
+    c._append_event = lambda rec: None if rec.get("ev") == "mapdPath" else recs.append(copy.deepcopy(rec))
   stock = stock_mph * MPH
   for i in range(ticks):
     clock[0] = 5000.0 + (i + 1) * 0.01
@@ -681,6 +682,7 @@ class TestController:
     log = tmp_path / "ces_events.jsonl"
     _drive(monkeypatch, tmp_path / "rec", points=STRAIGHT, anchors=ADD_ROW, log_file=log)
     lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    lines = [r for r in lines if r.get("ev") != "mapdPath"]     # mapdpathlog2pnw: its own record, not a tick
     assert lines, "nothing was written"
     for rec in lines:
       assert set(cl.TELE_KEYS) <= set(rec), set(cl.TELE_KEYS) - set(rec)
