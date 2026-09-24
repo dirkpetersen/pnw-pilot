@@ -147,8 +147,8 @@ MIN_RED_MS = 1.0     # v2_replay.MIN_RED_MS: within this of the reference = no s
 REAL = 2.5
 
 
-def replay_outcome(ref, icbm, posted, k_row, k_truth, cls):
-  tgt, _ = cl.db_target(icbm * MPH, k_row, A, ref=ref * MPH, posted=posted)
+def replay_outcome(ref, icbm, posted, k_row, k_truth, cls, a=A):
+  tgt, _ = cl.db_target(icbm * MPH, k_row, a, ref=ref * MPH, posted=posted)
   a_t = k_truth * tgt ** 2
   raised, gone = tgt > icbm * MPH + 0.5, tgt >= ref * MPH - MIN_RED_MS
   if cls == "unwanted":
@@ -169,6 +169,19 @@ def test_the_replay_table_is_reproduced_from_its_numbers():
   assert len(real) == 2
   assert all(o == "kept" for _r, _t, _a, o in real), "a real curve was weakened"
   assert not [r for r, _t, a, o in real if o in ("LOST", "WEAKENED")], "0 wanted weakened to >= 2.5"
+
+
+# the same seven at the truck's own A (2.0, DEVICE-VERIFIED 2026-09-24): mph at the candidate
+EXPECTED_MPH_A20 = [59.1, 36.3, 63.4, 65.55, 51.5, 44.0, 49.8]   # C: the offline k_row; the car keys 65.9 (test_..._replay)
+
+
+def test_the_replay_table_at_the_trucks_A_2_0():
+  rows = [replay_outcome(*r[1:], a=2.0) for r in REPLAY]
+  for (name, *_), (tgt, _a, _o), want in zip(REPLAY, rows, EXPECTED_MPH_A20, strict=True):
+    assert tgt / MPH == pytest.approx(want, abs=0.06), name
+  assert [o for r, (_t, _a, o) in zip(REPLAY, rows, strict=True) if r[-1] == "unwanted"] == ["reduced"] * 5
+  real = [(a, o) for r, (_t, a, o) in zip(REPLAY, rows, strict=True) if r[5] * (r[1] * MPH) ** 2 >= REAL]
+  assert len(real) == 2 and all(o == "kept" and a < REAL for a, o in real)
 
 
 def test_the_tumwater_left_curve_is_added_at_about_69_mph():
@@ -344,9 +357,47 @@ class TestA:
     ({"personalities": {"standard": {"map_curve_target_lat_a": 2.2}}}, None, None),
     ({"personalities": {"standard": {"map_curve_target_lat_a": 2.2}}}, 1, 2.2),
     (json.dumps({"personalities": {"relaxed": {"map_curve_target_lat_a": 1.9}}}), b"2", 1.9),
+    ({"map_curve_target_lat_a": 2}, None, 2.0),          # top-level layout: the personality is not needed
+    ({"map_curve_target_lat_a": "x"}, 0, None), ({"map_curve_target_lat_a": 0.5}, 0, None), ([], 0, None),
+    ({"settings_version": 1}, 0, None),                  # neither layout
   ])
   def test_parse(self, settings, pers, want):
     assert cl.parse_a(settings, pers)[0] == want
+
+  def test_the_trucks_own_mapd_settings_read_2_0(self):
+    """DEVICE-VERIFIED 2026-09-24 (read-only probe of the truck, custom mapd 77bad867): MapdSettings has NO
+    `personalities`; map_curve_target_lat_a is TOP-LEVEL, the int 2; LongitudinalPersonality is the int 0; Params
+    returns the param already parsed. The v2-layout-only first cut read this as unreadable -> DB OFF on every
+    decision."""
+    truck = {"accept_speed_limit_timeout": 0, "adjust_set_speed_to_accept_speed_limit": False,
+             "conditional_speed_limit_control_enabled": False, "default_lane_width": 3.7, "enable_speed": 0,
+             "external_speed_limit_control_enabled": False, "hold_last_seen_speed_limit": False,
+             "hold_speed_limit_while_changing_set_speed": True, "log_json": True, "log_level": "error",
+             "log_source": True, "map_curve_speed_control_enabled": False, "map_curve_target_lat_a": 2,
+             "map_curve_use_enable_speed": False, "press_gas_to_accept_speed_limit": False,
+             "press_gas_to_override_speed_limit": False, "settings_version": 1,
+             "slow_down_for_next_speed_limit": True, "speed_limit_change_requires_accept": False,
+             "speed_limit_control_enabled": False, "speed_limit_offset": 0, "speed_limit_priority": "map",
+             "speed_limit_use_enable_speed": False, "speed_up_for_next_speed_limit": False, "target_speed_accel": 1.2}
+    for raw in (truck, json.dumps(truck), json.dumps(truck).encode()):
+      a, src, why = cl.parse_a(raw, 0)
+      assert (a, src, why) == (2.0, "mapd:top", "ok") and isinstance(a, float)
+
+  def test_curve_json_overrides_mapd(self, tmp_path, logs):
+    db = cl.CurveDbLive(True, data_dir=write_db(str(tmp_path), [FAR_ANCHOR]), read_params=lambda: (None, 1),
+                        start=False, a_override=2.5)
+    db.load()
+    db.poll_a()
+    assert db.a_lat() == (2.5, "curve.json", "ok") and logs.errors == []   # mapd is not even read
+
+  @pytest.mark.parametrize("cfg,want", [(None, None), (0, None), (2.5, 2.5), (0.4, 1.0), (9.0, 3.5)])
+  def test_the_curve_json_knob(self, tmp_path, monkeypatch, cfg, want):
+    f = tmp_path / "curve.json"
+    if cfg is not None:
+      f.write_text(json.dumps({"lightning": {"curvedb_v2_lat_a": cfg}}))
+    monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(f))
+    assert pv.PnwVehicle(FakeCP(LIGHTNING, "ford", False)).curvedb_v2_lat_a == want
+    assert pv.PnwVehicle(FakeCP(TESLA, "tesla", True)).curvedb_v2_lat_a is None
 
   def test_unreadable_A_is_OFF_and_logged_once(self, tmp_path, logs):
     db = cl.CurveDbLive(True, data_dir=write_db(str(tmp_path), [FAR_ANCHOR]), read_params=lambda: (None, 1), start=False)
@@ -545,7 +596,7 @@ class TestController:
     add = [r for r in lines if r["cdb2Dir"] == "add"]
     assert add, {r["cdb2Why"] for r in lines}
     r = add[-1]
-    assert r["cdb2On"] == "ok" and r["cdb2Rows"] == 1 and r["cdb2A"] == 2.2 and r["cdb2Pers"] == "standard"
+    assert r["cdb2On"] == "ok" and r["cdb2Rows"] == 1 and r["cdb2A"] == 2.2 and r["cdb2ASrc"] == "mapd:standard"
     assert r["cdb2Row"] == "0:0" and r["cdb2K"] == 0.004 and r["cdb2VDb"] == pytest.approx(23.45, abs=0.01)
     assert r["cdb2Base"] is None and r["cdb2Tgt"] == pytest.approx(23.45, abs=0.01) and r["cdb2Why"] == "ok"
     assert r["cdb2Lat"] is not None and r["cdb2D"] is not None and r["cdb2N"] > 0 and r["cdb2NL"] > 0
@@ -592,3 +643,14 @@ def test_a_row_found_by_the_scan_raises_only_with_the_margin(monkeypatch, tmp_pa
                          anchors=[_anchor(220.0, 0.0004), _anchor(340.0, k2)])
     got = [t for t in _targets(on) if t is not None]
     assert got and got[-1] == pytest.approx(math.sqrt(A / (1.25 * k2)), abs=0.01)
+
+
+def test_a_curve_json_A_sets_the_speed_and_is_logged_as_its_source(monkeypatch, tmp_path):
+    cfg_dir = tmp_path / "ov"
+    cfg_dir.mkdir()
+    (cfg_dir / "curve.json").write_text(json.dumps({"lightning": {"curvedb_v2_lat_a": 2.5}}))
+    monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(cfg_dir / "curve.json"))
+    on, recs, c = _drive(monkeypatch, cfg_dir, points=STRAIGHT, anchors=ADD_ROW, read=lambda: (None, 1))
+    got = [t for t in _targets(on) if t is not None]
+    assert got and got[-1] == pytest.approx(math.sqrt(2.5 / 0.004), abs=0.01)
+    assert {(r["cdb2A"], r["cdb2ASrc"]) for r in recs} == {(2.5, "curve.json")}

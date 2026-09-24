@@ -56,26 +56,26 @@ def _bind(v_ego, ref):
   return f
 
 
-def candidate_row(e):
+def candidate_row(e, a=A):
   """The episode at ICBM's candidate (the site), as the offline replay judged it."""
   idx, poly = _geo(e)
   s_q, _ = poly.project(*e["site"])
   mt = cl.match_at(idx, poly, s_q, *e["site"])
-  tgt, d = cl.db_target(e["icbm"], mt.k, A, e["ref"], e["posted"]) if mt.why == "ok" else (e["icbm"], "none")
+  tgt, d = cl.db_target(e["icbm"], mt.k, a, e["ref"], e["posted"]) if mt.why == "ok" else (e["icbm"], "none")
   if tgt >= e["ref"] - m.ICBM_MIN_DROP_MS:
     tgt = None
   a_t = e["k_truth"] * (e["ref"] if tgt is None else tgt) ** 2
   return mt, tgt, d, a_t, _outcome(e["cls"], e["ref"], e["icbm"], tgt, a_t)
 
 
-def full_decision(e):
+def full_decision(e, a=A):
   """The whole live decision (candidate row + the scan of every row on the path ahead), taken LEAD_M before the
   site at the driver's reference speed: what the truck would have published there."""
   idx, poly = _geo(e)
   s_site, _ = poly.project(*e["site"])
   ego = poly.at(max(s_site - LEAD_M, 0.0))
   db = cl.CurveDbLive(True, data_dir="/nonexistent", read_params=lambda: ({"personalities": {"standard": {
-    "map_curve_target_lat_a": A}}}, 1), start=False)
+    "map_curve_target_lat_a": a}}}, 1), start=False)
   db.index, db.state = idx, "ok"
   db.poll_a()
   pts = [{"latitude": a, "longitude": b} for a, b in e["path"]]
@@ -122,6 +122,18 @@ def test_the_full_live_decision_never_weakens_a_real_curve_and_never_raises_past
       assert out in ("REMOVED", "reduced"), (e["pt"], out)
 
 
+def test_at_the_trucks_A_2_0_the_same_safety_holds():
+  """DEVICE-VERIFIED 2026-09-24: mapd's A on the truck is 2 (top-level MapdSettings), not the 2.2 the build assumed.
+  MEASURED at 2.0: all 5 unwanted are reduced (H no longer removed: 51.5 at the candidate), I and J kept."""
+  for e in _load()["episodes"]:
+    _mt, cand, _d, a_t, out = candidate_row(e, 2.0)
+    ft, fa, f_out, _dir = full_decision(e, 2.0)
+    if e["cls"] == "unwanted":
+      assert out == "reduced" and f_out == "reduced", (e["pt"], out, f_out)
+    if e["k_truth"] * e["ref"] ** 2 >= REAL:
+      assert out == "kept" and f_out == "kept" and a_t < REAL and fa < REAL, e["pt"]
+
+
 def test_the_tumwater_left_curve_is_added_at_about_69_mph():
   (x,) = _load()["adds"]
   idx, poly = _geo(x)
@@ -141,15 +153,15 @@ def _mph(v):
   return "none" if v is None else f"{v / MPH:.1f}"
 
 
-def table() -> str:
+def table(a=A) -> str:
   fx = _load()
-  out = ["| PT | site | ref | ICBM | row k (car / offline) | v_db | v2 at the candidate | outcome | full live decision |",
+  out = [f"A = {a} m/s^2", "| PT | site | ref | ICBM | row k (car / offline) | v_db | v2 at the candidate | outcome | full live decision |",
          "|---|---|---|---|---|---|---|---|---|"]
   for e in fx["episodes"]:
-    mt, cand, _d, a_t, oc = candidate_row(e)
-    ft, fa, f_out, fdir = full_decision(e)
+    mt, cand, _d, a_t, oc = candidate_row(e, a)
+    ft, fa, f_out, fdir = full_decision(e, a)
     cells = [e["pt"], e["cls"], f"{e['ref'] / MPH:.0f}", f"{e['icbm'] / MPH:.1f}",
-             f"{mt.k:.6f} / {e['k_row_offline']:.6f}", f"{cl.v_db(A, mt.k) / MPH:.1f}",
+             f"{mt.k:.6f} / {e['k_row_offline']:.6f}", f"{cl.v_db(a, mt.k) / MPH:.1f}",
              f"{_mph(cand)} (a {a_t:.2f})", oc, f"{_mph(ft)} (a {fa:.2f}) {f_out} [{fdir}]"]
     out.append("| " + " | ".join(cells) + " |")
   (x,) = fx["adds"]
@@ -158,11 +170,23 @@ def table() -> str:
   ms = cl.scan_ahead(idx, poly, max(s_site - 500.0, 0.0), 500.0)
   at_site = min(ms, key=lambda mt: abs(mt.s_anchor - s_site))
   tight = min(ms, key=lambda mt: cl.v_db(A, mt.k))
-  out.append(f"\nadd {x['pt']}: at the site v_db {cl.v_db(A, at_site.k) / MPH:.1f} mph "
+  out.append(f"\nadd {x['pt']}: at the site v_db {cl.v_db(a, at_site.k) / MPH:.1f} mph "
              + f"(offline {x['v_db_mph_offline']:.1f}); tightest row on the 500 m before it "
-             + f"{cl.v_db(A, tight.k) / MPH:.1f} mph; approach {x['v_app_mph']:.1f}")
+             + f"{cl.v_db(a, tight.k) / MPH:.1f} mph; approach {x['v_app_mph']:.1f}; "
+             + f"truth a at the site's v_db {x['k_truth'] * cl.v_db(a, at_site.k) ** 2:.2f}")
   return "\n".join(out)
 
 
 if __name__ == "__main__":
-  print(table())
+  print(table(2.2))
+  print()
+  print(table(2.0))
+
+
+def test_at_A_2_0_the_left_curve_is_added_at_about_66_mph():
+  (x,) = _load()["adds"]
+  idx, poly = _geo(x)
+  s_site, _ = poly.project(*x["site"])
+  ms = cl.scan_ahead(idx, poly, max(s_site - 500.0, 0.0), 500.0)
+  at_site = min(ms, key=lambda mt: abs(mt.s_anchor - s_site))
+  assert cl.v_db(2.0, at_site.k) / MPH == pytest.approx(66.1, abs=0.5)

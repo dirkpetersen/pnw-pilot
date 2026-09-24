@@ -3927,9 +3927,10 @@ class CESController:
     self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
     # curvedblive2pnw: the learned curve database, LIVE on ICBM's curve target (curvedb_live.py). Loads in its
     # own thread; OFF (and saying why in every record) on any car without the capability or with the kill switch.
-    self._roaddb = CurveDbLive(veh.curvedb_v2_live)
+    self._roaddb = CurveDbLive(veh.curvedb_v2_live, a_override=veh.curvedb_v2_lat_a)
     if veh.lightning_curve_slow:
       cloudlog.event("curvedb_v2_cfg", live=veh.curvedb_v2_live, switch=veh._curve_cfg["curvedb_v2_live"],
+                     lat_a=veh.curvedb_v2_lat_a if veh.curvedb_v2_lat_a is not None else "mapd",
                      path=pnw_vehicle_module.CURVE_CONFIG_PATH)
     # icbmslow2pnw / Rule 2: _load_curve_config() is silent, so a /data/pnw/curve.json that sets
     # icbm_map_floor_frac to 0 would turn the map-rating floor off with nothing anywhere saying so.

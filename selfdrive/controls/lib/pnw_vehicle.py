@@ -134,6 +134,11 @@ _CURVE_DEFAULTS = {
   # directions (ces_pnw/curvedb_live.py). ON by default on the Lightning -- owner decision 2026-09-24, which
   # overrides the design's N >= 60 shadow gate. 0 = OFF: ICBM exactly as without the DB. Read at selfdrived start.
   "curvedb_v2_live": 1.0,
+  # curvedblive2pnw: the lateral accel (m/s^2) the curve DB turns a row's curvature into a speed with,
+  # v = sqrt(this / k). 0 (the default) = mapd's own map_curve_target_lat_a, read live from MapdSettings (2 on the
+  # truck, 2026-09-24). A number in [1.0, 3.5] = use that instead. Read at selfdrived start; logged as curvedb_v2_cfg
+  # and in every record (cdb2A / cdb2ASrc).
+  "curvedb_v2_lat_a": 0.0,
 }
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
@@ -173,6 +178,7 @@ _CURVE_BOUNDS = {
   "launch_accel": (0.2, 2.0),
   "launch_v_mph": (3.0, 25.0),
   "curvedb_v2_live": (0.0, 1.0),   # curvedblive2pnw: a switch; >= 0.5 is ON
+  "curvedb_v2_lat_a": (0.0, 3.5),  # curvedblive2pnw: 0 = mapd's A; else clamped to [1.0, 3.5] by the property
 }
 
 
@@ -622,6 +628,16 @@ class PnwVehicle:
     """curvedblive2pnw: the learned curve database may set ICBM's curve target. Lightning only (ICBM is its
     stock-ACC path), and only while curve.json's `curvedb_v2_live` kill switch is on (default on)."""
     return self.lightning_curve_slow and self._curve_cfg["curvedb_v2_live"] >= 0.5
+
+  @property
+  def curvedb_v2_lat_a(self) -> float | None:
+    """curvedblive2pnw: curve.json's own A for the curve DB, or None = use mapd's A (the default, and every
+    non-Lightning car). A value below 1.0 other than 0 is raised to 1.0 (the DB's plausibility floor), never read
+    as "mapd's"."""
+    v = self._curve_cfg["curvedb_v2_lat_a"]
+    if not self.lightning_curve_slow or v <= 0.0:
+      return None
+    return max(v, 1.0)
 
   @property
   def icbm_lead_lat_accel(self) -> float:

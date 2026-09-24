@@ -91,7 +91,7 @@ UNKNOWN_CLASSES = ("", "unknown", "None", "none")
 
 # Every key tele() emits. Pinned by the tests: a key added here and not emitted (or vice versa) is a
 # silently-null column -- that happened four times in ces_pnw.py's history.
-TELE_KEYS = ("cdb2On", "cdb2Err", "cdb2Rows", "cdb2A", "cdb2Pers", "cdb2N", "cdb2NR", "cdb2NL",
+TELE_KEYS = ("cdb2On", "cdb2Err", "cdb2Rows", "cdb2A", "cdb2ASrc", "cdb2N", "cdb2NR", "cdb2NL",
              "cdb2Why", "cdb2Dir", "cdb2Src", "cdb2Base", "cdb2Tgt", "cdb2Row", "cdb2K", "cdb2VDb",
              "cdb2D", "cdb2Lat", "cdb2Lon")
 
@@ -424,34 +424,58 @@ BACKGROUND = [True]           # False: load + read A synchronously in the constr
 
 
 def parse_a(settings_raw, personality_raw) -> tuple[float | None, str | None, str]:
-  """(A, personality name, why) from mapd's own settings store. A is None whenever it cannot be read
-  with certainty -- never a default: every DB speed scales with sqrt(A)."""
+  """(A, source, why) from mapd's own settings store. A is None whenever it cannot be read with certainty --
+  never a default: every DB speed scales with sqrt(A).
+
+  TWO LAYOUTS, both real:
+  * pfeiferj mapd v2 (settings_version 2): personalities[<p>].map_curve_target_lat_a, <p> from
+    LongitudinalPersonality (0 aggressive, 1 standard, 2 relaxed) -- source "mapd:<p>";
+  * the truck's custom mapd 77bad867 (settings_version 1, DEVICE-VERIFIED 2026-09-24): a TOP-LEVEL
+    map_curve_target_lat_a (2, an int) and no `personalities` key -- source "mapd:top". The personality is then
+    not part of the lookup.
+  Params returns the JSON param already parsed (a dict); bytes/str are parsed here."""
+  s = settings_raw
+  if s is None:
+    return None, None, "MapdSettings absent"
   try:
-    pers = int(personality_raw.decode() if isinstance(personality_raw, bytes) else personality_raw)
-  except (TypeError, ValueError, AttributeError):
-    return None, None, f"personality unreadable ({personality_raw!r:.40})"
-  name = PERSONALITIES.get(pers)
-  if name is None:
-    return None, None, f"personality {pers} unknown"
-  if settings_raw is None:
-    return None, name, "MapdSettings absent"
-  try:
-    s = settings_raw
     if isinstance(s, bytes):
       s = s.decode()
     if isinstance(s, str):
       s = json.loads(s)
-    a = float(s["personalities"][name]["map_curve_target_lat_a"])
-  except (KeyError, TypeError, ValueError, AttributeError) as e:
-    return None, name, f"MapdSettings unparsable ({type(e).__name__})"
+  except (UnicodeDecodeError, ValueError) as e:
+    return None, None, f"MapdSettings unparsable ({type(e).__name__})"
+  if not isinstance(s, dict):
+    return None, None, f"MapdSettings is a {type(s).__name__}, not an object"
+  pers = s.get("personalities")
+  try:
+    if isinstance(pers, dict):
+      try:
+        name = PERSONALITIES.get(int(personality_raw.decode() if isinstance(personality_raw, bytes) else personality_raw))
+      except (TypeError, ValueError, AttributeError):
+        return None, None, f"personality unreadable ({personality_raw!r:.40})"
+      if name is None:
+        return None, None, f"personality {personality_raw!r:.20} unknown"
+      if name not in pers:
+        return None, f"mapd:{name}", f"MapdSettings has no personality {name}"
+      a, src = float(pers[name]["map_curve_target_lat_a"]), f"mapd:{name}"
+    elif "map_curve_target_lat_a" in s:
+      a, src = float(s["map_curve_target_lat_a"]), "mapd:top"
+    else:
+      return None, None, "MapdSettings has neither personalities nor a top-level map_curve_target_lat_a"
+  except (KeyError, TypeError, ValueError) as e:
+    return None, None, f"MapdSettings unparsable ({type(e).__name__})"
   if not (math.isfinite(a) and A_MIN <= a <= A_MAX):
-    return None, name, f"A {a} outside [{A_MIN}, {A_MAX}]"
-  return a, name, "ok"
+    return None, src, f"A {a} outside [{A_MIN}, {A_MAX}]"
+  return a, src, "ok"
 
 
 class CurveDbLive:
-  def __init__(self, enabled: bool, data_dir: str | None = None, read_params=None, start: bool = True):
+  def __init__(self, enabled: bool, data_dir: str | None = None, read_params=None, start: bool = True,
+               a_override: float | None = None):
+    """a_override: curve.json's curvedb_v2_lat_a (PnwVehicle.curvedb_v2_lat_a) -- a number means the DB uses it
+    instead of mapd's A (source "curve.json"); None means mapd's A, read live."""
     self.enabled = bool(enabled)
+    self.a_override = a_override
     self.data_dir = data_dir if data_dir is not None else DATA_DIR       # looked up at call time (tests redirect it)
     self._read_params = read_params or READ_PARAMS[0]
     self.state = "off" if not self.enabled else "loading"
@@ -498,6 +522,13 @@ class CurveDbLive:
       self._loaded.set()
 
   def poll_a(self) -> None:
+    if self.a_override is not None:
+      a, name, why = self.a_override, "curve.json", "ok"
+      self._a = (a, name, why, time.monotonic())
+      if self._a_logged != (a, name, why):
+        cloudlog.event("curvedb_v2_a", a_lat=a, source=name)
+        self._a_logged = (a, name, why)
+      return
     try:
       raw_s, raw_p = self._read_params()
       a, name, why = parse_a(raw_s, raw_p)
@@ -509,7 +540,7 @@ class CurveDbLive:
       if a is None:
         cloudlog.error(f"curvedb_v2: mapd's lateral target A is UNREADABLE ({why}) -- the curve DB is OFF for every decision until it reads")
       else:
-        cloudlog.event("curvedb_v2_a", a_lat=a, personality=name)
+        cloudlog.event("curvedb_v2_a", a_lat=a, source=name)
       self._a_logged = key
 
   def _run(self) -> None:
@@ -527,7 +558,7 @@ class CurveDbLive:
     return self._loaded.wait(timeout)
 
   def a_lat(self):
-    """(A, personality, why) -- A None when unreadable or stale."""
+    """(A, source, why) -- A None when unreadable or stale. source: "curve.json" | "mapd:top" | "mapd:<personality>"."""
     a, name, why, t = self._a
     if a is not None and time.monotonic() - t > A_MAX_AGE_S:
       return None, name, f"A reading stale ({time.monotonic() - t:.0f} s)"
@@ -689,7 +720,7 @@ class CurveDbLive:
     a, name, why = self.a_lat() if self.enabled else (None, None, "off")
     out = dict.fromkeys(TELE_KEYS)
     out.update(cdb2On=self.state, cdb2Err=self.err, cdb2Rows=self.index.n_rows if self.index is not None else 0,
-               cdb2A=a, cdb2Pers=name, cdb2N=self.n, cdb2NR=self.n_raise, cdb2NL=self.n_lower)
+               cdb2A=a, cdb2ASrc=name, cdb2N=self.n, cdb2NR=self.n_raise, cdb2NL=self.n_lower)
     if self._last and time.monotonic() - self._last_t <= DECISION_FRESH_S:
       out.update(self._last)
     else:                                  # ICBM idle (Chill, CES off, no data): no stale decision beside icbmT=None
