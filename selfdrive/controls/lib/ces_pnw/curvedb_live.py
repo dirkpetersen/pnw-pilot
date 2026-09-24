@@ -16,7 +16,10 @@ and replaces mapd's number for that curve (it does not stack on it):
   driver's set. (terwilliger2pnw, owner 2026-09-24: the former 1.25x curvature margin on raises turned A = 2.5
   into an effective 2.0 -- mapd's own A -- so on the Terwilliger Curves the DB could raise mapd's 47 / 49 mph by
   only 1-2 mph when the road needed 54-56. LODO held-out passes at v_db, A = 2.5, no margin: 2.88 % reach
-  >= 3.0 m/s^2 and 0.46 % (4 of 867, all city streets) >= 3.5. The truck's lataccel2pnw cap is the backstop.)
+  >= 3.0 m/s^2 and 0.46 % (4 of 867, max 5.18, all on Seattle city streets) >= 3.5. The backstop for an
+  over-raise is the VISION candidate: it is never replaced and stays in the MIN pool, so a curve vision sees as
+  sharp still binds. lataccel2pnw's layer-2 cap is NOT a backstop here -- its schedule allows 5-6 m/s^2 at the
+  30-45 mph city speeds where all four >= 3.5 passes happened.)
 * LOWER (v_db below -- a real sharp curve mapd under-rated or missed): exactly v_db, no margin, no
   penalty on top. "Sharp curves must slow, but only to the level required, never too much" (owner).
 * A curve the map missed entirely is found by scanning mapd's path ahead for rows (an ADD). It binds
