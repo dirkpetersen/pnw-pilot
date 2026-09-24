@@ -135,13 +135,12 @@ _CURVE_DEFAULTS = {
   # overrides the design's N >= 60 shadow gate. 0 = OFF: ICBM exactly as without the DB. Read at selfdrived start.
   "curvedb_v2_live": 1.0,
   # curvedblive2pnw: the lateral accel (m/s^2) the curve DB turns a row's curvature into a speed with,
-  # v = sqrt(this / k). DEFAULT 2.2 -- owner decision 2026-09-24 ("sharp curves must slow, but only to the level
-  # required"), chosen over mapd's own 2.0 (slows more than needed, never fully removes an unwanted slowdown) and 2.5
-  # (the DB alone would not slow the 09-21 Tumwater left curve). Replay at 2.2: Tumwater left added at 69 mph /
-  # 2.46 m/s^2, 1 unwanted removed + 4 reduced, Terwilliger kept.
+  # v = sqrt(this / k). DEFAULT 2.5 -- owner decision 2026-09-24 11:25 PT after the Corvallis->Albany drive ("it slowed
+  # down a little bit too much in one of the curves"), up from 2.2 set earlier the same day. Known consequence: at 2.5
+  # the DB alone does not slow the 09-21 Tumwater left curve (the restore hold still limits it).
   # 0 = mapd's own map_curve_target_lat_a, read live from MapdSettings (2 on the truck). A number in [1.0, 3.5] =
   # use that. Read at selfdrived start; logged as curvedb_v2_cfg and in every record (cdb2A / cdb2ASrc).
-  "curvedb_v2_lat_a": 2.2,
+  "curvedb_v2_lat_a": 2.5,
 }
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
