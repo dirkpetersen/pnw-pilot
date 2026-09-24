@@ -12,10 +12,12 @@ This is the driver's "database of trouble spots" — used ONLY for VALIDATION of
 penalty pipeline demands a meaningfully lower entry speed at every recorded washout). It is NEVER
 read by control code.
 
-Direction convention (this truck's logs): the recorded `strAng` is the raw Ford
-SteeringPinion_Data.StePinComp_An_Est — on these 2026-07-11 logs the washed-out DOWNHILL LEFT
-curves carry NEGATIVE strAng, so strAng < 0 => "left" (matches the field evidence; note this is
-the LOG convention, not openpilot's left-positive model convention).
+Direction convention: strAng > 0 => "left". The recorded `strAng` is carState.steeringAngleDeg,
+which on this truck is LEFT-positive (openpilot's convention; the sign is unchanged since July).
+Before 2026-09-24 this said strAng < 0 = left -- WRONG: it mislabelled 28 of the 35 binding
+2026-07-11 washouts, including the 18:12 PT one cited as a "downhill left" (it was a right-hander),
+and that false premise is what justified the Lightning left_factor (removed 2026-09-24). Evidence:
+drives/2026-09-24/vision-left-flag-check.md and a recount against the device's GPS `bearing`.
 
 Usage:
   python3 tools/washouts.py /home/dp/gh/comma/drives \
@@ -91,9 +93,9 @@ def _emit(cluster: dict, drive: str, idx: int) -> dict:
   # recorded binding cap: the lowest VTSC applied cap in the cluster (op-long drives), else the
   # lowest ICBM target (stock-ACC drives), else None (no longitudinal authority was active).
   cap = min(cluster["caps"]) if cluster["caps"] else (min(cluster["icbm"]) if cluster["icbm"] else None)
-  # dominant steering direction over the cluster (log convention: strAng < 0 = LEFT on this truck)
+  # dominant steering direction over the cluster (strAng > 0 = LEFT, steeringAngleDeg convention)
   mean_ang = sum(cluster["angs"]) / len(cluster["angs"])
-  direction = "left" if mean_ang < 0 else ("right" if mean_ang > 0 else "")
+  direction = "left" if mean_ang > 0 else ("right" if mean_ang < 0 else "")
   v_entry = round(cluster["v_entry_ms"], 2)
   return {
     "id": f"{drive}#{idx:02d}",
@@ -132,7 +134,7 @@ def main() -> None:
   fixture = {
     "comment": "descentcurve2pnw washout registry — validation-only, never read by control code",
     "min_speed_mph": 55, "cluster_gap_s": CLUSTER_GAP_S,
-    "dir_convention": "strAng<0 = left (raw Ford StePinComp log convention on this truck)",
+    "dir_convention": "strAng>0 = left (carState.steeringAngleDeg, left-positive; fixed 2026-09-24)",
     "washouts": washouts,
   }
   with open(args.out, "w") as f:

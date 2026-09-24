@@ -2,7 +2,7 @@
  "comment": "descentcurve2pnw washout registry \u2014 validation-only, never read by control code",
  "min_speed_mph": 55,
  "cluster_gap_s": 3.0,
- "dir_convention": "strAng<0 = left (raw Ford StePinComp log convention on this truck)",
+ "dir_convention": "strAng>0 = left (carState.steeringAngleDeg, left-positive; fixed 2026-09-24)",
  "washouts": [
   {
    "id": "2026-07-11/lightning-icbm-nofire#01",
@@ -14,7 +14,7 @@
    "v_entry_ms": 26.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.9,
    "n_ticks": 8,
    "shadow": true
@@ -29,7 +29,7 @@
    "v_entry_ms": 28.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.1,
    "n_ticks": 28,
    "shadow": true
@@ -44,7 +44,7 @@
    "v_entry_ms": 25.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.1,
    "n_ticks": 5,
    "shadow": true
@@ -59,7 +59,7 @@
    "v_entry_ms": 26.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 4.5,
    "n_ticks": 4,
    "shadow": true
@@ -74,7 +74,7 @@
    "v_entry_ms": 26.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.5,
    "n_ticks": 4,
    "shadow": true
@@ -89,7 +89,7 @@
    "v_entry_ms": 28.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.5,
    "n_ticks": 7,
    "shadow": true
@@ -104,7 +104,7 @@
    "v_entry_ms": 28.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.0,
    "n_ticks": 4,
    "shadow": true
@@ -119,7 +119,7 @@
    "v_entry_ms": 29.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.7,
    "n_ticks": 11,
    "shadow": true
@@ -134,7 +134,7 @@
    "v_entry_ms": 30.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.8,
    "n_ticks": 2,
    "shadow": true
@@ -149,7 +149,7 @@
    "v_entry_ms": 29.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.4,
    "n_ticks": 2,
    "shadow": true
@@ -164,7 +164,7 @@
    "v_entry_ms": 26.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.7,
    "n_ticks": 1,
    "shadow": true
@@ -179,7 +179,7 @@
    "v_entry_ms": 27.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.8,
    "n_ticks": 2,
    "shadow": true
@@ -194,7 +194,7 @@
    "v_entry_ms": 30.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.5,
    "n_ticks": 42,
    "shadow": true
@@ -209,7 +209,7 @@
    "v_entry_ms": 29.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 6.2,
    "n_ticks": 7,
    "shadow": true
@@ -224,7 +224,7 @@
    "v_entry_ms": 29.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.2,
    "n_ticks": 1,
    "shadow": true
@@ -239,7 +239,7 @@
    "v_entry_ms": 29.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.1,
    "n_ticks": 1,
    "shadow": true
@@ -254,7 +254,7 @@
    "v_entry_ms": 30.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.6,
    "n_ticks": 3,
    "shadow": true
@@ -269,7 +269,7 @@
    "v_entry_ms": 29.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 2.1,
    "n_ticks": 1,
    "shadow": true
@@ -284,7 +284,7 @@
    "v_entry_ms": 29.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.4,
    "n_ticks": 1,
    "shadow": true
@@ -299,7 +299,7 @@
    "v_entry_ms": 29.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.2,
    "n_ticks": 9,
    "shadow": true
@@ -314,7 +314,7 @@
    "v_entry_ms": 28.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.9,
    "n_ticks": 1,
    "shadow": true
@@ -329,7 +329,7 @@
    "v_entry_ms": 28.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 3.5,
    "n_ticks": 23,
    "shadow": true
@@ -344,7 +344,7 @@
    "v_entry_ms": 26.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 5.4,
    "n_ticks": 7,
    "shadow": true
@@ -359,7 +359,7 @@
    "v_entry_ms": 29.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.6,
    "n_ticks": 26,
    "shadow": true
@@ -374,7 +374,7 @@
    "v_entry_ms": 27.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.6,
    "n_ticks": 2,
    "shadow": true
@@ -389,7 +389,7 @@
    "v_entry_ms": 25.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.6,
    "n_ticks": 2,
    "shadow": true
@@ -404,7 +404,7 @@
    "v_entry_ms": 26.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -5.3,
    "n_ticks": 8,
    "shadow": true
@@ -419,7 +419,7 @@
    "v_entry_ms": 25.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.8,
    "n_ticks": 3,
    "shadow": true
@@ -434,7 +434,7 @@
    "v_entry_ms": 29.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.3,
    "n_ticks": 8,
    "shadow": true
@@ -449,7 +449,7 @@
    "v_entry_ms": 29.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.6,
    "n_ticks": 1,
    "shadow": true
@@ -464,7 +464,7 @@
    "v_entry_ms": 29.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.4,
    "n_ticks": 4,
    "shadow": true
@@ -479,7 +479,7 @@
    "v_entry_ms": 30.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.5,
    "n_ticks": 4,
    "shadow": true
@@ -494,7 +494,7 @@
    "v_entry_ms": 30.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.9,
    "n_ticks": 2,
    "shadow": true
@@ -509,7 +509,7 @@
    "v_entry_ms": 30.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.8,
    "n_ticks": 11,
    "shadow": true
@@ -524,7 +524,7 @@
    "v_entry_ms": 29.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.7,
    "n_ticks": 1,
    "shadow": true
@@ -539,7 +539,7 @@
    "v_entry_ms": 30.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.2,
    "n_ticks": 1,
    "shadow": true
@@ -554,7 +554,7 @@
    "v_entry_ms": 29.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.8,
    "n_ticks": 3,
    "shadow": true
@@ -569,7 +569,7 @@
    "v_entry_ms": 28.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.7,
    "n_ticks": 2,
    "shadow": true
@@ -584,7 +584,7 @@
    "v_entry_ms": 27.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.2,
    "n_ticks": 3,
    "shadow": true
@@ -599,7 +599,7 @@
    "v_entry_ms": 28.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 4.5,
    "n_ticks": 7,
    "shadow": true
@@ -614,7 +614,7 @@
    "v_entry_ms": 28.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.8,
    "n_ticks": 2,
    "shadow": true
@@ -629,7 +629,7 @@
    "v_entry_ms": 26.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.0,
    "n_ticks": 1,
    "shadow": true
@@ -644,7 +644,7 @@
    "v_entry_ms": 25.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.6,
    "n_ticks": 1,
    "shadow": true
@@ -659,7 +659,7 @@
    "v_entry_ms": 28.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.5,
    "n_ticks": 1,
    "shadow": true
@@ -674,7 +674,7 @@
    "v_entry_ms": 28.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.2,
    "n_ticks": 2,
    "shadow": true
@@ -689,7 +689,7 @@
    "v_entry_ms": 27.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.8,
    "n_ticks": 4,
    "shadow": true
@@ -704,7 +704,7 @@
    "v_entry_ms": 28.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.6,
    "n_ticks": 1,
    "shadow": true
@@ -719,7 +719,7 @@
    "v_entry_ms": 28.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.9,
    "n_ticks": 1,
    "shadow": true
@@ -734,7 +734,7 @@
    "v_entry_ms": 27.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.7,
    "n_ticks": 1,
    "shadow": true
@@ -749,7 +749,7 @@
    "v_entry_ms": 27.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 5.0,
    "n_ticks": 15,
    "shadow": true
@@ -764,7 +764,7 @@
    "v_entry_ms": 28.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -6.6,
    "n_ticks": 10,
    "shadow": true
@@ -779,7 +779,7 @@
    "v_entry_ms": 27.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.8,
    "n_ticks": 5,
    "shadow": true
@@ -794,7 +794,7 @@
    "v_entry_ms": 29.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.9,
    "n_ticks": 16,
    "shadow": true
@@ -809,7 +809,7 @@
    "v_entry_ms": 27.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.5,
    "n_ticks": 2,
    "shadow": true
@@ -824,7 +824,7 @@
    "v_entry_ms": 26.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.5,
    "n_ticks": 1,
    "shadow": true
@@ -839,7 +839,7 @@
    "v_entry_ms": 28.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 9.3,
    "n_ticks": 34,
    "shadow": true
@@ -854,7 +854,7 @@
    "v_entry_ms": 29.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.2,
    "n_ticks": 2,
    "shadow": true
@@ -869,7 +869,7 @@
    "v_entry_ms": 31.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -8.7,
    "n_ticks": 27,
    "shadow": true
@@ -884,7 +884,7 @@
    "v_entry_ms": 30.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.5,
    "n_ticks": 2,
    "shadow": true
@@ -899,7 +899,7 @@
    "v_entry_ms": 30.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 5.4,
    "n_ticks": 1,
    "shadow": true
@@ -914,7 +914,7 @@
    "v_entry_ms": 30.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 3.3,
    "n_ticks": 1,
    "shadow": true
@@ -929,7 +929,7 @@
    "v_entry_ms": 30.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 4.5,
    "n_ticks": 1,
    "shadow": true
@@ -944,7 +944,7 @@
    "v_entry_ms": 25.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 2.5,
    "n_ticks": 2,
    "shadow": true
@@ -959,7 +959,7 @@
    "v_entry_ms": 24.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 3.4,
    "n_ticks": 1,
    "shadow": true
@@ -974,7 +974,7 @@
    "v_entry_ms": 25.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.2,
    "n_ticks": 1,
    "shadow": true
@@ -989,7 +989,7 @@
    "v_entry_ms": 33.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.0,
    "n_ticks": 70,
    "shadow": true
@@ -1004,7 +1004,7 @@
    "v_entry_ms": 31.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -7.0,
    "n_ticks": 24,
    "shadow": true
@@ -1019,7 +1019,7 @@
    "v_entry_ms": 31.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 2.8,
    "n_ticks": 37,
    "shadow": true
@@ -1034,7 +1034,7 @@
    "v_entry_ms": 31.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.8,
    "n_ticks": 3,
    "shadow": true
@@ -1049,7 +1049,7 @@
    "v_entry_ms": 30.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.0,
    "n_ticks": 3,
    "shadow": true
@@ -1064,7 +1064,7 @@
    "v_entry_ms": 31.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 4.0,
    "n_ticks": 43,
    "shadow": true
@@ -1079,7 +1079,7 @@
    "v_entry_ms": 31.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.1,
    "n_ticks": 3,
    "shadow": true
@@ -1094,7 +1094,7 @@
    "v_entry_ms": 29.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.3,
    "n_ticks": 2,
    "shadow": true
@@ -1109,7 +1109,7 @@
    "v_entry_ms": 29.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.7,
    "n_ticks": 1,
    "shadow": true
@@ -1124,7 +1124,7 @@
    "v_entry_ms": 29.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.2,
    "n_ticks": 1,
    "shadow": true
@@ -1139,7 +1139,7 @@
    "v_entry_ms": 32.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.7,
    "n_ticks": 1,
    "shadow": true
@@ -1154,7 +1154,7 @@
    "v_entry_ms": 34.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.7,
    "n_ticks": 11,
    "shadow": true
@@ -1169,7 +1169,7 @@
    "v_entry_ms": 33.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.8,
    "n_ticks": 1,
    "shadow": true
@@ -1184,7 +1184,7 @@
    "v_entry_ms": 31.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 8.4,
    "n_ticks": 8,
    "shadow": true
@@ -1199,7 +1199,7 @@
    "v_entry_ms": 32.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -5.1,
    "n_ticks": 37,
    "shadow": true
@@ -1214,7 +1214,7 @@
    "v_entry_ms": 32.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.9,
    "n_ticks": 1,
    "shadow": true
@@ -1229,7 +1229,7 @@
    "v_entry_ms": 31.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.1,
    "n_ticks": 2,
    "shadow": true
@@ -1244,7 +1244,7 @@
    "v_entry_ms": 31.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.7,
    "n_ticks": 1,
    "shadow": true
@@ -1259,7 +1259,7 @@
    "v_entry_ms": 32.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.5,
    "n_ticks": 1,
    "shadow": true
@@ -1274,7 +1274,7 @@
    "v_entry_ms": 32.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.4,
    "n_ticks": 1,
    "shadow": true
@@ -1289,7 +1289,7 @@
    "v_entry_ms": 32.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 2.4,
    "n_ticks": 1,
    "shadow": true
@@ -1304,7 +1304,7 @@
    "v_entry_ms": 31.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 3.2,
    "n_ticks": 22,
    "shadow": true
@@ -1319,7 +1319,7 @@
    "v_entry_ms": 31.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.3,
    "n_ticks": 3,
    "shadow": true
@@ -1334,7 +1334,7 @@
    "v_entry_ms": 30.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.5,
    "n_ticks": 3,
    "shadow": true
@@ -1349,7 +1349,7 @@
    "v_entry_ms": 31.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.7,
    "n_ticks": 19,
    "shadow": true
@@ -1364,7 +1364,7 @@
    "v_entry_ms": 31.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.4,
    "n_ticks": 1,
    "shadow": true
@@ -1379,7 +1379,7 @@
    "v_entry_ms": 31.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.7,
    "n_ticks": 1,
    "shadow": true
@@ -1394,7 +1394,7 @@
    "v_entry_ms": 31.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.4,
    "n_ticks": 2,
    "shadow": true
@@ -1409,7 +1409,7 @@
    "v_entry_ms": 31.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 0.8,
    "n_ticks": 7,
    "shadow": true
@@ -1424,7 +1424,7 @@
    "v_entry_ms": 31.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.2,
    "n_ticks": 1,
    "shadow": true
@@ -1439,7 +1439,7 @@
    "v_entry_ms": 31.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.0,
    "n_ticks": 1,
    "shadow": true
@@ -1454,7 +1454,7 @@
    "v_entry_ms": 30.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 6.1,
    "n_ticks": 28,
    "shadow": true
@@ -1469,7 +1469,7 @@
    "v_entry_ms": 30.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.8,
    "n_ticks": 3,
    "shadow": true
@@ -1484,7 +1484,7 @@
    "v_entry_ms": 27.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.4,
    "n_ticks": 3,
    "shadow": true
@@ -1499,7 +1499,7 @@
    "v_entry_ms": 26.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.6,
    "n_ticks": 1,
    "shadow": true
@@ -1514,7 +1514,7 @@
    "v_entry_ms": 26.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.9,
    "n_ticks": 2,
    "shadow": true
@@ -1529,7 +1529,7 @@
    "v_entry_ms": 26.6,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.0,
    "n_ticks": 1,
    "shadow": true
@@ -1544,7 +1544,7 @@
    "v_entry_ms": 28.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -5.8,
    "n_ticks": 13,
    "shadow": true
@@ -1559,7 +1559,7 @@
    "v_entry_ms": 25.4,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.3,
    "n_ticks": 2,
    "shadow": true
@@ -1574,7 +1574,7 @@
    "v_entry_ms": 26.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.6,
    "n_ticks": 2,
    "shadow": true
@@ -1589,7 +1589,7 @@
    "v_entry_ms": 27.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.8,
    "n_ticks": 1,
    "shadow": true
@@ -1604,7 +1604,7 @@
    "v_entry_ms": 27.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.6,
    "n_ticks": 1,
    "shadow": true
@@ -1619,7 +1619,7 @@
    "v_entry_ms": 25.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.0,
    "n_ticks": 1,
    "shadow": true
@@ -1634,7 +1634,7 @@
    "v_entry_ms": 37.5,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -6.8,
    "n_ticks": 1,
    "shadow": true
@@ -1649,7 +1649,7 @@
    "v_entry_ms": 39.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 6.3,
    "n_ticks": 7,
    "shadow": true
@@ -1664,7 +1664,7 @@
    "v_entry_ms": 39.2,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 10.4,
    "n_ticks": 4,
    "shadow": true
@@ -1679,7 +1679,7 @@
    "v_entry_ms": 36.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.1,
    "n_ticks": 1,
    "shadow": true
@@ -1694,7 +1694,7 @@
    "v_entry_ms": 38.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 16.3,
    "n_ticks": 8,
    "shadow": true
@@ -1709,7 +1709,7 @@
    "v_entry_ms": 38.3,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -8.9,
    "n_ticks": 2,
    "shadow": true
@@ -1724,7 +1724,7 @@
    "v_entry_ms": 38.0,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.7,
    "n_ticks": 1,
    "shadow": true
@@ -1739,7 +1739,7 @@
    "v_entry_ms": 33.1,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -15.7,
    "n_ticks": 9,
    "shadow": true
@@ -1754,7 +1754,7 @@
    "v_entry_ms": 31.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -14.0,
    "n_ticks": 14,
    "shadow": true
@@ -1769,7 +1769,7 @@
    "v_entry_ms": 31.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 8.9,
    "n_ticks": 12,
    "shadow": true
@@ -1784,7 +1784,7 @@
    "v_entry_ms": 29.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 13.3,
    "n_ticks": 8,
    "shadow": true
@@ -1799,7 +1799,7 @@
    "v_entry_ms": 29.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -8.5,
    "n_ticks": 13,
    "shadow": true
@@ -1814,7 +1814,7 @@
    "v_entry_ms": 26.5,
    "cap_ms": 36.8,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -10.1,
    "n_ticks": 2,
    "shadow": false
@@ -1829,7 +1829,7 @@
    "v_entry_ms": 31.8,
    "cap_ms": 31.9,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -16.0,
    "n_ticks": 5,
    "shadow": false
@@ -1844,7 +1844,7 @@
    "v_entry_ms": 33.9,
    "cap_ms": 31.9,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 18.0,
    "n_ticks": 7,
    "shadow": false
@@ -1859,7 +1859,7 @@
    "v_entry_ms": 33.9,
    "cap_ms": 31.8,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -15.4,
    "n_ticks": 9,
    "shadow": false
@@ -1874,7 +1874,7 @@
    "v_entry_ms": 35.8,
    "cap_ms": 13.1,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -14.0,
    "n_ticks": 6,
    "shadow": false
@@ -1889,7 +1889,7 @@
    "v_entry_ms": 37.5,
    "cap_ms": 29.1,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 14.7,
    "n_ticks": 2,
    "shadow": false
@@ -1904,7 +1904,7 @@
    "v_entry_ms": 29.0,
    "cap_ms": 29.1,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -33.6,
    "n_ticks": 1,
    "shadow": false
@@ -1919,7 +1919,7 @@
    "v_entry_ms": 32.6,
    "cap_ms": 21.0,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.0,
    "n_ticks": 9,
    "shadow": false
@@ -1934,7 +1934,7 @@
    "v_entry_ms": 28.9,
    "cap_ms": 29.1,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 17.2,
    "n_ticks": 4,
    "shadow": false
@@ -1949,7 +1949,7 @@
    "v_entry_ms": 31.9,
    "cap_ms": 31.5,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -17.3,
    "n_ticks": 9,
    "shadow": false
@@ -1964,7 +1964,7 @@
    "v_entry_ms": 36.4,
    "cap_ms": 17.7,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -14.5,
    "n_ticks": 5,
    "shadow": false
@@ -1979,7 +1979,7 @@
    "v_entry_ms": 29.0,
    "cap_ms": 29.1,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -13.8,
    "n_ticks": 3,
    "shadow": false
@@ -1994,7 +1994,7 @@
    "v_entry_ms": 29.4,
    "cap_ms": 29.1,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -19.2,
    "n_ticks": 2,
    "shadow": false
@@ -2009,7 +2009,7 @@
    "v_entry_ms": 32.4,
    "cap_ms": 31.4,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -11.4,
    "n_ticks": 8,
    "shadow": false
@@ -2024,7 +2024,7 @@
    "v_entry_ms": 38.3,
    "cap_ms": 21.9,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.5,
    "n_ticks": 10,
    "shadow": false
@@ -2039,7 +2039,7 @@
    "v_entry_ms": 33.2,
    "cap_ms": 24.6,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 19.0,
    "n_ticks": 4,
    "shadow": false
@@ -2054,7 +2054,7 @@
    "v_entry_ms": 30.7,
    "cap_ms": 28.6,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -11.9,
    "n_ticks": 8,
    "shadow": false
@@ -2069,7 +2069,7 @@
    "v_entry_ms": 37.1,
    "cap_ms": 25.9,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -14.0,
    "n_ticks": 6,
    "shadow": false
@@ -2084,7 +2084,7 @@
    "v_entry_ms": 31.7,
    "cap_ms": 32.3,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -11.5,
    "n_ticks": 14,
    "shadow": false
@@ -2099,7 +2099,7 @@
    "v_entry_ms": 32.1,
    "cap_ms": 25.5,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -6.9,
    "n_ticks": 14,
    "shadow": false
@@ -2114,7 +2114,7 @@
    "v_entry_ms": 38.3,
    "cap_ms": 20.2,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 0.4,
    "n_ticks": 13,
    "shadow": false
@@ -2129,7 +2129,7 @@
    "v_entry_ms": 32.2,
    "cap_ms": 27.7,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 17.0,
    "n_ticks": 5,
    "shadow": false
@@ -2144,7 +2144,7 @@
    "v_entry_ms": 30.2,
    "cap_ms": 28.1,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 19.4,
    "n_ticks": 3,
    "shadow": false
@@ -2159,7 +2159,7 @@
    "v_entry_ms": 28.0,
    "cap_ms": 29.7,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -6.3,
    "n_ticks": 2,
    "shadow": false
@@ -2174,7 +2174,7 @@
    "v_entry_ms": 30.4,
    "cap_ms": 26.4,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -16.2,
    "n_ticks": 11,
    "shadow": false
@@ -2189,7 +2189,7 @@
    "v_entry_ms": 32.2,
    "cap_ms": 15.6,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -14.8,
    "n_ticks": 4,
    "shadow": false
@@ -2204,7 +2204,7 @@
    "v_entry_ms": 32.2,
    "cap_ms": 32.7,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 19.5,
    "n_ticks": 2,
    "shadow": false
@@ -2219,7 +2219,7 @@
    "v_entry_ms": 34.6,
    "cap_ms": 32.8,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -7.1,
    "n_ticks": 1,
    "shadow": false
@@ -2234,7 +2234,7 @@
    "v_entry_ms": 30.2,
    "cap_ms": 29.9,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -17.8,
    "n_ticks": 5,
    "shadow": false
@@ -2249,7 +2249,7 @@
    "v_entry_ms": 36.8,
    "cap_ms": 31.4,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -2.2,
    "n_ticks": 15,
    "shadow": false
@@ -2264,7 +2264,7 @@
    "v_entry_ms": 25.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.9,
    "n_ticks": 3,
    "shadow": false
@@ -2279,7 +2279,7 @@
    "v_entry_ms": 39.4,
    "cap_ms": 37.1,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.2,
    "n_ticks": 15,
    "shadow": false
@@ -2294,7 +2294,7 @@
    "v_entry_ms": 36.4,
    "cap_ms": 38.2,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.8,
    "n_ticks": 4,
    "shadow": false
@@ -2309,7 +2309,7 @@
    "v_entry_ms": 27.6,
    "cap_ms": 30.4,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -13.7,
    "n_ticks": 9,
    "shadow": false
@@ -2324,7 +2324,7 @@
    "v_entry_ms": 33.2,
    "cap_ms": 23.5,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 6.2,
    "n_ticks": 4,
    "shadow": false
@@ -2339,7 +2339,7 @@
    "v_entry_ms": 34.5,
    "cap_ms": 31.7,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -10.1,
    "n_ticks": 5,
    "shadow": false
@@ -2354,7 +2354,7 @@
    "v_entry_ms": 37.3,
    "cap_ms": 36.4,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 19.4,
    "n_ticks": 1,
    "shadow": false
@@ -2369,7 +2369,7 @@
    "v_entry_ms": 38.8,
    "cap_ms": 34.1,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 0.8,
    "n_ticks": 11,
    "shadow": false
@@ -2384,7 +2384,7 @@
    "v_entry_ms": 31.2,
    "cap_ms": 37.9,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.4,
    "n_ticks": 1,
    "shadow": false
@@ -2399,7 +2399,7 @@
    "v_entry_ms": 38.4,
    "cap_ms": 34.6,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -10.5,
    "n_ticks": 13,
    "shadow": false
@@ -2414,7 +2414,7 @@
    "v_entry_ms": 37.7,
    "cap_ms": 36.9,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -12.7,
    "n_ticks": 7,
    "shadow": false
@@ -2429,7 +2429,7 @@
    "v_entry_ms": 37.9,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.6,
    "n_ticks": 3,
    "shadow": false
@@ -2444,7 +2444,7 @@
    "v_entry_ms": 25.6,
    "cap_ms": 39.7,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -4.4,
    "n_ticks": 1,
    "shadow": false
@@ -2459,7 +2459,7 @@
    "v_entry_ms": 39.7,
    "cap_ms": null,
    "binding": false,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -0.9,
    "n_ticks": 16,
    "shadow": true
@@ -2474,7 +2474,7 @@
    "v_entry_ms": 38.6,
    "cap_ms": 25.8,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 17.3,
    "n_ticks": 3,
    "shadow": true
@@ -2489,7 +2489,7 @@
    "v_entry_ms": 39.4,
    "cap_ms": 24.95,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 17.3,
    "n_ticks": 4,
    "shadow": true
@@ -2504,7 +2504,7 @@
    "v_entry_ms": 39.0,
    "cap_ms": 23.0,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -12.0,
    "n_ticks": 16,
    "shadow": true
@@ -2519,7 +2519,7 @@
    "v_entry_ms": 28.8,
    "cap_ms": null,
    "binding": false,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 1.8,
    "n_ticks": 2,
    "shadow": true
@@ -2534,7 +2534,7 @@
    "v_entry_ms": 36.5,
    "cap_ms": 21.6,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -3.0,
    "n_ticks": 11,
    "shadow": false
@@ -2549,7 +2549,7 @@
    "v_entry_ms": 31.0,
    "cap_ms": 30.3,
    "binding": true,
-   "dir": "right",
+   "dir": "left",
    "mean_str_ang": 20.1,
    "n_ticks": 3,
    "shadow": false
@@ -2564,7 +2564,7 @@
    "v_entry_ms": 35.8,
    "cap_ms": 30.1,
    "binding": true,
-   "dir": "left",
+   "dir": "right",
    "mean_str_ang": -1.9,
    "n_ticks": 21,
    "shadow": false
