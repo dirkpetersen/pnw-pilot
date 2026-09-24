@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 import cereal.messaging as messaging
 
 from cereal import car
+from openpilot.common import pnw_log_archive
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
@@ -1531,6 +1532,50 @@ class L2Downloader:
 NET_EVENT_LOG = "/data/pnw/net_events.jsonl"
 NET_EVENT_LOG_MAX_BYTES = 10 * 1024 * 1024   # rotate at 10 MB, one .1 generation (~20 MB cap)
 NET_LOG_PERIOD_S = 15.0                       # one sample / 15 s (~240 points/hr of driving)
+# cesarchive2pnw: every rotated generation is hardlinked in here, and the uploader takes it from here
+# (PNW_LOG_SOURCES, prefix "net_events.jsonl."). Nothing else writes to this directory. The live file
+# also rotates at each UTC day boundary, not only at 10 MB: at the measured ~0.4 MB/day, 10 MB alone
+# would hold a generation back for ~25 days before it could be uploaded.
+NET_ARCHIVE_DIR = "/data/pnw/net_archive"
+# ~8 months at ~0.4 MB/day. Outside the log root, so every byte displaces a drive segment 1:1.
+NET_ARCHIVE_MAX_BYTES = 100 * 1024 * 1024
+
+
+def rotate_net_log(path: str, now: float, archive_dir: str | None = None, max_bytes: int | None = None) -> bool:
+  """cesarchive2pnw: rotate `path` -> `path.1` when it is over NET_EVENT_LOG_MAX_BYTES or was last
+  written on an earlier UTC day, and hardlink the new `.1` into the archive. A `.1` that was never
+  archived (nlink 1 -- e.g. the pre-cesarchive2pnw generation on the device) is linked in first, before
+  the rotation overwrites it. Returns True when it rotated. Never raises; failures are logged."""
+  archive_dir = NET_ARCHIVE_DIR if archive_dir is None else archive_dir
+  max_bytes = NET_ARCHIVE_MAX_BYTES if max_bytes is None else max_bytes
+  base = os.path.basename(path)
+  try:
+    st = os.stat(path)
+  except FileNotFoundError:
+    return False
+  except OSError as e:
+    cloudlog.error(f"location_services: net log stat failed ({type(e).__name__}) -- not rotated")
+    return False
+  new_day = (now >= pnw_log_archive.CLOCK_VALID_EPOCH and st.st_mtime >= pnw_log_archive.CLOCK_VALID_EPOCH and
+             time.gmtime(now)[:3] != time.gmtime(st.st_mtime)[:3])
+  if st.st_size <= NET_EVENT_LOG_MAX_BYTES and not new_day:
+    return False
+  gen1 = path + ".1"
+  try:
+    if os.stat(gen1).st_nlink == 1:
+      pnw_log_archive.link_into_archive(gen1, archive_dir, base)
+  except FileNotFoundError:
+    pass
+  except OSError as e:
+    cloudlog.error(f"location_services: cannot stat {gen1} ({type(e).__name__}) -- it may be overwritten unarchived")
+  try:
+    os.replace(path, gen1)
+  except OSError as e:
+    cloudlog.error(f"location_services: net log rotation FAILED ({type(e).__name__}) -- still appending to {path}")
+    return False
+  pnw_log_archive.link_into_archive(gen1, archive_dir, base)
+  pnw_log_archive.prune_archive(archive_dir, base + ".", max_bytes)
+  return True
 
 
 class NetLogger(threading.Thread):
@@ -1599,11 +1644,7 @@ class NetLogger(threading.Thread):
         lat, lon = self._gps()
         rec = {"t": round(time.time(), 1), "lat": lat, "lon": lon,  # noqa: TID251 -- wall clock, route correlation
                "iface": self._default_iface(), **self._net(sock)}
-        try:
-          if os.path.getsize(NET_EVENT_LOG) > NET_EVENT_LOG_MAX_BYTES:
-            os.replace(NET_EVENT_LOG, NET_EVENT_LOG + ".1")
-        except OSError:
-          pass
+        rotate_net_log(NET_EVENT_LOG, rec["t"])   # cesarchive2pnw: size OR day boundary, + archive
         with open(NET_EVENT_LOG, "a") as f:
           f.write(json.dumps(rec) + "\n")
       except Exception:

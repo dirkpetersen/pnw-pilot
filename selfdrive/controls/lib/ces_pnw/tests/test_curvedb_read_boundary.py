@@ -232,7 +232,22 @@ class TestL1CesPnwSyntacticPositions:
 # =====================================================================================================
 class TestL2ShadowModuleIsSealed:
 
-  ALLOWED_OPENPILOT_IMPORTS = {"openpilot.common.swaglog", "openpilot.tools.curvedb.store"}
+  # cesarchive2pnw added openpilot.common.pnw_log_archive (the per-boot upload snapshot of the corpus).
+  # It is allowed ONLY because it is itself sealed the same way -- stdlib + swaglog, nothing that can
+  # publish or actuate; test_the_archive_helper_is_sealed_too pins that, so this cannot become a hole.
+  ALLOWED_OPENPILOT_IMPORTS = {"openpilot.common.swaglog", "openpilot.tools.curvedb.store",
+                               "openpilot.common.pnw_log_archive"}
+
+  def test_the_archive_helper_is_sealed_too(self):
+    helper = _repo_root() / "common" / "pnw_log_archive.py"
+    assert helper.is_file(), helper          # an absent file would make this loop check nothing
+    for node in ast.walk(_tree(helper)):
+      mods = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+             [node.module or ""] if isinstance(node, ast.ImportFrom) else []
+      for mod in mods:
+        root = mod.split(".")[0]
+        assert root in ("os", "shutil", "time") or mod == "openpilot.common.swaglog", \
+          f"pnw_log_archive imports {mod!r} -- curvedb_shadow's seal depends on it importing nothing else"
 
   def test_it_imports_nothing_from_the_control_stack(self):
     """The only openpilot imports are swaglog (to log) and the shared C1 store (to compute).

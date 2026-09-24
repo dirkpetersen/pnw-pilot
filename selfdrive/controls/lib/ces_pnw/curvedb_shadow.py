@@ -128,6 +128,7 @@ import stat
 import threading
 import time
 
+import openpilot.common.pnw_log_archive as pnw_log_archive
 from openpilot.common.swaglog import cloudlog
 from openpilot.tools.curvedb.store import (
   PROVISIONAL_ENVELOPES,
@@ -152,6 +153,12 @@ from openpilot.tools.curvedb.store import (
 CURVEDB_DIR = "/data/pnw"
 OBS_PATH = os.path.join(CURVEDB_DIR, "curvedb_obs.jsonl")
 CONFIG_PATH = os.path.join(CURVEDB_DIR, "curvedb.json")
+# cesarchive2pnw: per-boot snapshots of the observation corpus, for the uploader (PNW_LOG_SOURCES,
+# prefix "curvedb_obs.jsonl."). A subdirectory of the corpus's own directory, so a test that redirects
+# obs_path never touches /data. Each snapshot is cumulative (<= OBS_MAX_BYTES), so old ones are
+# redundant once uploaded; 50 MB keeps 100+ full-size snapshots.
+CURVEDB_ARCHIVE_SUBDIR = "curvedb_archive"
+CURVEDB_ARCHIVE_MAX_BYTES = 50 * 1024 * 1024
 
 # THE CAP IS A LATENCY BUDGET, NOT A DISK BUDGET (Fable S3).
 #
@@ -477,6 +484,14 @@ class CurveDBShadow:
                        "the WRITE half is disabled; no passes will be recorded this boot")
 
     if self._enabled:
+      # cesarchive2pnw: snapshot the corpus as of this boot into curvedb_archive/ for upload. It is
+      # the live database and is only ever appended to (never rotated -- see OBS_MAX_BYTES), so the
+      # uploader must never take the live file; a copy is taken instead, here, where the shadow is
+      # built before selfdrived can engage (<= OBS_MAX_BYTES, a few ms). Skipped when the content is
+      # unchanged since the last snapshot. Never raises; logs its own failures.
+      archive_dir = os.path.join(os.path.dirname(self._obs_path) or ".", CURVEDB_ARCHIVE_SUBDIR)
+      pnw_log_archive.snapshot_into_archive(self._obs_path, archive_dir, os.path.basename(self._obs_path))
+      pnw_log_archive.prune_archive(archive_dir, os.path.basename(self._obs_path) + ".", CURVEDB_ARCHIVE_MAX_BYTES)
       size = 0
       try:
         size = os.path.getsize(self._obs_path)

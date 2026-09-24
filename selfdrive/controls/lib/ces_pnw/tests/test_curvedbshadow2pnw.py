@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import types
 
 import pytest
@@ -895,3 +896,47 @@ class TestOnTheRealCallPath:
       json.loads(json.dumps(frag, allow_nan=False))
       for k, v in frag.items():
         assert not (isinstance(v, float) and not math.isfinite(v)), (k, v)
+
+
+# =====================================================================================================
+# cesarchive2pnw: curvedb_obs.jsonl is the LIVE database (append-only, never rotated), so the uploader
+# must never take it directly. The shadow snapshots it into curvedb_archive/ at construction (selfdrived
+# start, before anything can engage), once per distinct content.
+# =====================================================================================================
+SNAP_MTIME = 1789000000.0
+
+
+def _snap_make(tmp_path, text):
+  obs = tmp_path / "curvedb_obs.jsonl"
+  if text is not None:
+    obs.write_text(text)
+    os.utime(obs, (SNAP_MTIME, SNAP_MTIME))
+  cfg = tmp_path / "curvedb.json"
+  cfg.write_text(json.dumps({}))
+  sh = cs.CurveDBShadow("TESTCAR", obs_path=str(obs), config_path=str(cfg), load_async=False)
+  return sh, tmp_path / cs.CURVEDB_ARCHIVE_SUBDIR
+
+
+class TestUploadSnapshot:
+  def test_construction_snapshots_the_corpus_by_copy(self, tmp_path):
+    sh, arc = _snap_make(tmp_path, "")
+    (name,) = os.listdir(arc)
+    assert name == "curvedb_obs.jsonl.20260910T002640Z"
+    assert os.stat(arc / name).st_ino != os.stat(tmp_path / "curvedb_obs.jsonl").st_ino, "a COPY, not a link"
+    assert sh._state == "on"
+
+  def test_an_unchanged_corpus_is_not_snapshotted_again(self, tmp_path):
+    _snap_make(tmp_path, "")
+    _, arc = _snap_make(tmp_path, None)             # second boot, file untouched
+    assert len(os.listdir(arc)) == 1
+
+  def test_no_corpus_no_snapshot_and_the_shadow_still_works(self, tmp_path):
+    sh, arc = _snap_make(tmp_path, None)
+    assert not arc.exists() or os.listdir(arc) == []
+    assert sh._state == "on"
+
+  def test_a_snapshot_failure_does_not_make_the_shadow_inert(self, tmp_path, monkeypatch):
+    monkeypatch.setattr(cs.pnw_log_archive.shutil, "copyfile",
+                        lambda s, d: (_ for _ in ()).throw(OSError(28, "ENOSPC")))
+    sh, _ = _snap_make(tmp_path, "")
+    assert sh._state == "on" and sh.err == 0
