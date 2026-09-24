@@ -99,13 +99,48 @@ def test_limit_drop_no_double_reduction():
   assert abs(out - 50 * MPH) < 1e-6
 
 
-def test_limit_drop_under_limit_no_slow():
-  # Corvallis city bug: driver set 30 in a 45 zone (ratio 0.67, UNDER the limit); limit drops to 25.
-  # Must NOT slow them (was wrongly capping to ~16 mph). ratio < 1 -> no cap.
+# limitdropexact2pnw (owner rule 1b, 2026-09-24): a driver AT or UNDER the old limit is slowed to EXACTLY the new
+# limit -- never below it, and not at all if the set is already at/below the new limit. The 07-14 "Corvallis"
+# guard (ratio < 1 -> no cap) left the truck at 41 mph in a 25 zone on 2026-09-24 09:18 PT. The Corvallis bug it
+# fixed (30 in a 45 scaled to ~16 mph) stays fixed by the posted-limit floor.
+def test_limit_drop_under_limit_slows_to_exactly_the_new_limit():
   V30 = 30 * MPH
   V25 = 25 * MPH
-  c = _ctrl(mode=2, sl_ref=V45, ratio=V30 / V45, sl=V25)
-  assert _cap(c, V30, V25) == V30
+  c = _ctrl(mode=2, sl_ref=V45, ratio=V30 / V45, sl=V25)     # 30 in a 45 (Corvallis case), limit drops to 25
+  out = _settle(c, V30, V25)
+  assert abs(out - V25) < 1e-6, f"want exactly 25 mph, got {out / MPH:.2f}"
+
+
+def test_limit_drop_the_2026_09_24_case_41_in_a_45_to_a_25():
+  V41 = 41 * MPH
+  V25 = 25 * MPH
+  c = _ctrl(mode=2, sl_ref=V45, ratio=V41 / V45, sl=V25)
+  out = _settle(c, V41, V25)
+  assert abs(out - V25) < 1e-6, f"41 in a 45 -> 25 zone must settle at 25, got {out / MPH:.2f}"
+
+
+def test_limit_drop_at_the_limit_slows_to_exactly_the_new_limit():
+  V25 = 25 * MPH
+  c = _ctrl(mode=2, sl_ref=V45, ratio=1.0, sl=V25)
+  out = _settle(c, V45, V25)
+  assert abs(out - V25) < 1e-6
+
+
+def test_limit_drop_already_below_the_new_limit_is_untouched():
+  V20 = 20 * MPH
+  V25 = 25 * MPH
+  c = _ctrl(mode=2, sl_ref=V45, ratio=V20 / V45, sl=V25)     # 20 in a 45; the new 25 limit is above the set
+  assert _cap(c, V20, V25) == V20
+
+
+def test_limit_drop_over_the_limit_keeps_the_same_percentage():
+  # rule 1 unchanged: 15 % over 35 -> 15 % over 25 = 28.75 mph
+  V35 = 35 * MPH
+  V25 = 25 * MPH
+  set_ = 1.15 * V35
+  c = _ctrl(mode=2, sl_ref=V35, ratio=1.15, sl=V25)
+  out = _settle(c, set_, V25)
+  assert abs(out - 1.15 * V25) < 1e-6, f"want 28.75 mph, got {out / MPH:.2f}"
 
 
 def test_limit_drop_never_below_limit():

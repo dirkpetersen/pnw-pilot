@@ -553,20 +553,22 @@ class SpeedAdjustController:
     Persistent while below the baseline; releases once _update_baseline() re-anchors on a rising limit.
     m/s or None.
 
-    Two guards (Corvallis city fix 2026-07-14): (1) only trim a driver who was ABOVE the baseline limit
-    (ratio >= 1) — a limit drop must NOT slow a law-abiding driver (set 30 in a 45 -> ratio 0.65 -> a drop
-    to 25 wrongly scaled them to 16 mph); (2) NEVER cap below the posted limit (max floor). So this is a
-    'trim your speeding when the limit falls' feature, not a 'slow everyone proportionally' one."""
+    Owner rules (2026-09-13 / 2026-09-24): over the old limit -> the SAME PERCENTAGE over the new limit; AT or
+    UNDER the old limit -> EXACTLY the new limit. NEVER below the posted limit (max floor) -- that floor is what
+    fixed the 2026-07-14 Corvallis bug (30 in a 45 scaled to 16 mph). The 07-14 ratio<1 guard is gone
+    (limitdropexact2pnw): it also stopped slowing a driver who was under the old but OVER the new limit."""
     sl = self._sl
     if sl <= 0.0:
       return None                            # unknown limit → no cap, preserve the baseline + ratio
     if sl >= self._sl_ref:
       return None                            # at/above baseline → uncapped (already re-anchored above)
-    if self._ratio < 1.0:
-      return None                            # driver was at/UNDER the limit → a drop shouldn't slow them
     if sl / self._sl_ref > MIN_DROP_FRAC:    # < 5% drop → noise
       return None
-    return max(sl, sl * self._ratio)         # proportional trim, but NEVER below the posted limit
+    # limitdropexact2pnw (owner rule 1b, 2026-09-24): a driver AT or UNDER the old limit (ratio <= 1) is slowed to
+    # EXACTLY the new limit. The 07-14 guard `if ratio < 1.0: return None` left the truck at 41 mph in a 25 zone
+    # (2026-09-24 09:18 PT). The Corvallis bug it fixed (30 in a 45 scaled to ~16 mph) stays fixed by the floor
+    # below, and a set already at/below the new limit is untouched because the cap is reduce-only.
+    return max(sl, sl * self._ratio)         # over the limit: same % over the new limit; at/under: exactly the limit
 
   # ---- satele2pnw: diagnostic status publish (mem-param; ces_pnw forwards it into ces_events) -----
   SA_PUB_THROTTLE_S = 0.2                  # 5 Hz — ces_pnw samples at ~1 Hz, this just bounds the cost
