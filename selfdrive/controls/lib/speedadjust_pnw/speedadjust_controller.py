@@ -379,7 +379,11 @@ class SpeedAdjustController:
       # SL_DROP_CONFIRM_S. Only the falling direction is gated -- a rising limit releases the cap and
       # is accepted at once. A pending value that stops matching (the reading moved on) is discarded
       # without ever having been acted on, which is exactly the mapd re-match transient we're after.
-      if 0.0 < sl < self._sl:
+      # limitdropexact2pnw (Fable F1): after a >SL_HOLD_S dropout self._sl is 0 but _sl_ref survives, so a first
+      # reading below the baseline must wait for the same confirm window -- else ONE bogus low read would act
+      # at once (and since rule 1b, also on a driver at/under the old limit).
+      ref = self._sl if self._sl > 0.0 else self._sl_ref
+      if 0.0 < sl < ref:
         self._sl_rise_pending = 0.0            # a lower reading ends any pending rise
         if abs(sl - self._sl_pending) > SL_DROP_EPS:
           self._sl_pending = sl

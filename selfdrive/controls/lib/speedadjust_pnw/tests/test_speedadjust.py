@@ -2088,3 +2088,40 @@ def test_the_rise_credit_is_used_only_by_the_release_on_the_same_tick(monkeypatc
     if t > 40.0 and first_clear is None and c._cap_out is None:
       first_clear = t - 40.0
   assert first_clear is not None and first_clear >= RELEASE_S, f"police cap released {first_clear} s after it cleared"
+
+
+def test_a_single_low_read_after_a_dropout_does_not_act():
+  # limitdropexact2pnw (Fable F1): 55 in a 60, the limit goes unknown past SL_HOLD_S (self._sl = 0, the baseline
+  # survives), then ONE bogus 25 read. It must wait for the drop confirm like any other drop.
+  c = _sl_reader(0.0, 25 * MPH)
+  c._sl_ref = V60
+  assert c._read_speed_limit() == 0.0, "an unconfirmed first-after-dropout drop must not be returned"
+  c.mem_params.value = V60
+  assert c._read_speed_limit() == V60
+  assert c._sl_pending == 0.0
+
+
+def test_a_real_drop_after_a_dropout_is_accepted_after_confirmation():
+  c = _sl_reader(0.0, 25 * MPH)
+  c._sl_ref = V60
+  assert c._read_speed_limit() == 0.0
+  c._sl_pending_t -= (SL_DROP_CONFIRM_S + 0.1)
+  assert c._read_speed_limit() == 25 * MPH
+
+
+def test_first_read_after_a_dropout_at_the_baseline_is_taken_at_once():
+  c = _sl_reader(0.0, V60)
+  c._sl_ref = V60
+  assert c._read_speed_limit() == V60
+
+
+def test_limit_drop_41_in_a_45_on_stock_acc_publishes_exactly_25():
+  # limitdropexact2pnw (Fable F2): the 2026-09-24 bug was on the Lightning (stock ACC) -- pin the published target.
+  V41 = 41 * MPH
+  V25 = 25 * MPH
+  c = _stock_ctrl(mode=2, sl_ref=V45, ratio=V41 / V45, sl=V25)
+  _settle_pub(c, V41, V41)
+  payload = c.mem_params.last
+  assert payload is not None, "the zone must publish a SET- target on stock ACC"
+  assert "dir" not in payload
+  assert abs(payload["target"] - V25) < 0.01, f"want exactly 25 mph, got {payload['target'] / MPH:.2f}"
