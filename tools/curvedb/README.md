@@ -16,6 +16,22 @@ on §3.9 and this branch does not change that.
 | `calib.py` | The two numbers this README quotes about its own PROVISIONAL constants: what a 1 Hz-built row costs against the 100 Hz peak, and how far the approach bearing moves across ICBM's decision range. **Committed because they used to come from an uncommitted scratch script** (§10). |
 | `tests/` | 352 tests. **102/102 mutants killed**, 0 survived, 0 unbuilt (`_scratch/curvedb/mutate.py`). |
 
+### v2 (2026-09-24, OFFLINE, NOT DEPLOYED, NO AUTHORITY): the road table from drive logs
+
+Built per the owner's 2026-09-23 decisions (every pass counts; median across >= 2 dates; Tesla never sole
+evidence; I-5 corridor + Seattle first). Method, validation, replay, gate and the on-car shadow proposal:
+**`docs/CURVEDB-V2-BUILD.md`** in the workbench (`~/gh/comma/docs/`). v1's files above are unchanged.
+
+| file | what it is |
+|---|---|
+| `v2_extract.py` | qlog/rlog -> per-segment streams (livePose yaw, carState, carControl, GPS, mapdOut incl. `wayRef`). I/O only |
+| `roadtable.py` | the pure core: fusion, 1 s signed-mean curvature, 25 m resampling, anchors + **branch key**, R8 over the extent, `row_verdict` (the owner's rules). Imports only `store.py` |
+| `v2_io.py` | route loading, PT dates, ces_events loading |
+| `v2_validate.py` | step 2: yaw-derived k vs `kPeak`/`kPoseP`/CAN `yawRate`, clock lag measured per route |
+| `v2_build.py` | step 3: the table (`table.json.gz`) and the exportable rows (`rows.json`) |
+| `v2_replay.py` | step 4: LODO replay of ICBM episodes, adds scan, and the ICBM-independent **row accuracy** |
+| `tests/test_v2.py` | the pure functions |
+
 ```bash
 PYTHONPATH=. python3 tools/curvedb/ingest.py drives/**/ces_events*.jsonl \
     --out-observations obs.jsonl --out-episodes eps.jsonl
