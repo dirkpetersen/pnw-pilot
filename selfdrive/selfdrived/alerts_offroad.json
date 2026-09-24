@@ -45,5 +45,10 @@
     "text": "Excessive %1 actuation detected on your last drive. Please contact support at https://comma.ai/support and share your device's Dongle ID for troubleshooting.",
     "severity": 1,
     "_comment": "Set extra field to lateral or longitudinal."
+  },
+  "Offroad_UnuploadedDataDeleted": {
+    "text": "Recording space ran out: un-uploaded drive segments (video/logs) were deleted before they reached the cloud (%1). Connect to home WiFi to catch up.",
+    "severity": 0,
+    "_comment": "deleterloss2pnw: set by the deleter; extra field = segments and MB lost since boot."
   }
 }
