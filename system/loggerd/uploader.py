@@ -640,8 +640,10 @@ class Uploader:
         if os.path.islink(fn) or not os.path.isfile(fn):
           continue
         files.append((os.path.getmtime(fn), name, fn))
-      except OSError:
-        continue                      # deleted under us
+      except OSError as e:
+        # Usually the deleter racing us, but EACCES/EIO must not look the same (Rule 2): say which.
+        cloudlog.event("uploader_stat_failed", key=f"boot/{name}", fn=fn, exc=type(e).__name__)
+        continue
     for _, name, fn in sorted(files):
       try:
         if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
@@ -722,7 +724,11 @@ class Uploader:
     used = self._metered_used(today)
     if used is None:
       return None
-    d = next(iter(self._list_metered_files()), None)
+    # Materialise the listing (Fable 2026-09-23): taking only the first yield abandoned the generator before
+    # _iter_pnw_source reached its change-only 'scanned ... pending=' note, so the backlog went unreported on
+    # exactly the links where it builds up. The unmetered path already lists in full each loop; same cost.
+    files = list(self._list_metered_files())
+    d = files[0] if files else None
     if d is None:
       return None
     name, key, fn = d

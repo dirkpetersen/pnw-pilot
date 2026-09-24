@@ -31,9 +31,9 @@ MUTANTS = [
    'FIREHOSE_FILES = {"rlog", "rlog.zst", "fcamera.hevc", "ecamera.hevc"}',
    'FIREHOSE_FILES = {"fcamera.hevc", "ecamera.hevc"}'),
 
-  ("M6 HD-interleave gate deleted: pass 2 no longer runs alongside pass 1 (video starves)",
-   "and (p1 is None or pass1_run >= PASS2_INTERLEAVE):",
-   "and (p1 is None):"),
+  ("M6 logs-before-video gate removed: pass 2 (HD) runs while pass-1 logs are still pending (cesarchive2pnw)",
+   "at_home, onroad, parked, defer_hd) and p1 is None:",
+   "at_home, onroad, parked, defer_hd):"),
 
   ("M14 boot/crash tier swapped below the qlog tier: boot stops going first",
    "    for name, key, fn in upload_files:\n      if any(f in fn for f in self.immediate_folders):\n        return name, key, fn\n\n    for name, key, fn in upload_files:\n      if name in self.immediate_priority:\n        return name, key, fn",
