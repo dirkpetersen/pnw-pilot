@@ -358,6 +358,12 @@ class TestL3NobodyElseImportsIt:
       "selfdrive/controls/lib/ces_pnw/curvedb_shadow.py",
       "selfdrive/controls/lib/ces_pnw/tests/test_curvedb_read_boundary.py",
       "selfdrive/controls/lib/ces_pnw/tests/test_curvedbshadow2pnw.py",
+      # cesarchive2pnw: the UPLOADER names the prefix of the per-boot snapshots in curvedb_archive/
+      # (never the live store) and ships their bytes to S3 without parsing a row. It cannot feed a
+      # row to anything that acts: it is a separate process with no path into control.
+      "system/loggerd/uploader.py",
+      "system/loggerd/tests/test_cesarchive_uploader.py",
+      "system/loggerd/tests/test_ceslogup2pnw.py",
     }, f"unexpected readers of the curvedb store files: {sorted(offenders)}"
 
   def test_no_control_path_module_reaches_into_tools_curvedb(self):

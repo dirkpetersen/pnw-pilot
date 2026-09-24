@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import datetime
+import zoneinfo
 from collections.abc import Iterator
 
 from cereal import log
@@ -78,8 +79,16 @@ SKIP_WIDE_PARAM = "SkipWideCameraUpload"
 # leave the device. Add a source here only after checking what else shares its directory.
 #
 # (dir, key prefix, required filename prefix)
+#
+# cesarchive2pnw added two more, each a directory that ONLY its archiver writes to (checked): net_archive
+# (location_servicesd.rotate_net_log: hardlinked rotated generations) and curvedb_archive
+# (the curve-DB shadow: per-boot copies of the observation corpus; its temp file is dot-prefixed, so it
+# fails the name gate while half-written). Neither is under /data/pnw/location. Tuple order is the
+# listing order.
 PNW_LOG_SOURCES: tuple[tuple[str, str, str], ...] = (
   ("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),
+  ("/data/pnw/curvedb_archive", "pnwlogs", "curvedb_obs.jsonl."),
+  ("/data/pnw/net_archive", "pnwlogs", "net_events.jsonl."),
 )
 # The archive names each generation by its own mtime (ces_events.jsonl.20260916T191100Z, with a .N
 # suffix while a same-second file is still present, and a random `.b<hex>` token when the clock is
@@ -102,6 +111,24 @@ PNW_LOG_SUFFIX = ".zst"
 # so a new source cannot be added to one and forgotten in the other (which would list a file forever
 # and never choose it -- a silent no-op, the exact failure mode Rule 2 is about).
 PNW_LOG_PREFIXES: tuple[str, ...] = tuple(f"{prefix}/" for _, prefix, _ in PNW_LOG_SOURCES)
+
+# cesarchive2pnw (owner, 2026-09-23): THE ONE METERED EXCEPTION. On a metered link (effective_metered)
+# no drive file moves -- qlog, qcamera, rlog and video stay blocked exactly as before (the 2026-09-10
+# incident sent 2.6 GB of video over a metered Starlink). Only these small device logs may go, and only
+# until the bytes SENT while metered reach this cap per PACIFIC day. Bytes = what goes on the wire
+# (the .zst size for a file compressed in flight). Unmetered traffic is neither counted nor limited.
+PNW_LOG_METERED_DAILY_BYTES = 50 * 1024 * 1024
+# The shared counter, persisted so a reboot cannot reset it to 0 mid-day: {"date": PT date, "bytes": n}.
+# Written atomically (tmp + os.replace) and BEFORE each upload (reserve), refunded after a failure, so
+# no byte is ever sent that the file does not already account for. Unreadable/corrupt -> the day is
+# treated as EXHAUSTED (fail closed) and the file is rewritten that way, so it self-heals next day.
+METERED_BUDGET_PATH = "/data/pnw/metered_budget.json"
+# Without a trustworthy clock there is no "today", so no budget: metered uploads stop. Same epoch as
+# ces_pnw.CLOCK_VALID_EPOCH (the 3X's RTC is dead; a cold boot reads 1970 until NTP/GPS sync).
+METERED_CLOCK_VALID_EPOCH = 1577836800.0
+# Priority when the budget is short: each tier drains (oldest first) before the next is considered.
+# "boot/" is the log root's boot directory -- the ONLY log-root files exempted on metered.
+METERED_ORDER: tuple[str, ...] = ("ces_events.jsonl.", "curvedb_obs.jsonl.", "boot/", "net_events.jsonl.")
 
 
 def uploadable_firehose_files(params=None) -> set[str]:
@@ -419,7 +446,8 @@ class Uploader:
     # 412 apart from a systemic outbreak" comment above RETRY_COOLDOWN_S for why and how it's rebased
     # into the current wall-clock frame at comparison time.
     self._412_streak_start: float | None = None
-    self._pnw_log_state: tuple | None = None   # ceslogup2pnw: change-only state for _pnw_log_note
+    self._pnw_log_state: dict = {}   # ceslogup2pnw: change-only state for _pnw_log_note, per channel
+    self._metered_full_day: str | None = None   # cesarchive2pnw: PT date the metered budget ran out
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -504,12 +532,18 @@ class Uploader:
     read the same as a source with nothing in it, which is exactly the "0 of 2,612 files uploaded"
     class of false conclusion this project has been bitten by. Errors go to cloudlog.error, the
     healthy summary to cloudlog.event, and both carry what was SCANNED."""
+    # cesarchive2pnw: change-only PER CHANNEL (the source dir, or "metered"). With one state for
+    # everything, three sources' "scanned" summaries alternate the key and log on every listing.
+    chan = str(kw.get("src", "metered" if state.startswith("metered") else ""))
     key = (state, tuple(sorted((k, str(v)) for k, v in kw.items())))
-    if self._pnw_log_state == key:
+    if self._pnw_log_state.get(chan) == key:
       return
-    self._pnw_log_state = key
+    self._pnw_log_state[chan] = key
     try:
-      if state == "error":
+      if state in ("metered_corrupt", "metered_write_failed", "metered_no_tz"):
+        cloudlog.error(f"cesarchive2pnw: metered telemetry budget {state} {kw} -- metered uploads are " +
+                       "BLOCKED for today (fail closed)")
+      elif state == "error":
         cloudlog.error(f"ceslogup2pnw: pnw log source UNREADABLE {kw} -- these logs are NOT reaching S3 and " +
                        "the on-device archive is now the only copy; it evicts oldest-first at its budget")
       else:
@@ -524,59 +558,195 @@ class Uploader:
     Deliberately NOT a sweep of /data/pnw; see PNW_LOG_SOURCES for why that would have published the
     Waze API key. Yields nothing on a metered link: these are never worth money."""
     if metered:
+      return        # the metered exception is a separate, budgeted listing: _list_metered_files
+    for src, prefix, want in PNW_LOG_SOURCES:
+      yield from self._iter_pnw_source(src, prefix, want)
+
+  def _iter_pnw_source(self, src: str, prefix: str, want: str) -> Iterator[tuple[str, str, str]]:
+    """One PNW_LOG_SOURCES entry, oldest first (names are mtime stamps). All three gates live here."""
+    now = time.monotonic()
+    try:
+      names = sorted(os.listdir(src))
+    except FileNotFoundError:
+      # Nothing has rotated into it yet. Normal on a fresh device and on any device that has not
+      # yet filled 8 generations -- NOT an error, and explicitly not logged as one.
+      self._pnw_log_note("absent", src=src)
+      return
+    except OSError as e:
+      self._pnw_log_note("error", src=src, err=type(e).__name__)
+      return
+    eligible = done = notfile = 0
+    for name in names:
+      if not name.startswith(want):
+        continue          # second gate: a file that is not a rotated generation never leaves
+      fn = os.path.join(src, name)
+      # THIRD gate, and the one that makes the second a real gate rather than a name check (Fable
+      # 2026-09-16): `startswith` matches a NAME, and a name is not a file. A symlink
+      # `ces_events.jsonl.link -> /data/pnw/location/police_proxy.json` dropped in this directory
+      # passes the prefix test, and open() follows it -- the Waze API key uploads to S3 under a
+      # pnwlogs/ key. Planting it needs write access here, which already implies read access to the
+      # secret, so this is defense-in-depth rather than a live hole; it costs two lines, and the
+      # commit that added the allowlist SELLS two independent gates, so the second one has to be
+      # real. islink() is checked separately from isfile() because isfile() FOLLOWS the link and
+      # would say True for exactly the case being excluded.
+      # Same check fixes a non-security bug: a DIRECTORY named `ces_events.jsonl.somedir` was
+      # yielded, getsize() returned 4096, and open() raised IsADirectoryError -> upload_failed ->
+      # a 15-minute retry cooldown, re-entered forever with no error code and so no UP ERR.
+      if os.path.islink(fn) or not os.path.isfile(fn):
+        # Counted, not logged per-name: _pnw_log_note is change-only on (state, kwargs), so two
+        # differently-named rejects would alternate the key and log on EVERY listing. The count
+        # rides the `scanned` summary below, which is already aggregate and change-only.
+        notfile += 1
+        continue
+      eligible += 1
+      try:
+        if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
+          done += 1
+          continue
+      except OSError:
+        # Same contract as the drive-file loop: it may have been pruned out from under us.
+        cloudlog.event("uploader_getxattr_failed", key=name, fn=fn)
+        continue
+      if self._retry_after.get(fn, 0.0) > now:
+        continue
+      yield name, f"{prefix}/{name}{PNW_LOG_SUFFIX}", fn
+    # `notfile` is reported even when it is 0: a name that passed the prefix gate and was then
+    # rejected for not being a regular file is exactly the case worth seeing, and a field that
+    # only appears when non-zero cannot be told from a field that stopped being written.
+    self._pnw_log_note("scanned", src=src, eligible=eligible, uploaded=done,
+                       pending=eligible - done, notfile=notfile)
+
+  # ---------------------------------------------------------------------------------------------
+  # cesarchive2pnw: the metered exception (see PNW_LOG_METERED_DAILY_BYTES)
+  # ---------------------------------------------------------------------------------------------
+  def _list_boot_files(self) -> Iterator[tuple[str, str, str]]:
+    """The log root's boot/ directory, oldest (mtime) first -- the one log-root source allowed on
+    metered. Same gates as a drive file (lock, xattr, cooldown) plus the pnw sources' regular-file
+    gate. Keys are exactly what the unmetered path uses, so nothing is ever uploaded twice."""
+    src = os.path.join(self.root, "boot")
+    try:
+      names = os.listdir(src)
+    except FileNotFoundError:
+      return
+    except OSError as e:
+      self._pnw_log_note("error", src=src, err=type(e).__name__)
+      return
+    if any(n.endswith(".lock") for n in names):
       return
     now = time.monotonic()
-    for src, prefix, want in PNW_LOG_SOURCES:
+    files = []
+    for name in names:
+      fn = os.path.join(src, name)
       try:
-        names = sorted(os.listdir(src))
-      except FileNotFoundError:
-        # Nothing has rotated into it yet. Normal on a fresh device and on any device that has not
-        # yet filled 8 generations -- NOT an error, and explicitly not logged as one.
-        self._pnw_log_note("absent", src=src)
-        continue
-      except OSError as e:
-        self._pnw_log_note("error", src=src, err=type(e).__name__)
-        continue
-      eligible = done = notfile = 0
-      for name in names:
-        if not name.startswith(want):
-          continue          # second gate: a file that is not a rotated generation never leaves
-        fn = os.path.join(src, name)
-        # THIRD gate, and the one that makes the second a real gate rather than a name check (Fable
-        # 2026-09-16): `startswith` matches a NAME, and a name is not a file. A symlink
-        # `ces_events.jsonl.link -> /data/pnw/location/police_proxy.json` dropped in this directory
-        # passes the prefix test, and open() follows it -- the Waze API key uploads to S3 under a
-        # pnwlogs/ key. Planting it needs write access here, which already implies read access to the
-        # secret, so this is defense-in-depth rather than a live hole; it costs two lines, and the
-        # commit that added the allowlist SELLS two independent gates, so the second one has to be
-        # real. islink() is checked separately from isfile() because isfile() FOLLOWS the link and
-        # would say True for exactly the case being excluded.
-        # Same check fixes a non-security bug: a DIRECTORY named `ces_events.jsonl.somedir` was
-        # yielded, getsize() returned 4096, and open() raised IsADirectoryError -> upload_failed ->
-        # a 15-minute retry cooldown, re-entered forever with no error code and so no UP ERR.
         if os.path.islink(fn) or not os.path.isfile(fn):
-          # Counted, not logged per-name: _pnw_log_note is change-only on (state, kwargs), so two
-          # differently-named rejects would alternate the key and log on EVERY listing. The count
-          # rides the `scanned` summary below, which is already aggregate and change-only.
-          notfile += 1
           continue
-        eligible += 1
-        try:
-          if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
-            done += 1
-            continue
-        except OSError:
-          # Same contract as the drive-file loop: it may have been pruned out from under us.
-          cloudlog.event("uploader_getxattr_failed", key=name, fn=fn)
+        files.append((os.path.getmtime(fn), name, fn))
+      except OSError:
+        continue                      # deleted under us
+    for _, name, fn in sorted(files):
+      try:
+        if getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE:
           continue
-        if self._retry_after.get(fn, 0.0) > now:
-          continue
-        yield name, f"{prefix}/{name}{PNW_LOG_SUFFIX}", fn
-      # `notfile` is reported even when it is 0: a name that passed the prefix gate and was then
-      # rejected for not being a regular file is exactly the case worth seeing, and a field that
-      # only appears when non-zero cannot be told from a field that stopped being written.
-      self._pnw_log_note("scanned", src=src, eligible=eligible, uploaded=done,
-                         pending=eligible - done, notfile=notfile)
+      except OSError:
+        cloudlog.event("uploader_getxattr_failed", key=f"boot/{name}", fn=fn)
+        continue
+      if self._retry_after.get(fn, 0.0) > now:
+        continue
+      yield name, f"boot/{name}", fn
+
+  def _list_metered_files(self) -> Iterator[tuple[str, str, str]]:
+    """Everything that may go on a metered link, in METERED_ORDER. Never a drive file."""
+    for tier in METERED_ORDER:
+      if tier == "boot/":
+        yield from self._list_boot_files()
+        continue
+      for src, prefix, want in PNW_LOG_SOURCES:
+        if want == tier:
+          yield from self._iter_pnw_source(src, prefix, want)
+
+  def _metered_today(self) -> str | None:
+    """The Pacific date, or None when it cannot be trusted (then metered uploads stop, and say so)."""
+    now = time.time()  # noqa: TID251 -- the budget is per calendar day; wall clock by definition
+    if now < METERED_CLOCK_VALID_EPOCH:
+      self._pnw_log_note("metered_clock_invalid")   # change-only: no per-call value in the key
+      return None
+    try:
+      tz = zoneinfo.ZoneInfo("America/Los_Angeles")
+    except Exception as e:
+      self._pnw_log_note("metered_no_tz", err=type(e).__name__)
+      return None
+    return datetime.datetime.fromtimestamp(now, tz).strftime("%Y-%m-%d")
+
+  def _metered_write(self, today: str, used: int) -> bool:
+    tmp = METERED_BUDGET_PATH + ".tmp"
+    try:
+      with open(tmp, "w") as f:
+        json.dump({"date": today, "bytes": int(used)}, f)
+        f.flush()
+        os.fsync(f.fileno())
+      os.replace(tmp, METERED_BUDGET_PATH)
+      return True
+    except OSError as e:
+      self._pnw_log_note("metered_write_failed", err=type(e).__name__, path=METERED_BUDGET_PATH)
+      return False
+
+  def _metered_used(self, today: str) -> int | None:
+    """Bytes already sent on metered today, or None = do not trust it (treat as exhausted)."""
+    try:
+      with open(METERED_BUDGET_PATH) as f:
+        d = json.load(f)
+      date, used = d["date"], d["bytes"]
+      if not isinstance(date, str) or isinstance(used, bool) or not isinstance(used, int) or used < 0:
+        raise ValueError(f"bad fields {d!r}")
+    except FileNotFoundError:
+      return 0                        # never used on metered yet (first write creates it)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+      self._pnw_log_note("metered_corrupt", err=type(e).__name__, path=METERED_BUDGET_PATH)
+      self._metered_write(today, PNW_LOG_METERED_DAILY_BYTES)   # persist "exhausted"; rolls over tomorrow
+      return None
+    return used if date == today else 0
+
+  @staticmethod
+  def _wire_size(key: str, fn: str) -> int:
+    """Exactly the bytes do_upload will PUT: the compressed size when it compresses in flight."""
+    stream, size = get_upload_stream(fn, key.endswith('.zst') and not fn.endswith('.zst'))
+    stream.close()
+    return size
+
+  def step_metered(self, network_type: int) -> bool | None:
+    """One upload on a METERED link: the next small device log in METERED_ORDER, only if it fits in
+    what is left of today's PNW_LOG_METERED_DAILY_BYTES. A file that would push the total past the cap
+    is not started, and nothing else is tried today (strict order). Returns like step()."""
+    today = self._metered_today()
+    if today is None or self._metered_full_day == today:
+      return None
+    used = self._metered_used(today)
+    if used is None:
+      return None
+    d = next(iter(self._list_metered_files()), None)
+    if d is None:
+      return None
+    name, key, fn = d
+    if key.startswith('boot/') and not key.endswith('.zst'):
+      key += ".zst"                   # exactly as step() keys a boot log
+    try:
+      size = self._wire_size(key, fn)
+    except OSError as e:
+      cloudlog.event("upload_failed", exc=type(e).__name__, key=key, fn=fn, metered=True)
+      self._retry_after[fn] = time.monotonic() + RETRY_COOLDOWN_S
+      return False
+    if used + size > PNW_LOG_METERED_DAILY_BYTES:
+      self._metered_full_day = today
+      self._pnw_log_note("metered_budget_reached", date=today, mb=round(used / 1e6, 1),
+                         cap_mb=round(PNW_LOG_METERED_DAILY_BYTES / 1e6, 1), next_key=key, next_bytes=size,
+                         note=f"metered telemetry budget reached: {used / 1e6:.1f} MB today")
+      return None
+    if not self._metered_write(today, used + size):     # reserve BEFORE sending, or do not send
+      return None
+    ok = self.upload(name, key, fn, network_type, True)
+    if not ok:
+      self._metered_write(today, used)                   # refund; a failed refund only over-counts
+    return ok
 
   def list_upload_files(self, metered: bool, pass2: bool = False) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -962,7 +1132,12 @@ def main(exit_event: threading.Event | None = None) -> None:
     p1 = None
     if pass1_allowed(network_type_raw, metered, at_home):
       p1 = uploader.step(network_type_raw, cost)                # pass 1 (small files)
-    uploader.set_pass1_active(p1 is True)   # sidebar GREEN while pass-1 progresses (change-only write)
+      uploader.set_pass1_active(p1 is True)   # sidebar GREEN while pass-1 progresses (change-only write)
+    else:
+      # cesarchive2pnw: METERED. No drive file, ever -- only the small device logs, within the
+      # persisted 50 MB/Pacific-day budget. Not shown as pass-1 progress (GREEN means drive files move).
+      uploader.set_pass1_active(False)
+      p1 = uploader.step_metered(network_type_raw)
     if p1 is None:
       pass1_run = 0
     elif p1:

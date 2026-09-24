@@ -38,7 +38,8 @@ def _uploader(root, archive=None, prefix="pnwlogs", want="ces_events.jsonl."):
   u._retry_after = {}
   u._defer_hd = False
   u._skip_wide = False
-  u._pnw_log_state = None
+  u._pnw_log_state = {}
+  u._metered_full_day = None
   if archive is not None:
     uploader.PNW_LOG_SOURCES = ((str(archive), prefix, want),)
   return u
@@ -132,8 +133,11 @@ class TestTheSecretNeverLeaves:
     assert scanned[0]["notfile"] == 2, scanned[0]
     assert scanned[0]["eligible"] == 1, "the rejects must not be counted as eligible either"
 
-  def test_the_real_shipped_source_list_is_a_single_named_archive_directory(self):
-    assert PNW_LOG_SOURCES == (("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),)
+  def test_the_real_shipped_source_list_is_named_archive_directories_only(self):
+    # cesarchive2pnw added curvedb_archive and net_archive; each is written by exactly one archiver.
+    assert PNW_LOG_SOURCES == (("/data/pnw/ces_archive", "pnwlogs", "ces_events.jsonl."),
+                               ("/data/pnw/curvedb_archive", "pnwlogs", "curvedb_obs.jsonl."),
+                               ("/data/pnw/net_archive", "pnwlogs", "net_events.jsonl."))
     for src, _, want in PNW_LOG_SOURCES:
       assert want, f"{src} has no filename gate -- it would upload everything in that directory"
       assert src.startswith("/data/pnw/"), src
