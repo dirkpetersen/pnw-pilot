@@ -489,7 +489,7 @@ def _drive(monkeypatch, tmp_path, *, points, anchors, fp=LIGHTNING, brand="ford"
 
   clock = [5000.0]
   ns = types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0])
-  for mod in (C, m):
+  for mod in (C, m, cl):             # cl too: the waySel hold (terwilliger2pnw) runs on the decision clock
     monkeypatch.setattr(mod, "time", ns)
   C._ces_mode_hold_st.clear()
 
@@ -499,7 +499,7 @@ def _drive(monkeypatch, tmp_path, *, points, anchors, fp=LIGHTNING, brand="ford"
 
     def get(self, k, return_default=False):
       return {"MapTargetVelocities": points, "MapSpeedLimit": str(posted_mph * MPH), "MapHighwayClass": "motorway",
-              "MapWaySel": way_sel,
+              "MapWaySel": way_sel(clock[0] - 5000.0) if callable(way_sel) else way_sel,
               "LastGPSPosition": json.dumps({"latitude": LAT0, "longitude": LON0, "bearing": 0.0, "src": "device",
                                              "ts": clock[0], "fix_ts": clock[0] - 0.3})}.get(k)
 
@@ -622,6 +622,50 @@ class TestController:
     base, _, _ = _drive(monkeypatch, tmp_path / "base", points=PHANTOM, anchors=[FAR_ANCHOR], way_sel="predicted")
     got, recs, _ = _drive(monkeypatch, tmp_path / "ws", points=PHANTOM, anchors=RAISE_ROW, way_sel="predicted")
     assert got == base and {r["cdb2Why"] for r in recs if r["icbmT"] is not None} == {"waySel"}
+
+  def test_a_short_way_selection_flicker_is_ridden_through(self, monkeypatch, tmp_path, logs):
+    """terwilliger2pnw: 2026-09-24 12:35:35 PT, one ~1 s waySel != current tick mid-curve switched the DB off; the target
+    fell to mapd's number and the running cap walked the set down to it. A flicker shorter than WAYSEL_HOLD_S must
+    leave the DB's decision exactly as if waySel had stayed current -- and say it rode through (cdb2WayHold)."""
+    def flicker(t):
+      return "predicted" if 1.5 <= t < 2.6 else "current"      # 1.1 s, spanning the 1 Hz record at t = 2.0
+    steady, _, _ = _drive(monkeypatch, tmp_path / "steady", points=PHANTOM, anchors=RAISE_ROW)
+    got, recs, _ = _drive(monkeypatch, tmp_path / "flick", points=PHANTOM, anchors=RAISE_ROW, way_sel=flicker)
+    no_db, _, _ = _drive(monkeypatch, tmp_path / "nodb", points=PHANTOM, anchors=[FAR_ANCHOR])
+    assert _targets(steady) != _targets(no_db), "the DB must change the target here, or this proves nothing"
+    assert _targets(got) == _targets(steady)
+    during = [r for r in recs if 1.9 <= r["t"] - 5000.0 <= 2.1 and r["icbmT"] is not None]
+    assert during and all(r["cdb2WayHold"] is True and r["cdb2Why"] != "waySel" for r in during), \
+      [(r["t"], r["cdb2Why"], r["cdb2WayHold"]) for r in during]
+    assert not [r for r in recs if r["cdb2Why"] == "waySel"]
+    assert all(r["cdb2WayHold"] is False for r in recs if r["icbmT"] is not None and not 1.9 <= r["t"] - 5000.0 <= 2.1)
+    starts = [k for n, k in logs.events if n == "curvedb_v2_waysel_hold"]
+    assert len(starts) == 1 and starts[0]["way_sel"] == "predicted", logs.events   # change-only, not per tick
+
+  def test_a_sustained_way_change_still_gates_within_the_hold(self, monkeypatch, tmp_path, logs):
+    """A real exit onto a ramp or another road (waySel stays non-current) must switch the DB off no later than
+    WAYSEL_HOLD_S after the last current decision -- exactly as without the hold from then on."""
+    t_off = 1.5
+    got, recs, _ = _drive(monkeypatch, tmp_path / "exit", points=PHANTOM, anchors=RAISE_ROW,
+                          way_sel=lambda t: "current" if t < t_off else "possible", ticks=800)
+    live = [r for r in recs if r["icbmT"] is not None]
+    gated = [r["t"] - 5000.0 for r in live if r["cdb2Why"] == "waySel"]
+    assert gated, {r["cdb2Why"] for r in live}
+    # the first gated record: within the hold + one ICBM decision period + the ~1 Hz record cadence
+    assert gated[0] <= t_off + cl.WAYSEL_HOLD_S + 1.3, gated[0]
+    assert all(r["cdb2Why"] == "waySel" and r["cdb2WayHold"] is False
+               for r in live if r["t"] - 5000.0 > t_off + cl.WAYSEL_HOLD_S + 1.3)
+    assert [n for n, _k in logs.events if n == "curvedb_v2_waysel_hold_end"], "the end of the ride-through is not logged"
+
+  def test_the_hold_boundary(self):
+    db = cl.CurveDbLive(False)
+    assert db.way_sel_held("current", 100.0) == ("current", False)
+    assert db.way_sel_held("predicted", 101.0) == ("current", True)
+    assert db.way_sel_held(None, 102.0) == ("current", True)             # exactly WAYSEL_HOLD_S: still held
+    assert db.way_sel_held("predicted", 102.01) == ("predicted", False)
+    assert db.way_sel_held("predicted", 103.0) == ("predicted", False)
+    fresh = cl.CurveDbLive(False)                                         # never saw current: no hold at all
+    assert fresh.way_sel_held("predicted", 5.0) == ("predicted", False)
 
   def test_the_tesla_is_unaffected(self, monkeypatch, tmp_path):
     assert not pv.PnwVehicle(FakeCP(TESLA, "tesla", True)).curvedb_v2_live

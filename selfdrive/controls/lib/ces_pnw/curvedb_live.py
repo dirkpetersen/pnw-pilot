@@ -31,7 +31,8 @@ NO EFFECT AT ALL -- ICBM's target exactly as without this module -- when:
   the car lacks the capability, or curve.json sets curvedb_v2_live = 0 (the kill switch);
   the file is missing, corrupt, of another format, or still loading;
   A cannot be read (MapdSettings / LongitudinalPersonality absent, unparsable or implausible);
-  mapd's way selection is not `current`, the road class is unknown or a ramp, no posted limit;
+  mapd's way selection is not `current` (and was not `current` at any decision in the last WAYSEL_HOLD_S = 2 s:
+  a shorter flicker is ridden through, cdb2WayHold), the road class is unknown or a ramp, no posted limit;
   no anchor within 40 m and 35 degrees of the curve, or the BRANCH is unknown or ambiguous (mapd's path
   does not reach 150 m past the anchor, or its end point lies within 15 m of no branch, of two, or of a
   branch the table refused);
@@ -86,6 +87,12 @@ A_MAX_AGE_S = 30.0              # a reader that stopped updating is not a readin
 PERSONALITIES = {0: "aggressive", 1: "standard", 2: "relaxed"}   # cereal LongitudinalPersonality
 
 DECISION_FRESH_S = 1.0         # a record shows the latest decision only if ICBM made one this recently
+# terwilliger2pnw: mapd's way selection flickers. On the 2026-09-24 Terwilliger right-hander ONE ~1 s tick of
+# waySel != "current" switched the DB off mid-curve; the target fell to mapd's 47.2 and, because a running cap never
+# raises the set, the truck stayed at 47 after the DB's 49.6 came back. A waySel that was "current" at any decision
+# within this many seconds still counts as current (cdb2WayHold = true). A sustained non-current waySel -- a real exit
+# onto another road -- gates the DB off once this has elapsed since the last "current".
+WAYSEL_HOLD_S = 2.0
 MAX_RAISE_ROUNDS = 3           # hidden curves re-derived behind a raised map/far candidate (decide)
 SCAN_STEP_M = 25.0              # the table's own resampling step (roadtable.PROVISIONAL_V2.step_m)
 R_EARTH_M = 6371000.0
@@ -96,7 +103,7 @@ UNKNOWN_CLASSES = ("", "unknown", "None", "none")
 # silently-null column -- that happened four times in ces_pnw.py's history.
 TELE_KEYS = ("cdb2On", "cdb2Err", "cdb2Rows", "cdb2A", "cdb2ASrc", "cdb2N", "cdb2NR", "cdb2NL",
              "cdb2Why", "cdb2Dir", "cdb2Src", "cdb2Base", "cdb2Tgt", "cdb2Row", "cdb2K", "cdb2VDb",
-             "cdb2D", "cdb2Lat", "cdb2Lon")
+             "cdb2D", "cdb2Lat", "cdb2Lon", "cdb2WayHold")
 
 
 class CurveDbFileError(Exception):
@@ -492,6 +499,8 @@ class CurveDbLive:
     self.n = self.n_raise = self.n_lower = 0
     self._last: dict = {}
     self._last_t = -1e9
+    self._way_cur_t = -1e9           # monotonic time of the last decision that saw waySel == "current"
+    self._way_holding = False        # change-only log of a WAYSEL_HOLD_S ride-through
     if not self.enabled:
       self._loaded.set()
       return
@@ -604,6 +613,23 @@ class CurveDbLive:
       self._last_t = time.monotonic()
       raise
 
+  def way_sel_held(self, way_sel, now) -> tuple[str | None, bool]:
+    """(the waySel the gate uses, whether a flicker is being ridden through). Called on EVERY decision, before any
+    gate, so the last-current time is tracked even while another gate is closed."""
+    if way_sel == "current":
+      self._way_cur_t = now
+      hold = False
+    else:
+      hold = now - self._way_cur_t <= WAYSEL_HOLD_S
+    if hold != self._way_holding:     # change-only, both edges
+      if hold:
+        cloudlog.event("curvedb_v2_waysel_hold", way_sel=way_sel, since_current_s=round(now - self._way_cur_t, 2))
+      else:
+        cloudlog.event("curvedb_v2_waysel_hold_end", way_sel=way_sel,
+                       since_current_s=None if self._way_cur_t < 0 else round(now - self._way_cur_t, 2))
+      self._way_holding = hold
+    return ("current" if hold else way_sel), hold
+
   def _decide(self, *, today, src, cands_fn, recand_fn, points, plat, plon, ref, posted, horizon_m, bind_fn,
               min_drop, way_sel, hwy, allow):
     """One ICBM decision. Returns (target, src, far_dist or None).
@@ -629,8 +655,10 @@ class CurveDbLive:
     -- or any value when ICBM has no target at all -- is used exactly."""
     self.n += 1
     self._last_t = time.monotonic()
+    way_sel, way_hold = self.way_sel_held(way_sel, self._last_t)
     rec = {"cdb2Src": src, "cdb2Base": _r(today, 2), "cdb2Tgt": _r(today, 2), "cdb2Dir": "none",
-           "cdb2Row": None, "cdb2K": None, "cdb2VDb": None, "cdb2D": None, "cdb2Lat": None, "cdb2Lon": None}
+           "cdb2Row": None, "cdb2K": None, "cdb2VDb": None, "cdb2D": None, "cdb2Lat": None, "cdb2Lon": None,
+           "cdb2WayHold": way_hold}
     why = self.gate(way_sel=way_sel, hwy=hwy, posted=posted, plat=plat, plon=plon, allow=allow)
     if why is None:
       poly = self.polyline(points)
