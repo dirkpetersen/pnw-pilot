@@ -784,7 +784,7 @@ class SelfdriveD:
                    (self.sm.frame * DT_CTRL - self.off_request_t) <= OFF_REQUEST_HOLD_S)
     # madsbrake2pnw: the panda's own lateral answer, only from a sample that arrived THIS frame (None otherwise).
     panda_lat = (panda_lateral_view(self.sm['pandaStates'], IGNORED_SAFETY_MODES)
-                 if self.sm.updated['pandaStates'] else None)
+                 if self.sm.updated['pandaStates'] and self.sm.valid['pandaStates'] else None)
     self.mads.update(self.enabled, self.active, CS.brakePressed or CS.regenBraking,
                      CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req, panda_lat)
     # madsquiet2pnw: decide the engagement chimes from THIS frame's engagement and MADS state. It only

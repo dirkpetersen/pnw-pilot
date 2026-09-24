@@ -1133,6 +1133,22 @@ class TestPandaConfirmedTail:
   def test_a_blocking_event_in_the_tail_kills_it(self):
     assert self._run(48, {53: True}, blocked_at=50) is None
 
+  def test_a_seen_brake_that_still_loses_steering_is_logged(self, monkeypatch):
+    """Fable F2 (Rule 2): brake seen, panda never confirms -> one warning at window expiry, naming the last view."""
+    import openpilot.selfdrive.selfdrived.mads_pnw as mp
+    logs = []
+    monkeypatch.setattr(mp.cloudlog, "warning", lambda msg, *a, **k: logs.append(msg))
+    assert self._run(48, {43: False, 63: False}) is None
+    assert len(logs) == 1 and "madsbrake2pnw" in logs[0] and "last panda view False" in logs[0]
+
+  def test_no_log_when_it_arms_or_no_brake_was_seen(self, monkeypatch):
+    import openpilot.selfdrive.selfdrived.mads_pnw as mp
+    logs = []
+    monkeypatch.setattr(mp.cloudlog, "warning", lambda msg, *a, **k: logs.append(msg))
+    assert self._run(48, {53: True}) == 53
+    assert self._run(1000, {}) is None
+    assert logs == []
+
   def test_disengage_on_brake_on_never_opens_the_tail(self):
     assert self._run(48, {53: True}, alt=MADS_DISENGAGE) is None
 
@@ -1162,9 +1178,9 @@ class TestPandaConfirmedTail:
     assert "MadsQuiet(MADS_BRAKE_PANDA_GRACE_FRAMES)" in src
 
   def test_panda_view_is_fresh_only(self):
-    """selfdrived must pass the panda view only on a frame where a new pandaStates arrived."""
+    """selfdrived must pass the panda view only on a frame where a new, VALID pandaStates arrived (Fable F1)."""
     src = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
-    assert "if self.sm.updated['pandaStates'] else None" in src
+    assert "if self.sm.updated['pandaStates'] and self.sm.valid['pandaStates'] else None" in src
 
 
 class TestPandaLateralView:

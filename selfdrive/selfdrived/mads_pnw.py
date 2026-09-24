@@ -147,8 +147,10 @@ MADS_BRAKE_GRACE_FRAMES = 45
 #
 # Past MADS_BRAKE_GRACE_FRAMES, openpilot no longer races the panda. It arms only once the panda itself
 # REPORTS lateral permitted (a fresh pandaStates sample, all reporting pandas), and only if the brake was
-# seen inside the window. By construction that can never put openpilot in "lateral-only while the panda
-# blocks", the state the narrower-than-panda invariant exists to prevent. So this extension does not need
+# seen inside the window. So it never arms against the panda's LAST REPORT. That report is a 10 Hz health poll,
+# up to ~100 ms old: a panda revoking inside that gap (ACC main off, comms loss) can leave openpilot armed for
+# at most the frame before it sees the same cause itself; the 2 s madsControlsMismatchLateral detector covers
+# anything persistent -- the same exposure the steady lateral-only state already has. So this extension does not need
 # to be narrower than the panda. It needs to be LONGER, by at least one pandaStates period (10 Hz), so a
 # relatch at the panda's 600 ms limit is still reported inside it. 75 frames = 600 ms + 100 ms + 50 ms margin.
 # If the panda view is unknown (no fresh sample, or no panda reports the field), the extension never arms:
@@ -252,6 +254,7 @@ class MadsPnw:
     # madsbrake2pnw: frames since the falling edge, and whether the brake has been seen since it.
     self._grace_elapsed = 0
     self._grace_brake_seen = False
+    self._grace_panda_last = None    # madsbrake2pnw: the last panda lateral view seen in the window (for the log)
 
   @property
   def brake_grace_open(self) -> bool:
@@ -343,6 +346,7 @@ class MadsPnw:
       self._brake_grace = 0 if (self.enabled or not may_arm) else MADS_BRAKE_PANDA_GRACE_FRAMES
       self._grace_elapsed = 0
       self._grace_brake_seen = False
+      self._grace_panda_last = None
       self.active = self.enabled
       self.lateral_only = self.enabled
     else:
@@ -368,6 +372,12 @@ class MadsPnw:
             self.enabled = True          # unchanged: brake inside the openpilot-only 450 ms window
           elif self._grace_brake_seen and panda_lateral_allowed is True:
             self.enabled = True          # madsbrake2pnw: late brake, and the panda has already re-latched
+        if panda_lateral_allowed is not None:
+          self._grace_panda_last = panda_lateral_allowed
+        if self._brake_grace == 0 and not self.enabled and self._grace_brake_seen:
+          # Rule 2: the 09-24 09:20:36 shape (brake seen, steering still lost) must be visible without an rlog replay.
+          n, last = MADS_BRAKE_PANDA_GRACE_FRAMES, self._grace_panda_last
+          cloudlog.warning(f"madsbrake2pnw: brake seen after the cruise drop but the panda never confirmed lateral within {n} frames (last panda view {last}) -> full disengage")  # noqa: E501
       self.active = self.enabled
       self.lateral_only = self.enabled
 
