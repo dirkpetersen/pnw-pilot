@@ -607,9 +607,12 @@ class TestController:
 
     def boom(self, **kw):
       raise RuntimeError("db on fire")
-    monkeypatch.setattr(cl.CurveDbLive, "decide", boom)
-    got, _, _ = _drive(monkeypatch, tmp_path / "boom", points=PHANTOM, anchors=RAISE_ROW)
+    monkeypatch.setattr(cl.CurveDbLive, "_decide", boom)
+    got, recs, _ = _drive(monkeypatch, tmp_path / "boom", points=PHANTOM, anchors=RAISE_ROW)
     assert got == base
+    # Fable F1: the telemetry must say the DB crashed, never replay an earlier decision as if live
+    whys = {r.get("cdb2Why") for r in recs}
+    assert "crash" in whys and not whys & {"ok", "notMin"}, whys
 
 
 # =====================================================================================================

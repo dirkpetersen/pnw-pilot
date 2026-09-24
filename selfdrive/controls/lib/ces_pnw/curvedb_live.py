@@ -586,12 +586,23 @@ class CurveDbLive:
       return "waySel"
     if hwy in UNKNOWN_CLASSES or hwy in RAMP_CLASSES or hwy is None:
       return "class"
-    if not (posted and posted > 0.0):
+    if not (posted and posted > 0.0):   # both directions for now: no posted limit = no raise cap (owner call pending)
       return "noPosted"
     return None
 
-  def decide(self, *, today, src, cands_fn, recand_fn, points, plat, plon, ref, posted, horizon_m, bind_fn,
-             min_drop, way_sel, hwy, allow):
+  def decide(self, **kw):
+    """_decide(), but a crash never leaves the PREVIOUS decision on the telemetry as if it were live: it is
+    recorded as cdb2Why="crash" and re-raised (ICBM's caller logs it and runs without the DB)."""
+    try:
+      return self._decide(**kw)
+    except Exception:
+      self._last = {"cdb2Src": kw.get("src"), "cdb2Base": _r(kw.get("today"), 2), "cdb2Tgt": _r(kw.get("today"), 2),
+                    "cdb2Dir": "none", "cdb2Why": "crash"}
+      self._last_t = time.monotonic()
+      raise
+
+  def _decide(self, *, today, src, cands_fn, recand_fn, points, plat, plon, ref, posted, horizon_m, bind_fn,
+              min_drop, way_sel, hwy, allow):
     """One ICBM decision. Returns (target, src, far_dist or None).
 
     today      ICBM's target without the DB (post-penalty), or None
@@ -689,7 +700,8 @@ class CurveDbLive:
         adds = [x for x in live if x[2] == "add"]
         rep_m = min(adds, key=lambda x: x[0])[3] if adds else None
       rec["cdb2Why"] = ("margin" if own is not None and own[2] == "held" else
-                        rep_m.why if rep_m is not None else ("noRow" if src in ("map", "far") else "notMap"))
+                        ("notMin" if rep_m.why == "ok" else rep_m.why) if rep_m is not None else
+                        ("noRow" if src in ("map", "far") else "notMap"))   # notMin: a row matched, another cand binds
     else:
       if new is None:
         out = (None, None, None)
