@@ -76,18 +76,24 @@ _CURVE_DEFAULTS = {
   "peak_hi_v_mph": 62.0,
   "taper_v_mph": 75.0,
   # descentcurve2pnw (2026-07-11 evening: two DOWNHILL LEFT-curve washouts under op-long; stock-ACC
-  # 90 mph silent-ICBM run). All Lightning-only via lightning_curve_slow; Tesla path returns 0.0 /
+  # 90 mph silent-ICBM run -- the LEFT labels were inverted, see left_factor). All Lightning-only via lightning_curve_slow; Tesla path returns 0.0 /
   # neutral values from every accessor below.
   "descent_gain": 8.0,          # per rad of downhill pitch: a 5% grade (~0.05 rad) -> +40% penalty.
                                 #   Physics: on a descent gravity eats the regen decel budget, so the
                                 #   truck arrives at/above the cap — enter the curve slower instead.
   "descent_pitch_cap": 0.12,    # rad (~12% grade); |pitch| beyond this adds no more (IMU-noise bound)
   "penalty_cap_mph": 15.0,      # hard cap on the TOTAL penalty after all multipliers (never more)
-  "left_factor": 1.15,          # extra multiplier on LEFT curves only: US road crown drains right, so
-                                #   a left curve banks ADVERSELY (negative superelevation) — the same
-                                #   curvature needs more lateral grip + more EPS torque, and the
-                                #   Lightning's weak EPS washes out of lefts first (both 2026-07-11
-                                #   washouts were downhill LEFTS).
+  "left_factor": 1.0,           # multiplier on LEFT curves only. NEUTRAL (1.0) since 2026-09-24: the
+                                #   owner removed the left-only penalty -- left and right curves are
+                                #   treated the same. It was 1.15, justified by "both 2026-07-11
+                                #   washouts were downhill LEFTS" (adverse US road crown + weak EPS).
+                                #   That premise was WRONG: tools/washouts.py labelled direction with
+                                #   strAng < 0 = left, but on this truck steeringAngleDeg > 0 = LEFT,
+                                #   so 28 of the 35 binding washouts carried the wrong `dir`, and the
+                                #   18:12 PT washout cited as a downhill left was a right-hander
+                                #   (drives/2026-09-24/vision-left-flag-check.md). Knob kept so
+                                #   curve.json can still set it (bounds [1.0, 1.5]); the direction
+                                #   plumbing + telemetry (icbmLeft / icbmLeftSrc, vtscDir) stay.
   "overspeed_margin_mph": 2.0,  # VTSC: v_ego above the applied cap by this -> friction-brake escalation
   "map_scale": 0.92,            # ICBM: scale mapd's suggested speeds DOWN before the binding test —
                                 #   OSM curve speeds (mapV 99-112 mph on the I-90 sweepers) are
@@ -551,8 +557,8 @@ class PnwVehicle:
         penalty scales UP: pen *= 1 + descent_gain * min(|pitch|, descent_pitch_cap) — gravity eats
         the regen decel budget, so the truck must enter the curve slower (2026-07-11 washouts at
         18:12 / 19:17 were "accelerating downhill into the curve"). None / NaN / uphill -> no-op.
-      is_left: LEFT curve -> pen *= left_factor (adverse US road crown + the weak EPS; see the
-        left_factor default comment).
+      is_left: LEFT curve -> pen *= left_factor. Neutral (1.0) by default since 2026-09-24 -- see
+        the left_factor default comment for why the 1.15 was removed.
     The TOTAL is clamped to penalty_cap_mph (<= 15 mph) after all multipliers.
     Returns 0.0 for any non-Lightning (Tesla path untouched). Pure Python (no numpy); never
     negative (a bad config can't invert this into a speed-up)."""
@@ -586,7 +592,7 @@ class PnwVehicle:
         p = 0.0
       if p == p and p < 0.0:                         # finite (NaN != NaN) AND downhill
         pen_mph *= 1.0 + cfg["descent_gain"] * min(-p, cfg["descent_pitch_cap"])
-    # descentcurve2pnw: left-curve factor (adverse crown + weak EPS) — factor is clamped >= 1.0
+    # descentcurve2pnw: left-curve factor — clamped >= 1.0; 1.0 (no-op) by default since 2026-09-24
     if is_left:
       pen_mph *= cfg["left_factor"]
     pen_mph = min(pen_mph, cfg["penalty_cap_mph"])   # hard total cap after all multipliers

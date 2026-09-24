@@ -15,8 +15,9 @@ inflated past a 55 mph cruise was being REJECTED as a candidate -- which makes t
 WHAT IS PINNED HERE
   * the floor is the BINDING candidate's OWN raw rating, for map AND far sources;
   * the descent guard and the left-curve factor still bite BELOW it (they model risk mapd's rating
-    does not contain -- both came from the two downhill-LEFT washouts of 2026-07-11 -- and flooring
-    the multiplied penalty would make them silently do nothing);
+    does not contain, and flooring the multiplied penalty would make them silently do nothing). The
+    left factor is NEUTRAL (1.0) by default since 2026-09-24 -- its "downhill-LEFT washouts" premise
+    came from inverted direction labels -- so its test here sets it via config;
   * vision candidates are never floored by THIS floor (curvefix2pnw added their own, at vision's 2.5 m/s^2 speed);
   * the Tesla and every non-Lightning car are byte-identical;
   * `icbm_map_floor_frac = 0.0` reproduces the pre-change target exactly (the documented off switch);
@@ -161,13 +162,14 @@ def test_descent_still_lowers_the_target_below_the_floor(shipped_cfg):
 
 
 def test_left_curve_still_lowers_the_target_below_the_floor(shipped_cfg):
-  veh = _veh()
+  # a curve.json left_factor (neutral by default since 2026-09-24) must not be erased by the floor
+  veh = _veh(left_factor=1.15)
   left, _ = _run(veh, _map_sig(26.0, 20.0), bend=+4.0)    # path bends left
   right, _ = _run(veh, _map_sig(26.0, 20.0), bend=-4.0)
   assert left < right - 0.1, "the left-curve factor was erased by the floor"
   assert right == pytest.approx(20.0, abs=0.01)
   # the extra is exactly the multiplied-minus-base penalty, nothing invented
-  veh2 = _veh()
+  veh2 = _veh(left_factor=1.15)
   eff = m.icbm_map_eff_scale(20.0) * 20.0 * 0.92
   extra = veh2.curve_speed_penalty_ms(eff, is_left=True) - veh2.curve_speed_penalty_ms(eff)
   assert (right - left) == pytest.approx(extra, abs=0.02)

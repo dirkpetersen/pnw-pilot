@@ -428,17 +428,26 @@ def test_icbm_descent_lowers_target_like_vtsc(tmp_path, monkeypatch):
   assert abs(t_flat - apex) < 0.02                # flat right-hander: the floor gives the whole hump back
 
 
-def test_icbm_left_curve_penalized_more(tmp_path, monkeypatch):
+def test_icbm_left_and_right_curves_get_the_same_target(tmp_path, monkeypatch):
+  """Owner 2026-09-24: the left factor is neutral by default, so a left curve and the mirror right curve publish
+  the same target (the direction is still recorded -- test_curvefix2pnw)."""
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
-  t_left = _published_target(step, mgr, _vis_sig(29.0, -3.474))    # lat < 0 = LEFT (curvefix2pnw, measured)
-  t_right = _published_target(step, mgr, _vis_sig(29.0, +3.474))
-  assert t_left is not None and t_right is not None
-  assert t_left < t_right                         # adverse crown + weak EPS on lefts
+  for pitch in (None, -0.05):
+    t_left = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=pitch))    # lat < 0 = LEFT (measured)
+    assert mgr._icbm_left is True
+    t_right = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=pitch))
+    assert mgr._icbm_left is False
+    assert t_left is not None and t_right is not None
+    assert t_left == t_right
 
 
 def test_icbm_map_source_uses_path_geometry(tmp_path, monkeypatch):
-  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
+  # the left factor is neutral by default (2026-09-24); set it via curve.json so the geometry -> direction
+  # plumbing still shows up in the target
+  p = tmp_path / "curve.json"
+  p.write_text('{"lightning": {"left_factor": 1.15}}')
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(p))
   lat, lon = 47.0, -122.0
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
   mgr._cur_lat, mgr._cur_lon = lat, lon

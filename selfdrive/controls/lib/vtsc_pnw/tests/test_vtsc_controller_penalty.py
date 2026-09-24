@@ -3,6 +3,8 @@
 With a Lightning CP the finalized curve-safe speed (msg['vCurveSafe']) is LOWER than with a Tesla CP
 for the identical model curve; the Tesla path is byte-unchanged (penalty provably 0.0). Uses a fake
 params + fake modelV2 so no cereal/device stack is needed."""
+import pytest
+
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
 
 MPH = 0.44704
@@ -162,26 +164,32 @@ def test_apex_turn_direction_signs():
 
 
 def test_vtsc_left_factor_follows_the_road_on_measured_frames():
-  """The measured left-hander gets the Lightning left factor and the measured right-hander does not: the same
-  curve speed (both frames cap near 69 mph at 2.5 m/s^2) comes out lower on the left. `vtscDir` says so too."""
+  """`vtscDir` follows the road on the measured frames, and the left factor lands on the left-hander only. The
+  shipped default (left_factor 1.0 since 2026-09-24) applies NO left multiplier: the default penalty on the
+  left-hander equals the plain hump, recovered as the penalty with left_factor 1.15 divided by 1.15. On the
+  right-hander the knob changes nothing."""
   class P:
     def get(self, k2, return_default=False): return {"CESMode": "2"}.get(k2)
     def get_bool(self, k2): return False
     def put_nonblocking(self, k2, v): pass
-  out = {}
-  for name, fr in (("L", mtf.LEFT_HANDER), ("R", mtf.RIGHT_HANDER)):
+
+  def pen(fr, name, lf=None):
     ctrl = VTSCController(LIGHTNING, params=P())
     ctrl.mem_params = None
+    if lf is not None:
+      ctrl.veh._curve_cfg = dict(ctrl.veh._curve_cfg, left_factor=lf)
     cc = _NS()
     cc.orientationNED = [0.0, 0.0, 0.0]
     ctrl.cap({"modelV2": mtf.as_model(fr), "carControl": cc}, 40.0, fr["v_ego"])
     assert ctrl._tele_dir == name
-    out[name] = (ctrl._tele_pen, ctrl.veh)
-  pen_l, veh = out["L"]
-  pen_r, _ = out["R"]
-  assert pen_l > 0.0 and pen_r > 0.0
-  # left = hump x left_factor; right = the plain hump (the curve speeds differ slightly, so compare ratios to the hump)
-  assert pen_l / pen_r > 1.05
+    assert ctrl._tele_pen > 0.0
+    return ctrl._tele_pen
+
+  # left-hander: the knob scales it, the default does not
+  assert pen(mtf.LEFT_HANDER, "L", 1.15) == pytest.approx(pen(mtf.LEFT_HANDER, "L", 1.0) * 1.15)
+  assert pen(mtf.LEFT_HANDER, "L") == pytest.approx(pen(mtf.LEFT_HANDER, "L", 1.15) / 1.15)
+  # right-hander: never scaled
+  assert pen(mtf.RIGHT_HANDER, "R", 1.15) == pytest.approx(pen(mtf.RIGHT_HANDER, "R"))
 
 
 def test_descent_scales_lightning_penalty_up():
@@ -198,11 +206,16 @@ def test_descent_scales_lightning_penalty_up():
   assert abs(down_pen - base_pen * 1.4) < 1e-6
 
 
-def test_left_curve_penalized_more_than_right():
+def test_left_and_right_curves_get_the_same_cap():
+  """Owner 2026-09-24: the left factor is neutral by default -- a left curve and its mirror right curve get the
+  same curve-safe speed (the direction is still computed: vtscDir)."""
   k = 2.5 / (24.6 * 24.6)
-  ctrl_l, _ = _run2(LIGHTNING, 29.0, 29.0, -k)                     # LEFT (z < 0, measured)
-  ctrl_r, _ = _run2(LIGHTNING, 29.0, 29.0, +k)                     # right
-  assert ctrl_l.msg["vCurveSafe"] < ctrl_r.msg["vCurveSafe"]       # adverse crown + weak EPS
+  for pitch in (0.0, -0.05):
+    ctrl_l, _ = _run2(LIGHTNING, 29.0, 29.0, -k, pitch=pitch)       # LEFT (z < 0, measured)
+    ctrl_r, _ = _run2(LIGHTNING, 29.0, 29.0, +k, pitch=pitch)       # right
+    assert (ctrl_l._tele_dir, ctrl_r._tele_dir) == ("L", "R")
+    assert ctrl_l._tele_pen > 0.0
+    assert ctrl_l.msg["vCurveSafe"] == pytest.approx(ctrl_r.msg["vCurveSafe"])
 
 
 def test_tesla_byte_unchanged_with_pitch_and_direction():

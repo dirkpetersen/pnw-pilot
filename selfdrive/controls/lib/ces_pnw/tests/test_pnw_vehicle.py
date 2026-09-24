@@ -152,8 +152,20 @@ def test_descent_ignores_uphill_none_and_nan(tmp_path, monkeypatch):
   assert v.curve_speed_penalty_ms(t, pitch_rad="junk") == base    # never raises
 
 
-def test_left_factor_only_on_left(tmp_path, monkeypatch):
+def test_left_factor_neutral_by_default(tmp_path, monkeypatch):
+  """Owner 2026-09-24: left and right curves get the SAME penalty. The 1.15 left factor rested on
+  mislabelled washouts (tools/washouts.py had strAng < 0 = left; on this truck > 0 is LEFT)."""
   v = _lightning(tmp_path, monkeypatch)
+  for mph in (25, 40, 55, 70, 85):
+    t = mph * MPH
+    assert v.curve_speed_penalty_ms(t) > 0.0
+    assert v.curve_speed_penalty_ms(t, is_left=True) == v.curve_speed_penalty_ms(t, is_left=False)
+    assert v.curve_speed_penalty_ms(t, pitch_rad=-0.05, is_left=True) == v.curve_speed_penalty_ms(t, pitch_rad=-0.05)
+
+
+def test_left_factor_knob_still_applies_only_on_left(tmp_path, monkeypatch):
+  """The knob is kept: a curve.json that sets it still scales LEFT curves only."""
+  v = _lightning(tmp_path, monkeypatch, {"left_factor": 1.15})
   t = 55 * MPH
   assert abs(v.curve_speed_penalty_ms(t, is_left=True) - v.curve_speed_penalty_ms(t) * 1.15) < 1e-9
   assert v.curve_speed_penalty_ms(t, is_left=False) == v.curve_speed_penalty_ms(t)
@@ -200,7 +212,8 @@ def test_new_keys_tunable_and_clamped(tmp_path, monkeypatch):
   w = _lightning(tmp_path, monkeypatch, {"descent_gain": -5, "left_factor": 0.2,
                                          "map_scale": 1.8, "icbm_firm_decel": 9.0})
   assert w.curve_speed_penalty_ms(t, pitch_rad=-0.1) == w.curve_speed_penalty_ms(t)  # gain -> 0
-  assert w.curve_speed_penalty_ms(t, is_left=True) >= w.curve_speed_penalty_ms(t)    # factor -> 1.0
+  assert w._curve_cfg["left_factor"] == 1.0                                          # factor -> 1.0
+  assert w.curve_speed_penalty_ms(t, is_left=True) == w.curve_speed_penalty_ms(t)
   assert w.icbm_map_scale <= 1.0
   assert w.icbm_firm_decel <= 1.5
 

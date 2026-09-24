@@ -63,11 +63,12 @@ def test_vision_direction_matches_the_measured_road(frame, left):
 
 
 def test_the_or34_right_hander_gets_no_left_factor():
-  """The 11:19 over-slow curve: vision's target now carries at most the plain hump, never hump x left_factor."""
+  """The 11:19 over-slow curve: vision's target now carries at most the plain hump, never hump x left_factor.
+  (left_factor is neutral by default since 2026-09-24; set here so the direction still has something to gate.)"""
   fr = mtf.RIGHT_HANDER
   lat, _ = _frame_vis(fr)
   assert lat > 0.0                                   # the road's sign: + = RIGHT
-  veh = _veh()
+  veh = _veh(left_factor=1.15)
   apex = fr["v_ego"] * math.sqrt(m.VTSC_A_LAT / lat)
   t, *_ = m.icbm_penalise(veh, [], apex, "vis", _vis_sig(fr["v_ego"], lat), LAT, LON, float("inf"), 0.0)
   with_left = apex - veh.curve_speed_penalty_ms(apex, is_left=True)
@@ -75,16 +76,21 @@ def test_the_or34_right_hander_gets_no_left_factor():
 
 
 def test_the_measured_left_hander_gets_the_left_factor_through_icbm_step():
-  """End to end through the real _icbm_step: the left frame's vision candidate is published LOWER than the same
-  magnitude on the right, and the controller records the direction it used."""
-  veh = _veh()
+  """End to end through the real _icbm_step, and the controller records the direction it used. At the shipped
+  defaults (left_factor 1.0 since 2026-09-24) left and right publish the SAME target; with a curve.json left_factor
+  the left frame's vision candidate is published LOWER than the same magnitude on the right."""
   lat, _ = _frame_vis(mtf.LEFT_HANDER)
-  mgr, step = _icbm_stub(veh)
-  t_left = _published_target(step, mgr, _vis_sig(33.0, lat))
-  assert (mgr._icbm_left, mgr._icbm_left_src) == (True, "vis")
-  t_right = _published_target(step, mgr, _vis_sig(33.0, -lat))
-  assert (mgr._icbm_left, mgr._icbm_left_src) == (False, "vis")
-  assert t_left is not None and t_right is not None and t_left < t_right
+  for veh, left_lower in ((_veh(), False), (_veh(left_factor=1.15), True)):
+    mgr, step = _icbm_stub(veh)
+    t_left = _published_target(step, mgr, _vis_sig(33.0, lat))
+    assert (mgr._icbm_left, mgr._icbm_left_src) == (True, "vis")
+    t_right = _published_target(step, mgr, _vis_sig(33.0, -lat))
+    assert (mgr._icbm_left, mgr._icbm_left_src) == (False, "vis")
+    assert t_left is not None and t_right is not None
+    if left_lower:
+      assert t_left < t_right
+    else:
+      assert t_left == t_right
 
 
 def test_map_direction_is_unchanged():
@@ -174,8 +180,9 @@ def test_or34_vision_target_is_vision_own_speed(pt, v, lat, logged):
   assert new == pytest.approx(apex, abs=1e-6)
   assert flr == pytest.approx(apex) and hit is True
   assert 69.0 < new / MPH < OR34_NEED_MPH + 0.5
-  # the pre-curvefix model (left factor on this right-hander, no floor) reproduces the logged ~66 mph
-  veh0 = _veh()
+  # the pre-curvefix model (the then-default 1.15 left factor on this right-hander, no floor) reproduces the logged
+  # ~66 mph. left_factor is pinned to the value the truck ran, since the default is 1.0 since 2026-09-24.
+  veh0 = _veh(left_factor=1.15)
   old = apex - veh0.curve_speed_penalty_ms(apex, pitch_rad=0.015, is_left=True)
   assert old / MPH == pytest.approx(logged / MPH, abs=0.6), f"{pt}: model {old / MPH:.2f} vs logged {logged / MPH:.2f}"
 
@@ -194,8 +201,9 @@ def test_vis_floor_frac_zero_is_the_off_switch():
 
 def test_left_and_descent_extras_still_bite_below_the_vision_floor():
   """The floor bounds the BASE hump only (as the map floor does): a left curve on a descent still comes in below
-  vision's own speed, by exactly the multiplier extras."""
-  veh = _veh()
+  vision's own speed, by exactly the multiplier extras. (left_factor is neutral by default since 2026-09-24; set
+  here so the left extra is non-zero.)"""
+  veh = _veh(left_factor=1.15)
   v, lat, pitch = 30.0, -3.0, -0.05                   # LEFT (lat < 0), 5 % downhill
   apex = v * math.sqrt(m.VTSC_A_LAT / abs(lat))
   t, *_ = m.icbm_penalise(veh, [], apex, "vis", _vis_sig(v, lat, pitch=pitch), LAT, LON, float("inf"), 0.0)
