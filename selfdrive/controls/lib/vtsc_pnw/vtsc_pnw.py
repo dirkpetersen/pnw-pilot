@@ -114,13 +114,20 @@ def curvatures_from_model(model):
 
 def apex_turn_direction(model, lookahead_max_s: float = C.LOOKAHEAD_MAX_S) -> int:
   """descentcurve2pnw: turn DIRECTION of the model path's apex (sharpest upcoming point):
-  +1 = LEFT, -1 = right, 0 = straight/unknown. Sign convention verified in-tree: openpilot is
-  left-positive (latcontrol_torque "left is positive in this convention"; positive steeringAngleDeg
-  and positive desired curvature = left), and modelV2.orientationRate.z is the plan yaw rate with
-  z UP, so orientationRate.z > 0 = turning LEFT. model_curve_state/curvatures_from_model take
-  abs() and LOSE the sign — this walks the same points keeping it. Direction is only claimed for a
-  real bend (apex curvature >= CUE_MIN_CURVATURE, ~R2300 m) so lane noise can't flip it. Pure-ish;
-  bad data -> 0."""
+  +1 = LEFT, -1 = right, 0 = straight/unknown.
+
+  curvefix2pnw (2026-09-24): modelV2.orientationRate.z is RIGHT-positive in this tree (device frame, z DOWN), so
+  orientationRate.z > 0 = turning RIGHT. The original docstring claimed the opposite, citing latcontrol_torque's
+  "left is positive in this convention" TODO -- which is about that controller's torque OUTPUT (negated on the next
+  line), not curvature; modeld derives desiredCurvature from orientationRate.z with no sign flip, and openpilot's
+  internal curvature is right-positive (controlsd: `self.curvature = -VM.calc_curvature(...)`). MEASURED on the
+  F-150 Lightning, OR-34 2026-09-24: z ~ -0.08 through a left-hander (strAng +17, yawRate +0.08, GPS bearing
+  falling) and z ~ +0.08 through a right-hander (strAng -17, yawRate -0.08, bearing rising); 147 of 147 in-curve
+  ces_events ticks agree (drives/2026-09-24/vision-left-flag-check.md).
+
+  model_curve_state/curvatures_from_model take abs() and LOSE the sign — this walks the same points keeping it.
+  Direction is only claimed for a real bend (apex curvature >= CUE_MIN_CURVATURE, ~R2300 m) so lane noise can't
+  flip it. Pure-ish; bad data -> 0."""
   try:
     orz = list(model.orientationRate.z)
     vx = list(model.velocity.x)
@@ -137,7 +144,7 @@ def apex_turn_direction(model, lookahead_max_s: float = C.LOOKAHEAD_MAX_S) -> in
       best_k, best_z = k, orz[i]
   if best_k < C.CUE_MIN_CURVATURE or best_z == 0.0:
     return 0
-  return 1 if best_z > 0.0 else -1
+  return -1 if best_z > 0.0 else 1          # curvefix2pnw: z > 0 = RIGHT (see the docstring)
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:

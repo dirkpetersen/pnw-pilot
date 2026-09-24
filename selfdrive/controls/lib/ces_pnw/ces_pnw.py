@@ -2101,23 +2101,50 @@ CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icb
                        "icbmSaneT", "icbmSaneWhy", "icbmBehind")
 
 
+# curvefix2pnw: throttle for icbm_penalise's turn-direction failure log (it runs per candidate at ~4 Hz, and the curve
+# DB prices up to three candidates a tick). Module-level because icbm_penalise is a module function.
+_ICBM_DIR_ERR = {"t": -1e9, "n": 0}
+
+
 def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_raw):
   """The Lightning curve penalty, the map-rating floor and rain, applied to ONE candidate's apex `target` from
-  source `src`. Returns (target, map_floor, floor_hit). Lifted verbatim out of _icbm_step (curvedblive2pnw) so
-  the curve DB can price every candidate the way ICBM prices the one it picked; _icbm_step calls it exactly
-  where the inline block was, with the same inputs, so its behavior is unchanged. A module function, not a
-  method, because the ICBM tests bind _icbm_step onto bare stubs."""
-  is_left = False
+  source `src`. Returns (target, map_floor, floor_hit, is_left, dir_src). Lifted verbatim out of _icbm_step
+  (curvedblive2pnw) so the curve DB can price every candidate the way ICBM prices the one it picked; _icbm_step
+  calls it exactly where the inline block was, with the same inputs. A module function, not a method, because the
+  ICBM tests bind _icbm_step onto bare stubs.
+
+  curvefix2pnw: `is_left` is the direction the left factor was applied for, and `dir_src` where it came from
+  ("vis" / "map" / "far"; "unknown" = no direction could be called, so no left factor; "err" = the lookup raised).
+  Both reach ces_events as icbmLeft / icbmLeftSrc: the direction was never logged before, which is how the inverted
+  vision sign below survived from 2026-07-11 to 2026-09-24."""
+  turn, dir_src = 0, "unknown"
   try:
     if src == "vis":
-      is_left = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0) > 0.0
+      # curvefix2pnw: curve_lat_accel_vision = modelV2.orientationRate.z * v, and orientationRate.z is RIGHT-positive
+      # in this tree (device frame, z down: modeld derives desiredCurvature from it with no sign flip, and
+      # openpilot's internal curvature is right-positive). So a POSITIVE value is a RIGHT curve. MEASURED
+      # 2026-09-24 on 147 in-curve ticks: visLat > 0 came with slKActl < 0, strAng < 0 and a rising GPS bearing on
+      # 147 / 147 (drives/2026-09-24/vision-left-flag-check.md). The old `> 0 = left` put left_factor on every
+      # right-hand vision curve and withheld it from every left-hand one.
+      lat = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0)
+      turn = -1 if lat > 0.0 else (1 if lat < 0.0 else 0)
     elif src == "far":
-      is_left = map_turn_direction(map_targets, plat, plon, far_dist) > 0
+      turn = map_turn_direction(map_targets, plat, plon, far_dist)
     elif src == "map":
-      is_left = map_turn_direction(map_targets, plat, plon,
-                                   sig.get("map_target_dist", float("inf"))) > 0
-  except Exception:
-    is_left = False
+      turn = map_turn_direction(map_targets, plat, plon, sig.get("map_target_dist", float("inf")))
+    if turn != 0:
+      dir_src = src
+  except Exception as e:
+    # Rule 2: the neutral fallback (no left factor) is kept, but it is no longer silent -- on a right curve a
+    # failure here looks exactly like a correct "right", so the log is the only place it can show.
+    turn, dir_src = 0, "err"
+    _ICBM_DIR_ERR["n"] += 1
+    now_w = time.monotonic()
+    if now_w - _ICBM_DIR_ERR["t"] > ICBM_ERR_LOG_S:
+      cloudlog.exception(f"icbm_penalise: turn direction FAILED for src={src} ({type(e).__name__}) -- the left-curve " +
+                         f"factor is NOT applied ({_ICBM_DIR_ERR['n']} failure(s) since the last log)")
+      _ICBM_DIR_ERR["t"], _ICBM_DIR_ERR["n"] = now_w, 0
+  is_left = turn > 0
   # icbmslow2pnw: THE MAP-RATING FLOOR. The Lightning curve penalty may not push a MAP/FAR
   # target below that candidate's own raw mapd rating (scaled by icbm_map_floor_frac, default
   # 1.0). See the knob's comment in pnw_vehicle.py for the full why: the penalty was
@@ -2158,7 +2185,7 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   flr_hit = target > penalised + 1e-9
   # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
   target = max(target - veh.rain_penalty_ms(), 0.0)
-  return target, map_flr, flr_hit
+  return target, map_flr, flr_hit, is_left, dir_src
 
 
 def _roaddb_tele(ctl) -> dict:
@@ -4139,6 +4166,10 @@ class CESController:
     # applied" from "the floor applied and changed nothing".
     self._icbm_map_flr = 0.0
     self._icbm_map_flr_hit = False
+    # curvefix2pnw: the turn direction the Lightning penalty used this tick (icbmLeft; None = no target) and where it
+    # came from (icbmLeftSrc: vis/map/far/unknown/err). Never logged before -- an inverted vision sign hid for 2 months.
+    self._icbm_left = None
+    self._icbm_left_src = None
     # icbmrestore2pnw: the cap->clear->restore episode machine + the current direction for telemetry
     self._icbm_ep = IcbmEpisode()
     self._icbm_dir = None                  # "dec" while capping, "inc" while restoring, None idle
@@ -5276,6 +5307,7 @@ class CESController:
         # icbmslow2pnw: same reason -- never publish a stale map-rating floor beside icbmT=None
         self._icbm_map_flr = 0.0
         self._icbm_map_flr_hit = False
+        self._icbm_left, self._icbm_left_src = None, None   # curvefix2pnw: same reason
         self._icbm_rcap_state = None    # icbmrestorecap2pnw: no stale limit across a Chill interlude
         self._icbm_rcap = 0.0
         # icbmconsist2pnw: never publish a stale point-match alongside icbmT=None
@@ -5402,8 +5434,8 @@ class CESController:
       # icbmalign2pnw: ICBM now applies the SAME descent + left-curve multipliers as VTSC — literally
       # the same shared function (PnwVehicle.curve_speed_penalty_ms, knobs from /data/pnw/curve.json),
       # so stock-ACC and op-long behavior stay aligned. Direction per source:
-      #   vis      -> sign of the model's predicted lateral accel (lat = orientationRate.z * v, and
-      #               z > 0 = LEFT — the convention verified for apex_turn_direction);
+      #   vis      -> sign of the model's predicted lateral accel (lat = orientationRate.z * v). z > 0 is a
+      #               RIGHT turn -- curvefix2pnw corrected this 2026-09-24 (it was read as LEFT; see icbm_penalise);
       #   map/far  -> map path geometry at the candidate's distance (map_turn_direction, same
       #               left-positive convention). Unknown direction / no pitch -> neutral (no-op).
       # Multipliers only ever RAISE the penalty (>= 1, clamped), so the target only moves DOWN:
@@ -5412,8 +5444,10 @@ class CESController:
       # publish the previous tick's floor as if it were live (the same staleness trap
       # _icbm_floor_hit documents).
       self._icbm_map_flr, self._icbm_map_flr_hit = 0.0, False
+      self._icbm_left, self._icbm_left_src = None, None   # curvefix2pnw: same staleness rule as the floor
       if target is not None:
-        target, self._icbm_map_flr, self._icbm_map_flr_hit = icbm_penalise(
+        (target, self._icbm_map_flr, self._icbm_map_flr_hit,
+         self._icbm_left, self._icbm_left_src) = icbm_penalise(
           self._veh, self._map_targets, target, self._icbm_src, sig, plat, plon, far_dist, far_raw)
       # curvedblive2pnw: the learned road table replaces mapd's number for the curve (raise to the measured curve
       # within the +15 mph / posted + 10 caps, lower to exactly it) and adds sharp curves the map missed. Here, after the
@@ -5850,6 +5884,8 @@ class CESController:
       # icbmslow2pnw: the map-rating floor (m/s) and whether it gave penalty back this tick.
       tele["icbmMapFlr"] = round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2)
       tele["icbmMapFlrHit"] = bool(getattr(self, "_icbm_map_flr_hit", False))
+      tele["icbmLeft"] = getattr(self, "_icbm_left", None)          # curvefix2pnw
+      tele["icbmLeftSrc"] = getattr(self, "_icbm_left_src", None)
       tele["icbmRCap"] = round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1)   # icbmrestorecap2pnw: 0 = no cap
       tele.update(_rhold_tele(self))              # restorehold2pnw: restore held for the curve ahead
       # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
@@ -6127,6 +6163,10 @@ class CESController:
       # candidate (m/s; 0.0 = no floor this tick) and whether it actually raised the target.
       "icbmMapFlr": round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2),
       "icbmMapFlrHit": bool(getattr(self, "_icbm_map_flr_hit", False)),
+      # curvefix2pnw: the turn direction the penalty's left factor used (None = no target this tick) and its source
+      # (vis / map / far; unknown = none could be called; err = the lookup raised, logged by icbm_penalise).
+      "icbmLeft": getattr(self, "_icbm_left", None),
+      "icbmLeftSrc": getattr(self, "_icbm_left_src", None),
       "icbmRCap": round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1),   # icbmrestorecap2pnw: restore cap, 0 = none
       **_rhold_tele(self),   # restorehold2pnw: icbmRHold = "poly"/"vis" while a restore is held, icbmRHoldA = m/s^2
       "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore

@@ -77,11 +77,11 @@ def test_lightning_curve_cap_lower_than_tesla():
   assert ctrl_t.veh.curve_speed_penalty_ms(vcs_t) == 0.0
   assert abs(vcs_t - 24.6) < 0.5                          # ~ the pure v_safe, no penalty applied
   # Lightning enters the SAME curve slower — ~the full ~5 mph (2.24 m/s) peak penalty.
-  # descentcurve2pnw: the stub model's curve has orientationRate.z > 0 = a LEFT curve, so the
-  # left-curve factor (1.15x) now applies on top of the hump; flat pitch -> no descent term.
+  # curvefix2pnw: the stub model's curve has orientationRate.z > 0, which is a RIGHT curve (measured; the
+  # descentcurve2pnw note here called it LEFT). So no left factor: the plain hump; flat pitch -> no descent term.
   assert vcs_l < vcs_t - 0.5
-  pen = ctrl_l.veh.curve_speed_penalty_ms(vcs_t, is_left=True)
-  assert pen > 2.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # peak penalty * left factor (~2.57 m/s)
+  pen = ctrl_l.veh.curve_speed_penalty_ms(vcs_t, is_left=False)
+  assert pen > 2.0 and abs((vcs_t - vcs_l) - pen) < 0.2   # the peak penalty (~2.24 m/s)
 
 
 def test_fast_gentle_sweeper_tapers():
@@ -102,13 +102,15 @@ def test_no_curve_no_penalty_applied():
 # ---- descentcurve2pnw: descent guard + left factor + overspeed escalation ------------------------
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import apex_turn_direction
+from openpilot.selfdrive.controls.lib.vtsc_pnw.tests import measured_turn_frames as mtf
 
 LIGHTNING = FakeCP("FORD_F_150_LIGHTNING_MK1", "ford")
 TESLA = FakeCP("TESLA_MODEL_S_HW3", "tesla")
 
 
 def _make_model_signed(curvature, vx=27.0, n=20, apex_from=0):
-  """Signed model: orientationRate.z keeps the curvature SIGN (>0 = LEFT, openpilot convention).
+  """Signed model: orientationRate.z keeps the curvature SIGN (> 0 = RIGHT, measured on the road -- see
+  measured_turn_frames.py; curvefix2pnw corrected the old "> 0 = LEFT" belief).
   apex_from > 0 -> straight until that index (puts the apex at a real distance ahead)."""
   m = _NS()
   m.orientationRate = _NS()
@@ -139,20 +141,55 @@ def _run2(cp, v_cruise, v_ego, curvature, pitch=0.0, apex_from=0, cycles=1):
   return ctrl, cap
 
 
+def test_apex_turn_direction_on_measured_frames():
+  """curvefix2pnw: the sign is pinned against REAL modelV2 frames from the OR-34 drive, each checked against three
+  independent witnesses (steering angle, yaw rate, GPS bearing). The old test asserted "+z = LEFT" on a synthetic
+  model and was wrong; a synthetic model can only ever re-state whatever convention its author believed."""
+  assert mtf.witnesses_say_left(mtf.LEFT_HANDER) is True
+  assert mtf.witnesses_say_left(mtf.RIGHT_HANDER) is False
+  assert apex_turn_direction(mtf.as_model(mtf.LEFT_HANDER)) == 1
+  assert apex_turn_direction(mtf.as_model(mtf.RIGHT_HANDER)) == -1
+  # and the road's own sign: z < 0 through the left-hander, z > 0 through the right-hander
+  assert max(mtf.LEFT_HANDER["z"][:20]) < 0.0 < min(mtf.RIGHT_HANDER["z"][:20])
+
+
 def test_apex_turn_direction_signs():
   k = 2.5 / (24.0 * 24.0)
-  assert apex_turn_direction(_make_model_signed(k)) == 1          # +z = LEFT
-  assert apex_turn_direction(_make_model_signed(-k)) == -1        # -z = right
+  assert apex_turn_direction(_make_model_signed(k)) == -1         # +z = RIGHT (measured, see above)
+  assert apex_turn_direction(_make_model_signed(-k)) == 1         # -z = LEFT
   assert apex_turn_direction(_make_model_signed(0.0)) == 0        # straight
   assert apex_turn_direction(_NS()) == 0                          # bad data -> unknown, never raises
+
+
+def test_vtsc_left_factor_follows_the_road_on_measured_frames():
+  """The measured left-hander gets the Lightning left factor and the measured right-hander does not: the same
+  curve speed (both frames cap near 69 mph at 2.5 m/s^2) comes out lower on the left. `vtscDir` says so too."""
+  class P:
+    def get(self, k2, return_default=False): return {"CESMode": "2"}.get(k2)
+    def get_bool(self, k2): return False
+    def put_nonblocking(self, k2, v): pass
+  out = {}
+  for name, fr in (("L", mtf.LEFT_HANDER), ("R", mtf.RIGHT_HANDER)):
+    ctrl = VTSCController(LIGHTNING, params=P())
+    ctrl.mem_params = None
+    cc = _NS()
+    cc.orientationNED = [0.0, 0.0, 0.0]
+    ctrl.cap({"modelV2": mtf.as_model(fr), "carControl": cc}, 40.0, fr["v_ego"])
+    assert ctrl._tele_dir == name
+    out[name] = (ctrl._tele_pen, ctrl.veh)
+  pen_l, veh = out["L"]
+  pen_r, _ = out["R"]
+  assert pen_l > 0.0 and pen_r > 0.0
+  # left = hump x left_factor; right = the plain hump (the curve speeds differ slightly, so compare ratios to the hump)
+  assert pen_l / pen_r > 1.05
 
 
 def test_descent_scales_lightning_penalty_up():
   """A downhill (pitch -0.05 rad ~ 5% grade) must cut the Lightning's curve-safe speed FURTHER than
   the same curve on the flat (+40% penalty at defaults). Right curve so only the descent term acts."""
   k = 2.5 / (24.6 * 24.6)                                          # peak-zone curve (~55 mph safe)
-  ctrl_flat, _ = _run2(LIGHTNING, 29.0, 29.0, -k, pitch=0.0)
-  ctrl_down, _ = _run2(LIGHTNING, 29.0, 29.0, -k, pitch=-0.05)
+  ctrl_flat, _ = _run2(LIGHTNING, 29.0, 29.0, +k, pitch=0.0)     # +z = RIGHT
+  ctrl_down, _ = _run2(LIGHTNING, 29.0, 29.0, +k, pitch=-0.05)
   vcs_flat, vcs_down = ctrl_flat.msg["vCurveSafe"], ctrl_down.msg["vCurveSafe"]
   assert vcs_down < vcs_flat - 0.5                                 # meaningfully lower on the descent
   # ~1.4x the flat penalty: base ~5 mph -> ~7 mph => delta ~0.89 m/s
@@ -163,8 +200,8 @@ def test_descent_scales_lightning_penalty_up():
 
 def test_left_curve_penalized_more_than_right():
   k = 2.5 / (24.6 * 24.6)
-  ctrl_l, _ = _run2(LIGHTNING, 29.0, 29.0, +k)                     # LEFT (z > 0)
-  ctrl_r, _ = _run2(LIGHTNING, 29.0, 29.0, -k)                     # right
+  ctrl_l, _ = _run2(LIGHTNING, 29.0, 29.0, -k)                     # LEFT (z < 0, measured)
+  ctrl_r, _ = _run2(LIGHTNING, 29.0, 29.0, +k)                     # right
   assert ctrl_l.msg["vCurveSafe"] < ctrl_r.msg["vCurveSafe"]       # adverse crown + weak EPS
 
 

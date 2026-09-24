@@ -412,8 +412,9 @@ def _vis_sig(v_ego, lat_acc, ttc=4.0, v_set=None, pitch=None):
 def test_icbm_descent_lowers_target_like_vtsc(tmp_path, monkeypatch):
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
-  t_flat = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=None))
-  t_down = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=-0.05))
+  # curvefix2pnw: visLat > 0 is a RIGHT curve (measured), so +3.474 isolates the descent term
+  t_flat = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=None))
+  t_down = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=-0.05))
   assert t_flat is not None and t_down is not None
   assert t_down < t_flat                          # descent -> enter the curve slower (right curve)
   # exactly the shared formula: 1.4x the flat penalty at a 5% grade
@@ -425,8 +426,8 @@ def test_icbm_descent_lowers_target_like_vtsc(tmp_path, monkeypatch):
 def test_icbm_left_curve_penalized_more(tmp_path, monkeypatch):
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
-  t_left = _published_target(step, mgr, _vis_sig(29.0, +3.474))    # lat > 0 = LEFT (z*v sign)
-  t_right = _published_target(step, mgr, _vis_sig(29.0, -3.474))
+  t_left = _published_target(step, mgr, _vis_sig(29.0, -3.474))    # lat < 0 = LEFT (curvefix2pnw, measured)
+  t_right = _published_target(step, mgr, _vis_sig(29.0, +3.474))
   assert t_left is not None and t_right is not None
   assert t_left < t_right                         # adverse crown + weak EPS on lefts
 
@@ -465,7 +466,7 @@ def test_parity_vtsc_and_icbm_apply_identical_penalty(tmp_path, monkeypatch):
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(tmp_path / "nope.json"))
   from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCController
 
-  # --- VTSC side: Lightning, left curve (z > 0), pitch -0.05 ---
+  # --- VTSC side: Lightning, left curve (z < 0 -- curvefix2pnw, measured), pitch -0.05 ---
   class _NS:
     pass
   vx, k = 29.0, VTSC_A_LAT / (24.6 * 24.6)
@@ -474,7 +475,7 @@ def test_parity_vtsc_and_icbm_apply_identical_penalty(tmp_path, monkeypatch):
   m.velocity = _NS()
   m.position = _NS()
   m.action = _NS()
-  m.orientationRate.z = [k * vx] * 20
+  m.orientationRate.z = [-k * vx] * 20
   m.orientationRate.t = [i * 0.25 for i in range(20)]
   m.velocity.x = [vx] * 20
   m.position.x = [vx * i * 0.25 for i in range(20)]
@@ -493,7 +494,7 @@ def test_parity_vtsc_and_icbm_apply_identical_penalty(tmp_path, monkeypatch):
 
   # --- ICBM side: same apex via vision (29*sqrt(2.5/3.474) = 24.6), same pitch, LEFT ---
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
-  icbm_adjusted = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=-0.05))
+  icbm_adjusted = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=-0.05))
 
   assert icbm_adjusted is not None
   assert abs(vtsc_adjusted - icbm_adjusted) < 0.02   # literally the same shared penalty function
