@@ -17,6 +17,7 @@ import os
 import pytest
 from cereal import car
 
+from openpilot.common.tests.test_clockvalid2pnw import pin_device_floor
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import ParkTickGate
 
@@ -24,6 +25,12 @@ GearShifter = car.CarState.GearShifter
 BASE = "ces_events.jsonl"
 GOOD_MTIME = 1789000000.0          # 2026-09-10T00:26:40Z
 GOOD_NAME = f"{BASE}.20260910T002640Z"
+
+
+@pytest.fixture(autouse=True)
+def _device_floor(monkeypatch):
+  """clockvalid2pnw: the fixed dates here must not depend on when this host's systemd was upgraded."""
+  pin_device_floor(monkeypatch)
 
 
 @pytest.fixture
@@ -74,6 +81,12 @@ class TestLinkAtRotation:
     (name,) = [p.name for p in arc.iterdir()]
     assert name.startswith(f"{BASE}.19700101T000100Z.b"), name
     assert len(name) == len(f"{BASE}.19700101T000100Z.b") + 8, name
+
+  def test_a_pre_sync_2026_07_28_generation_gets_the_random_suffix_too(self, tmp_path, arc, monkeypatch):
+    """clockvalid2pnw: an unsynced AGNOS 19.7 boot reads systemd's build date, not 1970."""
+    from openpilot.common.tests.test_clockvalid2pnw import FAKE_PRESYNC
+    name = os.path.basename(m._archive_dest(str(arc), BASE, FAKE_PRESYNC))
+    assert name.startswith(f"{BASE}.20260728T150525Z.b") and len(name) == len(f"{BASE}.20260728T150525Z.b") + 8, name
 
   def test_link_and_move_choose_the_same_name(self, tmp_path):
     """The two paths share _archive_dest, so they cannot drift (the uploader's name gate and the

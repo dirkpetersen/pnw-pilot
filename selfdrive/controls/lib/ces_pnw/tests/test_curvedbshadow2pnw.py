@@ -37,6 +37,7 @@ import types
 import pytest
 
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+from openpilot.common.tests.test_clockvalid2pnw import pin_device_floor
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_shadow as cs
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
@@ -48,14 +49,20 @@ from openpilot.tools.curvedb.store import PROVISIONAL_PARAMS, CurveDB, Observati
 NS = types.SimpleNamespace
 
 M_PER_DEG_LAT = 111320.0
-# A REAL epoch (2026-09-18 PT). `_finish` refuses to file a row stamped before
-# CLOCK_VALID_EPOCH, because the dead RTC makes a cold boot read 1970 and a bogus
+# A REAL epoch (2026-09-18 PT). `_finish` refuses to file a row stamped before the
+# time_helpers.wall_time_valid floor, because the dead RTC makes a cold boot read 1970 and a bogus
 # timestamp manufactures a distinct DATE -- half of D6's authority key.
 T0 = 1788300000.0
 
 
 def _north(lat, metres):
   return lat + metres / M_PER_DEG_LAT
+
+
+@pytest.fixture(autouse=True)
+def _device_floor(monkeypatch):
+  """clockvalid2pnw: the fixed dates here must not depend on when this host's systemd was upgraded."""
+  pin_device_floor(monkeypatch)
 
 
 def _shadow(tmp_path, platform=LIGHTNING, config=None, obs=()):
@@ -664,7 +671,7 @@ class TestNonCircularityAndLiveness:
     such records (`clockBad`) rather than dropping them, because a record's other fields are still
     real; a row's date is not one of its fields, it is its identity."""
     sh = _shadow(tmp_path)
-    tele = _drive_past(sh, _site(), t0=1.0e9)          # 2001: before CLOCK_VALID_EPOCH
+    tele = _drive_past(sh, _site(), t0=1.0e9)          # 2001: below the wall_time_valid floor
     assert not _written(sh)
     assert [t["cdbEv"] for t in tele if t["cdbEv"]] == ["clockBad"]
     # ...and the SAME drive with a real clock does produce a row, or this proves only that the
@@ -673,8 +680,19 @@ class TestNonCircularityAndLiveness:
     _drive_past(sh2, _site(), t0=T0)
     assert [r for r in _written(sh2) if r["kind"] == "up"]
 
-  def test_the_clock_epoch_is_the_one_ces_pnw_uses(self):
-    assert cs.CLOCK_VALID_EPOCH == m.CLOCK_VALID_EPOCH
+  def test_the_pre_sync_2026_07_28_clock_is_refused_too(self, tmp_path):
+    """clockvalid2pnw: an unsynced AGNOS 19.7 boot reads systemd's build date (2026-07-28), not 1970,
+    and the old 2020 epoch filed rows under it."""
+    from openpilot.common.tests.test_clockvalid2pnw import FAKE_PRESYNC
+    sh = _shadow(tmp_path)
+    tele = _drive_past(sh, _site(), t0=FAKE_PRESYNC)
+    assert not _written(sh)
+    assert [t["cdbEv"] for t in tele if t["cdbEv"]] == ["clockBad"]
+
+  def test_the_clock_rule_is_the_one_ces_pnw_uses(self):
+    from openpilot.common import time_helpers
+    assert cs.wall_time_valid is time_helpers.wall_time_valid
+    assert m.wall_time_valid is time_helpers.wall_time_valid
 
   def test_a_frozen_writer_never_reports_a_row_it_did_not_write(self, tmp_path):
     """Rule 2. At the cap -- the state section 8.1 says must be loud -- the per-record verdict must

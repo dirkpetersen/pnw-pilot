@@ -40,6 +40,7 @@ from openpilot.common import pnw_log_archive
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.time_helpers import wall_time_valid
 from openpilot.system.location_services import geo
 
 # POI data is bundled IN the distribution next to this daemon (small enough to vendor). The daemon
@@ -1556,7 +1557,9 @@ def rotate_net_log(path: str, now: float, archive_dir: str | None = None, max_by
   except OSError as e:
     cloudlog.error(f"location_services: net log stat failed ({type(e).__name__}) -- not rotated")
     return False
-  new_day = (now >= pnw_log_archive.CLOCK_VALID_EPOCH and st.st_mtime >= pnw_log_archive.CLOCK_VALID_EPOCH and
+  # clockvalid2pnw: both times must be real (time_helpers.wall_time_valid) -- a pre-sync mtime reads
+  # systemd's build date, and comparing it with a synced "now" would call every first write a new day.
+  new_day = (wall_time_valid(now) and wall_time_valid(st.st_mtime) and
              time.gmtime(now)[:3] != time.gmtime(st.st_mtime)[:3])
   if st.st_size <= NET_EVENT_LOG_MAX_BYTES and not new_day:
     return False

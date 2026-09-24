@@ -130,6 +130,7 @@ import time
 
 import openpilot.common.pnw_log_archive as pnw_log_archive
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.time_helpers import wall_time_valid
 from openpilot.tools.curvedb.store import (
   PROVISIONAL_ENVELOPES,
   PROVISIONAL_PARAMS,
@@ -215,11 +216,11 @@ K_MIN_USABLE = 1e-4          # below this a row is degenerate (R > 10 km). Never
 # "driven past". One 1 Hz record is ~25 m at highway speed, so this is sub-record and only exists to
 # stop GPS jitter at the apex from latching a passage early.
 PASS_HYSTERESIS_M = 5.0
-# The comma 3X's RTC battery is dead, so every cold boot stamps records 1970 until NTP/GPS sync.
-# A bogus timestamp manufactures a distinct *date*, which is half of D6's authority key -- the same
-# integrity concern that makes a missing tzdata disable the writer. Mirrors ces_pnw's
-# CLOCK_VALID_EPOCH (L2 forbids importing ces_pnw); pinned equal by the test module.
-CLOCK_VALID_EPOCH = 1577836800.0   # 2020-01-01T00:00Z
+# The comma 3X's RTC battery is dead, so every cold boot stamps records with a pre-sync clock until
+# NTP/GPS sync. A bogus timestamp manufactures a distinct *date*, which is half of D6's authority key --
+# the same integrity concern that makes a missing tzdata disable the writer. "Pre-sync" is
+# time_helpers.wall_time_valid, the definition ces_pnw's clock_bad uses too (clockvalid2pnw: it was a
+# 2020 epoch, which let the pre-sync 2026-07-28 file rows under a date that never happened).
 # Ceiling on simultaneously-tracked sites. ICBM names one candidate per tick, so this is never
 # approached in practice; if it ever is, the eviction is loud (Rule 2) rather than a silent drop.
 MAX_TRACKED = 16
@@ -921,7 +922,7 @@ class CurveDBShadow:
       # leave-one-date-out. Refuse here rather than write a plausible lie.
       self._ev_pending.append("noTz")
       return
-    if s.t < CLOCK_VALID_EPOCH:
+    if not wall_time_valid(s.t):
       # Same integrity argument as `noTz`, for the other way the date can be wrong (Fable S7): the
       # 3X's RTC battery is dead, so a cold boot stamps 1970 until NTP/GPS sync -- and a bogus
       # timestamp manufactures a distinct DATE, which is half of D6's authority key. ces_pnw MARKS

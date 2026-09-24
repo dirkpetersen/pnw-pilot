@@ -248,10 +248,16 @@ def test_ces_stub_is_inert():
 
 # --- D: clock validity marker ------------------------------------------------------------------
 
-def test_clock_bad():
+def test_clock_bad(monkeypatch):
+  # clockvalid2pnw: clock_bad is `not time_helpers.wall_time_valid` (systemd's mtime + 1 day), no longer
+  # "before 2020". Floor pinned to the device's so the answer does not depend on this host's systemd.
+  from openpilot.common.tests.test_clockvalid2pnw import DEVICE_FLOOR, FAKE_PRESYNC, SYNCED_NOW, pin_device_floor
+  pin_device_floor(monkeypatch)
   assert clock_bad(0.0) is True                    # 1970 (dead RTC, pre-sync)
-  assert clock_bad(1764094635.0) is False          # 2025-11-25 — plausible-but-wrong stamps pass;
-                                                   #   only OBVIOUS pre-2020 garbage is markable
-  assert clock_bad(1577836799.0) is True           # 1 s before the 2020 epoch gate
-  assert clock_bad(1783894265.0) is False          # 2026-07-12 (real)
+  assert clock_bad(1764094635.0) is True           # 2025-11-25 — the stamp that polluted the 07-12 gap
+                                                   #   analysis is now below the floor, so it is marked
+  assert clock_bad(FAKE_PRESYNC) is True           # 2026-07-28: what an unsynced AGNOS 19.7 boot reads
+  assert clock_bad(DEVICE_FLOOR) is True           # the floor itself is not trusted (strict)
+  assert clock_bad(DEVICE_FLOOR + 1) is False
+  assert clock_bad(SYNCED_NOW) is False            # 2026-09-23 (real)
   assert clock_bad(None) is True                   # garbage input counts as bad, never raises

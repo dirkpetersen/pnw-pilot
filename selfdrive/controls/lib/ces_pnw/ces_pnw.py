@@ -26,6 +26,7 @@ from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.time_helpers import wall_time_valid
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
 # greenlight2pnw/greenlead2pnw: pure standstill->release detector + release-cause classifier
 # (sunnypilot mechanics + FrogPilot arming/lead rules — attribution in green_light.py).
@@ -122,15 +123,14 @@ CES_ARCHIVE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 # event records with a garbage wall clock until NTP/GPS sync (a 2025-11-25-stamped record polluted
 # the 2026-07-12 gap analysis). Records written before the clock is plausibly valid are MARKED
 # (never dropped — the data is still real, only the timestamp is not).
-CLOCK_VALID_EPOCH = 1577836800.0   # 2020-01-01T00:00Z
+# clockvalid2pnw: "plausibly valid" was "after 2020", but before sync the clock reads systemd's build date
+# (2026-07-28 on AGNOS 19.7), not 1970, so those records went out unmarked. It is now the shared
+# time_helpers.wall_time_valid (systemd's mtime + 1 day, as upstream's system_time_valid()).
 
 
 def clock_bad(t_wall: float) -> bool:
-  """True when the wall clock is obviously pre-sync (dead-RTC boot). Pure."""
-  try:
-    return float(t_wall) < CLOCK_VALID_EPOCH
-  except (TypeError, ValueError):
-    return True
+  """True when the wall clock is pre-sync (dead-RTC boot) or not a number. Never raises."""
+  return not wall_time_valid(t_wall)
 
 
 def prune_ces_archive(archive_dir: str | None = None, max_bytes: int | None = None) -> int:
@@ -192,7 +192,9 @@ def _archive_dest(archive_dir: str, base: str, mtime: float) -> str:
   # Name by the file's own mtime (when it last rotated out of live), not by "now": the archive is
   # then sorted by content time, which is what prune_ces_archive's oldest-first eviction needs.
   stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(mtime))
-  if mtime < CLOCK_VALID_EPOCH:
+  if clock_bad(mtime):
+    # clockvalid2pnw: "pre-sync" = time_helpers.wall_time_valid; a plain pre-2020 check let the pre-sync
+    # 2026-07-28 through, so those generations were named by a date that never happened.
     # ceslogup2pnw (Fable 2026-09-16): the 3X's RTC battery is dead, so every cold boot stamps
     # pre-NTP files 1970. The `.N` collision loop below only disambiguates while the EARLIER file
     # still exists -- and prune_ces_archive sorts by mtime, so 1970 files are always the first

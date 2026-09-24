@@ -14,19 +14,19 @@ import shutil
 import time
 
 from openpilot.common.swaglog import cloudlog
-
-# Same value as ces_pnw.CLOCK_VALID_EPOCH. The 3X's RTC battery is dead: a cold boot reads 1970 until
-# NTP/GPS sync, so an mtime before this is not a time.
-CLOCK_VALID_EPOCH = 1577836800.0   # 2020-01-01T00:00Z
+# clockvalid2pnw: "is this mtime a real time" is time_helpers.wall_time_valid, shared with ces_pnw, the
+# uploader and the curve-DB shadow. The 3X's RTC is dead: before NTP/GPS sync the clock reads systemd's build
+# date (2026-07-28 on AGNOS 19.7), which a plain "after 2020" check took for real.
+from openpilot.common.time_helpers import wall_time_valid
 
 
 def archive_name(archive_dir: str, base: str, mtime: float) -> str:
   """`<archive_dir>/<base>.<UTC mtime stamp>`, unique in `archive_dir`. Named by content time so the
-  uploader's lexical oldest-first walk is chronological. A pre-2020 mtime gets a random `.b<hex>`
+  uploader's lexical oldest-first walk is chronological. An untrusted (pre-sync) mtime gets a random `.b<hex>`
   token (a reused name is a silent S3 overwrite AND inherits the old file's upload xattr memo in
   xattr_cache); a same-second collision gets `.N`."""
   stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(mtime))
-  if mtime < CLOCK_VALID_EPOCH:
+  if not wall_time_valid(mtime):
     stamp = f"{stamp}.b{os.urandom(4).hex()}"
   dest = os.path.join(archive_dir, f"{base}.{stamp}")
   n = 1
@@ -57,7 +57,7 @@ def snapshot_into_archive(src: str, archive_dir: str, base: str) -> str | None:
   unless a snapshot of this exact content already exists there.
 
   "Exact content" = the same mtime stamp: the name is `<base>.<mtime stamp>`, so an unchanged file
-  maps to a name that is already present and nothing is copied. A pre-2020 mtime cannot be deduplicated
+  maps to a name that is already present and nothing is copied. An untrusted mtime cannot be deduplicated
   that way (and cannot be named uniquely without a random token), so it is skipped and SAID.
 
   Written to a dot-prefixed temp name and renamed, so the uploader (which requires `<base>.` as the
@@ -69,8 +69,8 @@ def snapshot_into_archive(src: str, archive_dir: str, base: str) -> str | None:
   except OSError as e:
     cloudlog.error(f"pnw_log_archive: cannot stat {src} ({type(e).__name__}) -- NOT snapshotted")
     return None
-  if st.st_mtime < CLOCK_VALID_EPOCH:
-    cloudlog.warning(f"pnw_log_archive: {src} has a pre-2020 mtime ({st.st_mtime}) -- NOT snapshotted this " +
+  if not wall_time_valid(st.st_mtime):
+    cloudlog.warning(f"pnw_log_archive: {src} has an untrusted (pre-sync) mtime ({st.st_mtime}) -- NOT snapshotted this " +
                      "time; it will be once a write lands with a synced clock")
     return None
   stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(st.st_mtime))

@@ -11,9 +11,15 @@ import pytest
 
 from openpilot.system.location_services import location_servicesd as ls
 from openpilot.common import pnw_log_archive
+from openpilot.common.tests.test_clockvalid2pnw import FAKE_PRESYNC, pin_device_floor
 
 DAY1 = 1789000000.0          # 2026-09-10T00:26:40Z
 DAY2 = DAY1 + 86400
+
+
+@pytest.fixture(autouse=True)
+def _device_floor(monkeypatch):
+  pin_device_floor(monkeypatch)
 
 
 @pytest.fixture
@@ -57,6 +63,23 @@ def test_the_size_cap_still_rotates_within_a_day(tmp_path, monkeypatch):
 def test_a_dead_clock_never_triggers_the_day_rotation(tmp_path):
   live = _live(tmp_path, mtime=60.0)
   assert ls.rotate_net_log(str(live), DAY2, str(tmp_path / "arc")) is False
+
+
+def test_a_pre_sync_2026_07_28_mtime_never_triggers_the_day_rotation(tmp_path):
+  """clockvalid2pnw: the unsynced 3X reads 2026-07-28, not 1970; against a synced "now" that looked
+  like an old day, so the first write after sync rotated -- and named the generation 20260728T150525Z."""
+  live = _live(tmp_path, mtime=FAKE_PRESYNC)
+  assert ls.rotate_net_log(str(live), DAY2, str(tmp_path / "arc")) is False
+  assert ls.rotate_net_log(str(live), FAKE_PRESYNC + 86400, str(tmp_path / "arc")) is False
+
+
+def test_a_pre_sync_generation_that_does_rotate_is_named_randomly(tmp_path, monkeypatch):
+  monkeypatch.setattr(ls, "NET_EVENT_LOG_MAX_BYTES", 10)     # the size cap still applies before sync
+  live = _live(tmp_path, "x" * 11, mtime=FAKE_PRESYNC)
+  arc = tmp_path / "arc"
+  assert ls.rotate_net_log(str(live), FAKE_PRESYNC + 60, str(arc)) is True
+  (name,) = os.listdir(arc)
+  assert name.startswith("net_events.jsonl.20260728T150525Z.b"), name
 
 
 def test_a_legacy_unarchived_generation_1_is_rescued_before_it_is_overwritten(tmp_path):

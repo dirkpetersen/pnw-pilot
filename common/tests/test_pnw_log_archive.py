@@ -6,9 +6,15 @@ import pathlib
 import pytest
 
 from openpilot.common import pnw_log_archive as a
+from openpilot.common.tests.test_clockvalid2pnw import FAKE_PRESYNC, pin_device_floor
 
 GOOD = 1789000000.0      # 2026-09-10T00:26:40Z
 STAMP = "20260910T002640Z"
+
+
+@pytest.fixture(autouse=True)
+def _device_floor(monkeypatch):
+  pin_device_floor(monkeypatch)
 
 
 @pytest.fixture
@@ -29,6 +35,13 @@ def test_the_name_is_the_mtime_stamp_and_a_dead_clock_gets_a_random_token(tmp_pa
   assert os.path.basename(a.archive_name(str(tmp_path), "b", GOOD)) == f"b.{STAMP}"
   bad = os.path.basename(a.archive_name(str(tmp_path), "b", 60.0))
   assert bad.startswith("b.19700101T000100Z.b") and len(bad) == len("b.19700101T000100Z.b") + 8
+
+
+def test_the_pre_sync_2026_07_28_clock_gets_the_random_token_too(tmp_path):
+  """clockvalid2pnw: the unsynced 3X reads systemd's build date, not 1970. A 2020 floor named a real
+  net_archive generation `net_events.jsonl.20260728T150525Z` -- a date that never happened."""
+  bad = os.path.basename(a.archive_name(str(tmp_path), "b", FAKE_PRESYNC))
+  assert bad.startswith("b.20260728T150525Z.b") and len(bad) == len("b.20260728T150525Z.b") + 8, bad
 
 
 def test_link_is_a_hardlink_not_a_copy(tmp_path):
@@ -60,7 +73,14 @@ def test_snapshot_is_a_copy_and_is_not_repeated_for_unchanged_content(tmp_path):
 def test_snapshot_of_a_dead_clock_file_is_skipped_and_said(tmp_path, said):
   src = _f(tmp_path / "obs.jsonl", mtime=60.0)
   assert a.snapshot_into_archive(str(src), str(tmp_path / "arc"), "obs.jsonl") is None
-  assert any("pre-2020" in s for s in said["warning"])
+  assert any("untrusted (pre-sync) mtime" in s for s in said["warning"])
+
+
+def test_snapshot_of_a_pre_sync_2026_07_28_file_is_skipped_and_said(tmp_path, said):
+  src = _f(tmp_path / "obs.jsonl", mtime=FAKE_PRESYNC)
+  assert a.snapshot_into_archive(str(src), str(tmp_path / "arc"), "obs.jsonl") is None
+  assert not (tmp_path / "arc").exists()
+  assert any("untrusted (pre-sync) mtime" in s for s in said["warning"])
 
 
 def test_a_missing_source_is_a_quiet_none(tmp_path, said):

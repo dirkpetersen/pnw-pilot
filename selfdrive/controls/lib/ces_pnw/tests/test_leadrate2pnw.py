@@ -42,6 +42,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from openpilot.common.time_helpers import wall_time_valid
 from openpilot.selfdrive.controls.lib.ces_pnw import park_tick_gate
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -119,7 +120,7 @@ def _attr_assign(src, tree, attr, value_pred, allow_duplicates=False):
 def _ces_pnw_globals():
   src, tree = _parse(CES_PNW_PATH)
   ns = {"time": time, "math": math}
-  exec(compile(_extract_module_assign(src, tree, "CLOCK_VALID_EPOCH"), "<epoch>", "exec"), ns)
+  ns["wall_time_valid"] = wall_time_valid   # clock_bad() delegates to the shared helper (clockvalid2pnw)
   exec(compile(_extract_func(src, tree, "clock_bad"), "<clock_bad>", "exec"), ns)
   exec(compile(_extract_func(src, tree, "_ach_lat"), "<ach_lat>", "exec"), ns)
   pts_src = _extract_module_assign(src, tree, "_COMPASS_PTS")
@@ -701,7 +702,7 @@ def test_steer_event_step_passes_through_peak_cmd_and_act_rate():
   import json
   src, tree = _parse(CES_PNW_PATH)
   ns = {"time": time, "json": json, "math": math}
-  exec(compile(_extract_module_assign(src, tree, "CLOCK_VALID_EPOCH"), "<epoch>", "exec"), ns)
+  ns["wall_time_valid"] = wall_time_valid   # clock_bad() delegates to the shared helper (clockvalid2pnw)
   exec(compile(_extract_func(src, tree, "clock_bad"), "<clock_bad>", "exec"), ns)
   exec(compile(_extract_func(src, tree, "_nearest_bearing"), "<nearest_bearing>", "exec"), ns)
   pts_src = _extract_module_assign(src, tree, "_COMPASS_PTS")

@@ -235,8 +235,22 @@ class TestL2ShadowModuleIsSealed:
   # cesarchive2pnw added openpilot.common.pnw_log_archive (the per-boot upload snapshot of the corpus).
   # It is allowed ONLY because it is itself sealed the same way -- stdlib + swaglog, nothing that can
   # publish or actuate; test_the_archive_helper_is_sealed_too pins that, so this cannot become a hole.
+  # clockvalid2pnw added openpilot.common.time_helpers (wall_time_valid: is a timestamp pre-sync), to both
+  # this module and pnw_log_archive. Same terms: test_the_clock_helper_is_sealed_too pins that it imports
+  # only the stdlib and swaglog.
   ALLOWED_OPENPILOT_IMPORTS = {"openpilot.common.swaglog", "openpilot.tools.curvedb.store",
-                               "openpilot.common.pnw_log_archive"}
+                               "openpilot.common.pnw_log_archive", "openpilot.common.time_helpers"}
+
+  def test_the_clock_helper_is_sealed_too(self):
+    helper = _repo_root() / "common" / "time_helpers.py"
+    assert helper.is_file(), helper          # an absent file would make this loop check nothing
+    for node in ast.walk(_tree(helper)):
+      mods = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+             [node.module or ""] if isinstance(node, ast.ImportFrom) else []
+      for mod in mods:
+        root = mod.split(".")[0]
+        assert root in ("datetime", "functools", "math", "pathlib") or mod == "openpilot.common.swaglog", \
+          f"time_helpers imports {mod!r} -- curvedb_shadow's seal depends on it importing nothing else"
 
   def test_the_archive_helper_is_sealed_too(self):
     helper = _repo_root() / "common" / "pnw_log_archive.py"
@@ -246,7 +260,7 @@ class TestL2ShadowModuleIsSealed:
              [node.module or ""] if isinstance(node, ast.ImportFrom) else []
       for mod in mods:
         root = mod.split(".")[0]
-        assert root in ("os", "shutil", "time") or mod == "openpilot.common.swaglog", \
+        assert root in ("os", "shutil", "time") or mod in ("openpilot.common.swaglog", "openpilot.common.time_helpers"), \
           f"pnw_log_archive imports {mod!r} -- curvedb_shadow's seal depends on it importing nothing else"
 
   def test_it_imports_nothing_from_the_control_stack(self):

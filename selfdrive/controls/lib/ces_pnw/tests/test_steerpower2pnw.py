@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from openpilot.common.constants import CV   # imports cleanly standalone (no cereal pull-in), verified below
+from openpilot.common.time_helpers import wall_time_valid   # clock_bad() delegates to it; stdlib-only import
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 CES_PNW_PATH = REPO_ROOT / "selfdrive/controls/lib/ces_pnw/ces_pnw.py"
@@ -438,8 +439,7 @@ def test_heading_if_fixed_gates_on_gps_valid_not_bearing_value():
 def _steer_event_harness_globals():
   src, tree = _parse(CES_PNW_PATH)
   ns = {"time": time, "json": json, "math": math}
-  # clock_bad() reads the module-level CLOCK_VALID_EPOCH constant -- real source, not invented.
-  exec(compile(_extract_module_assign(src, tree, "CLOCK_VALID_EPOCH"), "<epoch>", "exec"), ns)
+  ns["wall_time_valid"] = wall_time_valid   # clock_bad() delegates to the shared helper (clockvalid2pnw)
   exec(compile(_extract_func(src, tree, "clock_bad"), "<clock_bad>", "exec"), ns)
   exec(compile(_extract_func(src, tree, "_nearest_bearing"), "<nearest_bearing>", "exec"), ns)
   pts_src = _extract_module_assign(src, tree, "_COMPASS_PTS")

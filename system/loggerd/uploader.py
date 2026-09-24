@@ -20,6 +20,7 @@ from openpilot.common.realtime import set_core_affinity
 from openpilot.system.hardware.hw import Paths
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.time_helpers import wall_time_valid
 
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
@@ -92,7 +93,7 @@ PNW_LOG_SOURCES: tuple[tuple[str, str, str], ...] = (
 )
 # The archive names each generation by its own mtime (ces_events.jsonl.20260916T191100Z, with a .N
 # suffix while a same-second file is still present, and a random `.b<hex>` token when the clock is
-# pre-2020), so these keys do not collide in S3.
+# untrusted -- time_helpers.wall_time_valid), so these keys do not collide in S3.
 #
 # That last clause is load-bearing and was NOT true at first (Fable 2026-09-16). The gateway presigns
 # a plain put_object with no IfNoneMatch, so it returns no 412 and a repeated key silently
@@ -101,7 +102,7 @@ PNW_LOG_SOURCES: tuple[tuple[str, str, str], ...] = (
 # evicts first, freeing the name. Worse than the overwrite: xattr_cache memoises "uploaded" against
 # the PATH, so inside one uploader process a reused name inherits the previous file's b'1' and is
 # never sent at all. Fixed in archive_rotated_generation, not here, because that is where the name
-# is chosen; see the CLOCK_VALID_EPOCH branch there.
+# is chosen; see the clock_bad branch there.
 #
 # Uploaded as .zst: do_upload compresses on the fly whenever the KEY ends in .zst and the file does
 # not, and this is plain JSONL -- ~10x off a 20 MB generation, which is the difference between a
@@ -123,9 +124,10 @@ PNW_LOG_METERED_DAILY_BYTES = 50 * 1024 * 1024
 # no byte is ever sent that the file does not already account for. Unreadable/corrupt -> the day is
 # treated as EXHAUSTED (fail closed) and the file is rewritten that way, so it self-heals next day.
 METERED_BUDGET_PATH = "/data/pnw/metered_budget.json"
-# Without a trustworthy clock there is no "today", so no budget: metered uploads stop. Same epoch as
-# ces_pnw.CLOCK_VALID_EPOCH (the 3X's RTC is dead; a cold boot reads 1970 until NTP/GPS sync).
-METERED_CLOCK_VALID_EPOCH = 1577836800.0
+# Without a trustworthy clock there is no "today", so no budget: metered uploads stop. "Trustworthy" is
+# time_helpers.wall_time_valid, shared with ces_pnw (clockvalid2pnw). It was a 2020 epoch, but the 3X's
+# dead RTC makes an unsynced boot read systemd's build date (2026-07-28), which passed it: a pre-sync
+# metered upload would have been counted against that fake, fresh day -- up to one extra 50 MB per boot.
 # Priority when the budget is short: each tier drains (oldest first) before the next is considered.
 # "boot/" is the log root's boot directory -- the ONLY log-root files exempted on metered.
 METERED_ORDER: tuple[str, ...] = ("ces_events.jsonl.", "curvedb_obs.jsonl.", "boot/", "net_events.jsonl.")
@@ -668,7 +670,7 @@ class Uploader:
   def _metered_today(self) -> str | None:
     """The Pacific date, or None when it cannot be trusted (then metered uploads stop, and say so)."""
     now = time.time()  # noqa: TID251 -- the budget is per calendar day; wall clock by definition
-    if now < METERED_CLOCK_VALID_EPOCH:
+    if not wall_time_valid(now):
       self._pnw_log_note("metered_clock_invalid")   # change-only: no per-call value in the key
       return None
     try:

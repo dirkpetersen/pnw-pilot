@@ -12,6 +12,7 @@ import zoneinfo
 
 import pytest
 
+from openpilot.common.tests.test_clockvalid2pnw import FAKE_PRESYNC, pin_device_floor
 from openpilot.system.loggerd import uploader
 from openpilot.system.loggerd.uploader import PNW_LOG_METERED_DAILY_BYTES as CAP, Uploader
 
@@ -48,6 +49,7 @@ def env(tmp_path, monkeypatch):
   monkeypatch.setattr(uploader, "PNW_LOG_SOURCES", tuple((str(d), "pnwlogs", w) for w, d in arc.items()))
   monkeypatch.setattr(uploader, "METERED_BUDGET_PATH", str(tmp_path / "metered_budget.json"))
   monkeypatch.setattr(uploader.time, "time", lambda: NOW)
+  pin_device_floor(monkeypatch)        # clockvalid2pnw: NOW must not depend on this host's systemd date
   marks = {}
   monkeypatch.setattr(uploader, "getxattr", lambda fn, a: marks.get(fn))
   monkeypatch.setattr(uploader, "setxattr", lambda fn, a, v: marks.__setitem__(fn, v))
@@ -179,6 +181,23 @@ class TestTheDay:
     assert u.step_metered(1) is None and u.sent == []
     assert any(kw.get("state") == "metered_clock_invalid" for _, kw in env["events"])
     assert not (env["tmp"] / "metered_budget.json").exists(), "an untrusted day must not be written"
+
+  def test_the_pre_sync_2026_07_28_clock_blocks_metered_uploads_too(self, env, monkeypatch):
+    """clockvalid2pnw: an unsynced AGNOS 19.7 boot reads systemd's build date, 2026-07-28, not 1970. A 2020
+    floor let it through, so a pre-sync metered upload counted against that fake, fresh day -- one extra
+    50 MB. Nothing may go, the reason is said once, and no budget day is written."""
+    _put(env["arc"]["ces_events.jsonl."], "ces_events.jsonl.20260901T000000Z", 1000)
+    monkeypatch.setattr(uploader.time, "time", lambda: FAKE_PRESYNC)
+    u = _uploader(env)
+    assert u.step_metered(1) is None and u.sent == []
+    assert u.step_metered(1) is None and u.sent == []
+    notes = [kw for _, kw in env["events"] if kw.get("state") == "metered_clock_invalid"]
+    assert len(notes) == 1, f"change-only: said once, not per call ({notes})"
+    assert not (env["tmp"] / "metered_budget.json").exists(), "an untrusted day must not be written"
+    # ...and once the clock syncs, the same uploader sends (or this proves only that the harness is broken)
+    monkeypatch.setattr(uploader.time, "time", lambda: NOW)
+    assert u.step_metered(1) is True and len(u.sent) == 1
+    assert _budget(env)["date"] == TODAY_PT
 
 
 class TestFailClosed:
