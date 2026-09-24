@@ -10,7 +10,7 @@ Pinned here, each by a test that fails if the rule is broken:
   * every restore guard still applies after the lift: the curve-clear debounce, the in-curve deferral, the posted-limit
     zone cap (a limit drop DURING the press included), the curve-ahead hold, never above the ceiling;
   * no restore when the driver took the set over: SET+/RES/SET- during or after the press, brake, ACC off, a set already
-    at the ceiling, a press longer than the restore window;
+    at the ceiling, a press longer than ICBM_GAS_RESUME_MAX_S (120 s, gaswin2pnw -- was the 45 s restore window);
   * one late SET- tap of our own landing after the press is absorbed, a second is the driver;
   * change-only logging, never per tick; the Tesla (gas_resume False) exactly as before; the fields reach the record.
 """
@@ -21,6 +21,7 @@ import pytest
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (ICBM_EXEC_STEP_MS, ICBM_RATCHET_CONFIRM_S,
                                                               ICBM_RESTORE_DELAY_S, ICBM_RESTORE_WINDOW_S, IcbmEpisode)
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw_constants import ICBM_GAS_RESUME_MAX_S
 from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_ces_record_fields import _record
 
 MPH = 0.44704
@@ -207,10 +208,34 @@ class TestTheDriverOwnsTheSet:
     d.tick(cap=CAP, stock=CEIL, gas=True)
     assert d.ep.phase == "idle" and d.ep.gas_res == "no:atCeiling"
 
-  def test_a_press_longer_than_the_restore_window_declines(self):
+  def test_a_press_longer_than_the_gas_resume_max_declines(self):
     d = _capped()
-    d.secs(ICBM_RESTORE_WINDOW_S + 1.0, gas=True)
+    d.secs(ICBM_GAS_RESUME_MAX_S + 1.0, gas=True)
     assert d.ep.phase == "idle" and d.ep.gas_res == "no:gasLong"
+
+  def test_gas_resume_max_is_its_own_longer_limit(self):
+    """gaswin2pnw (owner 2026-09-24): the press limit is 120 s, separate from (and longer than) the 45 s restore window."""
+    assert ICBM_GAS_RESUME_MAX_S == 120.0
+    assert ICBM_RESTORE_WINDOW_S == 45.0
+
+  def test_a_press_past_the_old_45_s_window_still_restores_after_the_lift(self):
+    d = _capped()
+    d.secs(ICBM_RESTORE_WINDOW_S + 5.0, gas=True)
+    assert d.ep.phase == "gas" and d.ep.gas_res == "hold"
+    d.out.clear()
+    assert _restores(d)
+
+  def test_boundary_119_s_restores_121_s_declines(self):
+    d = _capped()
+    d.secs(119.0, gas=True)
+    assert d.ep.phase == "gas" and d.ep.gas_res == "hold"
+    d.out.clear()
+    assert _restores(d) and d.ep.restore_why == "afterGas"
+    d2 = _capped()
+    d2.secs(121.0, gas=True)
+    assert d2.ep.phase == "idle" and d2.ep.gas_res == "no:gasLong"
+    d2.out.clear()
+    assert not _restores(d2)
 
   def test_our_own_late_SET_minus_tap_is_absorbed_once(self):
     """The executor stops pressing the instant the pedal goes down, but its last tap is reported ~1 s late."""

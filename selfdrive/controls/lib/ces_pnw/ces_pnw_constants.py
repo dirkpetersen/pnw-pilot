@@ -497,6 +497,13 @@ ICBM_RESTORE_LIMIT_RISE_HOLD_S = 3.0           # a HIGHER limit must persist thi
                                                # as ICBM_FLOOR_RISE_HOLD_S: flicker and a real 5 mph
                                                # step are the same size; only persistence separates them)
 ICBM_RESTORE_LIMIT_STALE_S = 30.0              # how long an UNKNOWN reading keeps the last known limit
+# gaswin2pnw (owner decision 2026-09-24, Fable terwilliger2pnw finding 4): the longest a driver GAS press may last and
+# still restore to the pre-curve ceiling after the lift (terwilliger2pnw). It used to reuse ICBM_RESTORE_WINDOW_S
+# (45 s), so a long press on open road declined ("gasLong") and left the set stuck at the curve cap. Longer is safe
+# because the ceiling does not go stale during the press: note_limit / note_sa_zone keep the posted-limit and zone cap
+# fresh every tick, and after the lift the ordinary restore runs with every restore guard. ICBM_RESTORE_WINDOW_S
+# (ces_pnw.py) is unchanged for every other use.
+ICBM_GAS_RESUME_MAX_S = 120.0
 _ICBM_RCAP_ERR_LOG_S = 30.0                    # throttle for the failure log below (~4 Hz caller)
 _icbm_rcap_err_last = -1e9
 

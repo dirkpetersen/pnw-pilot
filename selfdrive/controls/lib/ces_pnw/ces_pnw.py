@@ -2867,7 +2867,7 @@ class IcbmEpisode:
     on open road, and the driver pressed SET+ 14 times. Now the pre-curve ceiling is KEPT through the press; once the
     gas lifts the episode re-enters its cap phase and the ordinary restore follows, with every restore guard.
     Declined (the episode ends, no restore, as before): the set was moved by the driver, it is already at/above the
-    ceiling, or the press outlasts the restore window. A brake or ACC off is handled by the caller (ends everything)."""
+    ceiling, or the press outlasts C.ICBM_GAS_RESUME_MAX_S (120 s, gaswin2pnw). A brake or ACC off is handled by the caller (ends everything)."""
     if self._gas_t0 is None:
       if self.phase not in ("cap", "restore") or self.ceiling is None:
         return False                    # no episode: exactly as before
@@ -2883,7 +2883,7 @@ class IcbmEpisode:
       self._after_gas = False
       self._gas_note("hold", None, stock_set)
       return True
-    why = self._gas_moved(now, stock_set) or ("gasLong" if now - self._gas_t0 > self._window_s else None)
+    why = self._gas_moved(now, stock_set) or ("gasLong" if now - self._gas_t0 > C.ICBM_GAS_RESUME_MAX_S else None)
     if why is not None:
       self._gas_decline(why, stock_set)
       return False
