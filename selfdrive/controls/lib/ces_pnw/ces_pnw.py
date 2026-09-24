@@ -2159,8 +2159,12 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   # op-long byte-identical. The 3 that WERE stock-ACC are analysed in docs/pnw/ICBMSLOW2PNW.md:
   # two are vision-sourced (unfloored), the third is map-sourced on one tick of eleven.
   #
-  # VISION candidates get NO floor: icbm_vision_apex is already a physics-derived safe speed
-  # with no map rating behind it, so there is nothing to floor against.
+  # curvefix2pnw Part B: VISION candidates are floored too, at vision's OWN speed for the curve (icbm_vision_apex,
+  # solved at A_LAT_TARGET 2.5 m/s^2 -- the Lightning's lateral target), scaled by icbm_vis_floor_frac (default
+  # 1.0). icbmslow2pnw left vision unfloored ("already a physics-derived safe speed, nothing to floor against"),
+  # which is exactly why the hump could take it BELOW that safe speed: OR-34 2026-09-24 11:19, the camera read the
+  # curve right (~69.2 mph at 2.5), the hump took ~3 mph more (66), and the curve needed 69.9. The pre-penalty
+  # target IS the vision apex here (_icbm_binding_apex returns the apex itself), so the floor is that number.
   # `min(floor, target)` uses the PRE-penalty candidate, so the floor can only ever give back
   # penalty — it can never raise the target above what the curve candidate itself allowed
   # (and that value is already reduce-only vs `ref`). Rain is applied AFTER, so the driver's
@@ -2172,8 +2176,11 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   # over the flat-right penalty is still subtracted, below the floor. Flooring the multiplied
   # penalty instead would make left_factor and descent_gain silently do nothing on every
   # map/far curve the floor touches, which on this corpus is most of them.
-  raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(src, 0.0)
-  map_flr = veh.icbm_map_floor_ms(raw_rating)
+  if src == "vis":
+    map_flr = veh.icbm_vis_floor_ms(target)          # curvefix2pnw Part B
+  else:
+    raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(src, 0.0)
+    map_flr = veh.icbm_map_floor_ms(raw_rating)
   pen_base = veh.curve_speed_penalty_ms(target)
   pen_full = veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
                                         is_left=is_left)
@@ -4139,6 +4146,7 @@ class CESController:
     # _load_curve_config itself: PnwVehicle is constructed by UI code too, repeatedly.
     if veh.lightning_curve_slow:
       cloudlog.event("ces_icbm_map_floor_cfg", frac=veh._curve_cfg["icbm_map_floor_frac"],
+                     vis_frac=veh._curve_cfg["icbm_vis_floor_frac"],     # curvefix2pnw Part B
                      map_scale=veh.icbm_map_scale, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
     self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
     self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
@@ -6161,6 +6169,7 @@ class CESController:
       "icbmFlr": round(float(self._icbm_floor_lim), 1), "icbmFlrHit": bool(self._icbm_floor_hit),
       # icbmslow2pnw: the map-rating floor bounding the Lightning curve penalty on a MAP/FAR
       # candidate (m/s; 0.0 = no floor this tick) and whether it actually raised the target.
+      # curvefix2pnw Part B: on icbmSrc=vis ticks this is VISION's own 2.5 m/s^2 speed (the vision floor).
       "icbmMapFlr": round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2),
       "icbmMapFlrHit": bool(getattr(self, "_icbm_map_flr_hit", False)),
       # curvefix2pnw: the turn direction the penalty's left factor used (None = no target this tick) and its source

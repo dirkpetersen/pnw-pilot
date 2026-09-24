@@ -417,10 +417,15 @@ def test_icbm_descent_lowers_target_like_vtsc(tmp_path, monkeypatch):
   t_down = _published_target(step, mgr, _vis_sig(29.0, +3.474, pitch=-0.05))
   assert t_flat is not None and t_down is not None
   assert t_down < t_flat                          # descent -> enter the curve slower (right curve)
-  # exactly the shared formula: 1.4x the flat penalty at a 5% grade
+  # exactly the shared formula: 1.4x the flat penalty at a 5% grade. curvefix2pnw Part B: the vision floor gives
+  # the BASE hump back (the target may not go below vision's own 2.5 m/s^2 apex), so what remains below the apex is
+  # the descent EXTRA only -- the part mapd's/vision's curve speed does not know about.
   veh = mgr._veh
   apex = 29.0 * math.sqrt(VTSC_A_LAT / 3.474)
-  assert abs((apex - t_down) - veh.curve_speed_penalty_ms(apex, pitch_rad=-0.05)) < 0.02
+  extra = veh.curve_speed_penalty_ms(apex, pitch_rad=-0.05) - veh.curve_speed_penalty_ms(apex)
+  assert extra > 0.5
+  assert abs((apex - t_down) - extra) < 0.02
+  assert abs(t_flat - apex) < 0.02                # flat right-hander: the floor gives the whole hump back
 
 
 def test_icbm_left_curve_penalized_more(tmp_path, monkeypatch):
@@ -493,8 +498,19 @@ def test_parity_vtsc_and_icbm_apply_identical_penalty(tmp_path, monkeypatch):
   vtsc_adjusted = ctrl.msg["vCurveSafe"]
 
   # --- ICBM side: same apex via vision (29*sqrt(2.5/3.474) = 24.6), same pitch, LEFT ---
+  # curvefix2pnw Part B: with the vision floor OFF the two are still literally the same shared penalty function.
+  veh_nf = PnwVehicle(FakeCPA(LIGHTNING, "ford"))
+  veh_nf._curve_cfg = dict(veh_nf._curve_cfg, icbm_vis_floor_frac=0.0)
+  mgr, step = _icbm_stub(veh_nf)
+  icbm_unfloored = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=-0.05))
+  assert icbm_unfloored is not None
+  assert abs(vtsc_adjusted - icbm_unfloored) < 0.02   # literally the same shared penalty function
+
+  # With the shipped floor ON (stock ACC only), ICBM deliberately sits ABOVE VTSC by exactly the base hump: the
+  # floor gives the base hump back and keeps the descent + left extras. VTSC (op-long) is NOT floored -- a known,
+  # deliberate divergence (curvefix2pnw Part B is scoped to ICBM; op-long is off on the Lightning today).
   mgr, step = _icbm_stub(PnwVehicle(FakeCPA(LIGHTNING, "ford")))
   icbm_adjusted = _published_target(step, mgr, _vis_sig(29.0, -3.474, pitch=-0.05))
-
+  apex = 29.0 * math.sqrt(VTSC_A_LAT / 3.474)
   assert icbm_adjusted is not None
-  assert abs(vtsc_adjusted - icbm_adjusted) < 0.02   # literally the same shared penalty function
+  assert abs((icbm_adjusted - vtsc_adjusted) - mgr._veh.curve_speed_penalty_ms(apex)) < 0.02

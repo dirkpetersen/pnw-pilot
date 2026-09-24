@@ -152,3 +152,100 @@ def test_direction_clears_on_a_tick_without_a_target():
   assert mgr._icbm_left_src == "vis"
   assert _published_target(step, mgr, _vis_sig(33.0, 0.0)) is None
   assert (mgr._icbm_left, mgr._icbm_left_src) == (None, None)
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Part B: a vision candidate may not be penalised below vision's own 2.5 m/s^2 speed for the curve
+# --------------------------------------------------------------------------------------------------------------------
+# The three icbmSrc=vis ticks of OR-34 2026-09-24 (ces_events, PT): (time, vEgo m/s, visLat m/s^2, logged icbmT m/s).
+OR34_VIS_TICKS = [("11:19:12.2", 32.7, 2.79, 29.63), ("11:19:13.2", 32.3, 2.72, 29.52), ("11:19:14.2", 31.6, 2.59, 29.64)]
+OR34_NEED_MPH = 69.9      # the curve's measured k 0.00256 at 2.5 m/s^2
+
+
+@pytest.mark.parametrize("pt,v,lat,logged", OR34_VIS_TICKS)
+def test_or34_vision_target_is_vision_own_speed(pt, v, lat, logged):
+  """The complaint: set 80 -> 66 on a curve that needed 69.9. Vision's own 2.5 m/s^2 speed was ~69.2 mph; the
+  hump (x the wrong left factor) took it to ~66. Now: exactly vision's own speed (a right-hander, pitch uphill ->
+  no left, no descent extra)."""
+  apex = v * math.sqrt(m.VTSC_A_LAT / lat)
+  sig = _vis_sig(v, lat, pitch=0.015)                 # measured pitch +0.010 .. +0.021 (uphill)
+  new, flr, hit, is_left, _ = m.icbm_penalise(_veh(), [], apex, "vis", sig, LAT, LON, float("inf"), 0.0)
+  assert is_left is False
+  assert new == pytest.approx(apex, abs=1e-6)
+  assert flr == pytest.approx(apex) and hit is True
+  assert 69.0 < new / MPH < OR34_NEED_MPH + 0.5
+  # the pre-curvefix model (left factor on this right-hander, no floor) reproduces the logged ~66 mph
+  veh0 = _veh()
+  old = apex - veh0.curve_speed_penalty_ms(apex, pitch_rad=0.015, is_left=True)
+  assert old / MPH == pytest.approx(logged / MPH, abs=0.6), f"{pt}: model {old / MPH:.2f} vs logged {logged / MPH:.2f}"
+
+
+def test_vis_floor_frac_zero_is_the_off_switch():
+  for lat in (2.2, 2.6, 3.0, 3.5, -2.6, -3.5):
+    for pitch in (None, 0.0, -0.05):
+      v = 30.0
+      apex = v * math.sqrt(m.VTSC_A_LAT / abs(lat))
+      veh = _veh(icbm_vis_floor_frac=0.0)
+      t, flr, hit, is_left, _ = m.icbm_penalise(veh, [], apex, "vis", _vis_sig(v, lat, pitch=pitch), LAT, LON,
+                                                float("inf"), 0.0)
+      assert flr == 0.0 and hit is False
+      assert t == pytest.approx(max(apex - veh.curve_speed_penalty_ms(apex, pitch_rad=pitch, is_left=is_left), 0.0))
+
+
+def test_left_and_descent_extras_still_bite_below_the_vision_floor():
+  """The floor bounds the BASE hump only (as the map floor does): a left curve on a descent still comes in below
+  vision's own speed, by exactly the multiplier extras."""
+  veh = _veh()
+  v, lat, pitch = 30.0, -3.0, -0.05                   # LEFT (lat < 0), 5 % downhill
+  apex = v * math.sqrt(m.VTSC_A_LAT / abs(lat))
+  t, *_ = m.icbm_penalise(veh, [], apex, "vis", _vis_sig(v, lat, pitch=pitch), LAT, LON, float("inf"), 0.0)
+  extra = veh.curve_speed_penalty_ms(apex, pitch_rad=pitch, is_left=True) - veh.curve_speed_penalty_ms(apex)
+  assert extra > 1.0
+  assert t == pytest.approx(apex - extra, abs=1e-6)
+
+
+def test_vision_floor_is_reduce_only_and_never_changes_candidacy():
+  """Through the real _icbm_step: the floored target is never above the candidate or the set, never below the
+  unfloored one, and binds exactly when the unfloored one binds."""
+  on, off = _veh(), _veh(icbm_vis_floor_frac=0.0)
+  checked = 0
+  for v_set in (25.0, 30.0, 35.0):
+    for lat in (2.0, 2.5, 3.0, 4.0, -2.5, -4.0):
+      for ttc in (3.0, 5.0, 8.0):
+        sig = {**_vis_sig(v_set, lat, ttc=ttc), "v_set": v_set}
+        mgr1, step1 = _icbm_stub(on)
+        mgr0, step0 = _icbm_stub(off)
+        t1, t0 = _published_target(step1, mgr1, sig), _published_target(step0, mgr0, sig)
+        assert (t1 is None) == (t0 is None), "the floor changed whether a vision curve binds"
+        if t1 is None:
+          continue
+        apex = v_set * math.sqrt(m.VTSC_A_LAT / abs(lat))
+        assert t0 - 0.006 <= t1 <= min(apex, v_set) + 0.006      # IcbmTarget is published rounded to 0.01
+        checked += 1
+  assert checked >= 15, f"only {checked} binding cases -- the sweep proves little"
+
+
+def test_vision_floor_is_lightning_only():
+  tesla = _veh("TESLA_MODEL_S_HW3", "tesla")
+  assert tesla.icbm_vis_floor_ms(30.0) == 0.0
+  assert _veh().icbm_vis_floor_ms(30.0) == pytest.approx(30.0)
+  for bad in (None, float("nan"), float("inf"), -5.0, 0.0, "x"):
+    assert _veh().icbm_vis_floor_ms(bad) == 0.0, bad
+
+
+def test_curve_json_clamps_the_vis_fraction(tmp_path, monkeypatch):
+  import json
+  p = tmp_path / "curve.json"
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(p))
+  for written, expect in ((2.0, 1.0), (-1.0, 0.0), (0.5, 0.5), (float("nan"), 1.0)):
+    p.write_text(json.dumps({"lightning": {"icbm_vis_floor_frac": written}}))
+    assert PnwVehicle(FakeCPA(LIGHTNING, "ford"))._curve_cfg["icbm_vis_floor_frac"] == pytest.approx(expect), written
+
+
+def test_map_floor_unchanged_by_the_vision_floor():
+  """A map candidate is still floored at mapd's own rating, not at its (scaled) candidate speed."""
+  veh = _veh()
+  sig = {"v_ego": 26.0, "v_set": 26.0, "map_target_v": 20.0, "map_target_dist": 205.0,
+         "curve_lat_accel_vision": 0.0, "time_to_curve": 10.0, "pitch": None}
+  _, flr, *_ = m.icbm_penalise(veh, [], 22.0, "map", sig, LAT, LON, float("inf"), 0.0)
+  assert flr == pytest.approx(20.0)

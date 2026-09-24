@@ -112,6 +112,14 @@ _CURVE_DEFAULTS = {
   # median 1.41 m/s^2 of lateral accel where mapd's own rating implies 1.67 and the design target is
   # 2.50. This floor restores the pre-08-11 property WITHOUT restoring the pre-08-11 candidacy bug.
   "icbm_map_floor_frac": 1.0,
+  # curvefix2pnw Part B (owner 2026-09-24, OR-34 11:19 "slowed down a little bit too much"): the same floor for a
+  # VISION candidate -- the fraction of vision's OWN speed for the curve (icbm_vision_apex, solved at A_LAT_TARGET
+  # 2.5 m/s^2, the Lightning's lateral target) that the curve penalty may not push the ICBM target below. 1.0 = floor
+  # on (default); 0.0 = the pre-curvefix behaviour. On OR-34 the camera read the curve correctly (visLat 2.72-2.79 at
+  # 72-73 mph = k 0.0026, measured 0.00256), its 2.5 m/s^2 speed was ~69.2 mph, and the hump took ~3 mph more off
+  # (66, while the curve needed 69.9). The owner's rule: slow for a sharp curve, but only to the level required.
+  # Like the map floor it bounds the BASE hump only: the descent and left-factor extras still come off below it.
+  "icbm_vis_floor_frac": 1.0,
   # curvelead2pnw: the lateral load ICBM may let a tracked lead car pace the truck to through a curve
   # (v <= sqrt(this / curvature), curvature = the TIGHTER of map geometry and vision). 2.5 is what the
   # driver himself chose on the 2026-09-13 ramps (2.32 / 2.96 m/s^2 measured). 0.0 turns lead pacing off.
@@ -167,6 +175,7 @@ _CURVE_BOUNDS = {
   # and 0.0 is the documented off switch. A bad config therefore degrades toward "more slowing",
   # never toward "less than mapd asked for".
   "icbm_map_floor_frac": (0.0, 1.0),
+  "icbm_vis_floor_frac": (0.0, 1.0),   # curvefix2pnw: same reasoning -- never above vision's own 2.5 m/s^2 speed
   # curvelead2pnw: [0, 3.0] -- 0 disables lead pacing; the ceiling sits at the driver's own p90 on country
   # roads (2.96 m/s^2): a bad config can never let a lead pace the truck above his own p90.
   "icbm_lead_lat_accel": (0.0, 3.0),
@@ -624,6 +633,22 @@ class PnwVehicle:
     if not math.isfinite(v) or v <= 0.0:
       return 0.0
     return v * self._curve_cfg["icbm_map_floor_frac"]
+
+  def icbm_vis_floor_ms(self, vis_apex) -> float:
+    """curvefix2pnw Part B: the speed (m/s) the Lightning curve penalty may not push an ICBM VISION curve target
+    below -- `icbm_vis_floor_frac` times the vision candidate's OWN pre-penalty speed (icbm_vision_apex, at
+    A_LAT_TARGET 2.5 m/s^2). Same contract as icbm_map_floor_ms: 0.0 (no floor) on every non-Lightning car, for a
+    missing / NaN / non-positive speed, and when the fraction is 0; the caller applies it with min(floor, target)
+    and max(), so it can only give penalty back, never raise a target above the candidate."""
+    if not self.lightning_curve_slow:
+      return 0.0
+    try:
+      v = float(vis_apex)
+    except (TypeError, ValueError):
+      return 0.0
+    if not math.isfinite(v) or v <= 0.0:
+      return 0.0
+    return v * self._curve_cfg["icbm_vis_floor_frac"]
 
   @property
   def curvedb_v2_live(self) -> bool:

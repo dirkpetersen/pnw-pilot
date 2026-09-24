@@ -17,7 +17,7 @@ WHAT IS PINNED HERE
   * the descent guard and the left-curve factor still bite BELOW it (they model risk mapd's rating
     does not contain -- both came from the two downhill-LEFT washouts of 2026-07-11 -- and flooring
     the multiplied penalty would make them silently do nothing);
-  * vision candidates are never floored (no map rating exists to floor against);
+  * vision candidates are never floored by THIS floor (curvefix2pnw added their own, at vision's 2.5 m/s^2 speed);
   * the Tesla and every non-Lightning car are byte-identical;
   * `icbm_map_floor_frac = 0.0` reproduces the pre-change target exactly (the documented off switch);
   * the floor is reduce-only: never above the candidate itself, therefore never above the ceiling;
