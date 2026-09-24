@@ -739,3 +739,93 @@ def test_the_telemetry_reaches_the_real_record():
 
 def test_the_hold_constant_is_the_fast_restore_debounce():
   assert math.isclose(ICBM_RESTORE_HOLD_CLEAR_S, m.ICBM_RESTORE_DELAY_FAST_S)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# restorehold3pnw: Fable's two residuals on 0a5cb972dc. Both LOST a restore (never slowed the truck).
+# ---------------------------------------------------------------------------------------------------------------
+def _restore_running(v=60):
+  """An episode whose restore just published an inc at set `v` toward 75. Returns (ep, t of that tick)."""
+  ep = IcbmEpisode()
+  ep.step(0.0, v * MPH, 75 * MPH, 75 * MPH, True, False)
+  ep.step(1.0, None, v * MPH, v * MPH, True, False)
+  t = 1.0 + ICBM_RESTORE_DELAY_S + 0.1
+  assert ep.step(t, None, v * MPH, v * MPH, True, False, v_ego=v * MPH)[1] == "inc"
+  return ep, t
+
+
+class TestFableResiduals:
+  def test_s2_an_in_curve_tick_between_the_press_and_the_hold_keeps_the_late_tap_grace(self):
+    """Fable sim S2 -- the 21:21:50 shape: an inc tick, then ONE in-curve pause tick, then the hold binds. Our taps
+    pressed on the inc tick are still in flight; the pause tick used to wipe "we were pressing", so the hold opened no
+    grace and 2 late taps reset the episode (restore lost, driver has to raise the set)."""
+    ep, t = _restore_running()
+    assert ep.step(t + DT, None, 60 * MPH, 60 * MPH, True, False, v_ego=60 * MPH, in_curve=True) == (None, None)
+    assert ep.step(t + 2 * DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True) == (None, None)
+    ep.step(t + 3 * DT, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep.phase == "restore", "our own late taps after an in-curve tick reset the held restore"
+    ep.step(t + 3 * DT + 1.5, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH)    # clears; debounce runs
+    pub, d = ep.step(t + 3 * DT + 1.5 + ICBM_RESTORE_HOLD_CLEAR_S + 0.01, None, 63 * MPH, 63 * MPH, True, False,
+                     v_ego=60 * MPH)
+    assert d == "inc" and pub == pytest.approx(75 * MPH)
+
+  def test_s2_the_grace_is_bounded_in_time_not_by_ticks(self):
+    """The press must be RECENT: a hold that binds more than ICBM_LATE_TAP_GRACE_S after the last inc publishes
+    opens no grace (nothing of ours can still be in flight), so 2 extra taps are the driver."""
+    ep, t = _restore_running()
+    for i in range(1, 8):                                         # 1.75 s of in-curve pause after the last press
+      ep.step(t + i * DT, None, 60 * MPH, 60 * MPH, True, False, v_ego=60 * MPH, in_curve=True)
+    t2 = t + 8 * DT
+    ep.step(t2, None, 60 * MPH, 60 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep.step(t2 + DT, None, 62 * MPH, 62 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep.phase == "idle"
+
+  def test_s3_a_curve_during_the_late_tap_grace_still_carries_the_ceiling(self):
+    """Fable sim S3: a mid-climb hold opens the grace, 2+ of our late taps land, and a curve binds inside the 1.5 s.
+    _carry_on_cap used the strict one-tap tolerance, read our taps as the driver's, and re-latched the ceiling at the
+    held set (75 -> 63): after that curve the restore stopped at 63."""
+    ep, t = _restore_running()
+    ep.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)     # snapshot 61, grace
+    ep.step(t + 2 * DT, None, 62 * MPH, 62 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    pub, d = ep.step(t + 3 * DT, 55 * MPH, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert d == "dec" and ep.ceiling == pytest.approx(75 * MPH), "the late taps made the carry re-latch low"
+    assert ep.bind_ceiling == pytest.approx(63 * MPH)
+
+  def test_s3_beyond_our_in_flight_taps_the_driver_still_wins(self):
+    ep, t = _restore_running()
+    ep.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep.step(t + 2 * DT, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep.step(t + 3 * DT, 55 * MPH, 65 * MPH, 65 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)   # +4, the band
+    assert ep.ceiling == pytest.approx(75 * MPH)
+    ep2, t = _restore_running()
+    ep2.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep2.step(t + 2 * DT, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep2.step(t + 3 * DT, 55 * MPH, 65.8 * MPH, 65.8 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep2.ceiling == pytest.approx(65.8 * MPH), "more than our in-flight taps is the driver: he wins"
+
+  def test_s3_after_the_grace_the_carry_is_strict_again(self):
+    ep, t = _restore_running()
+    ep.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep.step(t + 2.0, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)    # re-anchored at 63
+    ep.step(t + 2.25, 55 * MPH, 65 * MPH, 65 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep.ceiling == pytest.approx(65 * MPH)
+
+  def test_s3_the_band_itself_catches_a_driver_who_climbs_at_cadence(self):
+    """Mutation s3c: the driver pressing SET+ at our own cadence never trips the rise check, so only the late-tap band
+    can tell him apart: 5.5 taps over the snapshot, 1.5 over the previous tick, inside the grace -> his value wins."""
+    ep, t = _restore_running()
+    ep.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)     # snapshot 61
+    ep.step(t + 2 * DT, None, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    ep.step(t + 3 * DT, None, 65 * MPH, 65 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep.phase == "restore"                                  # +4: still ours
+    ep.step(t + 4 * DT, 55 * MPH, 66.5 * MPH, 66.5 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert ep.ceiling == pytest.approx(66.5 * MPH)
+
+  def test_s3_a_cap_on_the_first_tick_after_the_grace_is_strict(self):
+    """Mutation s3b: the grace is a time window. A cap arriving on the first tick AFTER it closed -- before any restore
+    tick re-anchored the snapshot -- is judged with the strict one-tap tolerance again."""
+    ep, t = _restore_running()
+    ep.step(t + DT, None, 61 * MPH, 61 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)     # grace to t+DT+1.5
+    ep.step(t + DT + m.ICBM_LATE_TAP_GRACE_S + 0.1, 55 * MPH, 63 * MPH, 63 * MPH, True, False, v_ego=60 * MPH,
+            hold_ahead=True)
+    assert ep.ceiling == pytest.approx(63 * MPH)

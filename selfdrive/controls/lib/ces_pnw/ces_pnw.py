@@ -2401,7 +2401,7 @@ class IcbmEpisode:
     self._ahead_clear_t0 = None         # restorehold2pnw: first tick the curve ahead read clear while held
     self._bind_ref = None               # restorehold2pnw (c): binding reference of a cap that CARRIED the ceiling
     self._rcap_late_until = None        # restorehold2pnw F1: late-tap grace deadline at a mid-climb hold snapshot
-    self._last_inc = False              # restorehold2pnw F1: the previous restore tick published "inc"
+    self._last_inc_t = None             # restorehold3pnw: when a restore tick last published "inc" (monotonic)
 
   def reset(self) -> None:
     self.phase = "idle"
@@ -2433,7 +2433,7 @@ class IcbmEpisode:
     self._ahead_clear_t0 = None         # restorehold2pnw
     self._bind_ref = None               # restorehold2pnw (c)
     self._rcap_late_until = None        # restorehold2pnw F1
-    self._last_inc = False              # restorehold2pnw F1
+    self._last_inc_t = None             # restorehold3pnw
 
   @property
   def bind_ceiling(self):
@@ -2508,7 +2508,13 @@ class IcbmEpisode:
           or stock_set > self._last_stock + ICBM_EXEC_STEP_MS * (dt / ICBM_TAP_PERIOD_S + 1.6)):
         return None
     hold0 = getattr(self, "_rcap_hold_set", None)
-    if hold0 is not None and stock_set > hold0 + ICBM_LATE_TAP_TOL:
+    # restorehold3pnw (Fable residual S3): inside a mid-climb hold's late-tap grace, up to ICBM_HOLD_LATE_TAPS of our
+    # own taps may still land -- the same band step() applies. The strict one-tap tolerance here read them as the
+    # driver, so a curve binding within 1.5 s of the hold re-latched the ceiling at the held set (75 -> 63).
+    late_until = getattr(self, "_rcap_late_until", None)
+    band = (ICBM_HOLD_LATE_TAPS * ICBM_EXEC_STEP_MS + ICBM_RESTORE_DONE_TOL
+            if late_until is not None and now < late_until else ICBM_LATE_TAP_TOL)
+    if hold0 is not None and stock_set > hold0 + band:
       return None
     return (self.ceiling, self.latch_limit, self.zone_cap, self.zone_why, self.zone_n0, self._sa_inst0,
             self._sa_restart_logged)
@@ -2640,7 +2646,7 @@ class IcbmEpisode:
     it; the existing restore window still bounds how long that can last, so after a long low zone the
     set is simply left at the cap for the driver to raise.
 
-    restorehold2pnw F1: `absorb` (the curve-ahead hold is the binding cap and the previous tick was pressing SET+)
+    restorehold2pnw F1: `absorb` (the curve-ahead hold is the binding cap and we pressed SET+ within the late-tap grace)
     opens a late-tap grace window at the snapshot; step() absorbs up to ICBM_HOLD_LATE_TAPS of our own in-flight taps
     in it, then re-anchors once.
     """
@@ -2859,7 +2865,8 @@ class IcbmEpisode:
         self._last_t = now
         out = self._restore_target(stock_set, self._ahead_bound(now, hold_ahead, stock_set, v_ego, restore_cap,
                                                                 hold_vsafe))
-        self._last_inc = out[1] == "inc"
+        if out[1] == "inc":
+          self._last_inc_t = now
         return out
       self.reset()
       return None, None
@@ -2911,12 +2918,16 @@ class IcbmEpisode:
         # icbmmapfirst2pnw: PAUSE while lateral-loaded (a late-seen next bend) — go silent so the
         # executor stale-stops, but keep the episode so the restore resumes once the load clears.
         # All the aborts above (pedal/ACC/window/decrease/fast-rise) ran this tick and stay live.
-        self._last_inc = False
         return None, None
+      # restorehold3pnw (Fable residual S2): "were we pressing?" is a TIME question -- our taps stay in flight for the
+      # set-report lag whatever the brain did since. A boolean reset by the in-curve pause (the 21:21:50 shape: inc,
+      # pause, then the hold binds) opened no grace, and 2 of our late taps then reset the episode.
       lim = self.ahead_limit()
-      absorb = self._last_inc and lim is not None and (restore_cap is None or lim <= restore_cap)
+      absorb = (self._last_inc_t is not None and now - self._last_inc_t < ICBM_LATE_TAP_GRACE_S
+                and lim is not None and (restore_cap is None or lim <= restore_cap))
       out = self._restore_target(stock_set, cap, now, absorb)
-      self._last_inc = out[1] == "inc"
+      if out[1] == "inc":
+        self._last_inc_t = now
       return out
 
     return None, None                   # idle, no cap
