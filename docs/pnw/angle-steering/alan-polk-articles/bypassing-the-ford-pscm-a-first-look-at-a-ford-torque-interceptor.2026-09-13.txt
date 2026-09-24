@@ -1,0 +1,112 @@
+TITLE: Bypassing the Ford PSCM: first look at a Ford Torque Interceptor
+URL: https://bluepilot.dev/2026/06/16/bypassing-the-ford-pscm-a-first-look-at-a-ford-torque-interceptor/
+PUBLISHED: 2026-06-16T10:17:11  MODIFIED: 2026-06-16T18:06:22
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+In the past we have dedicated multiple articles to explaining why Ford ADAS lateral control is so unique and problematic for Comma devices. In fact, we have built the 4th most popular openpilot fork around trying to mitigate the issues. This post, however, is about not fighting with Ford’s ADAS system at all. Instead, we will talk about how we just removed it from the equation.
+
+In “How do Ford lateral controls work” we walked through the core of why Ford is uniquely painful: unlike most cars, the steering planner doesn’t live in the camera, it lives inside the power steering module (the PSCM). because of this, openpilot can’t directly tell the car where to go. Our Comma device has to impersonate Ford’s camera and send the PSCM a bundle of seven secret-sauce signals, then hope the PSCM’s own proprietary control logic turns them into the steering action we wanted.
+
+So here’s the question we kept coming back to: what if we stopped asking the PSCM nicely? What if instead of arguing with the bouncer at the door, we just bought the club and walked in through the owner’s entrance on the side?
+
+What we actually did
+
+In early 2025, the BluePilot team purchased a power steering rack and pinion unit for an F-150 with the goal of reverse engineering the entire system for better control with Comma devices. We thought this was something we would have worked out in a few months.  Unfortunately the project was hit with technical setback after technical setback, requiring us to buy a BCM, PCM, and GWM modules, and then build a custom harness for it all to talk. It took us over a year to even get the device to come online for testing.  While an analysis of the firmware and bench testing  did provide us some excellent information for the existing control stack (that will be another article in the near future), the most exciting finding in the research was that Ford is using externally mounted torque sensor on most of their new vehicles.  For the last several weeks we’ve been reverse-engineering the steering torque sensor on the F-150 rack, the little sensor that tells the power steering  motor how hard, and which way, the driver is turning the steering wheel. We have decoded its signaling completely (it is a serial communication protocol known as Single Edge Nibble Transmission), figured out the handshake the PSCM uses to talk to it, and then did the part that matters: we generated those sensor signals ourselves, fed them to the PSCM, and it accepted them as a genuine sensor communication, with no fault codes. We added a steering command on top, and the PSCM’s own motor moved the rack for us. On the test bench we can drive the steering rack end to end, back and forth as quickly as we like.
+
+Why you’d want this:
+
+There are two audiences who will be interested in this path forwards:
+
+If you have a newer Ford, this is likely your only way in. Ford locks newer vehicles with CAN-FD message authentication (“TRON”), meaning openpilot has no path to communicate with the vehicle. Beginning in 2023, Ford started encrypting the canbus on vehicles, and now in 2026, the Ranger is the only vehicle available from Ford without an encrypted canbus:
+
+Confirmed TRON Status List
+
+A Torque Interceptor (TI) works below the canbus network at the hardware level, so the encryption simply doesn’t apply.
+
+But if you already run openpilot on a supported Ford, the TI is still an upgrade. Everything painful for Ford users of Comma devices comes from one root cause: we don’t get to steer the truck directly, we get to send polite suggestions to a black box that steers the truck. The path angle we can’t compute, the 0.02 curvature ceiling, the rate limits, the sticky filter that won’t unwind on curve exit, all of that is the PSCM’s lateral planner standing between openpilot and the wheel. A torque interceptor goes underneath the planner entirely. Instead of feeding the PSCM path hints, it injects torque at the sensor, the same low-level signal your own hands produce. That turns a Ford into a direct torque-control car, exactly the model openpilot uses on its best-supported platforms like Honda, Toyota, and Hyundai.  Openpilot’s own lateral controller does the steering; the Ford power steering just provides the muscle. No path-angle guessing game, no curvature ceiling, no exit drift into the ditch,  because the black box is no longer in the loop.
+
+In other words: the same device that unlocks the trucks we can’t control (TRON) also fixes how we steer the ones we already can.
+
+Important: this controls steering, not speed
+
+A very important caveat needs to be stated clearly. On a TRON-locked Ford, the Torque Interceptor gives you openpilot’s lateral control, the steering, and only that. Your truck’s gas and brakes (its adaptive cruise) still use Ford’s logic.
+
+The reason is baked into how the TI works: it talks to the steering torque sensor and nothing else. It has no path to the powertrain or the brakes, and on a TRON truck those are still sitting behind the same encrypted CAN bus we’re going around rather than through. So the division of labor looks like this:
+
+- openpilot does the steering, lane centering and lane keeping, through the TI.
+
+- Ford’s factory adaptive cruise does the speed — following the car ahead and holding your set speed.
+
+The practical takeaway: comma’s Experimental Mode driving won’t be available on a TRON vehicle. The headline Experimental Mode features like stopping for stop signs and red lights all depend on openpilot controlling the gas and brake, which we won’t have on a locked vehicle. You’ll be on Ford’s stock ACC for all of that. The honest truth is that in 2026, those features don’t work all that well anyway, especially in larger vehicles like F-150, Expedition, and Ranger.  Previous polls show that 90% of BluePilot CANFD drivers prefer Ford ACC anyway, and rarely use openpilot longitudinal controls.
+
+So what is a torque interceptor, exactly?
+
+Your power steering doesn’t read your mind, it reads a torque sensor on the steering shaft and adds motor assist in the same direction. That’s why the wheel feels light (if you’ve ever tried to steer a car while it isn’t cranked, you understand how much power steering helps). A TI is a small device that sits in-line between the sensor and the electric assist motor. Normally the TI will pass the signal from your hands straight through and your truck drives bone stock. When openpilot wants to steer, the TI adds a gentle nudge to the signal, the PSCM “sees” a little steering input, and its own assist follows it. openpilot steers by politely convincing the power steering to do the work,  much like you do, just without the hands.
+
+Torque Interceptors are a proven technology that were used extensively in the early days of automatous vehicle testing, before manufacturer embedded ADAS systems were available on most vehicles.
+
+Will this require additional hardware beyond a comma device?
+
+Yes, the TI is a standalone device. This isn’t a software flash or a tap you can crimp from the parts bin. It’s a purpose-built device plus vehicle-specific adapter harnesses that plug in line between the sensor and the PSCM, using factory-matching connectors on each end. That’s the cost for getting in under an encrypted network,  you’re working at the wiring level, so there has to be hardware at the wiring level. The upside: it’s a small, install-once device. Once it’s in, openpilot just uses it.
+
+Will the install be difficult?
+
+The install is more involved than a standard comma harness,  but nothing exotic. A normal Comma setup means finding your IPMA and installing a harness. A TI install means getting to the steering-sensor connector; which on the F-150 lives down at the steering rack. On the MachE, Escape, Maverick, and Explorer, this under the dash near the firewall.
+
+If you’re the kind of person who already found your IPMA and installed a Comma harness this is a step up but well within reach. And it’s squarely in the wheelhouse of any decent car-audio installer or aftermarket truck shop.  The same folks installing remote start system and trailer-brake controllers handle this kind of work every day.
+
+Which vehicles will it work on?
+
+Because the trick is the torque sensor and not the network, this reaches a lot further than the CAN-based path ever could. Where things stand:
+
+Where this stands, and what’s next
+
+This is where we are, This is a proven bench prototype, not something you can buy or build-and-drive today. We’ve shown the hard part works. We have not turned it into a product, and a prototype on a hobby board is emphatically not what you want commanding your steering at speed. The road-ready version needs to be redundant and safety-rated, which is a manufacturing job, not a weekend solder session.
+
+From here:
+
+- We need to partner with a manufacturer to turn the prototype into a proper automotive-grade device that meets all of the necessary safety requirements and has reliability built to live in a truck for years. We’re already in conversation with one manufacturer that builds exactly this class of device for a line of non-Ford vehicles.
+
+- Develop the vehicle-specific adapter harnesses so the install is true plug-and-play, nothing to cut, crimp, or solder.
+
+- Expand and confirm the vehicle list:  including the Super Duty, which has zero openpilot support today and no shortage of people asking about it.
+
+Want to make this happen faster? Two ways to help. If you’ve got one of the “expected” or “needs research” vehicles and you’re handy with a multimeter and a scope, reach out, confirming a sensor architecture is a couple hours of work and moves a whole model line from “maybe” to “confirmed*.
+
+I heard Comma is going to crack TRON, why wouldn’t I wait on that?
+
+Comma recently put up a $10,000 bounty to break TRON, and for more reasons than Comma compatibility, we hope someone collects it (it won’t be us). But a TRON crack and a torque interceptor aren’t the same bet, and there are real reasons to want the TI even if TRON is cracked.
+
+Cracks are slow, and they don’t always travel. Comma has run bounties like this before. The Toyota security bounty took roughly three years to even be partially solved. Someone finally cracked the RAV4, but it required the owner to run some utilities from a laptop to extract keys before the Comma could work, and they were never able to port it other Toyota vehicles because the encryption hardware had already been upgraded in newer models. Ford’s security chips look to be exceptionally secure, so there’s no guarantee a TRON crack ever arrives, and no guarantee it covers your truck if it does.
+
+A crack is software, and Ford can patch software. From what we can tell about how Ford handles the security certificates pushed down from its corporate servers, any TRON crack that does surface could very plausibly be closed right back up with a routine over-the-air update, the same channel Ford already uses to update your truck in your driveway. A torque interceptor lives on the far side of that fence. It’s hardware, sitting on the wires inside your steering rack. The only way Ford could eliminate a Torque Interceptor is to replace your entire steering assembly.
+
+And plenty of people want it even without TRON. This is the part we keep coming back to: the people asking us loudest for this aren’t all locked-out 2024+ owners. A lot of them are on supported trucks right now and just want the cleaner, direct steering control we talked about up top, the kind that doesn’t have to negotiate with Ford’s black box. The TI is an upgrade first and a lock-pick second.
+
+We need your input to make this happen (BluePilot isn’t a company)
+
+Quick bit of honesty, because it changes how much your vote is worth: bluepilot isn’t a company. No profit motive, no investors, no warehouse. We’re five guys in our home garages who do this for the community in our spare time. That’s the fun part. The less-fun part is that when we help put a real device into the world, the economics have to actually work, or it comes straight out of our own pockets.
+
+And small-batch automotive hardware has some genuinely brutal economics. A few of the realities we’re staring at:
+
+- Minimum order quantities. One of the connectors we need carries a 5,000-piece minimum order. We are never going to sell 5,000 units. So the cost of all 5,000 gets spread across the ones we do sell. If well 100 units, every device is quietly carrying 50 connectors’ worth of cost. If sell a 1,000 units, that drops by 10×.
+
+- Custom Connectors. Two of the connectors we need cannot be bought, Molex’s own website states clearly they provide the engineering data so that the maker of devices can mold the mating half into their part.  Both of these connectors will have to be 3D designed. After the design is complete we will need to evaluate if they can be 3D printed in Nylon, or will require injection molding.
+
+- Tooling. Building harnesses that won’t fail in a moving truck means the proper crimpers from Molex and TE Connectivity. These can be almost $2,000 a pair, and we need more than one pair.
+
+- Picking the right partner. Part of choosing which TI manufacturer to work with is making sure they can keep up if demand is real,  we don’t want to tie the community to a device that is constantly on back-order.
+
+Put simply: the more of you there are, the cheaper this gets for everyone.Knowing the real demand is what lets us set a fair price and not bankrupt a hobbyist group trying to build something nice for the community. So even the “no” answers help..
+
+Quick poll: would you actually run one?
+
+Please vote below. The “no” options count just as much as the “take my money” one, and please only vote once, so we don’t buy too many of these and get ourselves in the hole.
+
+LINKS:
+https://bluepilot.dev/2025/07/13/how-do-ford-lateral-controls-work-and-why-are-they-such-a-challenge-for-openpilot/
+iframe:https://www.youtube.com/embed/VlOZLiye73U?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent
+https://bluepilot.dev/2025/08/13/confirmed-tron-status-list/
+iframe:https://bluepilot.dev/2025/08/13/confirmed-tron-status-list/embed/#?secret=qeV6NgxIA8#?secret=9xMjnpiqeS
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2026/06/Screenshot-2026-06-16-at-8.59.59-AM.png?resize=682%2C837&ssl=1
+iframe:https://strawpoll.com/embed/e2naXkQ90yB

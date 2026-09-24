@@ -1,0 +1,57 @@
+TITLE: What Exactly are the limits of Ford Lane Assist Signals
+URL: https://bluepilot.dev/2026/01/07/what-exactly-are-the-limits-of-ford-lane-assist-signals/
+PUBLISHED: 2026-01-07T23:15:06  MODIFIED: 2026-04-26T08:42:20
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+Before we can tackle this question, we first need to understand the ford signals, whic are covered here:
+
+https://bluepilot.dev/2025/07/13/how-do-ford-lateral-controls-work-and-why-are-they-such-a-challenge-for-openpilot/
+
+We can now continue the conversation knowing that Ford has 4 control signals, not just one like a torque or angle based car. When talking about OpenPilot, there are two levels of safety limites imposed. The first are from comma, and the second are from Ford. Both ford and comma have the same “absolute limits”. For example the absolute limit on the curvature signal is 0.02 inverse meters. Comma intentionally set their absolute limits to match fords. What are different are the rate of change limits, comma’s limits are more restrictive than Fords. Complicating things, is that the rate of chagne limits are not static, they change with speed. At low speeds you can have a much higher rate of change than at higher speeds. So the answer to the question of “what is the limit to how much we can move the steering wheel?” is dependent upon three things; 
+
+1) Speed 
+2) Which signals are sent 
+3) Whose limits are being applied. 
+
+The primary control variable for OpenPilot is curvature, they probably chose that signal because it was already available in their model, and it was the smoothest signal they saw in the ford control set. The absolute limit of 0.02 inverse meters means that we could command the vehicle to follow a curve with a radius of 50 meters. Keep in mind that the safety limits inside of the fords rack and pinion would only let you achieve a curvature of 0.02 and follow that 50 meter radius road at very low speeds. You might could achieve 0.02 at 15mph, but at 25, 50, or 75 mph, you wouldn’t be able to get anywhere near it.
+
+When the BluePilot did our injection testing (long before comma supported CANFD fords), we disabled the comma safety limits and set the max value of each control signal in a parking lot at 10mph. This gave us the theoretical limits we can achieve at low speeds with max commands. The table here summarizes our findings:
+
+The chart uses front wheel angle instead of steering wheel angle, because it is independent of steering ratio. In the F150 the max front wheel angle we achieved of 15 is equal to about 270 degrees of steering wheel angle.
+
+As you can see, the path_angle and path_offset signals are far more powerful than the curvature signal. The problem is that those signals can very quickly overpower what you are trying to accomplish. We did manage to smooth it out quite a bit, and that logic was the basis for bp-3.0, but most people found it still too twitchy, so we reverted back to curvature as the primary control variable in bp-4.0 forward. This video here is of bp-3.0 without comma safety limits:
+
+The other complication we run into is that when we are sending strong signals, like trying to make a turn at an intersection, is that the rack and pinion will wind up very quickly, but then it will not unwind, and we send ourselves into the ditch :
+
+The team actually bought a spare Rack and Pinion with the hope to test a lot of different signal on the bench, but the project has been stalled for about a 10 months because we can’t find a specialty plug we need at a reasonable price, and our attempts to 3D print one failed. We’ve also been super busy with some other projects. We do still hope to get back to that testing with the spare rack and pinion. 
+
+The final caveat to all of this is that all of our testing has been on a Mache and a f150. According to comma, CANFD fords have more torque than CAN fords, but we cannot say by how much. Both vehicles use the exact same signals, so it must just be more conservative rate of change limits in the older firmware that CAN vehicles run.
+
+LINKS:
+https://bluepilot.dev/2025/07/13/how-do-ford-lateral-controls-work-and-why-are-they-such-a-challenge-for-openpilot/
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2026/01/image.png?resize=391%2C309&ssl=1
+iframe:https://www.youtube.com/embed/53cURHm9kU4?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent
+iframe:https://www.youtube.com/embed/jjN43VkxzCg?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent
+
+TABLE (transcribed 2026-09-13 from the article's embedded image,
+https://i0.wp.com/bluepilot.dev/wp-content/uploads/2026/01/image.png -- saved alongside as
+what-exactly-are-the-limits-of-ford-lane-assist-signals.table.2026-09-13.png).
+Injection test in a parking lot at 10 mph, comma safety limits disabled, "max value of each control signal".
+Units of last column: front-wheel angle, degrees (article: 15 deg front wheel ~= 270 deg steering wheel on the F-150).
+
+Test | Curvature | Curvature Rate | Path Angle | Path Offset | Max Front Wheel Angle Achieved
+  1  | Max       | 0              | 0          | 0           |  4
+  2  | Max       | Max            | 0          | 0           |  6
+  3  | Max       | 0              | Max        | 0           | 11
+  4  | Max       | 0              | 0          | Max         |  7
+  5  | 0         | Max            | 0          | 0           |  4
+  6  | 0         | Max            | Max        | 0           | 11
+  7  | 0         | Max            | 0          | Max         |  3
+  8  | 0         | 0              | Max        | 0           |  9
+  9  | 0         | 0              | Max        | Max         | 12
+ 10  | 0         | 0              | 0          | Max         |  2
+ 11  | Max       | Max            | Max        | Max         | 15
+ 12  | Max       | 0              | Max        | Max         | 15
+ 13  | Max       | Max            | 0          | Max         |  8
+ 14  | Max       | Max            | Max        | 0           | 15
+ 15  | Min       | Min            | Min        | Min         | -14

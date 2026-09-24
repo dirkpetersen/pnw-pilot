@@ -1,0 +1,29 @@
+TITLE: BluePilot 4.0 Release
+URL: https://bluepilot.dev/2025/07/25/bluepilot-4-0-release/
+PUBLISHED: 2025-07-25T14:03:45  MODIFIED: 2025-07-26T13:13:41
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+BluePilot 4.0 (bp-4.0) is now available for download in the GitHub and through the branch selector. This branch is based on sunnypilot dev-c3-new, which is still a work in progress and does not feature all legacy sunnypilot features. This branch is also susceptible to the Agnos upgrade issues which result in a frozen comma logo after install (https://bluepilot.dev/2025/07/13/my-device-is-stuck-at-the-comma-logo-while-installing-bluepilot/). For this release, many of the custom UI elements of BluePilot were rewritten to increase stability of the UI and reduce crashes. We have also begun breaking out advanced lateral control into multiple features, so that option no longer appears in the menu. The first feature related to advanced lateral is available in 4.0, listed as advanced in lane positioning. The in-lane positioning logic has been completely rewritten to work with OpenPilots new variable lag (acuator delay time) calculations, and should provide a much smoother overall experience for drivers. The reccomended model is Filet-o-Fish Liquid Crystal, PLEASE BE SURE TO SELECT THIS MODEL.
+
+URL (case sensistive):
+
+installer.comma.ai/BluePilotDev/bp-4.0
+
+Whats New?
+
+— The UI was completely rewritten to try and reduce UI crashes 
+
+— The curvature limits were put back to where they were in bp-2.1. This should mean better low speed torque and ability to handle curves under 35mph 
+
+— The advanced lateral was completely rewritten to clean up the issues introduced by comma’s dynamic lag calculations. Now it is two separate features, “advanced lane positioning” and “High curvature mode”. Only advanced lane positioning is available in 4.0. High Curvature Mode will be a future release. This should allow you to adjust your position in the lane side to side reliably without introducing ping pong or jittering. 
+
+— The stock comma logic for triggering a “steering limit exceeded” message was removed and replaced with custom ford specific logic. This should result in far fewer false alerts that you need to take the wheel. 
+
+— Updated panda logic to reduce the occurances of “steering temporarily unavailable” when utilizing Human Turn Reset.
+
+— Current speed color can now be animated to indicate brake light status.
+
+— Both CAN and CANFD Ford vehicles can now toggle between stock Ford ACC and SunnyPilot Longitudinal Control (menu –> developer –> enable sunnypilot longitudinal control)
+
+LINKS:
+https://bluepilot.dev/2025/07/13/my-device-is-stuck-at-the-comma-logo-while-installing-bluepilot/

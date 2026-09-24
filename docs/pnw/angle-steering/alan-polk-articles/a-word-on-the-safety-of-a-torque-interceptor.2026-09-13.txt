@@ -1,0 +1,21 @@
+TITLE: A word on the safety of a torque interceptor
+URL: https://bluepilot.dev/2026/06/17/a-word-on-the-safety-of-a-torque-interceptor/
+PUBLISHED: 2026-06-17T10:11:56  MODIFIED: 2026-06-17T10:11:58
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+When we posted a preview and introduction to the Ford Torque Interceptor yesterday (https://bluepilot.dev/2026/06/16/bypassing-the-ford-pscm-a-first-look-at-a-ford-torque-interceptor/), the only statements we made on the safety were:
+
+“A prototype on a hobby board is emphatically not what you want commanding your steering at speed. The road-ready version needs to be redundant and safety-rated, which is a manufacturing job, not a weekend solder session.”
+
+“We need to partner with a manufacturer to turn the prototype into a proper automotive-grade device that meets all of the necessary safety requirements and has reliability built to live in a truck for years”
+
+This was intentional, as we have not signed any NDAs with a manufacturer and were waiting to finalize such an agreement so we could be more specific about the device we are trying to bring to the community. However, within ten minutes of our initial post, we started to see comments questioning the safety associated with a torque interceptor.  Skepticism is healthy and we would be worried if people weren’t asking these questions. This type of community engagement is exactly what makes open-source projects robust and appealing. We just underestimated that it would come up this early in the conversation.
+
+While the BluePilot team is small, it includes multiple industrial controls and automation engineers who live and breathe functional safety every day.  We deal with the hardware and logic associated with the control of large chemical reactors full of lethal chemicals like Hydrogen Cyanide, Hydrofluoric Acid, and Phosgene; distillation columns full of jet fuel and gasoline; and industrial robotics that can dismember or kill in seconds.  We are trained in hazard and operability analysis, layers of protection analysis, risk reduction factors, and safety integrity levels. We even have a member who works for an organization that issues ASIL ratings to manufacturers.
+
+Without getting ahead of the formal documentation: The hardware will be sufficient for the application; and the production device’s command authority will be bounded, driver-overridable, and rate-limited — it can’t ask for more than you can overpower, or change faster than you can react — and any fault degrades to loss of assist, not loss of control.” 
+
+Once the proper agreements are in place with a manufacturer for the device, documentation on how functional safety is achieved will be made available, and we will set up a proper medium for discussions on the device.
+
+LINKS:
+https://bluepilot.dev/2026/06/16/bypassing-the-ford-pscm-a-first-look-at-a-ford-torque-interceptor/

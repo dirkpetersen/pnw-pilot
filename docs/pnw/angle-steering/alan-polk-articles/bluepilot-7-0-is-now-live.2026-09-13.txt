@@ -1,0 +1,26 @@
+TITLE: BluePilot 7.0 is Now Live
+URL: https://bluepilot.dev/2026/07/17/bluepilot-7-0-is-now-live/
+PUBLISHED: 2026-07-17T15:03:46  MODIFIED: 2026-07-17T15:44:21
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+bp-7.0 is now available:
+
+Since this release requires an updated AGNOSE version, it is reccomended to uninstall the existing branch or do a factory reset before upgrading.
+
+Installer URL:
+bit.ly/bp-70
+
+All bluepilot settings now show up in the “vehicle” tab of sunnylink.
+
+Release Notes and Announcements
+
+Background Article:
+
+Videos:
+
+LINKS:
+https://bluepilot.dev/announcements/
+iframe:https://bluepilot.dev/announcements/embed/#?secret=sVegxcgHC7#?secret=EzARFchH4W
+iframe:https://www.youtube.com/embed/WlU6PjYBEAk?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent
+iframe:https://www.youtube.com/embed/DFEHfBmmI3s?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent
+iframe:https://www.youtube.com/embed/gS1NBPlugY0?version=3&rel=1&showsearch=0&showinfo=1&iv_load_policy=1&fs=1&hl=en-US&autohide=2&wmode=transparent

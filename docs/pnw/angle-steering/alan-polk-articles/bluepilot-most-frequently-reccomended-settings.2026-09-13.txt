@@ -1,0 +1,53 @@
+TITLE: BluePilot Most Frequently Reccomended Settings
+URL: https://bluepilot.dev/2026/03/19/bluepilot-most-frequently-reccomended-settings/
+PUBLISHED: 2026-03-19T08:28:08  MODIFIED: 2026-03-19T08:28:11
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+Frequently, the question arises about which settings are the “best” to use.  “Best” is going to depend on a lot of factors, primarily the driver’s preferences for driving.  However, below is a compiled list of the most recommended settings:
+
+Toggles:
+Enable Sunnypilot: True
+Experimental Mode: False
+
+Models;
+Legacy Models –> WD40 or Notre Dame
+
+Steering:
+Modular Assist Driving System: True
+Customize Lane Change –> Auto Lane Change by Blinker: 0.5s
+Auto Lane change –> Delay with Blind Spot: True
+
+Cruise Settings:
+Alpha Long: Off (this uses Ford ACC, experimental mode not available)
+Intelligent Cruise Button Management: False
+
+Visual Settings:
+Show Blind Spot Warnings: False (There is a bluepilto specific option that most prefer)
+Green Traffic Light Alert; True
+Lead Depature Alert: True
+
+BluePilot Menu Lateral Tuning for F150/Lightning/Expedition/Navigator:
+Use Custom Tuning Profile: False
+Enable Advanced Lane Positioning: True
+Enable Lanefull Mode: True
+Custom In-Lane Offset: -0.05
+
+BluePilot Menu Lateral Tuning for Smaller Vehicles (MachE, Escape, Maverick, etc)
+Model: Legacy models –> WD40
+Use Custom Tuning Profile: True
+Predicted Curvature Blend Ratio Low: 0.30
+Predicted Curvature Blend Ratio High: 0.30
+Enable Advanced Lane Positioning: True
+Enable Lanefull Mode: True
+Custom In-Lane Offset: -0.05
+Low Curvature PID Gain: 1.0
+
+BluePilot Menu Visual Settings;
+Show Blindspot Overlay: True
+Show Brake Status: True
+Show Confidence Ball: True (C3X Only)
+Show Radar Lead Overlay: (C3X Only)
+Lower Right: Lead Speed (C4 Only)
+
+LINKS:
+

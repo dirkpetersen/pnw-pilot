@@ -1,0 +1,244 @@
+TITLE: The Beginner’s Guide to BluePilot on Ford Vehicles
+URL: https://bluepilot.dev/2026/03/26/the-beginners-guide-to-bluepilot-on-ford-vehicles/
+PUBLISHED: 2026-03-26T18:08:13  MODIFIED: 2026-08-31T14:44:54
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+A special thanks to B177y and KingStraasha from the F150 Lightning Forum for writing this article.
+
+BluePilot 7.0 User Manual For complete beginners on the Comma 4 device 
+
+Welcome! This article is written just for you — someone who has never used BluePilot or any driving assistance software before. Every step is explained in plain, easy words with simple directions. You do not need to be technical. We will go slowly, one thing at a time. 
+
+Important update: You can now only buy the Comma 4 device from comma.ai (the older Comma 3X is no longer sold). BluePilot works perfectly on the Comma 4 — it is smaller, sleeker, and takes up less space on your windshield while providing the same great driving help.
+
+Preface and warnings: 
+
+BluePilot is open-source software designed for use with open-source hardware and remains in an experimental phase. Improper installation may result in the disabling of your vehicle or its components. Please note that your vehicle manufacturer does not understand nor support Comma products or the use of BluePilot, and may try to blame issues on the Comma to avoid warranty repairs as a result. It is highly advised to remove the harness and device from the vehicle before taking it in for any work other than routine maintenance. Users are responsible for their own installations. 
+
+Vehicle compatibility may vary according to year, model, or trim level, even among similar vehicles. Specifications can change over time, and volunteer developers cannot ensure functionality on incompatible vehicles, regardless of repeated requests. 
+
+Before proceeding with installation or seeking assistance via forums or Discord, please thoroughly review this entire open-source manual and any links it contains, which is written and maintained by volunteers. Most common questions and setup guidance are addressed within this manual and it’s links. Both the forums and Discord are monitored by volunteers, and it is likely that your inquiry has been previously asked and answered. Your diligence in reading the manual is appreciated. 
+
+BluePilot is helpful software that turns your Ford vehicle into a smarter, safer ride. It can: 
+
+- Keep your car centered in the lane with smooth steering help 
+
+- Automatically adjust your speed to match the car in front of you (like smart cruise control that handles stop-and-go traffic) 
+
+- Help change lanes when you want (with blind spot checks) 
+
+- Show useful information on the screen, like blind spot warnings, the status of your brake lights, lead car distance, or hybrid/EV power flow (great for Lightning or hybrid Fords) 
+
+- Record dashcam video automatically during drives 
+
+- Work smoothly with your Ford’s built-in systems for natural-feeling steering and braking 
+
+BluePilot sits at the end of a clean, traceable lineage of open‑source driving software. At the root is OpenPilot, the original Comma.ai system that provides the core planner, model architecture, and safety framework. SunnyPilot forks from OpenPilot to extend that foundation with community‑driven features, expanded hardware support, and more experimental model options. BluePilot then builds on SunnyPilot’s enhancements but specializes them for Ford vehicles (like F-150, Lightning, Mustang Mach-E, Maverick, and many others), adding Ford‑specific integrations and tuning that aligns with the behavior of Ford’s steering and braking systems. The result is a direct evolutionary chain: OpenPilot → SunnyPilot → BluePilot, each layer inheriting the strengths of the previous one while tailoring the system for a more focused purpose. Because of this, for any options or capabilities not specifically mentioned in the BluePilot manual, please reference the SunnyPilot website, https://www.sunnypilot.ai/ 
+
+The Comma 4 is a small smart box (about the size of a phone) that runs BluePilot. It mounts high on your windshield (out of the way) and uses cameras to see the road, lane lines, and other cars. It plugs into your car with one simple cable using a Ford-specific harness. 
+
+Very important safety note: BluePilot and the Comma 4 are driver assistance only. They are not self-driving. You must always keep your eyes on the road, hands near the wheel, and be ready to take control at any moment. Use it on highways and clear roads first. Never use it when tired or distracted. Always follow traffic laws. 
+
+Most of the questions you might have are answered in the blogpost on the bluepilot website.  Please take the time to read them all of them.  There are not that many of them, and it will help you understand much better a device you are trusting to drive your vehicle for you.
+
+Release Notes and Announcements
+
+You are now ready to install! 
+
+How to install BluePilot 
+
+Step 1: Get the hardware 
+
+- Buy a Comma 4 device from the official comma.ai shop (comma.ai/shop/comma-four). It costs $999 (or less with trade-in credit if you have an old device). 
+
+- Buy the correct Ford harness for your exact vehicle year and model (select it on the shop page — this is very important so everything works safely). 
+
+- Ford Lightning owners also need a small extra coupler — check BluePilot.dev if you own a lightning: https://BluePilot.dev/lightning-coupler-order-page/ 
+
+Step 2: Physical installation (about 15 minutes) 
+
+Do this in a safe, flat parking spot with the engine off. 
+
+- For owners of a vehicle that comma shipped you a Ford Q3 harness, the installation videos from Comma are mostly relevant the install happens near the review mirror. 
+
+- https://www.youtube.com/watch?v=0Q3MndBEAiY&nbsp;
+
+- For owners of a vehicle that comma shipped you a Q4 harness, the camera module is too large to fit near the rearview mirror.  Please follow this link for videos on each vehicle type. 
+
+- https://BluePilot.dev/2025/08/15/canfd-installation-video-links/  
+
+- Unplug the factory connector from the IPMA. 
+
+- Plug the new Ford harness in between the original connector and the IPMA (it fits only one way). 
+
+- Mount the Comma 4 high on your windshield, centered, with the camera facing forward (use the sticky mount that comes with it — it is small and easy to place). 
+
+- An optional quick release dock is available from BluePilot: 
+
+- https://BluePilot.dev/dock-order-page/ 
+
+- Plug everything in securely. Start your car — the Comma 4 screen should light up. 
+
+If anything feels loose or you see warning lights that don’t go away after 20 seconds, double-check the connections. 
+
+LIGHTNING SPECIFIC: If you are using the BluePIlot Lightning Coupler, the long USB-C cable becomes orientation specific. If you get errors, rotate one end 180 degrees and power cycle the truck. If you still have errors, rotate the other end 180 degrees.  The coupler is designed for a 12V automotive system.  You cannot power on your comma using a phone charger (5V system) while the coupler is connected.  You cannot test the coupler inside; you can only test it in the vehicle.
+
+If the device does not switch to the camera screen after starting the vehicle, there is a wiring issue to be resolved.  It could be a loose connection somewhere or a bad / incompatible USB cable.  Only USB 3.2Gen2 Cables are compatible. 
+
+Step 3: Software installation (These steps can be performed in the car, or inside your home using a phone charger to power the comma) 
+
+- If you have a brand-new device, or you have flashed your device using flash.comma.ai, you MUST INSTALL STOCK OPENPILOT first to get github alias functionality before you can install a fork.  Use the menu on the screen to install stock openpilot first.  Then proceed to step 4.
+
+- Turn on the car (or plug the device into a phone charger) and let the Comma 4 boot up. 
+
+- Connect to Wi-Fi (use your phone as a hotspot if needed).  NOTE: After connecting to wifi, you must swipe down to get back to the installation menu.
+
+- If any old software is installed, go to Settings > Device and choose “Uninstall Open/SunnyPilot” (or factory reset the device). 
+
+- After reboot, the screen will ask for software. Choose “Use custom software/URL”. 
+
+- Carefully type the selected address (uppercase and lowercase matter!): https://bluepilot.dev/2025/07/13/which-version-of-bluepilot-should-i-install/ 
+
+- Press install. The device will download BluePilot (10–20 minutes) and restart a few times. 
+
+- When it finishes, you will see the BluePilot welcome screen. 
+
+Congratulations! BluePilot is now installed. 
+
+Step 4: Initial Setup
+
+- After installation, the device will boot into BluePilot. 
+
+- Connect to Wi-Fi again if asked. 
+
+- Pair with SunnyLink (strongly recommended — do this first!): Go to Settings > SunnyLink on the Comma 4 screen and follow the simple pairing steps (it shows a QR code or code to scan/enter on your phone or computer). SunnyLink lets you see your car’s status, change settings, switch models, and tune from home without touching the device while driving. The SunnyLink dashboard is here: https://sunnylink.ai (log in after pairing). 
+
+- Select your vehicle (if prompted): In SunnyLink or on the device menu, choose your exact Ford model from the vehicle menu. This helps BluePilot talk correctly to your car. 
+
+- Choose your driving model: Open the Models panel (easy button in the menu or SunnyLink). 
+
+- Start with the recommended/default model — it works great for most Ford owners. 
+
+- You can switch models later anytime without reinstalling.  See section 6: Model Management 
+
+At this point, don’t make any changes to the settings.  Drive a short test on a quiet road. Hopefully, everything will feel natural. For all changes after setup, it is recommended to use SunnyLink on your phone/computer — it is easier and safer than using the device screen while parked. 
+
+- Features and Options explained (Advanced detail) 
+
+BluePilot gives you many ways to customize how the system looks and behaves. All options are found on the SunnyLink dashboard under Other or by swiping down on the screen. We explain every BluePilot option at  BluePilot Specific Parameters and Tuning – Blue Pilot in both simple and technical terms, including exactly what it does, when you might want to change it, and safe recommendations for beginners. As a reminder, any options that are not specific to BluePilot can be found at the SunnyPilot website, https://www.sunnypilot.ai/ 
+
+- How to Tune Your Vehicle 
+
+Tuning just means making small changes, so BluePilot feels perfect for your Ford and your driving style. You only need to do this after a few drives if something feels off (like slight swaying, wandering side to side, or ping-ponging inside curves or on straight roads). 
+
+Important beginner rule: 
+
+- Keep Use Custom Tuning Profile on Default Tuning for your first drives (this uses the safe pre-set values). 
+
+- Only switch to Use Custom Tuning Parameters after you are comfortable and have noticed a specific issue. 
+
+- Change one thing at a time, test on a quiet highway at normal speeds, then decide if you like it. 
+
+- Small changes (like 0.1 or 0.2) make a big difference. You can always go back to defaults by switching back to Default Tuning. 
+
+Best way: Use SunnyLink dashboard (sunnylink.ai) — go to the Other section to find and change Use Custom Tuning Profile. All sliders and toggles are there too. 
+
+Easy steps to tune: 
+
+- Drive 2–3 times with defaults on a familiar highway. Pay attention to how the car behaves on straight sections and in gentle/medium curves. Note any wandering, slow side-to-side movement, or ping-ponging. 
+
+- Open SunnyLink on your phone/computer. 
+
+- Go to Other > change Use Custom Tuning Profile to Use Custom Tuning Parameters. 
+
+- Adjust one slider/toggle, save the change, and test drive again on the same road. 
+
+- There is no perfect setting.  You are “Goldilocking” your way into what feels best.  Not too Hot, not too Cold, just Right. 
+
+- If the change helps, great! If it makes things worse, go back and try the opposite direction (or return to Default Tuning). 
+
+- Tune in the order provided as each step builds upon the previous step. 
+
+The main tuning options explained (with defaults and beginner-friendly tuning steps): 
+
+Phase 1: Adjust for smooth steering.  Don’t focus on centering in the lane or lane hugging at this time 
+
+- Predicted Curvature Blend Ratio Low (for straight roads / low-curvature sections) How to tune it step by step: 
+
+- Drive at highway speeds on a straight road with good lane lines. 
+
+- If you notice slow wandering or ping-pong, increase the blend ratio (try 0.45, then 0.50, etc.) until the wandering just barely stops. 
+
+- If steering feels too lazy or delayed, decrease it slightly (try 0.35 or 0.30) to make it more aggressive. 
+
+- The goal is the highest number that still stops wandering without making steering feel sluggish. Most users end up between 0.40 and 0.60. Going low is not an issue. Going too high (0.8+) will result in lazy steering that might not be able to hold the lane. 
+
+- Predicted Curvature Blend Ratio High (for curves / higher-curvature sections)  
+
+How to tune it step by step: 
+
+- Drive on a highway with gentle to medium curves. 
+
+- If the car starts to ping-pong (small side-to-side movements) inside curves, increase the blend ratio (try 0.45, 0.50, etc.) until the ping-pong stops. 
+
+- If the car feels too slow or hesitant to turn in curves, decrease the blend ratio (try 0.35, 0.30, etc.) to make steering more aggressive. 
+
+- The goal is the lowest number that stops ping-pong without making the car feel twitchy. Most users end up between 0.40 and 0.60. 
+
+Phase 2: Center Your Vehicle in the Lane to Minimize Lane Hugging. As you work through the following settings, adjust each one individually and observe the results. If your vehicle consistently remains well-centered in the lane with slight movements towards the inside of a curve after adjusting a setting, you do not need to enable or change the next setting. Only proceed to the next option if you continue to notice the vehicle hugging one side of the lane or not maintaining the desired lane position. This step-by-step approach ensures the simplest and most effective tuning for your specific situation.  
+
+- Enable Advanced Lane Position: This turns on extra logic that helps the car stay more precisely centered in the lane. It uses additional signals (like path angle) to reduce wandering and gives you access to two important tuning sliders: Low Curvature PID Gain and In-Lane Offset. When and why to turn it on: 
+
+- Keep it off for your first few drives — the default behavior is already good for most people. 
+
+- Turn it on if, after tuning the blend ratios, if the car still wanders noticeably on straight roads or does not hold the exact center as well as you would like. 
+
+- It is especially useful if your Comma 4 mount is slightly off-center, if your vehicle has a tendency to hug one side of the lane, or if you just want the tightest possible centering on highways. 
+
+- Once turned on, you unlock Low Curvature PID Gain (for stronger centering pull) and In-Lane Offset (for fine side-to-side adjustment). 
+
+- Low Curvature PID Gain: This controls how strongly steering pulls the car back to the center on straight roads (low-curvature sections). Higher values make the pull stronger and quicker to correct any drift. Beginner tip: Start at 3.0. If the car still wanders left/right a little on straight highways, raise it slightly (like 3.1 or 3.2). If steering starts to feel jumpy, twitchy, or over-correcting, lower it a bit. Most people find gentle values around 3.0–3.5 work best. 
+
+- Enable Lanefull Mode: By default (Off), BluePilot puts a higher emphasis on being context aware for things like objects on the shoulder, etc. If you cannot keep your vehicle centered in the lane to your satisfaction, this toggle will put a higher emphasis on detected lane lines to help guid the vehicle to center within lane lines when they are present. 
+
+- In-Lane Offset: This gently shifts the car’s position left/right inside the lane (helpful if your mount is not perfectly centered or the car consistently hugs one side even after other tuning). Beginner tip: Only change this if the car hugs one side of the lane. Start with +0.05 (right) or –0.05 (left) and test. Do not go higher than ±0.1 or steering will feel twitchy.  Leave this at zero until you have finalized your value for Low Curuvature PID Gain.  Once PID Gain is tuned for a smooth ride, then you can start adjusting the in-lane offset. 
+
+Other useful toggles (in SunnyLink > Other): 
+
+- Lane Change Factor High: This controls how strong or gentle automatic lane changes feel. Beginner tip: 0.85 is smooth and natural for most people. If lane changes feel a tiny bit too quick or abrupt, lower to 0.80 or 0.75. This range gives the best results for many Ford drivers. Avoid lowering it too much, as doing so can prevent the vehicle from changing lanes. 
+
+- Enable Human Turn Detection: On – keep it unless you get unusual “steering unavailable” messages above 20 mph. 
+
+- Disable Downhill Compensation: Off – unless you notice jerky braking or speed changes on hills (most Fords handle this automatically). 
+
+- Model Management 
+
+Different models can correct poor driving behavior or possibly introduce new undesired behavior. A description of the current models can be found at the SunnyLink Wiki at https://sunnylink.wiki/models
+
+To get a better understanding of models and their functions and limitations, we recommend reading: What is the model? https://BluePilot.dev/2025/07/13/what-isthe-model-why-does-it-change-so-often-and-why-cant-we-fix-problem-x-y-z-on-fords/ 
+
+For most mid-size and smaller Ford vehicles, the default model should provide a satisfactory driving experience.  With each release of BluePilot, the default model is updated with the most current, tested model.  Larger and heavier Fords that use CANFD like the F150, F150 Lightning, and Mach-e, tend to work best with older models listed under the “legacy” section at the bottom of the models list. Try these models if the default newer models are not to your liking. 
+
+- Conclusion 
+
+Test changes only on safe, empty roads at normal highway speeds. Small, careful adjustments make BluePilot feel custom-made for your car. If you ever feel unsure, just switch Use Custom Tuning Profile back to Default Tuning and everything returns to the safe factory settings. 
+
+If you have any further questions, please see the BluePilot frequently asked questions at https://bluepilot.dev/FAQ/ or at SunnyPilot’s documentation, https://community.sunnypilot.ai/c/documentation/114/none  
+
+Drive safe! —The BluePilot Team
+
+LINKS:
+https://www.sunnypilot.ai/
+https://bluepilot.dev/announcements/
+iframe:https://bluepilot.dev/announcements/embed/#?secret=bIH9vA492m#?secret=4BLtSg8HG2
+https://bluepilot.dev/lightning-coupler-order-page/
+https://www.youtube.com/watch?v=0Q3MndBEAiY&nbsp
+https://bluepilot.dev/2025/08/15/canfd-installation-video-links/
+https://bluepilot.dev/dock-order-page/
+https://bluepilot.dev/2025/07/13/which-version-of-bluepilot-should-i-install/
+https://sunnylink.ai/
+https://bluepilot.dev/2026/02/28/bluepilot-specific-parameters-and-tuning/
+https://sunnylink.wiki/models&nbsp
+https://bluepilot.dev/2025/07/13/what-isthe-model-why-does-it-change-so-often-and-why-cant-we-fix-problem-x-y-z-on-fords/
+https://bluepilot.dev/FAQ/
+https://community.sunnypilot.ai/c/documentation/114/none

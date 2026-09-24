@@ -1,0 +1,114 @@
+TITLE: BluePilot Specific Parameters and Tuning
+URL: https://bluepilot.dev/2026/02/28/bluepilot-specific-parameters-and-tuning/
+PUBLISHED: 2026-02-28T15:54:58  MODIFIED: 2026-08-10T22:27:30
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+System Settings
+
+Enable Web Routes Server: This setting enables a lightweight HTML server on the comma device. This will allow you to look at your routes, view the videos, and download files without having to upload them to the comma connect website. This requires your Comma device and your web browser (mobile or desktop) to be on the same network. You can access the webserver using the address http://YOURCOMMASIPADDRESS:8088
+
+BP Web Portal Port: this defines the port used for the Web Route Server.  Only change if you have a specific need.  Default: 8088. 
+
+Show QR code: If the Web Routes Server is enabled, this button will show a QR connect to scan and access the webserver. 
+
+Preferred Wifi Network: Tells the device to always connect to your home Wi-Fi when available (saves your phone hotspot data).  Enter the case-sensitive name of your preferred WIFI network. 
+
+Use Konik Instead of Comma Connect: Send routes, location data, and telemtry to Konik (stable.konik.ai) instead of Comma (connect.comma.ai).  A reboot is required for settings to take effect. On first switch to the Konik portal, you will get a prompt to scan the QR code on the right side of the home screen to begin pairing.  You can switch back to comma connect at any time.
+
+Restore Cached Dongle ID: Only use this if a bluepilot dev instructs you to.
+
+Clear Crashed Model: Can be used to remove a corrupted model. If you see messages on the screen about modeld not communictating, use this button.
+
+Reset Menu Layout: Can be used to toggle a corrupted menu without having to reboot.
+
+Vehicle Settings
+
+12V Battery Limit: Sets the lowest voltage before the Comma 4 turns itself off to protect your car battery. Default is 11.8 V — perfect for almost everyone. Only change if your vehicle has a weak battery. 
+
+Show Hands-Free UI (C3X or C4): If you have a CANFD vehicle with a digital dash, it can probably display the BlueCruise “hands-free” icons on the dash. Even some vehicles not available with BlueCruise have this feature in the instrument cluster, such as the 2024-2025 Ford Ranger. If you do not have a digital dash capable of displaying these icons, turning on this toggle may cause odd behavior.
+
+Use Pinion Yaw Sensor: Only turn on this toggle if a bluepilto developer asks you to or you have confirmed that you have a faulty suspension yaw sensor on your vehicle.
+
+Audio Settings:
+
+Use Custom Engage / Disengage Sounds: Change the default sounds the system makes
+
+Engage/Disengage Sound: Choose among the Comma 4, Comma 3x, or Tesla themes.  More sounds possible in the future.
+
+Display and Visual Settings (Some features are Device and/or  Vehicle Specific) :
+
+Animate Steering Wheel (C3X or C4): When toggled on, the steering wheel icon on the screen will rotate to approximate position of the vehicles steering wheel.
+
+Minimal Driving View (C3X or C4): Hide the onroad camera and show a black screen. The high contrast makes it easier to see UI elements.
+
+8-bit Racer Theme (C3X or C4): Relive your favorite 90s racing game by converting your comma UI into a replay.
+
+Show Lateral Control Mode (C3X or C4): This will display a C for curvature, an A for angle, or OP if bluepilot lateral control is disabled.
+
+Show Blindspot Overlay (C3X or C4): Lights up the left or right edge of the screen in red when your vehicle’s blind-spot sensor sees a car. Very helpful on highways. Turn on if you like extra visual warnings. Default: off. 
+
+Show Confidence Ball (C3X): When toggled on, this will add a Comma4 style confidence ball the C3X UI.  The item will appear on the left edge of the screen.
+
+Hide Onroad Border (C3X): When toggled on, this will hide the colored border on the C3X which typically indicates the status of the devivce (Offline, Online, MADS, Driver Override).
+
+Hide Onroad Fade (C4): When toggled on, this will hide the black faded area around the bottom edge of the Comma4 screen.
+
+Show Brake Status (C3X or C4): This toggle enables showing the status of the brake lights on the UI.  This includes if the brakes are engaged by the adaptive cruise control, not just the brake pedal is pressed by the user.  On the C3X, this is accomplished by setting the current speed to red when the brake lights are active.  On the C4 this is accomplished by setting the steering icon to red.
+
+Display Road Name (C3X Only): This toggle displays the name of the current road you are on at the top-left center of the screen, to the right of the max speed setpoint.  This feature requires offline maps to be downloaded for your current area, and for the mapd process to successfully resolve your street name.
+
+Show Radar Lead Overlay (C3X Only): This toggle will enable an overlay based on the lead vehicle detected by the system. The overlay displays the distance to the vehicle, the current speed of the vehicle, and the follow time to the vehicle.
+
+Lower Right Display (C4 Only): Choose what extra info appears at the bottom right of the screen: – Off (cleanest) – Lead car speed – Your current speed – Lead car distance – Time to lead car. Most new users pick “Lead car speed” or “off”.  Default: off. 
+
+Show Hybrid/EV Battery Status (C3X Only, CANFD Vehicles Only): Enable an overlay on the bottom left of the screen which will show the status of your hybrid or EV battery. The data includes state of charge, voltage, and amps.
+
+Show Hybrid/EV Power Flow (C3X or C4, CANFD Vehicles Only): A visual representation of the Ford Powerflow bar placed on the screen. On the Comma3X, the torque becomes integrated into the power flow meter when enabled. This includes an indication of power out of the motor or regen into the motor, as well as the current mode (EV, Hybrid, ICE only) and the reason for the current mode. On the Comma4, this is a vertical bar on the left side of the screen. There is no text for status on the Comma4 UI.
+
+Hybrid/EV Power Flow Style (C3X Only): Select either the classic flat style powerflow gauge, or a new Comma4 torque bar inspired arch shape.
+
+Hybrid/EV Gauge Style (C4 Only): Select either a flat vertical power flow gauge on the left side of the screen, or a circular gauge that animates around the steering wheel.
+
+Driving Behavior Control Settings (All Devices and Vehicles)
+
+Bypass BP Lateral Control:  This toggle will bypass all bluepilot lateral optimization and apply stock openpilot lateral controls.  Useful for determining if your lateral issues are driven by the model or your tuning parameters.  
+
+Bypass BP Longitudinal Control: This toggle will bypass the bluepilot longitudinal optimizations and apply stock openpilot longitudinal ACC controls. This toggle has no effect if stock ford ACC is being utilized.
+
+Disable Ford Radar: This will enable vision only adaptive cruise control
+
+Disable Downhill Compensation:  When using openpilot longitudinal controls, this will prevent the brakes from being applied when going downhill in an attempt to not speed up.  Most Ford vehicles handle this automatically, and having OpenPilot also sends the signal results in very sharp, jerky braking when going downhill.
+
+Disable Lane Change Under Certain Speed: This toggle allows you to set a minimum speed under which nudgeless lane changes will not take place.  Useful if you find your vehicle attempting to change lanes into the median when you turn on your blinker to make a turn.
+
+Primary Control Variable: Choose between curvature or angle for the primary control variable.
+
+Low Speed Adjustment Factor (Angle): An adjustment factor for how aggressively the steering wheel is applied at low speeds (approximately 20mph).  Can be increased if the steering wheel is not providing enough turn, or decreased if it is providing too much turn.  Range is 0.5 – 1.5 with a default of 1.0.
+
+High Speed Adjustment Factor (Angle): An adjustment factor for how aggressively the steering wheel is applied at high speeds (approximately 70mph). Can be increased if the steering wheel is not providing enough turn, or decreased if it is providing too much turn. Range is 0.5 – 1.5 with a default of 1.0.
+
+High Speed Low Curve Adjustment Factor (Angle): An adjustment factor to weaken or strengthen the steering torque signal on high-speed straightaways. Increase to correct for a slow side-to-side wander or decrease to correct for a faster ping-pong behavior. Range 0.75 – 1.25 with a default of 1.0.
+
+Lane Change Factor High (Angle): This tuning parameter affects how aggressively lane changes are implemented from the model. A factor of 1.0 would be exactly what the model asked for, and a factor of 0.5 would be half of what the model asked for. This is mostly not needed in angle control, but some larger vehicles have needed to run a number around 1.05 or 1.10 to prevent failed lane changes occasionally.
+
+Enable Human Turn Detection: Helps the steering wheel reset after you make a turn so it doesn’t fight you. Can occasionally show “steering unavailable” above 20 mph. Most users leave on.  Default: on. 
+
+Lane Change Factor High (Curvature): This tuning parameter affects how aggressively lane changes are implemented from the model. A factor of 1.0 would be exactly what the model asked for, and a factor of 0.5 would be half of what the model asked for. Lowering this number can smooth out lane changes, but having it too low will result in the model asking for an extra amount of movement, and then an aggressive lane change will commence. Most users report good results in the 0.75 – 0.85 range.
+
+Enable Lane Positioning (Curvature): Uses extra logic (path angle) to assist keeping you centered in the lane. This can help a vehicle that wanders, or hugs one shoulder, but it can also result in twitchy steering if the associated tuning parameter (Low Curvature PID Gain) is incorrect. This option is also required when using the BluePilot “In-Lane Offset” feature. Default: off. 
+
+Enable Lanefull Mode (Curvature): This will attempt to force the vehicle to center within lane lines when they are present. Stock OpenPilot steering controls do not consider lane lanes, rather they consider the entire situation, including obstacles on the side of roads, construction barriers, etc. This setting can be helpful on well-marked highways with clear lane lines to reduce wandering. Default: off. 
+
+In-Lane Offset (Curvature): A parameter which will push the vehicle to the left (negative numbers) or the right (positive numbers) within the lane. This is helpful if a model hugs one side or the other, or if your mount is not centered. Too high of numbers will cause twitchy steering or ping pong. Most users can achieve 0.05 – 0.1 offset in either direction with minimal side effects.
+
+Use Custom Tuning Profile (Curvature): Unlocks the advanced options below. Only turn on if you want to fine-tune. Default: off. Please read the article on predicted curvature before attempting to adjust the tuning parameters (https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/)
+
+Predicted Curvature Blend Ratio High (Curvature): For curves / higher-curvature sections. This blends the car’s desired path with the model’s predicted path in curves for smoother steering. Higher numbers keep things very smooth but can cause ping-pong inside curves. Lower numbers make steering more aggressive and quicker to follow the curve. Most users like 0.4–0.6. Default: 0.4. 
+
+Predicted Curvature Blend Ratio Low (Curvature): For straight roads / low-curvature sections. This blends the car’s desired path with the model’s predicted path to make steering smoother on straightaways. Higher numbers make steering very smooth but can cause slow wandering or “ping-pong” (slow side-to-side drifting). Lower numbers make steering more responsive and aggressive. Most users like 0.4–0.6.  Default: 0.4
+
+Low Curvature PID Gain (Curvature): Controls how strongly the system centers the vehicle on straight roads. Higher = stronger centering but can feel twitchy. Change only in small steps. Default: 3.0.
+
+LINKS:
+http://YOURCOMMASIPADDRESS:8088
+https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/

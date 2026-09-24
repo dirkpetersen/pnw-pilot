@@ -1,0 +1,56 @@
+TITLE: BluePilot Version History
+URL: https://bluepilot.dev/2025/07/13/bluepilot-version-history/
+PUBLISHED: 2025-07-13T16:03:41  MODIFIED: 2026-07-15T18:43:22
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+The BluePilot team has chosen to make each feature release a new branch rather than forcing users to update their software as the upgrades are rolled out. This allows users to stay with a release that they are satisfied with, even if newer features are available. Although not all older versions of BluePilot are still viable, the branches are preserved on the GitHub repository. In May of 2025, all of the branches were renamed to make it easier to follow the revision history.  All branches are now named bp-x.y, where x is the major release and y is the minor release.  Below is a summary of all available branches.
+
+It is important to understand a little background information on OpenPilot and SunnyPilot with regards to how those affect BluePilot. Prior to February of 2025, all of the vehicle-specific logic was in the primary OpenPilot repository.  Any fork of OpenPilot had the vehicle-specific control in its main as well.  On this premise, SunnyPilot has built dozens of unique enhacements that made his fork the most popular OpenPilot fork in the world.  In February of 2025, OpenPilot moved all vehicle specific logic into a sub-module called OpenDBC.  While this might sound like a small change, it broke all of the custom features that SunnyPilot had spent years developing.   As a result of this, SunnyPilot had to start over rewriting most of his features, and there are two flavors of SunnyPilot currently in existing.  The legacy SunnyPilot known as dev-c3, and the new OpenDBC based known as dev-c3-new.  Given that BluePilot is based on SunnyPilot, this change has an effect on our forks.  bp-2.1 and older are based on SunnyPilot dev-c3, and feature all of the legacy SunnyPilot features.  bp-3.0 and newer are based on dev-c3-new, and feature only the enhacments that SunnyPilot has ported to the OpenDBC code base.
+
+bp-1.0 (aka bp-stable)
+
+The initial release of BluePilot was developed to fix two primary issues Ford users faced.  The first is that when using experimental mode or MADS from SunnyPilot (steering is always active, even if cruise control is canceled) after making a turn, the vehicle would keep trying to turn, even after the driver had straightened the wheel.  The second was an unacceptable amount of side to side bouncing (ping-pong) on straightaways.  This release featured no custom UI elements, no custom menus, and no custom tuning. Ping-Pong mitigation was accomplished using a fixed ratio of desired curvature versus predicted curvature (see post: https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/).  Due to a change in the portal registration process, this branch is no longer viable, as it will get stuck when installing.
+
+bp-1.1
+
+The updated  release of BluePilot 1.0 was developed to give users the ability to tweak many of the driving aspects to suit their personal driving preferences and the environment they frequently drive in.  This release has tuning values for lane changes (to adjust how aggressively the lane maneuver was executed), A large curve reduction factor to prevent the vehicle from cutting the inside edge of curves, and tunable blends of predicted and desired curvatures  (see post: https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/) for both straight aways and curves.  This is the first release to feature a “Ford” menu where the tuning was adjusted by the user.
+
+bp-2.0
+
+The second iteration of BluePilot featured the introduction of the path_angle and path_offset variables (https://bluepilot.dev/2025/07/13/how-do-ford-lateral-controls-work-and-why-are-they-such-a-challenge-for-openpilot/) to the control logic.  These two variables are much more powerful than the curvature signal used by stock OpenPilot for lateral control.  This release had minimal customizable tuning, but did introduce an adjustable in-lane-position variable.
+
+bp-2.1
+
+The updated release of BluePilot 2.0 introduced extensive tunable for multiple aspects of the lateral controls.  In addition to re-introducing adjustanble Predicted Curvature / Desired Curvature blending (see post: https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/), it also introduced tuning parameters to adjust how aggressivly the path_angle variable was implimented to achieve in-lane positioning and high curvature manuvers. Additional new features included the ability to toggle on the BlueCruise Hands-Free elements in the dash cluster for supported vehicles.  To help simplify tuning, three prebuilt profiles were included in the menu.
+
+bp-3.0
+
+The third iteration of BluePilot was the first built upon SunnyPilot dev-c3-new. Since this release was based on dev-c3-new, many legacy SunnyPilot features were not available. . The advanced lateral logic was also completely rewritten to try and achieve good control in very high curvature situations. The new advanced lateral logic was met with mixed reviews, as some users felt it was twitchy and unsettled, while others loved it’s ability to handle sharper curves.  bp-3.0 was also a bit of a rushed release due to thermal issues on new Comma devices running the older branches, so the UI was a bit buggy.
+
+bp-3.1
+
+The updated release of BluePilot 3.0 brought back the lateral control logic from bp-2.1, and updated it to work with the newer release of SunnyPilot. The primary change in lateral logic and tuning was that the three pre-built profiles were eleminated in favor of two profiles, one for CAN vehicles and one for CANFD vehicles, which were automatically selected based on the detected vehicle. Users could still elect to switch to a custom profile and tweak their tuning. This was also the first release of SunnyPilot with an open source UI, so many new custom visual elements were introduced. These elements included radar overlays and EV/Hybrid Battery Status information.  Since bp-3.1 was based on bp-3.0, it also experienced the UI bugs from a rushed deployment.
+
+bp-3.1-FordACC
+
+Starting with bp-3.0, mainstream OpenPilot forced CAN Ford vehicles (Q3 harness) to use OpenPilot ACC with no option to use Ford ACC.  bp-3.1-FordACC is an exact copy of bp-3.1, but with an added toggle to allow CAN vehicles use to Ford ACC.
+
+bp-4.0
+
+bp-4.0 is also based on SunnyPilot dev-c3-new, which means it still lacks many legacy SunnyPilot features.  However, this release was not rushed; the UI is significantly more stable, and the advanced lateral control was deprecated in favor of a more modular lateral control feature set.  This resulted in a very smooth lateral experience, although it does have slightly less torque available for large curves.
+
+bp-5.0
+
+bp-5.0 was based upon sunnypilot dev-c3-new, after many legacy features had been reintroduced. However, it was released after comma had dropped support for the Comma3 from the base operating system.  From a bluepilot standpoint 5.0 was a major release representing months of development focused on improving the user experience, expanding Ford-specific features, and introducing powerful new tools for managing your comma device. This release brought a completely new web interface, all new on device UI, enhanced onroad visuals, improved Ford lateral controls, and numerous quality-of-life improvements throughout the system.
+
+bp-6.0
+
+bp-6.0 is based on the latest sunnypilot master at time of release. It includes support for the Comma4 and Comma3x.  When comma introduced the Comma4, the entire user interface for both the Comma4 and the Comma3x was converted to a whole new programming language. BluePilot 6.0 is primarly a port of BluePilot 5.0, re-written in the new language, with support added for the Comma4 device. It also includes modified longitudinal controls when using openpilot long. This is an attempt to create a feel more like CANFD ACC from Ford, with more coasting and a less binary feel, Comma4 inspired animations for the Comma3x including confidence ball and steering meter, connection to sunnylink dashboard for updating device settings via the internet.  It also includes BluePilot animations for the Comma4. Space is limited but we managed to get brake status, blind spot warnings, lead vehicle information, and hybrid data flow onto the screen.
+
+bp-7.0
+
+bp-7.0 s based on the latest sunnypilot master at the time of release. It includes support for the Comma4 and Comma3x.  bp-7.0 reuses most Ui elements from bp-6.0, but added a new lateral control scheme utilizing path_angle as the primary control variable.  This new lateral mode increases the responsivness of the system and reduces ping-pong and overshoot.
+
+LINKS:
+https://bluepilot.dev/2025/07/13/desired-curvature-versus-predicted-curvature-and-why-it-matters-for-ford/
+https://bluepilot.dev/2025/07/13/how-do-ford-lateral-controls-work-and-why-are-they-such-a-challenge-for-openpilot/

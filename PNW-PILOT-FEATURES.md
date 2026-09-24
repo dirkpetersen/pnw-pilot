@@ -78,6 +78,7 @@ tuned against real I-5 / I-90 / I-82 drive logs.
 | **ICBM follows a tracked lead through a curve** | When a lead vehicle has been tracked continuously through a curve, ICBM paces its target to the lead's speed — capped at what the truck itself can comfortably take, and never above the driver's own set — instead of always computing its own, more conservative curve target. Dec-only: can only raise ICBM's target, never lower it. | Driver: "why don't you just follow that instead of making up your own mind" — over-aggressive map-driven slowdowns on rural roads and ramps where a lead was already handling the curve fine. | `PnwVehicle.icbm_lead_lat_accel` capability (Lightning only), tunable in `/data/pnw/curve.json` | ✅ | 2026-09-13 |
 | **Gas pedal sets the speed after a steering-only stop** | After a brake-triggered steering-only stop (e.g. a red light past the old 20 s auto-arm window), one accelerator press sets/engages cruise at the current speed — no need to reach for `+`. Only the **first** press after the brake counts (an overtake minutes later does not re-engage); a creep that never reaches ~11 mph doesn't spend it; the press waits **1.0 s** after lift-off so a driver who brakes again wins; regen-only slowing is ignored, not read as a deceleration. | Owner goal: "hit the gas pedal once and it should overwrite [MADS] and set the new speed" instead of requiring the `+` button. | `PnwVehicle.mads_resume` capability | ✅ | 2026-09-13 |
 | ~~**Cruise cancels if our own SET/RES overshoots**~~ **REMOVED 2026-09-14** (`nosetcancel2pnw`) | Was: if openpilot's own SET−/RES tap brought the truck's stock cruise set back more than 3 mph above what was asked for, cruise was cancelled outright and steering dropped too ("Cruise set too high - cancelled"). **Now nothing acts on it:** the verify still logs `reason:"setHigher"` loud (ces_events + `cloudlog.error`), and the record keeps `driverBtn` and `cancel` (always false) plus `overshootAction:"none"`. | Its only trigger, the Corvallis 2026-09-13 21:16 "55 mph at 34" event (`drives/2026-09-13/corvallis-resume-55/`), was a 55 km/h set — the owner had switched the speedo to km/h by mistake (`drives/2026-09-14/units-kmh/`), so the truck set the speed it was doing. With the set speed read in true m/s (`units2pnw`), the owner decided on 2026-09-14: "remove it". | `EventName.madsResumeSetTooHigh` (log.capnp `@104`) stays reserved; its `events.py` entry has no alerts and nothing raises it | removed | 2026-09-13 → removed 2026-09-14 |
+| **Lane Centering** | Gently nudges the steering curvature toward the middle of the two clearly-detected lane lines — small, rate-limited, confidence-gated, working **alongside** (not replacing) the E2E driving model. **On by default.** Turn off via Settings → "Disable Lane Centering"; advanced tuning (offset, gain, deadband, etc.) lives in a hot-reloaded `/data/pnw/lanecenter_tuning.json`, hard-clamped to a safe envelope. Design and implementation by **u/jc01rho**, integrated into **StarPilot** by **firestar5683**; ported here as `lanecenter2pnw`. | The driving model alone can hug one side of the lane on a straight; this is the first lever in this fork that measures and directly corrects lane position, on both cars. | `DisableLaneCentering` (default OFF = feature ON) | ✅ deployed, validated 2026-08-10 | 2026-08-10 |
 
 See `docs/CES.md`, `docs/VTSC.md`, `docs/pnw/SHARPCURVE2PNW.md`, `docs/pnw/CES_I90.md`, `docs/pnw/CURVESLOW2PNW.md`,
 `ICBM2PNW.md`, `docs/pnw/SPEEDADJUST-EXECUTOR.md`, `docs/pnw/FORDLONG2PNW.md`, `docs/AUTO2XNOR.md`, `docs/BSM2XNOR.md`,
@@ -177,6 +178,19 @@ See `docs/pnw/FORDSAFETY2PNW.md`, `docs/pnw/FORDLONG2PNW.md`, `docs/RAVEN.md`, `
 
 > **Known gap:** the 2025 Lightning fingerprint is present on `testing`/`3devpnw` but a clean build
 > from a frozen `4devpnw` fingerprints the Lightning as MOCK/dashcam — verify before relying on it.
+
+> **Deviation from BluePilot (bp-dev) — pinion / steering-angle curvature yaw-source measurement NOT
+> ported.** BluePilot's bp-dev fork (PR #145) added an opt-in alternative Ford yaw source: instead of
+> trusting the RCM's `Yaw_Data_FD1` yaw rate, it can derive curvature from the pinion/steering angle —
+> for vehicles whose RCM broadcasts a **sign-inverted / implausible yaw rate** ("bad-yaw bug") while
+> the CAN quality flag still reads OK. pnw-pilot **intentionally does not carry this** yet: a
+> 2026-08-09/10 diagnostic on our own truck found the Lightning's yaw sensor **healthy** (RCM yaw
+> correlates **+0.997** with the independent steering-derived yaw — the bad-yaw signature is a strong
+> negative correlation instead; see `../../drives/2026-07-14/lightning-left-curve-toofast/YAW-SENSOR-DIAGNOSTIC.md`),
+> so it's unnecessary for this vehicle. It's tracked as **available-but-deferred** rather than dropped,
+> because another Lightning (or other Ford) owner running this code could have a bad-yaw RCM and would
+> want it — see `docs/PENDING-WORK.md` for the porting-cost note (the safety half needs a manual
+> ~144-line `ford.h` re-port, not a clean cherry-pick, since our `ford.h` has diverged from bp-dev's).
 
 ---
 

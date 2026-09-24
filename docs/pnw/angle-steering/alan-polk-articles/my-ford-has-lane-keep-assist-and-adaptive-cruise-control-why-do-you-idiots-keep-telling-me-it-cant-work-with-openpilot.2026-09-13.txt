@@ -1,0 +1,17 @@
+TITLE: My Ford has Lane Keep Assist and Adaptive Cruise Control.  Why do you idiots keep telling me it can’t work with OpenPilot
+URL: https://bluepilot.dev/2025/07/29/my-ford-has-lane-keep-assist-and-adaptive-cruise-control-why-do-you-idiots-keep-telling-me-it-cant-work-with-openpilot/
+PUBLISHED: 2025-07-29T08:34:53  MODIFIED: 2026-08-29T08:55:27
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+Ford has two different “Lane Assist” feature sets.  The older one is known as Lane Keep Assist (LKA), and the newer one is known as “Lane Centering Assist” (LCA).  While the hardware in vehicles that only have LKA will support OpenPilot in theory, Ford has crippled the software side of it in the name of “safety”.  Lane Keep Assist does not continuously steer the vehicle; rather, it only sends short bursts of signals to nudge the vehicle back towards center when the vehicle gets too close to a lane line.  To prevent users from just playing on their phone while the car nudged itself around the lane, Ford implemented in the firmware of the rack and pinion logic that if too many LKA signals were issued within a specific time window, then the power rack and pinion would stop accepting LKA signals.  This is commonly referred to as “LKA Lockout” when discussing OpenPilot.
+
+Please disable the “LKA Lockout”
+
+To disable the LKA Lockout, you would have to replace the firmware on the rack and pinion unit. There were a handful of people working on this in the 2018 time frame, but they were never successful. Since most fords now feature LCA, we are aware of no one working on LKA. (Edit: In 2026 someone was able to sucessuflly remove the LKA lockout.  They documented their work, but did not create a tool.  Doing the same requires following their notes in GitHub, it’s a very DIY process: https://bluepilot.dev/announcements/?post=ford-lka-openpilot-progress)
+
+Then give me a version of OpenPilot that works by staying below the lockout threshold.
+
+An enormous amount of time was also spent on this approach. Attempting to use OpenPilot but keeping the signal usage below the lockout threshold resulted in mostly unusable driving control. The vehicle was unable to take even the most modest of curves, and even on straightaways, the control looked like a drunk driver swerving back and forth, which made lots of testers motion sick.
+
+LINKS:
+https://bluepilot.dev/announcements/?post=ford-lka-openpilot-progress

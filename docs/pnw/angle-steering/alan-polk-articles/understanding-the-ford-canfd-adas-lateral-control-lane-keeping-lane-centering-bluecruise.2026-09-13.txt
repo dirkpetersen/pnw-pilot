@@ -1,0 +1,86 @@
+TITLE: Documenting Ford CANFD ADAS Lateral Control (Lane Keeping, Lane Centering, BlueCruise)
+URL: https://bluepilot.dev/2025/11/11/understanding-the-ford-canfd-adas-lateral-control-lane-keeping-lane-centering-bluecruise/
+PUBLISHED: 2025-11-11T17:14:55  MODIFIED: 2025-11-11T17:15:55
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+This post is an attempt to document our research on the Ford ADAS lateral control messages, both for future reference, education of users, and the hope that someone might be able to use this data to further the development of aftermarket ADAS integration.
+
+First, we need to discuss the 3 types of lane assist technology Ford deploys.  Collectly Ford refers to these technologies as Traffic Jam Assist (TJA) which was later rebrnaded as CoPilot 360 Plus.  All 3 have their own CANBUS signals from the Image Processing Module (IPMA) to the Power Steering Control Module (PSCM) inside the rack and pinion unit.
+
+Lane Depature Warning – This system buzzes the wheel and beeps on the dash if you cross a lane marking stripe
+
+Lane Keeping Assist – This system bumps you back towards the center of your lane if you get too close to a lane marking stripe.  This system does not steer constantly, rather only in pulses.  On CAN based Fords this signal was limited to 6 second bursts.  Injection testing on CANFD fords indicates it is not restricted to the 6 second bursts, but is still limited by many other factors including a minimum engagement speed of 35 kph (22 mph).  The canbus signal for LKA sends a direction (left right or none) and a number of radians to turn the steering wheel.  We will look at this signal more depth further on.
+
+Lane Centering Assist – This system constantly steers the wheel to keep the vehicle centered in the lane.  The canbus signal for LCA sends a geometric description of the road path to the PSCM which is used to calculate how much to turn the steering wheel.
+
+The first signal we will analyze is Lane_Assist_Data3_FD1,  it includes a lot of the parameters that report what types of ADAS are available to be used.  This signal originates from the PSCM and is sent to the IPMA.  In terms of 3rd party ADAS messages, this is a read-only message for us, letting us know what commands the PSCM will accept from the IPMA.  If the PSCM is not in a mode to accept our signals, we must figure out if there are other signals originating from the IPMA that can be manipulated to get the PSCM into a mode to accept our signals.  For instance, if we wanted to send LKA signals to the PSCM, but we are at only 18mph, it would not be in a mode to accept them.  Since the speed to the PSCM comes from the ABS module and not the IPMA module, it is not a value we can modify (and we wouldn’t want to do that anyway, because spoofing the speed to a steering rack is incredibly dangerous since torque levels are based on speed).
+
+The first variable we notice that is useful to us is TjaHandsOnCnfdnc_B_Est, which is a value from the rack and pinion with a rating of how confident the vehicle is that the user has their hands on the wheel.  
+
+The second variable to look at is LaActAvail_D_Actl, which is indicating which type of ADAS are available.  The status of LKA , LCA, and LDW are summarized here in a value such as LCA_LKA_Supress_LDW_Available.  This would indicate that the Lane Keep Assist and Lane Centering Assist are Unavailable, but Lane Departure Warning is available.
+
+The third variable to study is LaHandsOff_B_Actl, which tell us if the PSCM is in hands on (LCA) or hands off (BlueCruise) mode.  
+
+The variable LatCtlSte_D_Stat tells us what type of ADAS lane assist is engaged at the moment
+
+The other varables in this signal are either not fully documented, or not useful for us at this time.
+
+The second signal we will look at is the Lane Keep Assist Signal from the IPMA to the PSCM, Lane_Assist_Data1
+
+The first variable of interest in this signal is LkdwActvStats_D_Req, which is the signal that tells the alert (steering wheel buzz) whether to activate or not.  It is coupled with the signal LdwActIntns_D_Req which regulates the intensity of the alert
+
+The next variable of not is LkaActvStats_D2_Req, which is the variable that tells the PSCM which direction a lane keep action needs to happen.  The values include things just as LDW_Idle, LKA_Inervene_Right, LKA_Intervene_Left etc.  
+
+The final varible of interest is LaRefAng_No_Req.  This is the angle the steering wheel needs to move (in milliradians) to correct for the lane depature.
+
+The third signal to investigate is the Lane Centering Assist signal from the IPMA to the PSCM and IPC (instrument panel cluster) LateralMotionControl2, which describes the path the vehicle needs to follow to the PSCM.
+
+We can go through these variables in order:
+
+LatCtlRampType_D_Rq  – How quickly should the steering rack adjust to changes in control signals (slow, fast, immediate)
+
+LatCtlPrecision_D_Rq – How strictly should the steering rack attempt to follow the described path (comfort, precision)
+
+LatCtl_D2_Rq – path following mode (Off, Limited, Extended).  Of note is that we we have not figured out what “extended” mode does.  It is possible this is for future use by ford.  It could possibly be used in the 2025 MachE with automatic lane changes, but since the canbus messages are encrypted, we can’t tell.
+
+HandsOffCnfm_B_Rq – This signal is to the IPC indicating whether to display the “keep hands on wheel” message.
+
+LatCtlPath_No_Cs – The functionality of this parameter is currently unknown, the LMC2 signal functions perfectly fine when this has a value of zero.
+
+LatCtlCurv_No_Actl – A measurement of the radius of the road in front of the vehicle (-0.02 to 0.02 1/m)
+
+LatCtlPath_An_Actl – This is believed to be a steering wheel adjustment angle (-0.5 to 0.5 milliradians) to correct for being offset from path center
+
+LatCtlPathOffst_L_Actl – this is the distance the centerline of the vehicle is from the ideal path center, in meters.  The limits are -5.o to 5.0 meters.
+
+LatCtlCrv_noRate2_Actl – derivative of curvature, in other words how quickly the curvature of the road is changing
+
+LatCtlPath_no_Cnt – This is a counter that allows other nodes on the network to determine if they have missed a message.
+
+The final signal to analyze for lateral control, is actually an ACC message.  Most of the variables here are for longitudinal control, but one of them is key to BlueCruise engaging and going hands free. That signal is ACCDATA_3, from the IPMA to the IPC, PSCM, and ABS modules.
+
+The key signal here is the Tja_D_Stat signal.  Which has the following values:
+
+0  – LCA off
+
+1 – LCA in standby 
+
+2 – LCA active 
+
+3 – LKA Intervention Left
+
+4 -LKA Intervention Right
+
+5 – LDW Warning Left
+
+6 – LDW Warning Right
+
+7 – Hands Free BlueCruise Active
+
+The value of Tja_D_Stat is calculated by the IPMA based on a flag from the APIM based on GPS location.
+
+LINKS:
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2025/11/Screenshot-2025-11-11-at-4.05.23-PM.png?resize=648%2C830&ssl=1
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2025/11/Screenshot-2025-11-11-at-3.45.17-PM.png?resize=648%2C685&ssl=1
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2025/11/Screenshot-2025-11-11-at-4.04.44-PM.png?resize=648%2C758&ssl=1
+img:https://i0.wp.com/bluepilot.dev/wp-content/uploads/2025/11/Screenshot-2025-11-11-at-4.59.25-PM.png?resize=588%2C1024&ssl=1

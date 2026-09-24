@@ -1,0 +1,16 @@
+TITLE: Ford LKA OpenPilot Progress
+URL: https://bluepilot.dev/2026/04/27/ford-lka-openpilot-progress/
+PUBLISHED: 2026-04-27T10:21:30  MODIFIED: 2026-08-18T19:29:23
+FETCHED: 2026-09-13 via wp-json/wp/v2/posts
+
+The bluepilot team has been working hard on firmware modifications to enhance the capabilities of the Ford ADAS systems. The first item that has been addressed is the removal of the LKA timeout and minimum speed requirements so that the signals can be used 100% of the time. A huge shout out to Zorro and Cone_Guy for their work on this. The process involves extracting the PSCM Firmware using the beta version of Forscan, editing the firmware using an AI Agent coding assistant, and then flashing the modified files back via Forscan. So far this has only been successfully executed on a single vehicle (2025 Ford Transit), but the process should be applicable to all CAN (Q3) vehicles. 
+
+Currently, this work is considered a proof of concept that needs further development, and the bluepilot team does not have the resources to commit to the effort. You may contribute to the effort by making a pull request against the seed work. in GitHub at:
+
+https://github.com/ghostdev137/ford-pscm-re/tree/main
+
+Here is a quick video of the ford transit in action:
+
+LINKS:
+https://github.com/ghostdev137/ford-pscm-re/tree/main
+iframe:https://videopress.com/embed/1qBXHtEi?cover=1&autoPlay=0&controls=1&loop=0&muted=0&persistVolume=1&playsinline=0&preloadContent=metadata&useAverageColor=1&hd=0
