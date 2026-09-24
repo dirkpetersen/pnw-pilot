@@ -32,6 +32,20 @@ evidence; I-5 corridor + Seattle first). Method, validation, replay, gate and th
 | `v2_replay.py` | step 4: LODO replay of ICBM episodes, adds scan, and the ICBM-independent **row accuracy** |
 | `tests/test_v2.py` | the pure functions |
 
+### v2 LIVE (curvedblive2pnw, 2026-09-24): the table sets ICBM's curve target on the Lightning
+
+Owner decision 2026-09-24: LIVE, both directions, the N >= 60 shadow gate overridden. The car side is
+`selfdrive/controls/lib/ces_pnw/curvedb_live.py`; how it works, the rules and the kill switch:
+**`docs/CURVEDB-V2-LIVE.md`** in the workbench. **The rows file is PRIVATE (the owner's driven positions): it is
+never committed here.** It lives at `/data/pnw/curvedb_v2/` on the device and in the private workdir repo.
+
+| file | what it is |
+|---|---|
+| `v2_live_export.py` | `table.json.gz` -> `curvedb_v2_rows.json.zst` (zstd JSON) + `manifest.json` (SHA-256 of the .zst) |
+| `v2_live_fixture.py` | the PRIVATE leave-one-date-out replay fixture `ces_pnw/tests/test_curvedblive2pnw_replay.py` runs on |
+| `v2_live_report.py` | per drive from `ces_events`: what the live DB did (decisions, raises, lowers, mph, sites, why-not) |
+| `tests/test_v2_live_report.py` | the report tool |
+
 ```bash
 PYTHONPATH=. python3 tools/curvedb/ingest.py drives/**/ces_events*.jsonl \
     --out-observations obs.jsonl --out-episodes eps.jsonl

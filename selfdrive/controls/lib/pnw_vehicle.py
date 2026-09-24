@@ -130,6 +130,10 @@ _CURVE_DEFAULTS = {
   # launch_v. (Root cause: a lead crept forward at a red, op-long launched to follow at ~2.0 m/s^2.)
   "launch_accel": 0.6,          # m/s^2 accel ceiling at a dead stop (soft; stock jumped to ~2.0 = lurch)
   "launch_v_mph": 9.0,          # by this speed the launch cap has lifted to the normal accel envelope
+  # curvedblive2pnw: the learned curve database (curvedb v2) supplies ICBM's map/far curve target LIVE, both
+  # directions (ces_pnw/curvedb_live.py). ON by default on the Lightning -- owner decision 2026-09-24, which
+  # overrides the design's N >= 60 shadow gate. 0 = OFF: ICBM exactly as without the DB. Read at selfdrived start.
+  "curvedb_v2_live": 1.0,
 }
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
@@ -168,6 +172,7 @@ _CURVE_BOUNDS = {
   # this cap can only ever SOFTEN a launch, never make it harsher. launch_v [3, 25] mph.
   "launch_accel": (0.2, 2.0),
   "launch_v_mph": (3.0, 25.0),
+  "curvedb_v2_live": (0.0, 1.0),   # curvedblive2pnw: a switch; >= 0.5 is ON
 }
 
 
@@ -611,6 +616,12 @@ class PnwVehicle:
     if not math.isfinite(v) or v <= 0.0:
       return 0.0
     return v * self._curve_cfg["icbm_map_floor_frac"]
+
+  @property
+  def curvedb_v2_live(self) -> bool:
+    """curvedblive2pnw: the learned curve database may set ICBM's curve target. Lightning only (ICBM is its
+    stock-ACC path), and only while curve.json's `curvedb_v2_live` kill switch is on (default on)."""
+    return self.lightning_curve_slow and self._curve_cfg["curvedb_v2_live"] >= 0.5
 
   @property
   def icbm_lead_lat_accel(self) -> float:

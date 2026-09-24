@@ -43,6 +43,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import (ParkTickGat
 # logs what it WOULD have done; no control path reads its answer, and that is enforced by
 # tests/test_curvedb_read_boundary.py rather than by this comment.
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_shadow import CurveDBShadow, curvedb_tele
+from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import CurveDbLive, TELE_KEYS as ROADDB_TELE_KEYS
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -2100,6 +2101,75 @@ CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icb
                        "icbmSaneT", "icbmSaneWhy", "icbmBehind")
 
 
+def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_raw):
+  """The Lightning curve penalty, the map-rating floor and rain, applied to ONE candidate's apex `target` from
+  source `src`. Returns (target, map_floor, floor_hit). Lifted verbatim out of _icbm_step (curvedblive2pnw) so
+  the curve DB can price every candidate the way ICBM prices the one it picked; _icbm_step calls it exactly
+  where the inline block was, with the same inputs, so its behavior is unchanged. A module function, not a
+  method, because the ICBM tests bind _icbm_step onto bare stubs."""
+  is_left = False
+  try:
+    if src == "vis":
+      is_left = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0) > 0.0
+    elif src == "far":
+      is_left = map_turn_direction(map_targets, plat, plon, far_dist) > 0
+    elif src == "map":
+      is_left = map_turn_direction(map_targets, plat, plon,
+                                   sig.get("map_target_dist", float("inf"))) > 0
+  except Exception:
+    is_left = False
+  # icbmslow2pnw: THE MAP-RATING FLOOR. The Lightning curve penalty may not push a MAP/FAR
+  # target below that candidate's own raw mapd rating (scaled by icbm_map_floor_frac, default
+  # 1.0). See the knob's comment in pnw_vehicle.py for the full why: the penalty was
+  # calibrated 2026-07-11 against a 1.242x-inflated candidate, icbmcurve2pnw (2026-08-11)
+  # made the composite scale 1.012x for tight/moderate curves, and nothing re-calibrated the
+  # penalty against that — so it has been eating a margin that is no longer there.
+  #
+  # Deliberately NOT a change to curve_speed_penalty_ms itself: that function is SHARED with
+  # VTSC (the op-long path), and 32 of the 35 binding 2026-07-11 washouts the penalty exists
+  # for had no ICBM target at all (op-long/VTSC did the braking). A knob change would silently
+  # weaken that protection the moment Alpha Long is switched back on; this floor leaves
+  # op-long byte-identical. The 3 that WERE stock-ACC are analysed in docs/pnw/ICBMSLOW2PNW.md:
+  # two are vision-sourced (unfloored), the third is map-sourced on one tick of eleven.
+  #
+  # VISION candidates get NO floor: icbm_vision_apex is already a physics-derived safe speed
+  # with no map rating behind it, so there is nothing to floor against.
+  # `min(floor, target)` uses the PRE-penalty candidate, so the floor can only ever give back
+  # penalty — it can never raise the target above what the curve candidate itself allowed
+  # (and that value is already reduce-only vs `ref`). Rain is applied AFTER, so the driver's
+  # wet-weather margin still bites through the floor (rain2pnw is not the EPS penalty).
+  #
+  # THE FLOOR BOUNDS THE *BASE* HUMP ONLY. The descent guard and the left-curve factor model
+  # risk mapd's rating does NOT contain (adverse crown on a left; a descent eating the decel
+  # budget) -- both came from the two downhill-LEFT washouts of 2026-07-11 -- so their EXTRA
+  # over the flat-right penalty is still subtracted, below the floor. Flooring the multiplied
+  # penalty instead would make left_factor and descent_gain silently do nothing on every
+  # map/far curve the floor touches, which on this corpus is most of them.
+  raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(src, 0.0)
+  map_flr = veh.icbm_map_floor_ms(raw_rating)
+  pen_base = veh.curve_speed_penalty_ms(target)
+  pen_full = veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
+                                        is_left=is_left)
+  penalised = max(target - pen_full, 0.0)
+  # max(pen_full - pen_base, 0.0): curve_speed_penalty_ms's multipliers are clamped >= 1, so
+  # this is already non-negative -- the max() is a guard against a future edit, not live state.
+  target = max(max(target - pen_base, min(map_flr, target))
+               - max(pen_full - pen_base, 0.0), 0.0)
+  flr_hit = target > penalised + 1e-9
+  # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
+  target = max(target - veh.rain_penalty_ms(), 0.0)
+  return target, map_flr, flr_hit
+
+
+def _roaddb_tele(ctl) -> dict:
+  """curvedblive2pnw: the curve DB's ces_events fragment. A controller built without it (a permissive test stub)
+  gets every key, nulled, with cdb2On "absent" -- never a missing column that reads as "did not trigger"."""
+  db = getattr(ctl, "_roaddb", None)
+  if db is None:
+    return {**dict.fromkeys(ROADDB_TELE_KEYS), "cdb2On": "absent"}
+  return db.tele()
+
+
 def _curvelead_tele(ctl) -> dict:
   """curvelead2pnw: the telemetry fragment for BOTH the CESStatus overlay feed and the ces_events record
   (one builder, so the two cannot drift). Every key in CURVELEAD_TELE_KEYS, always present; a missing or
@@ -3855,6 +3925,12 @@ class CESController:
     #   _shadow  -> CES runs shadow with ICBM as the actuator (stock-ACC buttons, no op-long)
     veh = PnwVehicle(CP)
     self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
+    # curvedblive2pnw: the learned curve database, LIVE on ICBM's curve target (curvedb_live.py). Loads in its
+    # own thread; OFF (and saying why in every record) on any car without the capability or with the kill switch.
+    self._roaddb = CurveDbLive(veh.curvedb_v2_live)
+    if veh.lightning_curve_slow:
+      cloudlog.event("curvedb_v2_cfg", live=veh.curvedb_v2_live, switch=veh._curve_cfg["curvedb_v2_live"],
+                     path=pnw_vehicle_module.CURVE_CONFIG_PATH)
     # icbmslow2pnw / Rule 2: _load_curve_config() is silent, so a /data/pnw/curve.json that sets
     # icbm_map_floor_frac to 0 would turn the map-rating floor off with nothing anywhere saying so.
     # One line per selfdrived start, only on the cars the floor can act on. Not put in
@@ -5162,57 +5238,16 @@ class CESController:
       # _icbm_floor_hit documents).
       self._icbm_map_flr, self._icbm_map_flr_hit = 0.0, False
       if target is not None:
-        is_left = False
-        try:
-          if self._icbm_src == "vis":
-            is_left = float(sig.get("curve_lat_accel_vision", 0.0) or 0.0) > 0.0
-          elif self._icbm_src == "far":
-            is_left = map_turn_direction(self._map_targets, plat, plon, far_dist) > 0
-          elif self._icbm_src == "map":
-            is_left = map_turn_direction(self._map_targets, plat, plon,
-                                         sig.get("map_target_dist", float("inf"))) > 0
-        except Exception:
-          is_left = False
-        # icbmslow2pnw: THE MAP-RATING FLOOR. The Lightning curve penalty may not push a MAP/FAR
-        # target below that candidate's own raw mapd rating (scaled by icbm_map_floor_frac, default
-        # 1.0). See the knob's comment in pnw_vehicle.py for the full why: the penalty was
-        # calibrated 2026-07-11 against a 1.242x-inflated candidate, icbmcurve2pnw (2026-08-11)
-        # made the composite scale 1.012x for tight/moderate curves, and nothing re-calibrated the
-        # penalty against that — so it has been eating a margin that is no longer there.
-        #
-        # Deliberately NOT a change to curve_speed_penalty_ms itself: that function is SHARED with
-        # VTSC (the op-long path), and 32 of the 35 binding 2026-07-11 washouts the penalty exists
-        # for had no ICBM target at all (op-long/VTSC did the braking). A knob change would silently
-        # weaken that protection the moment Alpha Long is switched back on; this floor leaves
-        # op-long byte-identical. The 3 that WERE stock-ACC are analysed in docs/pnw/ICBMSLOW2PNW.md:
-        # two are vision-sourced (unfloored), the third is map-sourced on one tick of eleven.
-        #
-        # VISION candidates get NO floor: icbm_vision_apex is already a physics-derived safe speed
-        # with no map rating behind it, so there is nothing to floor against.
-        # `min(floor, target)` uses the PRE-penalty candidate, so the floor can only ever give back
-        # penalty — it can never raise the target above what the curve candidate itself allowed
-        # (and that value is already reduce-only vs `ref`). Rain is applied AFTER, so the driver's
-        # wet-weather margin still bites through the floor (rain2pnw is not the EPS penalty).
-        #
-        # THE FLOOR BOUNDS THE *BASE* HUMP ONLY. The descent guard and the left-curve factor model
-        # risk mapd's rating does NOT contain (adverse crown on a left; a descent eating the decel
-        # budget) -- both came from the two downhill-LEFT washouts of 2026-07-11 -- so their EXTRA
-        # over the flat-right penalty is still subtracted, below the floor. Flooring the multiplied
-        # penalty instead would make left_factor and descent_gain silently do nothing on every
-        # map/far curve the floor touches, which on this corpus is most of them.
-        raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(self._icbm_src, 0.0)
-        self._icbm_map_flr = self._veh.icbm_map_floor_ms(raw_rating)
-        pen_base = self._veh.curve_speed_penalty_ms(target)
-        pen_full = self._veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
-                                                    is_left=is_left)
-        penalised = max(target - pen_full, 0.0)
-        # max(pen_full - pen_base, 0.0): curve_speed_penalty_ms's multipliers are clamped >= 1, so
-        # this is already non-negative -- the max() is a guard against a future edit, not live state.
-        target = max(max(target - pen_base, min(self._icbm_map_flr, target))
-                     - max(pen_full - pen_base, 0.0), 0.0)
-        self._icbm_map_flr_hit = target > penalised + 1e-9
-        # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
-        target = max(target - self._veh.rain_penalty_ms(), 0.0)
+        target, self._icbm_map_flr, self._icbm_map_flr_hit = icbm_penalise(
+          self._veh, self._map_targets, target, self._icbm_src, sig, plat, plon, far_dist, far_raw)
+      # curvedblive2pnw: the learned road table replaces mapd's number for the curve (raise with margin and
+      # cap, lower to exactly the measured curve) and adds sharp curves the map missed. Here, after the
+      # penalties and before the posted-limit floor, so it compares against the target ICBM would have used.
+      # Every gate is in curvedb_live.py; a failed gate is no effect at all. Lightning only (capability).
+      roaddb = getattr(self, "_roaddb", None)      # getattr: the ICBM tests bind this method onto bare stubs
+      if roaddb is not None and roaddb.enabled:
+        target, far_dist = self._icbm_roaddb(target, sig, plat, plon, ref, ep_ceiling, starting, in_curve,
+                                             vis_v, vis_dist, ttc, far_v, far_dist, far_raw)
       # curvefloor2pnw: POSTED-LIMIT FLOOR for the ICBM path, low limits only.
       # 2026-08-11 06:52: spdLim 11.2 (25 mph), map target 7.3 m/s sustained 12 s, stock set tapped
       # 23.7 -> 7.15 (16 mph). icbmratchet2pnw only confirms single-tick OUTLIER drops, so nothing
@@ -5494,6 +5529,78 @@ class CESController:
           cloudlog.exception("icbm: _icbm_step FAILED -- no IcbmTarget published; the executor will stale-stop and ICBM is inert until this clears")
         except Exception:
           pass                      # logging must not become the thing that raises
+
+  def _icbm_roaddb(self, target, sig, plat, plon, ref, ep_ceiling, starting, in_curve,
+                   vis_v, vis_dist, ttc, far_v, far_dist, far_raw):
+    """curvedblive2pnw: one ICBM decision through the curve DB (curvedb_live.CurveDbLive.decide).
+    Returns (target, far_dist) and may relabel self._icbm_src. A defect here costs the DB, never ICBM:
+    on any exception the target, source and distance are returned untouched, and it is logged."""
+    try:
+      inf = float("inf")
+      v_ego, v_set = sig["v_ego"], sig["v_set"]
+      veh = self._veh
+
+      def one(map_v=0.0, map_dist=inf, v_vis=0.0, d_vis=inf, v_far=0.0, d_far=inf):
+        # a single source through ICBM's own binding rule
+        return icbm_curve_target(v_ego, v_set, map_v, map_dist, ep_ceiling, icbm_map_eff_scale, v_vis, d_vis,
+                                 map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
+                                 far_v=v_far, far_dist=d_far, track=True)[0]
+
+      def cands_fn():
+        vis = (vis_v, vis_dist)
+        if starting and not icbm_vision_may_start(vis_dist, ttc, icbm_map_reach(self._map_targets, plat, plon)):
+          vis = (0.0, inf)                  # the MAP-FIRST start rule, as _icbm_step applies it
+        md = sig.get("map_target_dist", inf)
+        pre = {"map": (one(map_v=sig.get("map_target_v", 0.0), map_dist=md), md),
+               "far": (one(v_far=far_v, d_far=far_dist), far_dist),
+               "vis": (one(v_vis=vis[0], d_vis=vis[1]), vis[1])}
+        cands = {s: None if a is None else
+                 (icbm_penalise(veh, self._map_targets, a, s, sig, plat, plon, far_dist, far_raw)[0], d)
+                 for s, (a, d) in pre.items()}
+        pts = {"map": map_candidate_point(self._map_targets, plat, plon, md),
+               "far": map_candidate_point(self._map_targets, plat, plon, far_dist)}
+        return cands, pts
+
+      # points the truck has already passed never re-enter as a re-derived candidate (behindgate2pnw's own test)
+      mask, _why = icbm_passed_points(self._map_targets, plat, plon, getattr(self, "_cur_bearing", None), v_ego)
+      passed = {id(p) for p, gone in zip(self._map_targets, mask, strict=True) if gone} if mask is not None else set()
+
+      def recand_fn(s, pts):
+        # the map/far candidate re-derived on a subset of mapd's points (a raised curve's stretch removed)
+        pts = [p for p in pts if id(p) not in passed]
+        if s == "map":
+          tv, td = upcoming_curve(pts, plat, plon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
+          a = one(map_v=tv, map_dist=td)
+          sig2, fd, fr = {**sig, "map_target_v": tv, "map_target_dist": td}, far_dist, far_raw
+        else:
+          fv, td, fr = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale,
+                                              veh.icbm_map_scale, veh.icbm_firm_decel)
+          a = one(v_far=fv, d_far=td)
+          sig2, fd = sig, td
+        if a is None:
+          return None
+        return ((icbm_penalise(veh, self._map_targets, a, s, sig2, plat, plon, fd, fr)[0], td),
+                map_candidate_point(pts, plat, plon, td))
+
+      src0 = self._icbm_src
+      t, src, fd = self._roaddb.decide(
+        today=target, src=src0, cands_fn=cands_fn, recand_fn=recand_fn, points=self._map_targets, plat=plat, plon=plon, ref=ref,
+        posted=sig.get("spd_lim", 0.0), horizon_m=ICBM_MAP_HORIZON_M, bind_fn=lambda v, d: one(v_far=v, d_far=d),
+        min_drop=ICBM_MIN_DROP_MS, way_sel=self._way_sel, hwy=self._hwy_class, allow=not (starting and in_curve))
+    except Exception as e:
+      now_w = time.monotonic()
+      if now_w - getattr(self, "_roaddb_err_t", -1e9) > ICBM_ERR_LOG_S:
+        self._roaddb_err_t = now_w
+        cloudlog.exception(f"curvedb_v2: decision FAILED ({type(e).__name__}) -- ICBM keeps its own target")
+      return target, far_dist
+    if src != src0 or t != target:
+      self._icbm_src = src
+      if fd is not None:
+        far_dist = fd
+      # gpsdrgate2pnw's sticky map provenance, re-taken for the source that now binds (same rule as above)
+      if t is not None and (src in ("map", "far") or self._icbm_ep.phase != "cap"):
+        self._icbm_cap_src = src
+    return t, far_dist
 
   def _publish_status(self, sig, want: bool) -> None:
     """Log mode transitions and publish a throttled CESStatus snapshot to the in-memory param store
@@ -5789,6 +5896,9 @@ class CESController:
       # accepts: see curvedb_tele's docstring for the 13x site-rate measurement behind that.
       **curvedb_tele(self, site_pt=cand_pt, now_wall=now_wall, v_ego=raw_vego,
                      v_set=tele.get("vSet")),
+      # curvedblive2pnw: the LIVE curve DB's latest ICBM decision (row, curvature, A, v_db, direction, why-not,
+      # ICBM's target without the DB and the target applied) + liveness. Keys pinned: ROADDB_TELE_KEYS.
+      **_roaddb_tele(self),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
