@@ -1783,7 +1783,8 @@ def main():
     #    ranges (EV/rest perp-filtered + up to 15 mi ahead along the mapd path).
     #  • SURFACE street (any other road, with a GPS fix): no highway path -> show the nearest EV/rest within
     #    a SURFACE_RANGE_MI (3 mi) straight-line radius, any direction (you can detour).
-    # Police stays freeway-only (the "ahead"/banner concept is highway-specific).
+    # Police: the banner + speedadjust cap stay freeway-only (the "ahead" concept is highway-specific); off a
+    # freeway the line is DISPLAY-ONLY while the poll is armed at highway speed (policeoffway2pnw, _police_payload).
     on_freeway = (ctx == "freeway") and lat is not None and lon is not None
     have_gps = lat is not None and lon is not None
     out["freeway"] = on_freeway              # UI header: "HAPPENING AHEAD" (freeway) vs "NEARBY (3 MI)" (surface)
