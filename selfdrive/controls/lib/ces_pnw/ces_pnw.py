@@ -2502,6 +2502,10 @@ class IcbmEpisode:
     never reaches here -- step() resets the episode first -- so in every such case the driver's value wins, as today."""
     if self.phase != "restore" or self.ahead_cap is None or self.ceiling is None or stock_set is None:
       return None
+    # Fable (restorehold3pnw F1): the set has reached the ceiling -- the restore is complete, nothing left to carry.
+    # Without this, the wider late-tap band could carry a ceiling BELOW the driver's set (63 carried over a set of 64).
+    if stock_set >= self.ceiling - ICBM_RESTORE_DONE_TOL:
+      return None
     if self._last_stock is not None:
       dt = max(now - (self._last_t if self._last_t is not None else now), 0.0)
       if (stock_set < self._last_stock - ICBM_RESTORE_DONE_TOL

@@ -821,6 +821,21 @@ class TestFableResiduals:
     ep.step(t + 4 * DT, 55 * MPH, 66.5 * MPH, 66.5 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
     assert ep.ceiling == pytest.approx(66.5 * MPH)
 
+  def test_s3_the_grace_band_never_carries_a_ceiling_below_the_set(self):
+    """Fable review of restorehold3pnw, F1: ceiling one tap above the hold (63 over a 62 snapshot), and two taps land on
+    the SAME tick a curve binds (62 -> 64: inside the cadence check and the grace band). The carry must not keep the
+    63 ceiling -- the restore after that curve would stop a tap BELOW the driver's 64. The set has reached the
+    ceiling, so there is nothing left to carry: re-latch at the set, as 0a5cb972dc did."""
+    ep = IcbmEpisode()
+    ep.step(0.0, 60 * MPH, 63 * MPH, 63 * MPH, True, False)
+    ep.step(1.0, None, 60 * MPH, 60 * MPH, True, False)
+    t = 1.0 + ICBM_RESTORE_DELAY_S + 0.1
+    assert ep.step(t, None, 60 * MPH, 60 * MPH, True, False, v_ego=60 * MPH)[1] == "inc"
+    ep.step(t + DT, None, 62 * MPH, 62 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)     # snapshot 62, grace
+    pub, d = ep.step(t + 2 * DT, 55 * MPH, 64 * MPH, 64 * MPH, True, False, v_ego=60 * MPH, hold_ahead=True)
+    assert d == "dec"
+    assert ep.ceiling >= 64 * MPH - 1e-6, "the grace band carried a ceiling below the driver's set"
+
   def test_s3_a_cap_on_the_first_tick_after_the_grace_is_strict(self):
     """Mutation s3b: the grace is a time window. A cap arriving on the first tick AFTER it closed -- before any restore
     tick re-anchored the snapshot -- is judged with the strict one-tap tolerance again."""
