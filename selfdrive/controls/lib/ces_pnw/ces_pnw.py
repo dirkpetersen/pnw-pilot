@@ -185,6 +185,77 @@ def prune_ces_archive(archive_dir: str | None = None, max_bytes: int | None = No
   return removed
 
 
+def _archive_dest(archive_dir: str, base: str, mtime: float) -> str:
+  """cesarchive2pnw: the ONE place an archive name is chosen, shared by the hardlink made at rotation
+  (link_rotated_generation) and the legacy move at eviction (archive_rotated_generation) so the two
+  can never drift. Returns a path in `archive_dir` that does not exist yet."""
+  # Name by the file's own mtime (when it last rotated out of live), not by "now": the archive is
+  # then sorted by content time, which is what prune_ces_archive's oldest-first eviction needs.
+  stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(mtime))
+  if mtime < CLOCK_VALID_EPOCH:
+    # ceslogup2pnw (Fable 2026-09-16): the 3X's RTC battery is dead, so every cold boot stamps
+    # pre-NTP files 1970. The `.N` collision loop below only disambiguates while the EARLIER file
+    # still exists -- and prune_ces_archive sorts by mtime, so 1970 files are always the first
+    # evicted, which frees the name again. Once these generations are uploaded (ceslogup2pnw) a
+    # reused name is an S3 key collision, and the failure is silent twice over: the Lambda presigns
+    # a plain put_object, so the earlier object is simply overwritten; and xattr_cache keys its
+    # "already uploaded" memo on the PATH, so within one uploader process the new file inherits the
+    # old one's b'1' and is never sent at all.
+    # Random, not a counter or a clock: there is no trustworthy clock here by definition, and a
+    # counter would have to persist across the reboot that caused the problem.
+    stamp = f"{stamp}.b{os.urandom(4).hex()}"
+  dest = os.path.join(archive_dir, f"{base}.{stamp}")
+  n = 1
+  while os.path.exists(dest):          # two rotations inside one second (or a re-run) must not collide
+    dest = os.path.join(archive_dir, f"{base}.{stamp}.{n}")
+    n += 1
+  return dest
+
+
+def link_rotated_generation(gen1: str, base: str, archive_dir: str | None = None, max_bytes: int | None = None):
+  """cesarchive2pnw: hardlink the generation that was JUST rotated out of live (`gen1`, i.e. path.1)
+  into the archive, so it reaches S3 the same day instead of when it falls off the end of the ring.
+
+  Why: since parkgate2pnw stopped logging a parked truck, 8 x 20 MB covers ~4 days of driving, and a
+  generation used to reach the archive only when archive_rotated_generation evicted it -- telemetry
+  arrived on S3 ~4 days late (measured on the device 2026-09-23). A hardlink costs no bytes (same
+  filesystem as the ring, see CES_ARCHIVE_DIR) and one link() syscall -- this runs inside
+  selfdrived's loop. The ring keeps its own link; eviction then only drops that link (see
+  archive_rotated_generation), so nothing is archived twice.
+
+  Returns the archive path, or None on failure. Never raises; a failure is LOUD and degrades to the
+  pre-cesarchive2pnw behaviour (archived at eviction, days late)."""
+  archive_dir = CES_ARCHIVE_DIR if archive_dir is None else archive_dir   # see prune_ces_archive
+  dest = None
+  try:
+    st = os.stat(gen1)
+    os.makedirs(archive_dir, exist_ok=True)
+    dest = _archive_dest(archive_dir, base, st.st_mtime)
+    os.link(gen1, dest)
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: ces_archive hardlink FAILED ({type(e).__name__}: {e}) {gen1} -> {dest} -- this " +
+                   "generation will only be archived at EVICTION from the ring, i.e. reach S3 days late")
+    return None
+  prune_ces_archive(archive_dir, max_bytes)
+  return dest
+
+
+def _archive_link_of(st: os.stat_result, archive_dir: str, base: str):
+  """cesarchive2pnw: the path of an UPLOADABLE archive entry that is the same inode as `st`, or None
+  when there is none. Raises OSError when the archive cannot be scanned -- the caller must then NOT
+  assume the data is safe. scandir's inode() is d_ino from the directory read itself, so this is one
+  listing and no per-file stat."""
+  if os.stat(archive_dir).st_dev != st.st_dev:
+    return None                        # a different filesystem cannot hold a hardlink to it
+  with os.scandir(archive_dir) as it:
+    for e in it:
+      # The prefix is the uploader's own gate (PNW_LOG_SOURCES): a link under any other name would
+      # keep the bytes on disk but never reach S3, so it does not count as "archived".
+      if e.inode() == st.st_ino and e.name.startswith(base + ".") and e.is_file(follow_symlinks=False):
+        return e.path
+  return None
+
+
 def archive_rotated_generation(path: str, generations: int, archive_dir: str | None = None,
                                max_bytes: int | None = None):
   """curvedbtel2pnw (section 3.8): rescue the generation rotate_event_log is about to destroy.
@@ -215,27 +286,30 @@ def archive_rotated_generation(path: str, generations: int, archive_dir: str | N
     cloudlog.error(f"ces_pnw: ces_archive mkdir FAILED ({type(e).__name__}) at {archive_dir} -- ces_events history " +
                    "is being DESTROYED on every rotation; the curvedb Phase-1 corpus is not accumulating")
     return None
-  # Name by the file's own mtime (when it last rotated out of live), not by "now": the archive is
-  # then sorted by content time, which is what prune_ces_archive's oldest-first eviction needs.
   base = os.path.basename(path)
-  stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(st.st_mtime))
-  if st.st_mtime < CLOCK_VALID_EPOCH:
-    # ceslogup2pnw (Fable 2026-09-16): the 3X's RTC battery is dead, so every cold boot stamps
-    # pre-NTP files 1970. The `.N` collision loop below only disambiguates while the EARLIER file
-    # still exists -- and prune_ces_archive sorts by mtime, so 1970 files are always the first
-    # evicted, which frees the name again. Once these generations are uploaded (ceslogup2pnw) a
-    # reused name is an S3 key collision, and the failure is silent twice over: the Lambda presigns
-    # a plain put_object, so the earlier object is simply overwritten; and xattr_cache keys its
-    # "already uploaded" memo on the PATH, so within one uploader process the new file inherits the
-    # old one's b'1' and is never sent at all.
-    # Random, not a counter or a clock: there is no trustworthy clock here by definition, and a
-    # counter would have to persist across the reboot that caused the problem.
-    stamp = f"{stamp}.b{os.urandom(4).hex()}"
-  dest = os.path.join(archive_dir, f"{base}.{stamp}")
-  n = 1
-  while os.path.exists(dest):          # two rotations inside one second (or a re-run) must not collide
-    dest = os.path.join(archive_dir, f"{base}.{stamp}.{n}")
-    n += 1
+  if st.st_nlink > 1:
+    # cesarchive2pnw: it was hardlinked into the archive at rotation (link_rotated_generation), or
+    # by hand (the owner's 2026-09-23 one-off). Moving it in again would archive -- and upload -- the
+    # same bytes twice under a second name. But unlink only once the other link is PROVEN to be an
+    # uploadable archive entry: nlink alone does not say where that link lives.
+    try:
+      linked = _archive_link_of(st, archive_dir, base)
+      if linked is None:
+        cloudlog.warning(f"ces_pnw: {oldest} has nlink {st.st_nlink} but no uploadable link in {archive_dir} " +
+                         "-- moving it in as before")
+    except OSError as e:
+      linked = None
+      cloudlog.error(f"ces_pnw: ces_archive scan FAILED ({type(e).__name__}) checking {oldest} (nlink " +
+                     f"{st.st_nlink}) -- cannot prove it is already archived, so it is MOVED in as before " +
+                     "(worst case: archived and uploaded twice, never lost)")
+    if linked is not None:
+      try:
+        os.unlink(oldest)
+      except OSError as e:
+        cloudlog.error(f"ces_pnw: ces_archive could not unlink ring copy {oldest} ({type(e).__name__}) -- " +
+                       f"harmless: its data is safe in {linked} and the rotation overwrites this link")
+      return linked
+  dest = _archive_dest(archive_dir, base, st.st_mtime)
   try:
     os.replace(oldest, dest)
   except OSError as e:
@@ -254,7 +328,11 @@ def rotate_event_log(path: str, generations: int) -> None:
   curvedbtel2pnw (section 3.8): "dropped" now means "moved to CES_ARCHIVE_DIR" -- see
   archive_rotated_generation. It runs FIRST, before the shift that would overwrite path.N, and it
   never raises, so a broken archive degrades to exactly the pre-curvedbtel2pnw behaviour (the
-  generation is lost) with a loud swaglog line instead of silence."""
+  generation is lost) with a loud swaglog line instead of silence.
+
+  cesarchive2pnw: the new .1 is also hardlinked into the archive right away (link_rotated_generation),
+  so the data reaches S3 the same day; eviction of an already-linked file then just drops the ring's
+  link. The final os.replace still raises if `path` is missing -- callers already handle that."""
   archive_rotated_generation(path, generations)
   for i in range(max(int(generations), 1) - 1, 0, -1):
     try:
@@ -262,6 +340,46 @@ def rotate_event_log(path: str, generations: int) -> None:
     except OSError:
       pass          # that generation doesn't exist yet -> nothing to shift
   os.replace(path, f"{path}.1")
+  # cesarchive2pnw: archive the new .1 NOW (hardlink), not ~8 rotations from now. Never raises.
+  link_rotated_generation(f"{path}.1", os.path.basename(path))
+
+
+# cesarchive2pnw: the live file is rotated (and so archived + uploaded) when the truck goes into Park
+# after driving, if it holds at least this much. 64 KB is ~25 s of driving at the measured 9.1 MB/h:
+# enough that a park/unpark shuffle cannot spray the ring with tiny generations, small enough that
+# every real drive's tail qualifies.
+CES_PARK_ROTATE_MIN_BYTES = 64 * 1024
+
+
+def rotate_at_park(path: str, generations: int, min_bytes: int | None = None) -> bool:
+  """cesarchive2pnw: rotate `path` at the end of a drive so its tail reaches the archive (and S3) the
+  same night instead of whenever 20 MB accumulates -- which since parkgate2pnw can be days.
+
+  Called on ParkTickGate.park_edge: the first tick the gear reads Park after a known non-Park gear.
+  NOT debounced by the gate's 30 s hold: a driver who parks and switches off inside 30 s stops
+  selfdrived before the hold would fire, and the tail would wait for the next drive's end.
+
+  Returns True when it rotated. Never raises: this runs inside selfdrived's loop, via _park_decision,
+  whose caller forces CES to Chill on an exception -- a logging housekeeping step must not do that."""
+  min_bytes = CES_PARK_ROTATE_MIN_BYTES if min_bytes is None else min_bytes
+  try:
+    size = os.path.getsize(path)
+  except FileNotFoundError:
+    return False                       # nothing written since the last rotation -- nothing to archive
+  except OSError as e:
+    cloudlog.error(f"ces_pnw: park rotation could not stat {path} ({type(e).__name__}) -- this drive's tail " +
+                   "is NOT archived tonight; it rotates at 20 MB or at the next park instead")
+    return False
+  if size < min_bytes:
+    return False
+  try:
+    rotate_event_log(path, generations)
+  except Exception as e:
+    cloudlog.exception(f"ces_pnw: park rotation FAILED ({type(e).__name__}) for {path} ({size} bytes) -- this " +
+                       "drive's tail is NOT archived tonight")
+    return False
+  cloudlog.event("ces_park_rotate", size=size, path=path)
+  return True
 
 
 # steerpower2pnw: LOGGING ONLY -- measure the truck's true hands-off steering capability by direction.
@@ -5202,7 +5320,7 @@ class CESController:
     that stopped gating would otherwise be invisible, since "logging everything" is also what the
     healthy pre-feature behaviour looks like."""
     try:
-      return self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
+      decision = self._park_gate.update(self._gear, self._v_ego_raw, now, self._park_gate_on)
     except Exception as e:
       self._park_err_n += 1
       if self._park_err_t is None or now - self._park_err_t >= CURVELEAD_ERR_LOG_S:
@@ -5211,6 +5329,11 @@ class CESController:
         self._park_err_t = now
         self._park_err_n = 0
       return PARK_LOG
+    if self._park_gate.park_edge:
+      # cesarchive2pnw: end of a drive -> rotate (and so archive) the drive's tail tonight, not days
+      # from now. One tick per edge, so once per park transition. Never raises (see rotate_at_park).
+      rotate_at_park(CES_EVENT_LOG, CES_EVENT_LOG_GENERATIONS)
+    return decision
 
   def _event_record(self, kind: str, tele: dict) -> dict:
     """Build one rich, flat record for the persistent CES_EVENT_LOG. `kind` is "adopt" (a CES mode

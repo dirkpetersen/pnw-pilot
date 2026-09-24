@@ -66,6 +66,11 @@ class ParkTickGate:
     self.last_hold_suppressed = 0  # count from the hold that most recently ended (RELEASE record)
     self._park_since: float | None = None
     self._last_emit: float | None = None
+    # cesarchive2pnw: True on exactly the ONE tick the gear goes into Park from a KNOWN non-Park gear
+    # (i.e. the end of a drive), whatever gate_on says. Undebounced on purpose -- see ces_pnw's
+    # rotate_at_park. A None gear (no carState yet) is not "was driving", so a boot in Park is no edge.
+    self.park_edge = False
+    self._was_known_unparked = False
 
   def _clear(self) -> None:
     self.holding = False
@@ -86,6 +91,8 @@ class ParkTickGate:
     if park and isinstance(v_ego, (int, float)) and math.isfinite(v_ego) and abs(float(v_ego)) > PARK_RELEASE_V:
       park = False
     self.parked = park
+    self.park_edge = park and self._was_known_unparked
+    self._was_known_unparked = gear is not None and not park
 
     if not gate_on:
       # Kill switch (or the switch was never read): behave byte-identically to the old code. Any

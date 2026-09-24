@@ -66,8 +66,9 @@ class TestRotateEventLog:
     assert not os.path.exists(f"{log}.{n + 1}")
     # curvedbtel2pnw (section 3.8): it is ARCHIVED, not destroyed. 8 generations is ~17.6 driving
     # hours, and the curvedb Phase-1 gate needs 6-8 WEEKS retained.
-    archived = [q.read_text() for q in (tmp_path / "archive").iterdir()]
-    assert archived == [f"gen{n}"]
+    # cesarchive2pnw: and the generation that just LEFT live is hardlinked in at the same time.
+    archived = sorted(q.read_text() for q in (tmp_path / "archive").iterdir())
+    assert archived == sorted([f"gen{n}", "live"])
 
   def test_holes_in_the_chain_are_tolerated(self, tmp_path):
     # a crash mid-rotate can leave a missing generation; rotation must not raise
@@ -159,7 +160,8 @@ class TestArchive:
 
     m.rotate_event_log(str(live), 8)
 
-    assert [p.read_text() for p in arc.iterdir()] == ["gen8\n"]
+    # gen8 moved in at eviction (it was never linked); "live" hardlinked in at rotation (cesarchive2pnw)
+    assert sorted(p.read_text() for p in arc.iterdir()) == ["gen8\n", "live\n"]
     assert (tmp_path / "ces_events.jsonl.1").read_text() == "live\n"    # the rotation still works
     assert (tmp_path / "ces_events.jsonl.8").read_text() == "gen7\n"
 
