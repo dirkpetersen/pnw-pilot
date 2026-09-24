@@ -51,10 +51,13 @@ Field evidence: two DOWNHILL LEFT washouts under op-long (18:12:16 @ 77 mph vs c
 - **Overspeed-into-curve escalation:** when v_ego > applied cap + `overspeed_margin_mph` AND the
   entrance needs more than regen, the rate-limit ceiling escalates to the EXISTING
   `SHARP_A_DECEL_MAX` (no new decel ceiling).
-- **Left factor** (default 1.15): US crown drains right → left curves bank adversely; both washouts
-  were downhill LEFTS. Sign verified in-tree: `modelV2.orientationRate.z > 0` at apex = LEFT
-  (`apex_turn_direction`); map/far candidates use pure `map_turn_direction()` (path-geometry cross
-  products, ambiguous → 0 neutral).
+- **Left factor** (default 1.0; was 1.15): US crown drains right → left curves bank adversely;
+  both washouts were downhill LEFTS. Sign verified in-tree: `modelV2.orientationRate.z > 0` at
+  apex = LEFT (`apex_turn_direction`); map/far candidates use pure `map_turn_direction()`
+  (path-geometry cross products, ambiguous → 0 neutral).
+  **Removed 2026-09-24 by the owner (default 1.15 → 1.0, `noleftfactor2pnw`):** the 07-11 washout
+  direction labels were inverted (#156 at 18:12 PT was a right-hander), so the "downhill LEFTS"
+  premise does not hold. The knob is still settable via `curve.json`.
 - Multipliers clamped ≥ 1 → the penalty only ever GROWS → the target only moves DOWN; total penalty
   hard-capped at `penalty_cap_mph` (15).
 - Same commit's ICBM high-speed map fixes (500 m far candidate, firm-decel far ramp, `map_scale`
@@ -70,7 +73,7 @@ e.g. `left_factor` ∈ [1.0, 1.5], `map_scale` ≤ 1.0, penalties ∈ [0, 15] mp
 {"lightning": {"penalty_min_mph": 1.0, "penalty_max_mph": 5.0, "penalty_taper_mph": 1.5,
                "low_v_mph": 30, "peak_lo_v_mph": 45, "peak_hi_v_mph": 62, "taper_v_mph": 75,
                "descent_gain": 8.0, "descent_pitch_cap": 0.12, "penalty_cap_mph": 15,
-               "left_factor": 1.15, "overspeed_margin_mph": 2.0,
+               "left_factor": 1.0, "overspeed_margin_mph": 2.0,
                "map_scale": 0.92, "icbm_firm_decel": 1.4,
                "icbm_map_floor_frac": 1.0}}
 ```

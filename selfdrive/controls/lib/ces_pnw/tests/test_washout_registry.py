@@ -52,7 +52,8 @@ def test_fixture_present_and_covers_the_drive():
   # icbmslow2pnw (2026-09-17): the fixture as first checked in ENDED at 18:17 PT, because
   # ces_events_1917.jsonl was pulled off the device after it was generated. That silently left out
   # the 19:16-19:18 PT downhill-LEFT washouts -- the two events descentcurve2pnw's left_factor and
-  # descent_gain were BUILT from (CURVESLOW2PNW.md "two DOWNHILL LEFT washouts ... 19:17-18"), so
+  # descent_gain were BUILT from (labels since found inverted, 2026-09-24; left_factor removed)
+  # (CURVESLOW2PNW.md "two DOWNHILL LEFT washouts ... 19:17-18"), so
   # the regression below had never actually been run against them. Regenerated with tools/washouts.py
   # over the full folder: 158 -> 171 clusters, 27 -> 35 binding. Nothing else changed.
   assert max(w["t"] for w in washouts) > 1783822200, \
