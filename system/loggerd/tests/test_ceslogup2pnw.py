@@ -206,12 +206,14 @@ class TestDriveDataStillGoesFirst:
       (seg / n).write_bytes(b"x")
     return root
 
-  def test_a_qlog_outranks_the_corpus(self, tmp_path):
+  def test_the_corpus_now_outranks_a_qlog(self, tmp_path):
+    """INVERTED by cesarchive2pnw (owner, 2026-09-23): small device logs are tier 1, qlog tier 2.
+    (This used to be test_a_qlog_outranks_the_corpus.) The class name is historical."""
     root = self._with_segment(tmp_path, "qlog.zst")
     d = _archive(tmp_path, GEN)
     u = _uploader(root, archive=d)
     name, _, _ = u.next_file_to_upload(metered=False)
-    assert name == "qlog.zst"
+    assert name == GEN
 
   def test_a_boot_log_outranks_the_corpus(self, tmp_path):
     root = tmp_path / "realdata"

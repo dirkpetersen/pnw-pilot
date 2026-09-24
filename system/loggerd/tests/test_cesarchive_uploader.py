@@ -30,6 +30,12 @@ class _Params:
   def get_bool(self, k):
     return False
 
+  def put(self, k, v):
+    pass
+
+  def put_bool(self, k, v):
+    pass
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
@@ -277,3 +283,77 @@ def test_the_shipped_metered_order_and_sources():
   wants = {w for _, _, w in uploader.PNW_LOG_SOURCES}
   assert {t for t in uploader.METERED_ORDER if t != "boot/"} == wants, "every metered tier must be a real source"
   assert CAP == 50 * 1024 * 1024
+
+
+# ===================================================================================================
+# Scope 3 (owner, 2026-09-23): on UNMETERED links every log precedes any video, smallest first.
+#   1 small device logs (boot, then pnwlogs)  2 qlog  3 qcamera  4 rlog  5 HD video (dcamera: never)
+# Each tier drains across ALL segments before the next starts.
+# ===================================================================================================
+WIFI = next(iter(uploader.PASS2_NETWORK_TYPES))
+SEG2 = "00000004--0ac3964c96--8"
+
+
+def _drain_unmetered(u, limit=100):
+  """main()'s decision, verbatim: pass 1 every loop; pass 2 only once pass 1 has nothing left."""
+  for _ in range(limit):
+    if u.step(WIFI, False) is None and u.step(WIFI, False, pass2=True) is None:
+      return
+  raise AssertionError("never went idle")
+
+
+def _backlog(env):
+  _put(env["arc"]["net_events.jsonl."], "net_events.jsonl.20260901T000000Z", 100)
+  _put(env["arc"]["curvedb_obs.jsonl."], "curvedb_obs.jsonl.20260901T000000Z", 100)
+  _put(env["arc"]["ces_events.jsonl."], "ces_events.jsonl.20260901T000000Z", 100)
+  (env["root"] / "boot").mkdir()
+  _put(env["root"] / "boot", "00000019--0987654321", 100)
+  for seg in (SEG, SEG2):
+    (env["root"] / seg).mkdir()
+    for n in DRIVE_FILES:
+      _put(env["root"] / seg, n, 100)
+
+
+class TestUnmeteredTierOrder:
+  def test_small_logs_then_qlog_then_qcamera_then_rlog_then_hd(self, env):
+    _backlog(env)
+    u = _uploader(env)
+    _drain_unmetered(u)
+    assert u.sent[:10] == [
+      "boot/00000019--0987654321.zst",
+      "pnwlogs/ces_events.jsonl.20260901T000000Z.zst",
+      "pnwlogs/curvedb_obs.jsonl.20260901T000000Z.zst",
+      "pnwlogs/net_events.jsonl.20260901T000000Z.zst",
+      f"{SEG}/qlog.zst", f"{SEG2}/qlog.zst",
+      f"{SEG}/qcamera.ts", f"{SEG2}/qcamera.ts",
+      f"{SEG}/rlog.zst", f"{SEG2}/rlog.zst",
+    ], u.sent
+    # HD last, oldest segment first; fcamera/ecamera order inside a segment is os.listdir order.
+    hd = u.sent[10:]
+    assert sorted(hd[:2]) == [f"{SEG}/ecamera.hevc", f"{SEG}/fcamera.hevc"], hd
+    assert sorted(hd[2:]) == [f"{SEG2}/ecamera.hevc", f"{SEG2}/fcamera.hevc"], hd
+    assert not [k for k in u.sent if k.endswith("dcamera.hevc")], "the driver camera never leaves"
+
+  def test_a_cooling_down_rlog_does_not_block_video_forever(self, env, monkeypatch):
+    seg = env["root"] / SEG
+    seg.mkdir()
+    for n in ("rlog", "fcamera.hevc"):
+      _put(seg, n, 100)
+    u = _uploader(env)
+    monkeypatch.setattr(uploader.time, "monotonic", lambda: 1000.0)
+    u._retry_after = {str(seg / "rlog"): 1000.0 + uploader.RETRY_COOLDOWN_S}
+    assert u.next_pass2_file_to_upload(False)[1] == f"{SEG}/fcamera.hevc"
+    u._retry_after = {}                                  # the cooldown lapses -> rlog goes first again
+    assert u.next_pass2_file_to_upload(False)[1] == f"{SEG}/rlog"
+
+  def test_a_cooling_down_qlog_does_not_hold_back_pass_2(self, env, monkeypatch):
+    seg = env["root"] / SEG
+    seg.mkdir()
+    _put(seg, "qlog", 100)
+    u = _uploader(env)
+    monkeypatch.setattr(uploader.time, "monotonic", lambda: 1000.0)
+    u._retry_after = {str(seg / "qlog"): 1000.0 + uploader.RETRY_COOLDOWN_S}
+    assert u.next_file_to_upload(False) is None, "pass 1 must read as drained, so main() starts pass 2"
+
+  def test_the_interleave_is_gone(self):
+    assert not hasattr(uploader, "PASS2_INTERLEAVE")

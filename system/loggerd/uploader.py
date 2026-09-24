@@ -168,10 +168,9 @@ FIREHOSE_ACTIVE_PARAM = "FirehoseActive"
 # file = negligible overhead (the speed is already computed for the upload_success log event).
 FIREHOSE_SPEED_PARAM = "FirehoseSpeed"
 
-# connect2pnw HD-interleave: force one pass-2 (HD/rlog) upload after this many consecutive successful
-# pass-1 (small) uploads, so large video isn't starved behind a long small-file backlog. Small files
-# still get priority (pass 1 runs every loop); this just guarantees HD makes steady progress.
-PASS2_INTERLEAVE = 4
+# cesarchive2pnw: the connect2pnw HD-interleave (PASS2_INTERLEAVE: one pass-2 file after every 4 pass-1
+# successes) is GONE, by owner decision 2026-09-23 -- every log now fully precedes any video. Pass 2
+# runs only when pass 1 has nothing eligible left; see next_file_to_upload for the tiers.
 
 # uploadretry2pnw: GENTLE retry cooldown. On a hard failure a file is NOT marked done (no silent data
 # loss) but goes on this long per-file cooldown so it isn't re-picked every loop — no chatter, no
@@ -833,21 +832,23 @@ class Uploader:
         yield name, key, fn
 
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
+    """Pass 1 (small files), in TIERS -- cesarchive2pnw, owner 2026-09-23: "on unmetered networks always
+    prioritize all the logs before you upload any videos. Small logs go first and then the larger
+    ones." Each tier drains across ALL segments before the next starts:
+      1. small device logs: crash/ and boot/ (listing order), then the pnwlogs archives (oldest first,
+         in PNW_LOG_SOURCES order: ces_events, curvedb_obs, net_events)
+      2. every qlog            (~0.43 MB/segment)
+      3. every qcamera         (~2.3 MB/segment)
+    Pass 2 (main(): only once this returns None) then takes every rlog, then HD video.
+    A file on retry cooldown is not listed, so a tier counts as drained when everything still
+    eligible in it is uploaded or cooling down -- a stuck file can never hold the next tier back."""
     upload_files = list(self.list_upload_files(metered))
 
     for name, key, fn in upload_files:
       if any(f in fn for f in self.immediate_folders):
         return name, key, fn
 
-    for name, key, fn in upload_files:
-      if name in self.immediate_priority:
-        return name, key, fn
-
-    # ceslogup2pnw: LAST tier, deliberately. The drive data still goes first -- a pnw log only moves
-    # when there is no crash/boot file and no qlog/qcamera waiting -- so this cannot slow the upload
-    # of the segment that is being driven right now. The corpus is days-to-weeks old by the time it
-    # is archived; it can wait for a gap. (Without this tier the files would be listed and never
-    # chosen: pass 1 returns ONLY immediate-folder and immediate-priority names.)
+    # ceslogup2pnw's pnw-log tier, moved from LAST to here (tier 1) by cesarchive2pnw.
     #
     # The key-prefix test is NOT decoration, and it must not be loosened to "return the first thing
     # left" (Fable 2026-09-16). list_upload_files yields every non-firehose file in a segment,
@@ -860,6 +861,12 @@ class Uploader:
     for name, key, fn in upload_files:
       if key.startswith(PNW_LOG_PREFIXES):
         return name, key, fn
+
+    # Tiers 2 and 3: ALL qlogs, then ALL qcameras (stock took them segment by segment).
+    for prio in sorted(set(self.immediate_priority.values())):
+      for name, key, fn in upload_files:
+        if self.immediate_priority.get(name) == prio:
+          return name, key, fn
 
     return None
 
@@ -1090,7 +1097,6 @@ def main(exit_event: threading.Event | None = None) -> None:
   threading.Thread(target=_firehose_network_guard, args=(uploader, exit_event), daemon=True).start()
 
   backoff = 0.1
-  pass1_run = 0   # consecutive successful small (pass-1) uploads since the last HD (pass-2) upload
   last_locator_ping = 0.0   # uploadgate2pnw: standalone CloudWatch locator heartbeat (any connection)
   while not exit_event.is_set():
     sm.update(0)
@@ -1138,28 +1144,22 @@ def main(exit_event: threading.Event | None = None) -> None:
       # persisted 50 MB/Pacific-day budget. Not shown as pass-1 progress (GREEN means drive files move).
       uploader.set_pass1_active(False)
       p1 = uploader.step_metered(network_type_raw)
-    if p1 is None:
-      pass1_run = 0
-    elif p1:
-      pass1_run += 1
 
     # uploadgate2pnw: PASS 2 (rlog + HD video) ONLY at a priority (home) network — never on other
     # WiFi/hotspots however unmetered (a background 75 MB burst kills an on-the-road hotspot), never
     # metered, and only offroad-or-parked (GearPark param from card; no msgq subs in this process).
-    # HD-interleave: run pass 2 when pass 1 has nothing left (p1 is None) OR after every
-    # PASS2_INTERLEAVE successful small uploads, so HD video makes steady progress instead of being
-    # starved behind a long backlog of small files. Small files keep priority.
+    # cesarchive2pnw: pass 2 runs ONLY when pass 1 has nothing eligible left (p1 is None): every log
+    # (small logs, qlog, qcamera) precedes any rlog/video. No interleave (owner decision 2026-09-23).
     at_home = params.get_bool("OnPriorityNetwork")   # RE-read: pass 1 above may have taken a while
     parked = params.get_bool("GearPark")
     defer_hd = params.get_bool(DEFER_HD_PARAM)   # uploadgate2pnw2: relaxes the onroad block (rlog-only)
     p2 = None
-    if pass2_allowed(network_type_raw, metered, at_home, onroad, parked, defer_hd) and (p1 is None or pass1_run >= PASS2_INTERLEAVE):
+    if pass2_allowed(network_type_raw, metered, at_home, onroad, parked, defer_hd) and p1 is None:
       # same `cost` as pass 1: on a qualifying priority network the throttle inside list_upload_files
       # must not silently withhold files the gate just authorised. (For pass 2 specifically this is a
       # no-op today -- the throttle only touches qcamera.ts and crash//boot/ folders, none of which
       # are FIREHOSE_FILES -- but passing the raw bit here would re-create the very drift being fixed.)
       p2 = uploader.step(network_type_raw, effective_metered(network_type_raw, metered, at_home), pass2=True)
-      pass1_run = 0
 
     # backoff from the combined outcome: None=nothing to do anywhere; True=made progress; False=failure
     results = [r for r in (p1, p2) if r is not None]

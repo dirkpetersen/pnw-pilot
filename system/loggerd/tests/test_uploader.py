@@ -8,7 +8,7 @@ from openpilot.system.hardware.hw import Paths
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.loggerd.uploader import (main, effective_metered, pass1_allowed, pass2_allowed, PASS2_NETWORK_TYPES,
-                                               UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE, Uploader, PASS2_INTERLEAVE,
+                                               UPLOAD_ATTR_NAME, UPLOAD_ATTR_VALUE, Uploader,
                                                uploadable_firehose_files, FIREHOSE_FILES)
 from cereal import log
 
@@ -148,21 +148,16 @@ class TestUploader(UploaderTestCase):
   #    `dcamera_never_uploads` below asserts it here too, because a test that lists dcamera among its
   #    inputs and never checks it is the weakest possible witness.
   #
-  # 2. IN WHAT ORDER. The passes INTERLEAVE: the 8-segment case produces
-  #    `--0/qlog, --1/qlog, --2/qlog, --10/qlog, --0/rlog, --20/qlog, ...`.
+  # 2. IN WHAT ORDER. cesarchive2pnw (owner, 2026-09-23) replaced the HD-interleave with strict TIERS:
+  #    every log before any video, smallest first -- boot, then every qlog, (every qcamera,) then
+  #    pass 2: every rlog, then every fcamera. Each tier drains across ALL segments first.
   #
-  #    ⚠️ AN EARLIER VERSION OF THIS COMMENT CALLED THAT A RACE AND REFUSED TO ASSERT THE GLOBAL
-  #    SEQUENCE. THAT WAS WRONG (Fable 2026-09-19), and it cost real coverage. The order is fully
-  #    DETERMINISTIC: `main()` is single-threaded, the tests disable every sleep, and the sequence is
-  #    a pure function of `PASS2_INTERLEAVE` -- pass 1 walks boot then qlog in creation order, one
-  #    pass-2 file goes after every `PASS2_INTERLEAVE` pass-1 successes, and once pass 1 is empty
-  #    pass 2 drains all rlogs then all fcameras. Re-measured five times: byte-identical every run.
-  #
-  #    Dropping the exact-sequence check let two real regressions through, both proven by mutation:
-  #    swapping the boot and qlog tiers in `next_file_to_upload` (boot stops going first), and
-  #    deleting the `pass1_run >= PASS2_INTERLEAVE` gate (HD video stops interleaving and starves).
-  #    Neither moves a file in or out of the set, so a set-plus-per-kind check cannot see either.
-  #    `gen_sequence` below rebuilds the exact order and the success tests assert it.
+  #    Before that the passes INTERLEAVED (one pass-2 file after every PASS2_INTERLEAVE pass-1
+  #    successes). An earlier version of this comment called that order a race; it was not (Fable
+  #    2026-09-19): `main()` is single-threaded and the tests disable every sleep, so the global
+  #    sequence is deterministic and `gen_sequence` below rebuilds and asserts it exactly. That check
+  #    is what catches a tier swap (e.g. boot no longer first) or pass 2 starting before pass 1 is
+  #    empty -- neither moves a file in or out of the set, so a set-plus-per-kind check cannot.
   #
   #    `assert_upload_contract` is kept as well, for its diagnostics: when something does move, its
   #    message names the missing/unexpected key, which a list-compare of 24 items does not.
@@ -184,31 +179,19 @@ class TestUploader(UploaderTestCase):
     return keys
 
   def gen_sequence(self, seg1: list[int], seg2: list[int], boot=True) -> list[str]:
-    """The exact global order, derived from `PASS2_INTERLEAVE` -- not observed and pasted.
+    """The exact global order: the cesarchive2pnw tiers, derived here rather than observed and pasted.
 
-    Deriving it means a change to the interleave constant makes this expectation follow
-    automatically, while a change to the uploader's ORDERING still fails. Pasting a captured
-    sequence would have inverted that: it would break on a harmless constant bump and pass on a real
-    reordering."""
+    Tier by tier, each across ALL segments in creation order: boot logs, qlogs, rlogs, fcameras."""
     def seg_keys(kind: str) -> list[str]:
       return ([f"{self.seg_format.format(i)}/{kind}" for i in seg1] +
               [f"{self.seg_format2.format(i)}/{kind}" for i in seg2])
 
-    p1 = []
+    out = []
     if boot:
-      p1 += [f"boot/{self.seg_format.format(i)}.zst" for i in seg1]
-      p1 += [f"boot/{self.seg_format2.format(i)}.zst" for i in seg2]
-    p1 += seg_keys("qlog.zst")
-    p2 = seg_keys("rlog.zst") + seg_keys("fcamera.hevc")
-
-    out, pending, run = [], list(p2), 0
-    for key in p1:
-      out.append(key)
-      run += 1
-      if run >= PASS2_INTERLEAVE and pending:
-        out.append(pending.pop(0))
-        run = 0
-    out += pending          # pass 1 exhausted -> pass 2 drains
+      out += [f"boot/{self.seg_format.format(i)}.zst" for i in seg1]
+      out += [f"boot/{self.seg_format2.format(i)}.zst" for i in seg2]
+    for kind in ("qlog.zst", "rlog.zst", "fcamera.hevc"):
+      out += seg_keys(kind)
     return out
 
   def wait_for(self, observed: list[str], n: int, timeout: float = 10.0) -> None:
