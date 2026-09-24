@@ -24,7 +24,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  
 from openpilot.selfdrive.selfdrived.state import StateMachine
 # madsop2pnw: parallel lateral authority
 from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_latches,
-                                                     MADS_BRAKE_GRACE_FRAMES)
+                                                     MADS_BRAKE_PANDA_GRACE_FRAMES, panda_lateral_view)
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
@@ -151,7 +151,9 @@ class SelfdriveD:
     # selfdriveState. It runs AFTER our own state machine and never removes an event from it.
     self.mads = MadsPnw(self.CP.alternativeExperience)
     # madsquiet2pnw: which engagement chimes to silence while MADS keeps steering.
-    self.mads_quiet = MadsQuiet(MADS_BRAKE_GRACE_FRAMES)
+    # madsbrake2pnw: the provisional silence must cover the WHOLE brake window, panda-confirmed tail included,
+    # or a MADS takeover in the tail would be preceded by a spurious full-disengage chime.
+    self.mads_quiet = MadsQuiet(MADS_BRAKE_PANDA_GRACE_FRAMES)
     self._chime = ChimeDecision()
 
     # madsresume2pnw: the bounded auto-resume brain. Pure + inert by construction -- it refuses to
@@ -780,8 +782,11 @@ class SelfdriveD:
     # MADS only answers the separate question "may openpilot still steer?".
     off_req = bool(self.off_request_t and
                    (self.sm.frame * DT_CTRL - self.off_request_t) <= OFF_REQUEST_HOLD_S)
+    # madsbrake2pnw: the panda's own lateral answer, only from a sample that arrived THIS frame (None otherwise).
+    panda_lat = (panda_lateral_view(self.sm['pandaStates'], IGNORED_SAFETY_MODES)
+                 if self.sm.updated['pandaStates'] else None)
     self.mads.update(self.enabled, self.active, CS.brakePressed or CS.regenBraking,
-                     CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req)
+                     CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req, panda_lat)
     # madsquiet2pnw: decide the engagement chimes from THIS frame's engagement and MADS state. It only
     # ever changes a SOUND -- the state machine has already run and is never consulted or edited here.
     # Any failure falls back to the stock chimes: silence is the thing that must never happen by accident.

@@ -432,7 +432,7 @@ class TestNeverSuppresses:
     assert call is not None, "selfdrived must call self.mads.update()"
     assert [ast.unparse(a) for a in call.args] == [
       "self.enabled", "self.active", "CS.brakePressed or CS.regenBraking",
-      "CS.cruiseState.enabled", "self.events", "CS.cruiseState.available", "off_req"]
+      "CS.cruiseState.enabled", "self.events", "CS.cruiseState.available", "off_req", "panda_lat"]
 
   def test_warning_alerts_are_readmitted_while_mads_steers_alone(self):
     """Without this, openpilot's own state machine sits in `disabled` (current_alert_types ==
@@ -1075,3 +1075,112 @@ class TestBrakeArrivesLate:
     op_ms = MADS_BRAKE_GRACE_FRAMES * 10.0        # 100 Hz
     assert op_ms < panda_ms, (
       f"openpilot window {op_ms:.0f} ms must be STRICTLY shorter than the panda's {panda_ms:.0f} ms")
+
+
+class TestPandaConfirmedTail:
+  """madsbrake2pnw: a brake that lands after openpilot's 45-frame window but inside the panda's 600 ms.
+
+  MEASURED 2026-09-24 09:20:36 PT (drives/2026-09-24/mads-brake-disengage/): cruise dropped, brakePressed
+  landed 481 ms (48 frames) later, openpilot did not arm and disengaged completely. The panda re-latched
+  controls_allowed_lateral 20 ms after the brake and revoked it 2.9 s later (HEARTBEAT_ENGAGED_MISMATCH)
+  because openpilot never asked.
+  """
+
+  @staticmethod
+  def _run(brake_frame: int, panda: dict, total: int = 100, alt: int = MADS_ON, blocked_at: int | None = None):
+    """Frame 0 = the falling edge (cruise dropped, no brake yet). The brake is held from brake_frame on.
+    panda maps frame -> panda_lateral_allowed for that frame (None elsewhere). Returns the first frame
+    lateral-only armed, or None."""
+    m = MadsPnw(alt)
+    engage(m)
+    m.update(False, False, False, False, ev(EventName.pcmDisable))
+    for k in range(1, total):
+      braking = k >= brake_frame
+      events = ev(EventName.wrongGear) if k == blocked_at else ev(EventName.pcmDisable)
+      m.update(False, False, braking, False, events, True, False, panda.get(k))
+      if m.lateral_only:
+        return k
+    return None
+
+  def test_the_0924_drive_arms_once_the_panda_confirms(self):
+    """THE REGRESSION: brake at frame 48, the next 10 Hz pandaStates (frame ~53) says permitted -> arm."""
+    from openpilot.selfdrive.selfdrived.mads_pnw import MADS_BRAKE_GRACE_FRAMES
+    assert 48 > MADS_BRAKE_GRACE_FRAMES, "scenario must be past the openpilot-only window"
+    assert self._run(48, {43: False, 53: True, 63: True}) == 53
+
+  def test_without_the_panda_view_the_late_brake_still_does_not_arm(self):
+    """Unknown is never permission: no panda sample -> the old behavior, a clean full disengage."""
+    assert self._run(48, {}) is None
+
+  def test_panda_refusal_never_arms(self):
+    assert self._run(48, dict.fromkeys(range(100), False)) is None
+
+  def test_panda_permission_without_a_brake_never_arms(self):
+    """The panda view alone is not enough: openpilot must have seen the brake itself."""
+    assert self._run(1000, dict.fromkeys(range(100), True)) is None
+
+  def test_brake_inside_the_openpilot_window_still_arms_on_the_same_frame(self):
+    """The common case is untouched: no panda confirmation needed, no added latency."""
+    assert self._run(30, {}) == 30
+    assert self._run(45, {}) == 45
+
+  def test_confirmation_after_the_extended_window_does_not_arm(self):
+    from openpilot.selfdrive.selfdrived.mads_pnw import MADS_BRAKE_PANDA_GRACE_FRAMES
+    f = MADS_BRAKE_PANDA_GRACE_FRAMES
+    assert self._run(48, {f + 1: True, f + 11: True}) is None
+    assert self._run(48, {f: True}) == f
+
+  def test_a_blocking_event_in_the_tail_kills_it(self):
+    assert self._run(48, {53: True}, blocked_at=50) is None
+
+  def test_disengage_on_brake_on_never_opens_the_tail(self):
+    assert self._run(48, {53: True}, alt=MADS_DISENGAGE) is None
+
+  def test_a_short_brake_tap_confirmed_after_release_still_arms(self):
+    """The panda relatches on the brake RISING edge; the 10 Hz report can land after a short tap ended."""
+    m = MadsPnw(MADS_ON)
+    engage(m)
+    m.update(False, False, False, False, ev(EventName.pcmDisable))
+    for k in range(1, 60):
+      m.update(False, False, 48 <= k <= 50, False, ev(EventName.pcmDisable), True, False, True if k == 55 else None)
+    assert m.lateral_only
+
+  def test_extension_covers_the_panda_window_plus_one_report_period(self):
+    """The tail must OUTLAST the panda's relatch window by a pandaStates period (10 Hz), or a relatch at
+    the panda's limit could never be reported in time. Read from the C header so the two cannot drift."""
+    import re
+    from openpilot.selfdrive.selfdrived.mads_pnw import MADS_BRAKE_GRACE_FRAMES, MADS_BRAKE_PANDA_GRACE_FRAMES
+    hdr = (pathlib.Path(__file__).resolve().parents[3]
+           / "opendbc_repo/opendbc/safety/pnw/mads_declarations.h").read_text()
+    panda_ms = int(re.search(r"#define\s+MADS_BRAKE_RELATCH_US\s+(\d+)U", hdr).group(1)) / 1000.0
+    assert MADS_BRAKE_PANDA_GRACE_FRAMES * 10.0 >= panda_ms + 100.0
+    assert MADS_BRAKE_PANDA_GRACE_FRAMES > MADS_BRAKE_GRACE_FRAMES
+
+  def test_madsquiet_is_sized_to_the_whole_window(self):
+    """Otherwise a tail takeover is preceded by a spurious full-disengage chime."""
+    src = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
+    assert "MadsQuiet(MADS_BRAKE_PANDA_GRACE_FRAMES)" in src
+
+  def test_panda_view_is_fresh_only(self):
+    """selfdrived must pass the panda view only on a frame where a new pandaStates arrived."""
+    src = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
+    assert "if self.sm.updated['pandaStates'] else None" in src
+
+
+class TestPandaLateralView:
+  class _PS:
+    def __init__(self, cal, mismatch=False, model=car.CarParams.SafetyModel.ford):
+      self.controlsAllowedLateral, self.healthPacketMismatch, self.safetyModel = cal, mismatch, model
+
+  IGN = (car.CarParams.SafetyModel.silent, car.CarParams.SafetyModel.noOutput)
+
+  def test_views(self):
+    from openpilot.selfdrive.selfdrived.mads_pnw import panda_lateral_view
+    P = self._PS
+    assert panda_lateral_view([P(True)], self.IGN) is True
+    assert panda_lateral_view([P(False)], self.IGN) is False
+    assert panda_lateral_view([], self.IGN) is None
+    assert panda_lateral_view([P(True, mismatch=True)], self.IGN) is None, "unreadable field is unknown, not True"
+    assert panda_lateral_view([P(True), P(False, mismatch=True)], self.IGN) is True
+    assert panda_lateral_view([P(True), P(False)], self.IGN) is False
+    assert panda_lateral_view([P(False, model=car.CarParams.SafetyModel.silent), P(True)], self.IGN) is True

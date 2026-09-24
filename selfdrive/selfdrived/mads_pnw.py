@@ -129,7 +129,48 @@ MADS_TOLERATED_EVENTS = (EventName.pedalPressed, EventName.pcmDisable)
 # The fully robust form is to stop racing the panda at all -- gate arming on
 # pandaState.controlsAllowedLateral so the two agree by construction. That needs selfdrived to pass
 # the panda's view into update() (mads_pnw itself must stay pure), and is the right follow-up.
+#
+# CORRECTION (madsbrake2pnw, 2026-09-24): some of the numbers in the text above are stale. The value is
+# 45 frames (450 ms) and the panda's MADS_BRAKE_RELATCH_US is 600 ms; the "250 ms", "15" and "150 ms"
+# figures belong to earlier revisions.
 MADS_BRAKE_GRACE_FRAMES = 45
+
+# madsbrake2pnw: the PANDA-CONFIRMED extension of the window above -- the follow-up named just above.
+#
+# MEASURED ON THE TRUCK 2026-09-24 09:20:36 PT (drives/2026-09-24/mads-brake-disengage/): at 32 mph the
+# PCM dropped cruise and brakePressed landed 481 ms later, 48 frames, 3 past MADS_BRAKE_GRACE_FRAMES.
+# openpilot did not arm, so it disengaged completely and played the disengage chime. The panda, whose
+# window is 600 ms, DID re-latch controls_allowed_lateral 20 ms after the brake. It then revoked it 2.9 s
+# later with HEARTBEAT_ENGAGED_MISMATCH (32), because openpilot never asked. The panda permitted lateral;
+# openpilot's narrower window threw it away. Leads measured so far: 0-388 ms on 09-23/24 and 321/361 ms
+# on 09-06, then 481 ms. The tail is longer than the 450 ms margin assumed.
+#
+# Past MADS_BRAKE_GRACE_FRAMES, openpilot no longer races the panda. It arms only once the panda itself
+# REPORTS lateral permitted (a fresh pandaStates sample, all reporting pandas), and only if the brake was
+# seen inside the window. By construction that can never put openpilot in "lateral-only while the panda
+# blocks", the state the narrower-than-panda invariant exists to prevent. So this extension does not need
+# to be narrower than the panda. It needs to be LONGER, by at least one pandaStates period (10 Hz), so a
+# relatch at the panda's 600 ms limit is still reported inside it. 75 frames = 600 ms + 100 ms + 50 ms margin.
+# If the panda view is unknown (no fresh sample, or no panda reports the field), the extension never arms:
+# the result is the old behavior, a clean full disengage with its chime.
+# The first MADS_BRAKE_GRACE_FRAMES are unchanged, so the common case (brake within 450 ms) arms exactly
+# as fast as before; the panda path only adds latency, up to one pandaStates period, in the tail.
+MADS_BRAKE_PANDA_GRACE_FRAMES = 75
+
+
+def panda_lateral_view(panda_states, ignored_safety_models) -> bool | None:
+  """PURE. madsbrake2pnw: the panda's own answer to "is lateral permitted?", or None if it has none.
+
+  Same panda filter as selfdrived's madsControlsMismatchLateral detector. Pandas in a silent safety
+  mode are ignored. A panda whose health_t layout is not this build's (healthPacketMismatch) cannot
+  report the field, so it is skipped rather than read as False. If no panda reports the field, the
+  answer is None ("unknown"), which is never permission.
+  """
+  reporting = [ps for ps in panda_states
+               if ps.safetyModel not in ignored_safety_models and not ps.healthPacketMismatch]
+  if not reporting:
+    return None
+  return all(ps.controlsAllowedLateral for ps in reporting)
 
 
 def has_blocking_event(events: Events) -> bool:
@@ -208,6 +249,9 @@ class MadsPnw:
     self._cruise_enabled_prev = False
     # madsbrakerace2pnw: frames left in which a late `brakePressed` may still arm lateral-only.
     self._brake_grace = 0
+    # madsbrake2pnw: frames since the falling edge, and whether the brake has been seen since it.
+    self._grace_elapsed = 0
+    self._grace_brake_seen = False
 
   @property
   def brake_grace_open(self) -> bool:
@@ -215,7 +259,8 @@ class MadsPnw:
     return self._brake_grace > 0
 
   def update(self, op_enabled: bool, op_active: bool, braking: bool, cruise_enabled: bool,
-             events: Events, cruise_available: bool = True, off_requested: bool = False) -> None:
+             events: Events, cruise_available: bool = True, off_requested: bool = False,
+             panda_lateral_allowed: bool | None = None) -> None:
     """Run once per frame, AFTER selfdrived's own state machine has already decided op_enabled.
 
     op_enabled/op_active: selfdrived's own engagement, untouched by this module.
@@ -228,6 +273,9 @@ class MadsPnw:
     off_requested:        onebutton2pnw: the driver PRESSED the ACC ON/OFF button. Needed as its own
                           input because the resulting STATE is not a usable signal — from Standby
                           the truck never reaches Off (measured; see the carstate comment).
+    panda_lateral_allowed: madsbrake2pnw: panda_lateral_view() of a pandaStates sample that arrived
+                          THIS frame, or None if none arrived or no panda reports the field. Only
+                          consulted in the panda-confirmed tail of the brake window.
     """
     # The panda sets controls_allowed on the RISING edge of stock cruise engaging. If cruise
     # engages and openpilot does NOT engage with it — a NO_ENTRY is standing (calibration
@@ -292,7 +340,9 @@ class MadsPnw:
       # MADS_BRAKE_GRACE_FRAMES -- measured on the truck, the PCM drops cruise first). Open a
       # bounded window instead of deciding on one frame's view. Nothing is armed here; the window
       # only lets a LATER frame arm, and only on a real `braking` edge.
-      self._brake_grace = 0 if (self.enabled or not may_arm) else MADS_BRAKE_GRACE_FRAMES
+      self._brake_grace = 0 if (self.enabled or not may_arm) else MADS_BRAKE_PANDA_GRACE_FRAMES
+      self._grace_elapsed = 0
+      self._grace_brake_seen = False
       self.active = self.enabled
       self.lateral_only = self.enabled
     else:
@@ -311,8 +361,13 @@ class MadsPnw:
         # it lands; otherwise let the window run out and stay off. `not self.enabled` keeps this to
         # the arming path only -- it can never re-arm authority that a later frame took away.
         self._brake_grace -= 1
-        if braking and not self.enabled:
-          self.enabled = True
+        self._grace_elapsed += 1
+        self._grace_brake_seen = self._grace_brake_seen or braking
+        if not self.enabled:
+          if braking and self._grace_elapsed <= MADS_BRAKE_GRACE_FRAMES:
+            self.enabled = True          # unchanged: brake inside the openpilot-only 450 ms window
+          elif self._grace_brake_seen and panda_lateral_allowed is True:
+            self.enabled = True          # madsbrake2pnw: late brake, and the panda has already re-latched
       self.active = self.enabled
       self.lateral_only = self.enabled
 
