@@ -98,7 +98,7 @@ actually cost time or nearly bricked hardware (kept additive; newest era at the 
 
 - **Fable-review every change that ships** (`Agent`, `model: "fable"`) — the ONLY reviewer; no Gemini
   reviews even though the `gemini` skill is installed (owner directive 2026-09-13). Opus architects and
-  implements; Sonnet only under an Opus design. Full policy: `~/gh/comma/docs/CODING-POLICY.md`. Give
+  implements via the background `coder` agent (Opus, medium effort) — never Sonnet, never in the foreground (2026-09-24). Full policy: `~/gh/comma/docs/CODING-POLICY.md`. Give
   Fable evidence (telemetry, mutation results), apply or refute every finding, and record the verdict
   in the commit message.
 
