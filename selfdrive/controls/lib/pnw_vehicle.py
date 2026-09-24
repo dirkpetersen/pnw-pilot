@@ -116,11 +116,15 @@ _CURVE_DEFAULTS = {
   # (v <= sqrt(this / curvature), curvature = the TIGHTER of map geometry and vision). 2.5 is what the
   # driver himself chose on the 2026-09-13 ramps (2.32 / 2.96 m/s^2 measured). 0.0 turns lead pacing off.
   "icbm_lead_lat_accel": 2.5,
-  # restorehold2pnw (2026-09-21 21:21 PT, Tumwater S-bend): an ICBM RESTORE (SET+ back to the driver's set) is
-  # HELD while the sharpest curve ahead (map polyline or vision) would exceed this lateral accel at the speed the
-  # restore is heading to. 2.5 = VTSC_A_LAT, the curve model ICBM already solves every map curve with (icbmKV is
-  # sqrt(2.5/k)). Holding only withholds acceleration: it never taps SET- and never lowers the set. 0.0 = off.
+  # restorehold2pnw (2026-09-21 21:21 PT, Tumwater S-bend): an ICBM RESTORE (SET+ back to the driver's set) may not
+  # rise above the curve ahead's safe speed sqrt(this / curvature). 2.5 = VTSC_A_LAT, the curve model ICBM already
+  # solves every map curve with (icbmKV is sqrt(2.5/k)). It is also VISION's trigger bar (0 % false triggers at 2.5 in
+  # the 2026-09-24 calibration). Holding only withholds acceleration: never a SET-, never a lower set. 0.0 = the whole
+  # hold off (polyline included).
   "icbm_restore_hold_lat_accel": 2.5,
+  # restorehold2pnw (owner 2026-09-24, fewer false holds): the MAP POLYLINE triggers a hold only at this higher load --
+  # it is the noisier witness (31 % of its fires at 2.8 land on roads measured below 2.0 m/s^2). 0.0 = polyline off.
+  "icbm_restore_hold_poly_lat_accel": 2.8,
   # standstillsoft2pnw (2026-07-14): gentle standstill LAUNCH accel ramp — the red-light follow-launch
   # "lurch" fix. Cap the accel out of a dead stop to launch_accel, ramping to the normal envelope by
   # launch_v. (Root cause: a lead crept forward at a red, op-long launched to follow at ~2.0 m/s^2.)
@@ -159,6 +163,7 @@ _CURVE_BOUNDS = {
   # ceiling is openpilot's own live lateral limit at 73 mph on the Tumwater curve (slLatMax 3.21): a config can
   # never let a restore accelerate toward a curve predicted past the point where steering saturates.
   "icbm_restore_hold_lat_accel": (0.0, 3.2),
+  "icbm_restore_hold_poly_lat_accel": (0.0, 3.2),   # same ceiling, same reason
   # launch_accel in [0.2, 2.0]: never so low the truck can't move, never above the stock ~2.0 max ->
   # this cap can only ever SOFTEN a launch, never make it harsher. launch_v [3, 25] mph.
   "launch_accel": (0.2, 2.0),
@@ -617,10 +622,15 @@ class PnwVehicle:
 
   @property
   def icbm_restore_hold_lat_accel(self) -> float:
-    """restorehold2pnw: hold an ICBM restore while the sharpest curve ahead would exceed this lateral accel (m/s^2)
-    at the restore's target speed. 0.0 = hold OFF -- every non-Lightning car, and the Lightning when curve.json
-    sets it to 0."""
+    """restorehold2pnw: the curve target (m/s^2) a held ICBM restore may rise to (v_safe = sqrt(this / k)), and
+    vision's trigger bar. 0.0 = hold OFF -- every non-Lightning car, and the Lightning when curve.json sets it to 0."""
     return self._curve_cfg["icbm_restore_hold_lat_accel"] if self.lightning_curve_slow else 0.0
+
+  @property
+  def icbm_restore_hold_poly_lat_accel(self) -> float:
+    """restorehold2pnw: the map polyline's own (higher) trigger bar for the restore hold (m/s^2). 0.0 = polyline off
+    -- every non-Lightning car, and the Lightning when curve.json sets it to 0."""
+    return self._curve_cfg["icbm_restore_hold_poly_lat_accel"] if self.lightning_curve_slow else 0.0
 
   def gentle_launch_accel(self, v_ego: float) -> float:
     """standstillsoft2pnw: a soft accel CEILING (m/s^2) out of a standstill so a follow-launch behind a
