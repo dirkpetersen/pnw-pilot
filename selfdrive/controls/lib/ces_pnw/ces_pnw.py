@@ -1217,6 +1217,62 @@ ICBM_LATE_TAP_GRACE_S = 1.5      # s after going silent in which the executor's 
                                  #    may still land on the reported set (~1 s report lag + margin)
 ICBM_LATE_TAP_TOL = 1.6 * ICBM_EXEC_STEP_MS  # one full late tap + the executor deadband
 
+# --- restorehold2pnw (owner's top safety item; drive 2026-09-21 21:21 PT, I-5 S, Tumwater S-bend) -------------------
+# The restore out of the S-bend's right half walked the set 64 -> 75 and the truck accelerated 64 -> 73 mph INTO the
+# left half; openpilot's steering saturated (demand 3.47 vs its own 3.21 ceiling) before the driver took over. The
+# restore's only curve guard was icbm_in_curve -- "loaded NOW, or a vision curve < 2.75 s away" -- and the only
+# look-ahead was a NEW cap, which must bind against the CURRENT (tapped-down) set, not against the speed the restore
+# is heading to. mapd's 59.9 mph rating was inflated to 74.3 and rejected, so nothing bound. Yet at the restore's
+# first tick the map polyline already measured the left curve (k 0.00256 at 393 m: 2.87 m/s^2 at 75 mph).
+#
+# The fix only WITHHOLDS acceleration (owner, 2026-09-23: "I do not want any more slowdowns"). While the curve ahead
+# is too sharp for the restore's target speed, the restore holds the truck's CURRENT speed -- max(set, vEgo), so it
+# can never be the reason the truck slows -- and resumes toward the ceiling once the curve is clear. It never taps
+# SET-, never lowers a target, and never touches a cap. Bounded by the existing ICBM_RESTORE_WINDOW_S: a hold that
+# outlasts it ends the episode with the set left where it was held, for the driver to raise.
+ICBM_RESTORE_HOLD_CLEAR_S = ICBM_RESTORE_DELAY_FAST_S   # s the curve must stay clear before a held restore resumes
+                                                        #    (the same 1 s "curve provably behind" debounce)
+
+
+def icbm_restore_ahead_hold(v_target, k_poly, k_poly_n, k_poly_ahead, k_vis, a_hold) -> tuple:
+  """restorehold2pnw: should a restore toward `v_target` (m/s) be held for the curve ahead?
+
+  Returns (hold, a_pred, src): a_pred = k * v_target^2 for the TIGHTER of the two curvatures ICBM already measures,
+  src "poly" or "vis". hold = a_pred >= a_hold.
+    k_poly  the map polyline's horizon-max curvature (icbmK). Used only when measurable (k_poly_n > 0) and when
+            that maximum lies AHEAD of the truck: the polyline includes nodes behind the car, and a curve just exited
+            must not hold the restore that follows it. (A max that lies behind masks any smaller curve ahead; vision
+            still covers that case.)
+    k_vis   the model's tightest predicted curvature (vis_k_max; None = unavailable).
+  A missing, non-finite or non-positive input contributes nothing, which is the pre-restorehold behavior (no hold).
+  When nothing can be evaluated the result is (False, None, reason), reason "off" (a_hold <= 0), "badInput" (no valid
+  target speed) or "noGeom" (neither curvature usable), so telemetry can tell "clear" from "could not look".
+  Pure; never raises."""
+  def _num(x):
+    if x is None or isinstance(x, bool):
+      return None
+    try:
+      x = float(x)
+    except (TypeError, ValueError):
+      return None
+    return x if math.isfinite(x) else None
+  a_hold, v = _num(a_hold), _num(v_target)
+  if a_hold is None or a_hold <= 0.0:
+    return False, None, "off"
+  if v is None or v <= 0.0:
+    return False, None, "badInput"
+  k, src = 0.0, None
+  kp, kn = _num(k_poly), _num(k_poly_n)
+  if kp is not None and kn is not None and kn > 0 and k_poly_ahead is True and kp > k:
+    k, src = kp, "poly"
+  kv = _num(k_vis)
+  if kv is not None and kv > k:
+    k, src = kv, "vis"
+  if src is None:
+    return False, None, "noGeom"
+  a = k * v * v
+  return a >= a_hold, a, src
+
 # --- icbmtrack2pnw (driver-approved follow-up; field event 2026-07-12 19:58:31-59Z) -----------------
 # Continuous curve-profile SET-TRACKING for MAP candidates. Driver design, verbatim intent: "adjust
 # the target even when I'm behind a slow car; if I'm slower anyway it has no impact; if I go faster
@@ -2201,6 +2257,45 @@ def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
                   sa_tele.get("saInst"))
 
 
+def _rhold_tele(ctl) -> dict:
+  """restorehold2pnw: the two telemetry fields, from ONE builder for both the overlay feed and the ces_events record
+  (the CURVELEAD_TELE_KEYS lesson: two hand-written copies drift). icbmRHold = the source holding the restore right
+  now ("poly"/"vis"), None when no restore is held; icbmRHoldA = the predicted lateral accel (m/s^2) at the
+  restore's target speed, None when no episode ceiling was there to evaluate against."""
+  a = getattr(ctl, "_icbm_rhold_a", None)
+  return {"icbmRHold": getattr(ctl, "_icbm_rhold_src", None) if getattr(ctl, "_icbm_rhold_on", False) else None,
+          "icbmRHoldA": round(float(a), 2) if isinstance(a, (int, float)) and math.isfinite(a) else None}
+
+
+def _icbm_rhold_note(ctl, now, src) -> None:
+  """restorehold2pnw: change-only log of a restore held for the curve ahead, and the telemetry source.
+
+  "hold"    the restore is being held (src "poly"/"vis", the predicted lateral accel at the restore's target, the
+            speed it is held at);
+  "release" the curve ahead read clear and the restore carries on toward the ceiling;
+  "ended"   the episode ended WHILE held -- the restore window ran out, a pedal / ACC off / a set change aborted it,
+            or a new cap took over. The set stays where it was held; nothing is restored after this, so it is said
+            out loud rather than left to look like an idle episode.
+  A module function taking the controller, for the same reason as _curvelead_clear: the ICBM tests bind _icbm_step
+  onto bare stubs, and a missing method would be swallowed by _icbm_step's except as a silent ICBM outage."""
+  ep = getattr(ctl, "_icbm_ep", None)
+  held = ep is not None and ep.phase == "restore" and getattr(ep, "ahead_cap", None) is not None
+  was = bool(getattr(ctl, "_icbm_rhold_on", False))
+  if held and not was:
+    ctl._icbm_rhold_t0 = now
+    a = getattr(ctl, "_icbm_rhold_a", None)
+    cloudlog.event("ces_icbm_restore_hold", state="hold", src=src or getattr(ctl, "_icbm_rhold_src", None),
+                   a=round(a, 2) if a is not None else None, ceiling=round(ep.ceiling, 2),
+                   held_at=round(ep.ahead_cap, 2), stock_set=getattr(ctl, "_stock_set", None))
+  elif was and not held:
+    t0 = getattr(ctl, "_icbm_rhold_t0", None)
+    cloudlog.event("ces_icbm_restore_hold", state="release" if ep is not None and ep.phase == "restore" else "ended",
+                   phase=getattr(ep, "phase", None), held_s=round(now - t0, 1) if t0 is not None else None,
+                   stock_set=getattr(ctl, "_stock_set", None))
+    ctl._icbm_rhold_src = None
+  ctl._icbm_rhold_on = held
+
+
 class IcbmEpisode:
   """Cap -> clear -> RESTORE -> done state machine (pure, unit-tested; owned by CESController).
 
@@ -2269,6 +2364,8 @@ class IcbmEpisode:
     self._last_cap_vego = 0.0
     self._apex_passed = False
     self._late_tap_set = None           # the ONE absorbed late-tap baseline (anchored, never walked)
+    self.ahead_cap = None               # restorehold2pnw (also cleared in reset()): speed a restore is held at
+    self._ahead_clear_t0 = None         # restorehold2pnw: first tick the curve ahead read clear while held
 
   def reset(self) -> None:
     self.phase = "idle"
@@ -2295,6 +2392,40 @@ class IcbmEpisode:
     self.zone_n0 = None                 # sazoneset2pnw: speedadjust's zone count when this episode began
     self._sa_restart_logged = False     # zonefollow2pnw: one error per episode
     self._sa_inst0 = None               # zonefollow2pnw: speedadjust's instance when this episode began
+    self.ahead_cap = None               # restorehold2pnw
+    self._ahead_clear_t0 = None         # restorehold2pnw
+
+  def _ahead_bound(self, now, hold_ahead, stock_set, v_ego, restore_cap):
+    """restorehold2pnw: fold the curve-ahead hold into the restore's cap. Returns the cap to hand _restore_target.
+
+    On the first held tick the hold latches the truck's CURRENT speed, max(stock set, vEgo): holding the set alone
+    would let a truck still slowing toward a tapped-down set keep slowing, which is a decel the restore would not
+    have caused. Latched ONCE, never re-derived from vEgo while held, so the hold cannot creep upward tap by tap.
+    It releases only after the curve has read clear for ICBM_RESTORE_HOLD_CLEAR_S, then the restore carries on
+    toward the ceiling. The cap only ever LOWERS what the restore may publish (min with restore_cap), and at the cap
+    _restore_target goes silent: nothing here can produce a SET- or a target below the current set."""
+    if hold_ahead:
+      self._ahead_clear_t0 = None
+      if self.ahead_cap is None:
+        try:
+          v = float(v_ego)
+        except (TypeError, ValueError):
+          v = 0.0                       # unreadable speed -> hold the set itself (stock_set is validated > 0)
+        s = float(stock_set)
+        # Rounded UP to the executor's tap grid above the set: the executor ignores a gap under its 0.6-tap deadband,
+        # so a latch of exactly vEgo (set 51, vEgo 51.2) left the ACC to settle 0.2 mph lower -- a sub-tap decel the
+        # restore would not have caused (replay, 2026-09-17 18:31:53). Up to one tap faster is still withheld accel.
+        steps = math.ceil((v - s) / ICBM_EXEC_STEP_MS - 1e-6) if math.isfinite(v) and v > s else 0
+        self.ahead_cap = s + steps * ICBM_EXEC_STEP_MS
+    elif self.ahead_cap is not None:
+      if self._ahead_clear_t0 is None:
+        self._ahead_clear_t0 = now
+      if now - self._ahead_clear_t0 >= ICBM_RESTORE_HOLD_CLEAR_S:
+        self.ahead_cap = None
+        self._ahead_clear_t0 = None
+    if self.ahead_cap is None:
+      return restore_cap
+    return self.ahead_cap if restore_cap is None or self.ahead_cap < restore_cap else restore_cap
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -2439,7 +2570,7 @@ class IcbmEpisode:
     return target, "inc"
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
-           cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None):
+           cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None, hold_ahead=False):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -2459,7 +2590,14 @@ class IcbmEpisode:
                    At the cap the restore HOLDS silently -- it does not end -- so if the limit rises
                    within the restore window it follows back up toward the ceiling, never above
                    either. The executor already clamps target <= ceiling and presses inc only while
-                   the set is below the TARGET, so a target below the ceiling needs no executor change."""
+                   the set is below the TARGET, so a target below the ceiling needs no executor change.
+
+    restorehold2pnw optional input:
+      hold_ahead   the curve ahead is too sharp for the restore's target speed (icbm_restore_ahead_hold).
+                   Read ONLY in the restore phase and at restore entry: the restore holds the truck's current
+                   speed (see _ahead_bound) and resumes once it reads clear for ICBM_RESTORE_HOLD_CLEAR_S. The
+                   cap phase ignores it entirely, so no cap, no SET- and no ceiling latch can change with it.
+                   Default False = byte-identical to before."""
     if v_set is None or v_set <= 0.0:
       self.reset()                      # no valid driver set -> hands off everything
       return None, None
@@ -2617,7 +2755,7 @@ class IcbmEpisode:
         self._t0 = now
         self._last_stock = stock_set
         self._last_t = now
-        return self._restore_target(stock_set, restore_cap)
+        return self._restore_target(stock_set, self._ahead_bound(now, hold_ahead, stock_set, v_ego, restore_cap))
       self.reset()
       return None, None
 
@@ -2650,12 +2788,15 @@ class IcbmEpisode:
         return None, None
       self._last_stock = stock_set
       self._last_t = now
+      # restorehold2pnw: updated BEFORE the in-curve pause so the hold latches and its clear debounce runs on every
+      # restore tick, including the ones spent loaded in the curve itself.
+      cap = self._ahead_bound(now, hold_ahead, stock_set, v_ego, restore_cap)
       if in_curve:
         # icbmmapfirst2pnw: PAUSE while lateral-loaded (a late-seen next bend) — go silent so the
         # executor stale-stops, but keep the episode so the restore resumes once the load clears.
         # All the aborts above (pedal/ACC/window/decrease/fast-rise) ran this tick and stay live.
         return None, None
-      return self._restore_target(stock_set, restore_cap)
+      return self._restore_target(stock_set, cap)
 
     return None, None                   # idle, no cap
 
@@ -3622,6 +3763,10 @@ class CESController:
     self._icbm_floor_pend = None   # (candidate_limit, first_seen) while a RISE settles
     self._icbm_rcap_state = None   # icbmrestorecap2pnw: icbm_restore_limit carry-over
     self._icbm_rcap = 0.0          # icbmrestorecap2pnw: the restore cap in force (m/s), 0 = none
+    self._icbm_rhold_a = None      # restorehold2pnw: predicted lat accel at the restore's target (None = not evaluated)
+    self._icbm_rhold_src = None    # restorehold2pnw: "poly"/"vis" while a restore is held, else None
+    self._icbm_rhold_on = False    # restorehold2pnw: change-only log state
+    self._icbm_rhold_t0 = None
     self._icbm_floor_hit = False
     # icbmconsist2pnw: the POINT-MATCHED polyline reading beside mapd's own target -- telemetry only,
     # nothing reads these for control. icbmKAtGap is the load-bearing one: it says how far the nearest
@@ -4752,6 +4897,8 @@ class CESController:
         self._icbm_k_at_gap = 0.0
         _curvelead_clear(self)          # curvelead2pnw: no stale lead-pace / sanity telemetry; lead clock restarts
         self._icbm_ep.reset()           # icbmrestore2pnw: forced Chill / no data ends any episode
+        self._icbm_rhold_a = None       # restorehold2pnw: no stale prediction beside icbmT=None ...
+        _icbm_rhold_note(self, now, None)   # ... and a hold cut short here is logged as "ended"
         self.mem_params.put_nonblocking("IcbmTarget", {})
         return
       # curvedbtel2pnw (Fable 2026-09-16): cleared at the TOP of the live path, and re-latched near
@@ -5117,11 +5264,25 @@ class CESController:
       # forwarded status. A missing/unreadable mode is not evidence it is on: it falls back to limit + 5.
       icbm_note_speedadjust(self._icbm_ep, getattr(self, "_sa_tele", None), rcap_lim)
       self._icbm_rcap = float(self._icbm_ep.zone_cap) if self._icbm_ep.zone_cap is not None else 0.0
+      # restorehold2pnw: would the curve ahead be too sharp at the speed a restore gives back (the latched ceiling,
+      # or the zone cap below it)? Evaluated whenever an episode holds a ceiling so the telemetry shows it before
+      # the restore begins; the episode acts on it ONLY in its restore phase. getattr: the stub-built controllers in
+      # tests predate this field, and a missing attribute must cost the hold, not this whole publish.
+      rhold, self._icbm_rhold_a, rhold_src = False, None, None
+      if self._icbm_ep.phase in ("cap", "restore") and self._icbm_ep.ceiling is not None:
+        v_back = self._icbm_ep.ceiling if self._icbm_rcap <= 0.0 else min(self._icbm_ep.ceiling, self._icbm_rcap)
+        rhold, self._icbm_rhold_a, rhold_src = icbm_restore_ahead_hold(
+          v_back, self._icbm_k, self._icbm_k_n, self._icbm_k_ahead, sig.get("vis_k_max"),
+          getattr(self._veh, "icbm_restore_hold_lat_accel", 0.0))
+        if rhold:
+          self._icbm_rhold_src = rhold_src
       pub_target, direction = self._icbm_ep.step(now, target, sig["v_set"],
                                                  self._stock_set, self._stock_on, driver_pedal,
                                                  cap_dist=src_dist, v_ego=sig["v_ego"], in_curve=in_curve,
                                                  restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None,
-                                                 limit_now=rcap_lim if rcap_lim > 0.0 else None)
+                                                 limit_now=rcap_lim if rcap_lim > 0.0 else None,
+                                                 hold_ahead=rhold)
+      _icbm_rhold_note(self, now, rhold_src)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
@@ -5255,6 +5416,7 @@ class CESController:
       tele["icbmMapFlr"] = round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2)
       tele["icbmMapFlrHit"] = bool(getattr(self, "_icbm_map_flr_hit", False))
       tele["icbmRCap"] = round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1)   # icbmrestorecap2pnw: 0 = no cap
+      tele.update(_rhold_tele(self))              # restorehold2pnw: restore held for the curve ahead
       # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
       # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
       tele["icbmPhase"] = getattr(getattr(self, "_icbm_ep", None), "phase", None)
@@ -5526,6 +5688,7 @@ class CESController:
       "icbmMapFlr": round(float(getattr(self, "_icbm_map_flr", 0.0) or 0.0), 2),
       "icbmMapFlrHit": bool(getattr(self, "_icbm_map_flr_hit", False)),
       "icbmRCap": round(float(getattr(self, "_icbm_rcap", 0.0) or 0.0), 1),   # icbmrestorecap2pnw: restore cap, 0 = none
+      **_rhold_tele(self),   # restorehold2pnw: icbmRHold = "poly"/"vis" while a restore is held, icbmRHoldA = m/s^2
       "icbmPhase": getattr(getattr(self, "_icbm_ep", None), "phase", None),   # icbmrestorecap2pnw: idle/cap/restore
       "icbmZoneWhy": getattr(getattr(self, "_icbm_ep", None), "zone_why", None),      # sazoneset2pnw: prop/limit5/None
       "icbmLatchLim": getattr(getattr(self, "_icbm_ep", None), "latch_limit", None),  # sazoneset2pnw: limit at latch
