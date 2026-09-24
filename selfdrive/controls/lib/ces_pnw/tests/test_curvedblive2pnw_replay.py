@@ -1,7 +1,11 @@
-"""curvedblive2pnw: the build report's replay (docs/CURVEDB-V2-BUILD.md s4.2, raise margin 1.25, A = 2.2) re-run
+"""curvedblive2pnw: the build report's replay (docs/CURVEDB-V2-BUILD.md s4.2 episodes, A = 2.2) re-run
 through the CAR's code -- its keying (RowIndex / Polyline / match_at / scan_ahead) and its target rule -- on the
 real geometry: each adjudicated episode's own pass stands in for mapd's path, and the table is the leave-one-date-out
 export for that episode's date.
+
+terwilliger2pnw (2026-09-24) removed the 1.25x raise margin the build report used. The unwanted episodes keep the
+report's outcome classes; the two real Terwilliger curves (I, J), which the margin had KEPT at ICBM's target, are now
+raised to their row speed -- below 2.5 m/s^2 on the held-out pass at A = 2.2 and 2.0, and at the 2.5 line at A = 2.5.
 
 THE FIXTURE IS PRIVATE (the owner's driven positions) and is not in this repository. It is built by
 tools/curvedb/v2_live_fixture.py into ~/gh/comma/_scratch/curvedb-v2/live/replay_fixture.json.gz, or wherever
@@ -101,11 +105,13 @@ def test_the_build_reports_table_through_the_car_code():
   eps = _load()["episodes"]
   rows = [(e, *candidate_row(e)) for e in eps]
   for e, _mt, _tgt, _d, _a, out in rows:
-    assert out == e["outcome_offline"], e["pt"]
+    if e["cls"] == "unwanted":         # the report's margin never bound on these: same outcome class
+      assert out == e["outcome_offline"], e["pt"]
   unwanted = [out for e, *_x, out in rows if e["cls"] == "unwanted"]
   assert len(unwanted) == 5 and all(o in ("REMOVED", "reduced") for o in unwanted), unwanted
   real = [(e, a, out) for e, _mt, _t, _d, a, out in rows if e["k_truth"] * e["ref"] ** 2 >= REAL]
   assert len(real) == 2 and not [x for x in real if x[2] in ("LOST", "WEAKENED")]
+  assert all(o == "raised, < 2.5" for _e, _a, o in real), real   # the margin kept them; now raised, still < 2.5
   assert all(a < REAL for _e, a, _o in real)
 
 
@@ -124,14 +130,28 @@ def test_the_full_live_decision_never_weakens_a_real_curve_and_never_raises_past
 
 def test_at_the_trucks_A_2_0_the_same_safety_holds():
   """DEVICE-VERIFIED 2026-09-24: mapd's A on the truck is 2 (top-level MapdSettings), not the 2.2 the build assumed.
-  MEASURED at 2.0: all 5 unwanted are reduced (H no longer removed: 51.5 at the candidate), I and J kept."""
+  MEASURED at 2.0 without the raise margin: 4 unwanted reduced and H removed; I raised 44.0 -> 46.9 (a 2.01), J kept."""
   for e in _load()["episodes"]:
     _mt, cand, _d, a_t, out = candidate_row(e, 2.0)
     ft, fa, f_out, _dir = full_decision(e, 2.0)
     if e["cls"] == "unwanted":
-      assert out == "reduced" and f_out == "reduced", (e["pt"], out, f_out)
+      assert out in ("REMOVED", "reduced") and f_out in ("REMOVED", "reduced"), (e["pt"], out, f_out)
     if e["k_truth"] * e["ref"] ** 2 >= REAL:
-      assert out == "kept" and f_out == "kept" and a_t < REAL and fa < REAL, e["pt"]
+      assert out in ("kept", "raised, < 2.5") and f_out in ("kept", "raised, < 2.5"), (e["pt"], out, f_out)
+      assert a_t < REAL and fa < REAL, e["pt"]
+
+
+def test_at_the_shipped_A_2_5_a_real_curve_sits_on_the_owners_line():
+  """terwilliger2pnw, the shipped A (curve.json 2.5), no raise margin. MEASURED: 4 unwanted reduced, H removed; I
+  44.0 -> 52.4 mph (held-out 2.51 m/s^2), J 49.8 -> 55.8 (2.49). The row speed IS the 2.5 line, so a real curve
+  lands on it; bounded at 2.6 here. Candidate and full decision agree."""
+  for e in _load()["episodes"]:
+    _mt, cand, _d, a_t, out = candidate_row(e, 2.5)
+    ft, fa, f_out, _dir = full_decision(e, 2.5)
+    if e["cls"] == "unwanted":
+      assert out in ("REMOVED", "reduced") and f_out in ("REMOVED", "reduced"), (e["pt"], out, f_out)
+    if e["k_truth"] * e["ref"] ** 2 >= REAL:
+      assert a_t < 2.6 and fa < 2.6 and out != "kept", (e["pt"], a_t, fa, out)
 
 
 def test_the_tumwater_left_curve_is_added_at_about_69_mph():
@@ -178,6 +198,8 @@ def table(a=A) -> str:
 
 
 if __name__ == "__main__":
+  print(table(2.5))
+  print()
   print(table(2.2))
   print()
   print(table(2.0))

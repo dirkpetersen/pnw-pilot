@@ -11,9 +11,12 @@ this module for the row of that curve. Where there is one, the curve's speed bec
 
 and replaces mapd's number for that curve (it does not stack on it):
 
-* RAISE (v_db above ICBM's target -- the map claimed a sharper curve than the road has): the row is
-  inflated by RAISE_MARGIN first, v = sqrt(A / (1.25 k_row)), and the raise is capped at +15 mph over
-  ICBM's own target and at posted + 10 mph. Never above the driver's set.
+* RAISE (v_db above ICBM's target -- the map claimed a sharper curve than the road has): exactly v_db, the same
+  speed a lowering uses, capped at +15 mph over ICBM's own target and at posted + 10 mph. Never above the
+  driver's set. (terwilliger2pnw, owner 2026-09-24: the former 1.25x curvature margin on raises turned A = 2.5
+  into an effective 2.0 -- mapd's own A -- so on the Terwilliger Curves the DB could raise mapd's 47 / 49 mph by
+  only 1-2 mph when the road needed 54-56. LODO held-out passes at v_db, A = 2.5, no margin: 2.88 % reach
+  >= 3.0 m/s^2 and 0.46 % (4 of 867, all city streets) >= 3.5. The truck's lataccel2pnw cap is the backstop.)
 * LOWER (v_db below -- a real sharp curve mapd under-rated or missed): exactly v_db, no margin, no
   penalty on top. "Sharp curves must slow, but only to the level required, never too much" (owner).
 * A curve the map missed entirely is found by scanning mapd's path ahead for rows (an ADD). It binds
@@ -69,8 +72,8 @@ MAX_JSON_BYTES = 64 * 1024 * 1024   # decompressed; the 2026-09-24 table is ~2.9
 EXPECTED_PARAMS = {"site_radius_m": 40.0, "heading_tol_deg": 35.0, "extent_back_m": 25.0,
                    "extent_fwd_m": 150.0, "branch_radius_m": 15.0}
 
-# docs/CURVEDB-V2-BUILD.md s4.4: held-out passes at >= 2.5 m/s^2 at the DB speed, 4.45 % -> 0.27 %.
-RAISE_MARGIN = 1.25
+# terwilliger2pnw: NO raise margin (was 1.25, docs/CURVEDB-V2-BUILD.md s4.4). A raise and a lowering both use
+# v_db = sqrt(A / k); the caps below are what bounds a raise.
 RAISE_CAP_MS = 15.0 * MPH       # a raise never exceeds ICBM's own target + 15 mph (P1 first cut)
 POSTED_MARGIN_MS = 10.0 * MPH   # ... nor posted + 10 mph (the build replay's bound; the table reproduces with it)
 ACT_EPS_MS = 0.05               # smaller than this is not a change (telemetry direction only)
@@ -389,14 +392,14 @@ def db_target(today: float, k: float, a_lat: float, ref: float, posted) -> tuple
   """The DB's replacement for ONE map/far candidate whose pipeline value is `today` (m/s).
   Returns (value, direction). Pure; the rule of the module docstring:
 
-    raise: max(today, sqrt(A / (RAISE_MARGIN k))), capped at today + 15 mph and posted + 10 mph
+    raise: exactly sqrt(A / k), capped at today + 15 mph and posted + 10 mph ("held" when a cap leaves it at today)
     lower: exactly sqrt(A / k)
   and never above `ref` (the driver's set / the episode ceiling)."""
   if not (k > 0.0 and a_lat > 0.0 and math.isfinite(today) and math.isfinite(ref)):
     raise ValueError(f"db_target: bad inputs today={today} k={k} A={a_lat} ref={ref}")
   v = v_db(a_lat, k)
   if v > today + ACT_EPS_MS:
-    r = max(today, math.sqrt(a_lat / (RAISE_MARGIN * k)))
+    r = v
     cap = today + RAISE_CAP_MS
     if posted is not None and posted > 0.0:
       cap = min(cap, posted + POSTED_MARGIN_MS)
@@ -622,7 +625,7 @@ class CurveDbLive:
     and the source's candidate re-derived, up to MAX_RAISE_ROUNDS times; every candidate found takes part.
 
     THE MINIMUM WINS, and a DB value above `today` is a RAISE wherever it comes from: the candidate's own row,
-    or a row found by the scan ahead, carries the margin and the caps (db_target). Only a value below `today`
+    or a row found by the scan ahead, carries the raise caps (db_target). Only a value below `today`
     -- or any value when ICBM has no target at all -- is used exactly."""
     self.n += 1
     self._last_t = time.monotonic()
@@ -699,7 +702,7 @@ class CurveDbLive:
       if rep_m is None:
         adds = [x for x in live if x[2] == "add"]
         rep_m = min(adds, key=lambda x: x[0])[3] if adds else None
-      rec["cdb2Why"] = ("margin" if own is not None and own[2] == "held" else
+      rec["cdb2Why"] = ("held" if own is not None and own[2] == "held" else   # a raise the caps / the set withheld
                         ("notMin" if rep_m.why == "ok" else rep_m.why) if rep_m is not None else
                         ("noRow" if src in ("map", "far") else "notMap"))   # notMin: a row matched, another cand binds
     else:

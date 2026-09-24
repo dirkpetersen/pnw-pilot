@@ -5241,8 +5241,8 @@ class CESController:
       if target is not None:
         target, self._icbm_map_flr, self._icbm_map_flr_hit = icbm_penalise(
           self._veh, self._map_targets, target, self._icbm_src, sig, plat, plon, far_dist, far_raw)
-      # curvedblive2pnw: the learned road table replaces mapd's number for the curve (raise with margin and
-      # cap, lower to exactly the measured curve) and adds sharp curves the map missed. Here, after the
+      # curvedblive2pnw: the learned road table replaces mapd's number for the curve (raise to the measured curve
+      # within the +15 mph / posted + 10 caps, lower to exactly it) and adds sharp curves the map missed. Here, after the
       # penalties and before the posted-limit floor, so it compares against the target ICBM would have used.
       # Every gate is in curvedb_live.py; a failed gate is no effect at all. Lightning only (capability).
       roaddb = getattr(self, "_roaddb", None)      # getattr: the ICBM tests bind this method onto bare stubs

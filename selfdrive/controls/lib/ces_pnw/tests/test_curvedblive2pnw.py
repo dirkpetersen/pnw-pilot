@@ -1,8 +1,8 @@
 """curvedblive2pnw: the learned curve database sets ICBM's curve target LIVE.
 
 What is pinned here, each by a test that fails if the rule is broken:
-  * the target rule: a raise carries the 1.25x curvature margin and the +15 mph / posted + 10 mph caps; a lowering
-    is exactly sqrt(A / k), no margin; never above the set;
+  * the target rule: a raise is exactly sqrt(A / k) within the +15 mph / posted + 10 mph caps (terwilliger2pnw removed
+    the 1.25x curvature margin); a lowering is exactly sqrt(A / k); never above the set;
   * an unknown, ambiguous or refused branch is NO effect, in both directions;
   * a missing / corrupt / foreign file is DB OFF, loudly, never partial; an unreadable A is DB OFF for the decision;
   * the kill switch and the Tesla: byte-identical ICBM output;
@@ -86,11 +86,12 @@ def logs(monkeypatch):
 # the target rule
 # =====================================================================================================
 class TestTargetRule:
-  def test_a_raise_uses_the_margin(self):
-    k, today = 0.001, 40.0                                  # v_db 46.9, margin'd 41.95, cap 46.7
+  def test_a_raise_is_exactly_the_row_speed_no_margin(self):
+    """terwilliger2pnw: a raise uses v_db itself, the same speed a lowering uses (was sqrt(A / (1.25 k)))."""
+    k, today = 0.001, 44.0                                  # v_db 46.90 m/s, inside the +15 mph cap (50.7)
     v, d = cl.db_target(today, k, A, ref=60.0, posted=None)
-    assert d == "raise" and v == pytest.approx(math.sqrt(A / (1.25 * k)), abs=1e-9)
-    assert v < cl.v_db(A, k) - 4.0, "the raise went to the bare row speed: the margin is gone"
+    assert d == "raise" and v == pytest.approx(cl.v_db(A, k), abs=1e-9)
+    assert v > math.sqrt(A / (1.25 * k)) + 4.0, "the raise carries the old 1.25x curvature margin again"
 
   def test_a_raise_is_capped_at_plus_15_mph(self):
     v, d = cl.db_target(20.0, 0.0004, A, ref=60.0, posted=None)   # margin'd 66 m/s
@@ -104,11 +105,19 @@ class TestTargetRule:
     v, _ = cl.db_target(20.0, 0.0004, A, ref=22.0, posted=None)
     assert v == pytest.approx(22.0)
 
-  def test_the_margin_can_withhold_a_raise_entirely(self):
-    """Terwilliger I (09-21 23:39): v_db 49.1 mph over ICBM's 44.0, but margin'd 43.96 -> ICBM's target stands."""
+  def test_terwilliger_I_is_now_raised_to_the_row_speed(self):
+    """Terwilliger I (09-21 23:39): v_db 49.1 mph over ICBM's 44.0. The old 1.25 margin gave 43.96 and ICBM's target
+    stood; without it the raise goes to 49.1 (held-out pass 2.21 m/s^2 there, test_the_replay_table_...)."""
     today, k = 44.045275590551185 * MPH, 0.004557081583558678
     v, d = cl.db_target(today, k, A, ref=59 * MPH, posted=22.4)
-    assert cl.v_db(A, k) > today and d == "held" and v == today
+    assert d == "raise" and v == pytest.approx(cl.v_db(A, k), abs=1e-9) and v / MPH == pytest.approx(49.15, abs=0.01)
+
+  def test_a_raise_the_posted_cap_withholds_is_held(self):
+    """posted + 10 mph at or below ICBM's target: nothing changes, and the direction says why ("held")."""
+    v, d = cl.db_target(20.0, 0.001, A, ref=60.0, posted=20.0 - 10 * MPH)
+    assert d == "held" and v == 20.0
+    v, d = cl.db_target(20.0, 0.001, A, ref=20.0, posted=None)        # the set itself
+    assert d == "held" and v == 20.0
 
   def test_a_lowering_is_exactly_the_row_speed_no_margin(self):
     k = 0.004
@@ -128,7 +137,9 @@ class TestTargetRule:
 
 
 # =====================================================================================================
-# the build report's replay table, from its numbers (docs/CURVEDB-V2-BUILD.md s4.2, raise margin 1.25, A = 2.2)
+# the build report's replay table, from its numbers (docs/CURVEDB-V2-BUILD.md s4.2 episodes, A = 2.2), through the
+# CURRENT rule -- no raise margin since terwilliger2pnw. The report's own column (margin 1.25) kept I and J at ICBM's
+# 44.0 / 49.8; without the margin they are raised to their row speeds, still below 2.5 on the held-out pass.
 # =====================================================================================================
 # (PT, ref mph, ICBM mph, posted m/s, LODO k_row, own-pass k_truth, owner's class) -- no positions: those are private
 REPLAY = [
@@ -140,9 +151,10 @@ REPLAY = [
   ("09-21 23:39:14 I Terwilliger", 58.999998723276384, 44.045275590551185, 22.4, 0.004557081583558678, 0.004579531400473212, "wanted"),
   ("09-21 23:40:01 J Terwilliger", 58.999998723276384, 49.838940586972086, 22.4, 0.004018049922301351, 0.004008636677515643, "marginal"),
 ]
-# the build report's v2 column (replay_proposed.txt): the raises B/C/H/Olympia/SR99 land here, I and J keep ICBM's
-EXPECTED_MPH = [59.11238367931281, 36.340372226198994, 63.38493199713672, 68.75193196508867, 53.968196557625525,
-                44.045275590551185, 49.838940586972086]
+# the raises B/C/H/Olympia/SR99 land where the build report's v2 column put them, except where the old margin bound
+# (C: +15 mph cap 69.95 instead of the margin'd 68.75; H: v_db 60.3 is at/above the 55 set -> REMOVED); I and J go to
+# their row speeds (terwilliger2pnw)
+EXPECTED_MPH = [59.11238367931281, 36.340372226198994, 63.38493199713672, 69.95, 55.0, 49.15, 52.34]
 MIN_RED_MS = 1.0     # v2_replay.MIN_RED_MS: within this of the reference = no slowdown left
 REAL = 2.5
 
@@ -167,21 +179,55 @@ def test_the_replay_table_is_reproduced_from_its_numbers():
   assert sorted(unwanted) == ["REMOVED", "reduced", "reduced", "reduced", "reduced"], "5 of 5 unwanted removed/reduced"
   real = [(r, t, a, o) for r, (t, a, o) in zip(REPLAY, rows, strict=True) if r[5] * (r[1] * MPH) ** 2 >= REAL]
   assert len(real) == 2
-  assert all(o == "kept" for _r, _t, _a, o in real), "a real curve was weakened"
+  assert all(o == "raised, < 2.5" for _r, _t, _a, o in real), "a real curve was weakened to >= 2.5, or not raised"
   assert not [r for r, _t, a, o in real if o in ("LOST", "WEAKENED")], "0 wanted weakened to >= 2.5"
 
 
-# the same seven at the truck's own A (2.0, DEVICE-VERIFIED 2026-09-24): mph at the candidate
-EXPECTED_MPH_A20 = [59.1, 36.3, 63.4, 65.55, 51.5, 44.0, 49.8]   # C: the offline k_row; the car keys 65.9 (test_..._replay)
+# the same seven at mapd's A on the truck (2.0): mph at the candidate, no raise margin
+EXPECTED_MPH_A20 = [59.1, 36.3, 63.4, 69.95, 55.0, 46.86, 49.84]
 
 
 def test_the_replay_table_at_the_trucks_A_2_0():
   rows = [replay_outcome(*r[1:], a=2.0) for r in REPLAY]
   for (name, *_), (tgt, _a, _o), want in zip(REPLAY, rows, EXPECTED_MPH_A20, strict=True):
     assert tgt / MPH == pytest.approx(want, abs=0.06), name
-  assert [o for r, (_t, _a, o) in zip(REPLAY, rows, strict=True) if r[-1] == "unwanted"] == ["reduced"] * 5
+  assert sorted(o for r, (_t, _a, o) in zip(REPLAY, rows, strict=True) if r[-1] == "unwanted") == \
+    ["REMOVED", "reduced", "reduced", "reduced", "reduced"]
   real = [(a, o) for r, (_t, a, o) in zip(REPLAY, rows, strict=True) if r[5] * (r[1] * MPH) ** 2 >= REAL]
-  assert len(real) == 2 and all(o == "kept" and a < REAL for a, o in real)
+  assert len(real) == 2 and all(o in ("kept", "raised, < 2.5") and a < REAL for a, o in real)
+
+
+# the shipped A (2.5, curve.json): the DB aims at exactly 2.5 on its row, so a real curve lands AT the owner's line
+EXPECTED_MPH_A25 = [59.1, 36.3, 63.4, 69.95, 55.0, 52.39, 55.80]
+
+
+def test_the_replay_table_at_the_shipped_A_2_5():
+  """terwilliger2pnw: at A = 2.5 with no margin, Terwilliger I is raised 44.0 -> 52.4 mph and its held-out pass
+  measures 2.51 m/s^2 there; J 49.8 -> 55.8 at 2.49. "Only to the level required": the row speed IS the 2.5 line,
+  so a real curve sits on it -- never meaningfully past it. Bounded here at 2.6 (the rows' p50 spread)."""
+  rows = [replay_outcome(*r[1:], a=2.5) for r in REPLAY]
+  for (name, *_), (tgt, _a, _o), want in zip(REPLAY, rows, EXPECTED_MPH_A25, strict=True):
+    assert tgt / MPH == pytest.approx(want, abs=0.06), name
+  assert sorted(o for r, (_t, _a, o) in zip(REPLAY, rows, strict=True) if r[-1] == "unwanted") == \
+    ["REMOVED", "reduced", "reduced", "reduced", "reduced"]
+  real = [a for r, (_t, a, _o) in zip(REPLAY, rows, strict=True) if r[5] * (r[1] * MPH) ** 2 >= REAL]
+  assert len(real) == 2 and max(real) < 2.6, real
+
+
+# 2026-09-24 12:35 PT Terwilliger Curves, I-5 north (drives/2026-09-24/terwilliger-too-slow): posted 50, set 60 (zone
+# set 1.2 x 50). mapd rated curve A 47.4 / curve B 49.0 and ICBM's post-penalty base was ~47.0 / ~47.2 mph. The
+# measured curvature (3 s mean of |yaw|/v) was 0.00391 (A, right) and 0.00429 (B, left): 56.6 / 54.0 mph at 2.5.
+TERWILLIGER = [("A right-hander", 47.0, 0.00391, 56.6), ("B left-hander", 47.2, 0.00429, 54.0)]
+
+
+@pytest.mark.parametrize("name,base_mph,k,need_mph", TERWILLIGER)
+def test_terwilliger_is_raised_to_what_the_curve_needs_at_2_5(name, base_mph, k, need_mph):
+  """The drive's root cause: the 1.25 margin made every raise sqrt(2.0 / k) -- 50.6 / 48.3 mph here, mapd's own A.
+  Without it the raise reaches the curve's 2.5 m/s^2 speed, inside every cap (+15 mph: 62; posted + 10: 60; set 60)."""
+  v, d = cl.db_target(base_mph * MPH, k, 2.5, ref=60 * MPH, posted=50 * MPH)
+  assert d == "raise", name
+  assert v / MPH == pytest.approx(need_mph, abs=0.1), name
+  assert v * v * k == pytest.approx(2.5, abs=1e-6), name      # exactly the owner's line on the measured curve
 
 
 def test_the_tumwater_left_curve_is_added_at_about_69_mph():
@@ -638,15 +684,15 @@ def test_a_raised_phantom_does_not_hide_the_next_rated_curve(monkeypatch, tmp_pa
             and r["cdb2Tgt"] == pytest.approx(t_real[-1], abs=0.01)]
 
 
-def test_a_row_found_by_the_scan_raises_only_with_the_margin(monkeypatch, tmp_path):
+def test_a_row_found_by_the_scan_raises_to_its_row_speed_and_binds(monkeypatch, tmp_path):
     """The phantom's row lets ICBM's 20 m/s go up to its cap (26.7), but another row 120 m further on measures a
-    curve whose v_db is 25.0. That second row is ABOVE ICBM's target, so it is a raise too: it carries the margin,
-    sqrt(A / (1.25 k)) = 22.36 -- not its bare 25.0."""
+    curve whose v_db is 25.0. That second row is ABOVE ICBM's target, so it is a raise too, through the same rule:
+    its row speed 25.0 (no margin since terwilliger2pnw), and the minimum wins over the phantom's 26.7."""
     k2 = A / 25.0 ** 2
     on, recs, _ = _drive(monkeypatch, tmp_path / "on", points=_path({220.0: 20.0}),
                          anchors=[_anchor(220.0, 0.0004), _anchor(340.0, k2)])
     got = [t for t in _targets(on) if t is not None]
-    assert got and got[-1] == pytest.approx(math.sqrt(A / (1.25 * k2)), abs=0.01)
+    assert got and got[-1] == pytest.approx(25.0, abs=0.01)
 
 
 def test_a_curve_json_A_sets_the_speed_and_is_logged_as_its_source(monkeypatch, tmp_path):
