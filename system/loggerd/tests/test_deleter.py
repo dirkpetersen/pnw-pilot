@@ -36,6 +36,14 @@ class TestDeleter(UploaderTestCase):
   def fake_statvfs(self, d):
     return self.fake_stats
 
+  @pytest.fixture(autouse=True)
+  def _ces_log(self, tmp_path, monkeypatch):
+    # every test (not only the loss ones): a deleted un-uploaded segment appends a deleterLoss record, and the
+    # real CES_EVENT_LOG is the live /data/pnw telemetry log. The offroad alert goes through Params, which the
+    # root conftest already isolates under OPENPILOT_PREFIX.
+    self.ces_log = tmp_path / "ces_events.jsonl"
+    monkeypatch.setattr(accdrop_pnw, "CES_EVENT_LOG", str(self.ces_log))
+
   def setup_method(self):
     self.f_type = "fcamera.hevc"
     super().setup_method()
@@ -140,9 +148,7 @@ class TestDeleter(UploaderTestCase):
   # deleterloss2pnw: upload state is read UNCACHED, and destroying un-uploaded data is VISIBLE
   # (offroad alert + ces_events record), never only a swaglog line.
   @pytest.fixture
-  def loss(self, tmp_path, monkeypatch):
-    self.ces_log = tmp_path / "ces_events.jsonl"
-    monkeypatch.setattr(accdrop_pnw, "CES_EVENT_LOG", str(self.ces_log))
+  def loss(self, monkeypatch):
     self.log = _Log()
     monkeypatch.setattr(deleter, "cloudlog", self.log)
 
