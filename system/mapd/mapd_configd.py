@@ -251,6 +251,17 @@ class CarGpsSource:
     return {"latitude": lat, "longitude": lon, "bearing": hdg % 360.0, "speed": spd_ms}
 
 
+def next_limit_payload(next_sl, next_dist, now: float) -> dict:
+  """limitahead2pnw: the NextMapSpeedLimit mem-param -- mapd's UPCOMING limit (m/s) and the distance to where it
+  starts (m), stamped with this loop's monotonic time so speedadjust can reject a stale value (a dead bridge must
+  read as "no announcement", never as the last one). mapd publishes 0 for "none"; a non-finite or non-positive
+  value is normalised to sl=0 / d=0, i.e. an explicit, fresh "none"."""
+  sl, d = float(next_sl), float(next_dist)
+  if not (math.isfinite(sl) and math.isfinite(d)) or sl <= 0.0 or d <= 0.0:
+    sl, d = 0.0, 0.0
+  return {"sl": round(sl, 3), "d": round(d, 1), "ts": now}
+
+
 def device_gps_ext_msg(g):
   """mapdcargps2pnw: the DEVICE fix, copied VERBATIM onto `gpsLocationExternal` for mapd.
 
@@ -772,6 +783,11 @@ def main():
         mapd_out_down = 0
         mo = sm['mapdOut']
         mem.put_nonblocking("MapSpeedLimit", str(float(mo.speedLimit)))  # m/s; 0 = none
+        # limitahead2pnw: the UPCOMING limit + distance, so speedadjust can slow down BEFORE a lower limit instead
+        # of 3 s after it (drives/2026-09-24/limit-drop-1857). Written in the same loop as MapSpeedLimit so the two
+        # describe the same mapdOut message.
+        mem.put_nonblocking("NextMapSpeedLimit", next_limit_payload(mo.nextSpeedLimit, mo.nextSpeedLimitDistance,
+                                                                    time.monotonic()))
         # location2pnw: bridge the road identity/class so pnw_location_services can name the road and
         # freeway-gate its "happening ahead" lookups. roadContext enum -> 'freeway'|'city'|'unknown'.
         mem.put_nonblocking("RoadName", mo.roadName or "")

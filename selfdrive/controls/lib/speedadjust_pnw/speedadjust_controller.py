@@ -227,6 +227,48 @@ SA_ICBM_FRESH_S = 2.0
 # silentexc3pnw: so does the MapSpeedLimit read in _read_speed_limit.
 POLICE_READ_ERR_LOG_S = 60.0
 
+# limitahead2pnw (owner 2026-09-24, "just do 1 and 2 -- the higher the speed the sooner you need to start slowing
+# down"). drives/2026-09-24/limit-drop-1857: at a 60 -> 40 boundary the truck was still at 74 mph, because this module
+# only acted on the CURRENT limit, 3 s after the sign; mapd had announced the 40 1,078 m ahead.
+#   1. LOOK-AHEAD: once the distance to an announced lower limit (mapd nextSpeedLimit, bridged as the
+#      NextMapSpeedLimit mem-param) is within la_start_distance(), slow toward the rule-1/1b target for that limit.
+#      The slowdown is RESTORABLE until the lower limit is current and has held LA_PROMOTE_HOLD_S; only then does it
+#      hand over to the permanent zone set (sazoneset2pnw). If the drop never comes -- the boundary passes, or the
+#      announcement vanishes or rises, or the new limit reverts (the 19:02 road not taken) -- the driver's previous set
+#      is restored (owner-approved exception to "a limit drop never restores"; a look-ahead is not a limit drop).
+#   2. An ANNOUNCED drop skips SL_DROP_CONFIRM_S: the reading that matches the active look-ahead is taken at once.
+#      Unannounced drops keep the 2 s confirm.
+# LimitAheadMode: 0 off, 1 SHADOW (default: logs every decision, changes nothing), 2 live.
+LA_OFF, LA_SHADOW, LA_LIVE = 0, 1, 2
+LA_A_PLAN = 0.6       # m/s^2 -- the rate the Lightning's stock ACC actually sheds speed while it is above a tapped-down
+                      # set. Measured over all 16 routes of 2026-09-24 (291 qlogs, 7 episodes with ACC on, no pedals,
+                      # vEgo >= set + 3 mph for >= 3 s): p25 0.33, median 0.56, p75 0.90 m/s^2 (min aEgo -0.7..-1.8).
+                      # The set itself cannot fall faster than CAP_SLEW (1 m/s^2), so 0.6 is the median follow rate,
+                      # not a bound. 74 -> 50 mph at 0.6: 496 m of decel (the report's 0.75-1.0 gave 350-450 m).
+LA_T_LEAD = 3.0       # s of travel added as margin: up to 1 s for the 1 Hz read, ~0.4 s per tap, and the ~1-1.5 s it
+                      # takes the ACC to start following a lowered set (lag-after-last-tap 0.2-1.5 s, same logs).
+                      # 74 -> 50 mph: 496 + 99 = 595 m, i.e. 18 s before the boundary at 74 mph.
+LA_STEADY_S = 2.0     # an announcement must be seen this long (the same value, >= 2 reads) before a look-ahead starts
+LA_PROMOTE_HOLD_S = 8.0  # the lower limit must be CURRENT this long before the look-ahead becomes a permanent zone set.
+                         # 19:02:26 PT the same day, mapd matched onto the road not taken (a 25 on a 50 ramp) for
+                         # 4.95 s; read at 1 Hz that is 4-6 s. 8 s clears it with margin; the truck is already slowing
+                         # meanwhile, so the hold costs no distance -- it only decides whether the slowdown is permanent.
+LA_PASS_MARGIN_S = 3.0   # s of travel past the expected boundary before "the drop never came" (read + map-match lag)
+LA_PASS_MARGIN_MIN_M = 30.0
+LA_GONE_GRACE_S = 2.0    # an announcement that vanished / rose, or a limit that went back up, must stay that way this long
+                         # before the look-ahead aborts (one flickering read must not cost a restore and a re-slow)
+LA_INPUT_STALE_S = 2.0   # a NextMapSpeedLimit older than this reads as "no announcement" (dead mapd bridge)
+LA_SAME_ANN_M = 100.0    # an announced boundary that moves by more than this is a different road, not the same drop
+
+
+def la_start_distance(v_ego: float, v_tgt: float) -> float:
+  """limitahead2pnw: how far ahead of a lower limit the look-ahead starts (m) -- decel distance at LA_A_PLAN plus
+  LA_T_LEAD s of travel. Grows with speed (owner: "the higher the speed the sooner"); at or below the target only
+  the lead margin remains."""
+  v = max(float(v_ego), 0.0)
+  vt = max(float(v_tgt), 0.0)
+  return max(v * v - vt * vt, 0.0) / (2.0 * LA_A_PLAN) + v * LA_T_LEAD
+
 
 def _police_key(rep):
   """Stable identity for one police report: its uuid, else the quantized position the daemon falls
@@ -342,6 +384,21 @@ class SpeedAdjustController:
     self._pub_err_n = 0          # silentexc2pnw: failed target publishes since that log line
     self._clear_err_t = None     # silentexc2pnw: ...and the same for the {} clear publish
     self._clear_err_n = 0
+    # limitahead2pnw (see LA_* above)
+    self._la_mode = LA_OFF       # LimitAheadMode, read at READ_S (Off until the first read)
+    self._la_mode_err_t = None
+    self._la_mode_err_n = 0
+    self._next_err_t = None      # NextMapSpeedLimit read failures, logged like the police input
+    self._next_err_n = 0
+    self._next_raw = None        # last NextMapSpeedLimit reading: (limit m/s, distance m) or None
+    self._sl_raw = 0.0           # the RAW MapSpeedLimit reading (no hold, no confirm); 0 = unknown
+    self._odo = 0.0              # m travelled (integral of v_ego), the frame announced boundaries are kept in
+    self._ann = None             # the lower limit announced ahead: {"n", "b" (boundary odo), "since"} or None
+    self._la = None              # the active look-ahead episode (dict, see _la_step) or None
+    self._la_hold = False        # live: the limit-drop ratio keeps the pre-look-ahead set (our taps are not the driver's)
+    self._la_dismissed = None    # the announced limit (m/s) of an aborted episode: not restarted until that announcement goes
+    self._la_why = None          # telemetry: how the last episode ended ("promote" / "abort:<reason>")
+    self._la_ev_n = 0            # telemetry: look-ahead decisions logged so far (each one is a cloudlog event)
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -373,6 +430,7 @@ class SpeedAdjustController:
       if not math.isfinite(sl) or sl <= 0.0 or sl > SANE_MAX_SL:   # reject unknown / NaN / garbage-high
         sl = 0.0
     now = time.monotonic()
+    self._sl_raw = sl                          # limitahead2pnw: the look-ahead judges the drop on the raw reading
     if sl > 0.0:
       self._sl_valid_t = now
       # speedlimitconfirm2pnw: hold the previous limit until a DECREASE has persisted for
@@ -389,7 +447,17 @@ class SpeedAdjustController:
           self._sl_pending = sl
           self._sl_pending_t = now
         if now - self._sl_pending_t < SL_DROP_CONFIRM_S:
-          return self._sl                      # unconfirmed drop → keep the previous limit
+          # limitahead2pnw option 2: a drop the active look-ahead announced is taken at once -- mapd counted down to
+          # it, and the look-ahead (not this value) decides whether it becomes permanent (LA_PROMOTE_HOLD_S).
+          # Unannounced drops, and every drop in shadow mode, keep the confirm.
+          ep = self._la
+          if ep is None or abs(sl - ep["n"]) > SL_DROP_EPS:
+            return self._sl                    # unconfirmed drop → keep the previous limit
+          if not ep["skip_logged"]:
+            ep["skip_logged"] = True
+            self._la_log(ep, "confirmSkipped" if ep["live"] else "wouldSkipConfirm", limit=round(sl, 2))
+          if not ep["live"]:
+            return self._sl
       self._sl_pending = 0.0
       # sazoneset2pnw: a HIGHER limit must persist too (see SL_RISE_CONFIRM_S). A first reading after the
       # limit was genuinely unknown (self._sl == 0) is not a "rise" and is taken at once.
@@ -455,6 +523,76 @@ class SpeedAdjustController:
         self._mode_err_n = 0
     self._sl = self._read_speed_limit()
     self._police = self._read_police()
+    self._la_mode = self._read_la_mode()
+    self._next_raw = self._read_next_limit()
+    self._update_announcement()
+
+  # ---- limitahead2pnw: inputs ------------------------------------------------
+  def _read_la_mode(self) -> int:
+    """LimitAheadMode (0 off / 1 shadow / 2 live). Unreadable or out of range -> OFF, logged (Rule 2): the look-ahead
+    then neither acts nor logs, and the line says why."""
+    try:
+      m = int(self.params.get("LimitAheadMode", return_default=True) or 0)
+      if m in (LA_OFF, LA_SHADOW, LA_LIVE):
+        return m
+      err = f"out of range ({m})"
+    except Exception as e:
+      err = type(e).__name__
+    self._la_mode_err_n += 1
+    now = time.monotonic()
+    if self._la_mode_err_t is None or now - self._la_mode_err_t >= POLICE_READ_ERR_LOG_S:
+      cloudlog.error(f"speedadjust: LimitAheadMode unreadable ({err}) -- limit look-ahead OFF, no slowdown ahead of " +
+                     f"an announced lower limit while this lasts ({self._la_mode_err_n} failed read(s) since the last log)")
+      self._la_mode_err_t = now
+      self._la_mode_err_n = 0
+    return LA_OFF
+
+  def _read_next_limit(self):
+    """(limit m/s, distance m) of the limit mapd announces ahead, or None for none / stale / unreadable. A stale or
+    unreadable value is logged in the policer2pnw style: it means NO look-ahead, and an active one aborts."""
+    if self.mem_params is None:
+      return None
+    err = None
+    try:
+      raw = self.mem_params.get("NextMapSpeedLimit", return_default=True)
+      if isinstance(raw, (bytes, str)):
+        raw = json.loads(raw) if raw else None
+      if raw is None:
+        return None                            # never written yet (mapd not up): not a failure
+      n, d, ts = float(raw["sl"]), float(raw["d"]), float(raw["ts"])
+      age = time.monotonic() - ts
+      if not (math.isfinite(n) and math.isfinite(d) and math.isfinite(age)):
+        err = "non-finite value"
+      elif age > LA_INPUT_STALE_S:
+        err = f"stale ({age:.1f} s old)"
+      elif n <= 0.0 or d <= 0.0 or n > SANE_MAX_SL:
+        return None                            # fresh "nothing announced"
+      else:
+        return n, d
+    except Exception as e:
+      err = type(e).__name__
+    self._next_err_n += 1
+    now = time.monotonic()
+    if self._next_err_t is None or now - self._next_err_t >= POLICE_READ_ERR_LOG_S:
+      cloudlog.error(f"speedadjust: NextMapSpeedLimit unusable ({err}) -- no limit look-ahead while this lasts " +
+                     f"({self._next_err_n} bad read(s) since the last log)")
+      self._next_err_t = now
+      self._next_err_n = 0
+    return None
+
+  def _update_announcement(self) -> None:
+    """Track the LOWER limit announced ahead (vs the limit held now) and how long the same value has been announced.
+    The boundary is kept as an odometer position, so between the 1 Hz reads its distance is dead-reckoned."""
+    nxt, now = self._next_raw, time.monotonic()
+    ref = self._sl if self._sl > 0.0 else self._sl_ref
+    if nxt is None or ref <= 0.0 or nxt[0] / ref > MIN_DROP_FRAC:
+      self._ann = None                         # nothing announced, or a rise / < 5 % dip: nothing to do ahead
+      return
+    n, d = nxt
+    if self._ann is None or abs(self._ann["n"] - n) > SL_DROP_EPS or abs(self._ann["b"] - (self._odo + d)) > LA_SAME_ANN_M:
+      self._ann = {"n": n, "b": self._odo + d, "since": now}
+    else:
+      self._ann["b"] = self._odo + d
 
   # ---- the two reduce-only sources ------------------------------------------
   def _police_cap(self, v_cruise: float, v_ego: float):
@@ -542,7 +680,7 @@ class SpeedAdjustController:
     record a bogus-low ratio (which can silently disable the trim on the next real limit drop)."""
     sl = self._sl
     if sl > 0.0 and sl >= self._sl_ref:      # known limit, at/above baseline → uncapped; track it up
-      if self._icbm_hold and self._sl_ref > 0.0:
+      if (self._icbm_hold or self._la_hold) and self._sl_ref > 0.0:   # limitahead2pnw: same for our look-ahead taps
         # sazoneset2pnw: a curve has the set tapped down -- that is not the driver's speed. Keep the driver's
         # pre-curve set as the reference (only rescaled to the new baseline limit), so a zone entered during
         # the curve still gets "the same percentage as I was driving before".
@@ -573,6 +711,139 @@ class SpeedAdjustController:
     # (2026-09-24 09:18 PT). The Corvallis bug it fixed (30 in a 45 scaled to ~16 mph) stays fixed by the floor
     # below, and a set already at/below the new limit is untouched because the cap is reduce-only.
     return max(sl, sl * self._ratio)         # over the limit: same % over the new limit; at/under: exactly the limit
+
+  # ---- limitahead2pnw: the look-ahead episode --------------------------------
+  def _la_log(self, ep, action: str, **kw) -> None:
+    """Rule 2: every look-ahead decision is a cloudlog event (and bumps laEvN, forwarded into ces_events)."""
+    self._la_ev_n += 1
+    fields = {k: (round(float(v), 2) if isinstance(v, (int, float)) and not isinstance(v, bool) else v) for k, v in kw.items()}
+    cloudlog.event("speedadjust_lookahead", action=action, live=bool(ep["live"]), announced=round(float(ep["n"]), 2),
+                   target=round(float(ep["tgt"]), 2), **fields)
+
+  def _la_end(self, now: float, why) -> None:
+    """End the episode. why None = PROMOTE (the lower limit is current and held: the permanent zone set takes over).
+    Otherwise ABORT: the look-ahead cap goes away, so the cap releases and the ordinary bounded restore walks the set
+    back to the ceiling latched when this cap engaged -- the driver's set before the look-ahead, never higher -- unless
+    a real limit drop joined the episode meanwhile (_ep_limit_drop: then nothing is restored, sanorestore2pnw)."""
+    ep, self._la = self._la, None
+    if why is None:
+      self._la_why = "promote"
+      self._la_hold = False                  # the limit is now below the baseline: the ratio is no longer re-anchored
+      self._la_log(ep, "promote", limit=self._sl_raw, held_s=now - ep["hold_t"])
+      return
+    self._la_why = "abort:" + why
+    if why not in ("modeOff", "modeChanged", "cruiseUnset"):
+      # Not restarted for the same announcement: an aborted look-ahead restarting on the next tick would tap the set
+      # down and back up in a loop (a mapd still announcing a limit it has passed, or a frozen distance). Cleared once
+      # mapd announces something else or nothing.
+      self._la_dismissed = ep["n"]
+    if ep["live"] and why == "limitRose" and self._sl_raw > self._sl:
+      # We took the lower limit WITHOUT the confirm (option 2). Give it back the same way: kept, the ordinary limit-drop
+      # path would turn the bogus value into a permanent zone set the moment the look-ahead stops standing in for it
+      # -- exactly the 19:02 road-not-taken case (a 25 on a 50 ramp).
+      self._sl = self._sl_raw
+      self._sl_rise_pending = 0.0
+    # What the ordinary restore will walk back to (live), or would (shadow: the set before the look-ahead -- the shadow
+    # controller's own ceiling belongs to whatever the real limit-drop path did, so it is not the look-ahead's answer).
+    if ep["live"]:
+      restore = None if getattr(self, "_ep_limit_drop", False) else self._pub_ceiling
+    else:
+      restore = ep["pre"]
+    self._la_log(ep, "abort", reason=why, restore=restore, pre=ep["pre"], dist=ep["b"] - self._odo,
+                 limit=self._sl_raw, limitDropJoined=bool(ep["live"] and getattr(self, "_ep_limit_drop", False)))
+
+  def _la_step(self, now: float, v_ego: float, v_cruise_set: float):
+    """One tick of the look-ahead. Returns the cap to add (m/s) while a LIVE episode is running, else None; a shadow
+    episode runs the identical state machine and logs, but never returns a cap."""
+    ep, ann = self._la, self._ann
+    if self._la_mode == LA_OFF or self._mode < 2:
+      if ep is not None:
+        self._la_end(now, "modeOff")
+      return None
+    live = self._la_mode == LA_LIVE
+    if self._la_dismissed is not None and (ann is None or abs(ann["n"] - self._la_dismissed) > SL_DROP_EPS):
+      self._la_dismissed = None              # the announcement an episode aborted on is gone
+    if ep is None:
+      if ann is None or now - ann["since"] < LA_STEADY_S or self._la_dismissed is not None:
+        return None
+      tgt = max(ann["n"], ann["n"] * self._ratio)   # rule 1 (same % over) / 1b (at or under -> exactly the limit)
+      # "Nothing to slow for" is judged on the DRIVER's set: while a curve has it tapped down (_icbm_hold) that is the
+      # pre-curve set the ratio holds, not the tapped one -- else the curve's restore climbs past the target before the
+      # look-ahead starts and the two brains walk the set up and down again (measured in the closed-loop harness).
+      v_ref = self._ratio * self._sl_ref if (self._icbm_hold and self._sl_ref > 0.0) else v_cruise_set
+      if tgt >= v_ref - SL_DROP_EPS:
+        return None                          # already at or under the target: nothing to slow for
+      # The start distance is for the speed the truck is heading to: a truck below its set (a lead, a curve) returns
+      # to the set -- and a curve's restore walks it there -- so vEgo alone would start the look-ahead far too late.
+      v_plan = max(v_ego, v_ref)
+      dist, d_start = ann["b"] - self._odo, la_start_distance(v_plan, tgt)
+      if dist > d_start:
+        return None
+      ep = self._la = {"n": ann["n"], "tgt": tgt, "ratio": self._ratio, "pre": v_cruise_set, "b": ann["b"], "b0": ann["b"],
+                       "d_start": d_start, "mat_t": None, "hold_t": None, "bad_t": None, "bad_why": None, "live": live,
+                       "skip_logged": False}
+      if live and not self._long_ok:
+        self._la_hold = True                 # our own SET- taps must not re-anchor the driver's ratio
+      self._la_log(ep, "start", dist=dist, d_start=d_start, v=v_ego, vPlan=v_plan, pre=v_cruise_set, limit=self._sl_raw)
+      return tgt if live else None
+    if ep["live"] != live:
+      self._la_end(now, "modeChanged")
+      return None
+    # Chained drops (60 -> 40 -> 35): a still LOWER limit announced within its own start distance takes over the target.
+    if ann is not None and ann["n"] < ep["n"] - SL_DROP_EPS and now - ann["since"] >= LA_STEADY_S:
+      tgt2 = max(ann["n"], ann["n"] * ep["ratio"])
+      d2 = la_start_distance(max(v_ego, ep["tgt"]), tgt2)
+      if ann["b"] - self._odo <= d2:
+        ep.update(n=ann["n"], tgt=tgt2, b=ann["b"], b0=ann["b"], d_start=d2, mat_t=None, hold_t=None, bad_t=None,
+                  skip_logged=False)
+        self._la_log(ep, "retarget", dist=ann["b"] - self._odo, d_start=d2, v=v_ego)
+    raw = self._sl_raw
+    if 0.0 < raw <= ep["n"] + SL_DROP_EPS:
+      ep["bad_t"] = None
+      if ep["mat_t"] is None:
+        ep["mat_t"] = now
+        self._la_log(ep, "materialized", limit=raw, past=self._odo - ep["b"])
+      if ep["hold_t"] is None:
+        ep["hold_t"] = now                   # the hold is CONTINUOUS: any higher reading restarts it
+      elif now - ep["hold_t"] >= LA_PROMOTE_HOLD_S:
+        self._la_end(now, None)
+        return None
+      return ep["tgt"] if live else None
+    why = None
+    if ep["mat_t"] is not None:
+      if raw > ep["n"] + SL_DROP_EPS:
+        why = "limitRose"                    # the lower limit went away again: the road not taken (19:02)
+        ep["hold_t"] = None
+      elif raw <= 0.0 and self._sl <= 0.0:
+        # The limit has been unknown past the SL_HOLD_S dropout hold (mapd down?). Never hold a cap on nothing: end it,
+        # keeping the slowed set -- the drop DID materialize, so no restore toward a limit nobody can read now.
+        if ep["live"]:
+          self._ep_limit_drop = True
+        cloudlog.error("speedadjust: look-ahead ended -- the posted limit went unknown after the announced " +
+                       f"{ep['n']:.1f} m/s drop materialized; keeping the slowed set, no restore")
+        self._la_end(now, "limitUnknown")
+        return None
+      # raw unknown within the hold: a dropout is not evidence either way
+    else:
+      if self._odo - ep["b"] > max(LA_PASS_MARGIN_MIN_M, v_ego * LA_PASS_MARGIN_S):
+        self._la_end(now, "passed")          # the boundary is behind us and the limit never changed
+        return None
+      if ann is None:
+        why = "gone"
+      elif ann["n"] > ep["n"] + SL_DROP_EPS:
+        why = "rose"
+      elif abs(ann["b"] - ep["b0"]) > LA_SAME_ANN_M:
+        why = "moved"                        # re-routed, or a frozen mapd whose distance no longer counts down
+      else:
+        ep["b"] = ann["b"]                   # mapd's refined distance
+    if why is None:
+      ep["bad_t"] = None
+    elif ep["bad_t"] is None or ep["bad_why"] != why:
+      ep["bad_t"], ep["bad_why"] = now, why
+    elif now - ep["bad_t"] >= LA_GONE_GRACE_S:
+      self._la_end(now, why)
+      return None
+    return ep["tgt"] if live else None
 
   # ---- satele2pnw: diagnostic status publish (mem-param; ces_pnw forwards it into ces_events) -----
   SA_PUB_THROTTLE_S = 0.2                  # 5 Hz — ces_pnw samples at ~1 Hz, this just bounds the cost
@@ -613,6 +884,22 @@ class SpeedAdjustController:
       "zoneLast": _r(self._zone_last),                          # ...and the most recent one's target
       "icbmHold": bool(self._icbm_hold),                        # ratio holding the pre-curve set (ICBM has it tapped down)
       "inst": self._inst,                                       # zonefollow2pnw: changes only when plannerd restarts
+      # limitahead2pnw: the look-ahead, shadow or live. laNext/laNextD = the lower limit announced ahead (before any
+      # episode), laN/laTgt/laPre/laDs/laD = the running episode (announced limit, target, the set before it, the
+      # start distance, the distance left to the boundary), laMat = the limit is now current, laWhy = how the last
+      # episode ended, laEvN = decisions logged so far (each is a speedadjust_lookahead cloudlog event).
+      "laMode": self._la_mode,
+      "laNext": _r(self._ann["n"]) if self._ann else None,
+      "laNextD": _r(self._ann["b"] - self._odo, 1) if self._ann else None,
+      "laLive": bool(self._la["live"]) if self._la else None,
+      "laN": _r(self._la["n"]) if self._la else None,
+      "laTgt": _r(self._la["tgt"]) if self._la else None,
+      "laPre": _r(self._la["pre"]) if self._la else None,
+      "laDs": _r(self._la["d_start"], 1) if self._la else None,
+      "laD": _r(self._la["b"] - self._odo, 1) if self._la else None,
+      "laMat": (self._la["mat_t"] is not None) if self._la else None,
+      "laWhy": self._la_why,
+      "laEvN": self._la_ev_n,
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -925,6 +1212,7 @@ class SpeedAdjustController:
     now = time.monotonic()
     dt = min(max(now - self._last_t, 0.0), 0.5) if self._last_t is not None else 0.0
     self._last_t = now
+    self._odo += max(float(v_ego), 0.0) * dt  # limitahead2pnw: announced boundaries are kept on this odometer
     if now - self._last_read >= READ_S:
       self._last_read = now
       self._read_inputs()
@@ -951,6 +1239,9 @@ class SpeedAdjustController:
       self._zone_target = None               # sazoneset2pnw
       self._zone_elapsed = 0.0
       self._icbm_hold = False
+      if self._la is not None:               # limitahead2pnw: no set to slow from
+        self._la_end(now, "cruiseUnset")
+      self._la_hold = False
       self._publish_target(None)
       return v_cruise
 
@@ -1043,6 +1334,11 @@ class SpeedAdjustController:
         self._release_t = None
         self._zone_target = None             # sazoneset2pnw: the driver's own set ends any zone episode
         self._zone_elapsed = 0.0
+        # limitahead2pnw: ...and any look-ahead, which is not restarted for the same announcement. The drop itself,
+        # when it arrives, is judged against the set he just chose (the re-anchor above), with the ordinary confirm.
+        if self._la is not None:
+          self._la_end(now, "driverOverride")
+        self._la_hold = False
         # FIX E (telemetry only): mirror the normal release block's engaged-bookkeeping so the
         # "released" log actually fires and the next real engage's log isn't swallowed.
         if self._engaged:
@@ -1067,6 +1363,9 @@ class SpeedAdjustController:
       self._ratio = (v_cruise_set / self._sl) if self._sl > 0.0 else 0.0
       self._zone_target = None               # sazoneset2pnw
       self._zone_elapsed = 0.0
+      if self._la is not None:               # limitahead2pnw
+        self._la_end(now, "modeOff")
+      self._la_hold = False
       self._publish_target(None)
       return v_cruise
 
@@ -1115,12 +1414,26 @@ class SpeedAdjustController:
       self._icbm_hold = True
     elif self._icbm_hold and self._read_stock_set(sm) >= self._ratio * self._sl_ref - ZONE_SET_DONE_TOL:
       self._icbm_hold = False
+    # limitahead2pnw: the look-ahead runs BEFORE the baseline update, so an episode starting this tick already holds
+    # the ratio. The hold outlives an aborted episode until its restore has walked the set back (or ended): those
+    # SET+ taps are ours too.
+    la_tgt = self._la_step(now, v_ego, v_cruise_set)
+    if (self._la_hold and self._la is None and self._cap_out is None
+        and (self._restore_ceiling is None or self._read_stock_set(sm) >= self._ratio * self._sl_ref - ZONE_SET_DONE_TOL)):
+      self._la_hold = False
     self._update_baseline(v_cruise_set)
     lc = None
     if self._mode >= 2:                       # limit-drop cap itself: mode 2 only
       lc = self._limit_drop_cap()
+      # limitahead2pnw: while a LIVE look-ahead owns the drop it announced, it stands in for the limit-drop cap -- the
+      # same target, but restorable until LA_PROMOTE_HOLD_S. A different, higher drop (not the announced one) still caps
+      # as a real zone and makes the episode non-restorable.
+      if lc is not None and self._la is not None and self._la["live"] and self._sl <= self._la["n"] + SL_DROP_EPS:
+        lc = None
       if lc is not None:
         caps.append(lc)
+    if la_tgt is not None:
+      caps.append(la_tgt)
 
     if not caps:
       # release DEBOUNCE: sources must stay clear for RELEASE_S before the cap lets go — an
@@ -1242,7 +1555,7 @@ class SpeedAdjustController:
     # Stock-ACC only: an op-long car (the Tesla) has no set to tap, and cap()'s return value keeps the
     # continuous cap exactly as before. A police cap in the same episode keeps the old hold (mixed rule).
     # "Reached" needs EVIDENCE: an unreadable stock set (0.0) never completes the zone -- it waits.
-    zone_only = lc is not None and pc is None and not self._long_ok
+    zone_only = lc is not None and pc is None and la_tgt is None and not self._long_ok
     if zone_only:
       if self._zone_target is None:
         self._zone_n += 1                    # a zone episode opens (see _zone_n)

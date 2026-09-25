@@ -103,7 +103,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapdUseCarGps", {PERSISTENT, BOOL, "0"}},
     // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
     {"MapSpeedLimit", {PERSISTENT, STRING}},
-    {"NextMapSpeedLimit", {PERSISTENT, JSON}},
+    {"NextMapSpeedLimit", {PERSISTENT, JSON}},  // limitahead2pnw: mapd_configd bridges mapdOut.nextSpeedLimit as {"sl": m/s (0 = none), "d": m, "ts": monotonic} to the /dev/shm mem store; speedadjust reads it at ~1 Hz
     {"RoadName", {PERSISTENT, STRING}},
     {"WayRef", {PERSISTENT, STRING}},        // location2pnw: mapd road ref (e.g. "I 5") bridged to mem params
     {"RoadContext", {PERSISTENT, STRING}},   // location2pnw: mapd road class 'freeway'|'city'|'unknown' (freeway-gate)
@@ -243,6 +243,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ConditionalExperimentalSwitching", {PERSISTENT, BOOL, "0"}},  // ces2xnor: legacy master bool (back-compat; superseded by CESMode)
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"AutoSpeedReduce", {PERSISTENT, INT, "0"}},  // speedadjust2pnw: 3-way auto cruise-speed reduction 0=Off 1=Police(ease to limit+5 ~30s ahead) 2=Police+Limits(also cap proportionally on a posted-limit drop). Reduce-only, op-long only, default OFF.
+    {"LimitAheadMode", {PERSISTENT, INT, "1"}},  // limitahead2pnw: slow down AHEAD of a lower limit mapd announces (needs AutoSpeedReduce=2). 0=Off 1=Shadow (log what it would do, change nothing; DEFAULT) 2=Live.
     {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
     {"RainMode", {PERSISTENT, INT, "0"}},  // rain2pnw (driver req 2026-07-12): 3-way wet-weather curve-slowdown selector. 0=None, 1=Light (3 mph slower in curves by default), 2=Heavy (5 mph). Applies to BOTH cars, same reduction. Magnitudes tunable in /data/pnw/rain.json. Default None.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable

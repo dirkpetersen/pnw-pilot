@@ -2359,7 +2359,9 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
 # the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
 SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
                 "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt", "zoneN", "zoneLast",
-                "icbmHold", "inst")
+                "icbmHold", "inst",
+                # limitahead2pnw: the speed-limit look-ahead (shadow or live) -- see speedadjust _publish_status
+                "laMode", "laNext", "laNextD", "laLive", "laN", "laTgt", "laPre", "laDs", "laD", "laMat", "laWhy", "laEvN")
 
 
 def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
