@@ -2,10 +2,12 @@
 
 Continues [`CHANGELOG-2026-09-23.md`](CHANGELOG-2026-09-23.md). All times PT.
 
-**Channel tip:** `origin/3devpnw` = `668607cab5`, **GREEN: 4,098 passed** (Rule 9 gate).
-**Installed on the truck:** `668607c` — rebooted 11:39 (openpilot disengaged), verified: processes up, MADS
-alternativeExperience 1024, safety `ford`, curve DB loaded. Earlier installs today: `2c33ad0` 07:46, `0d24053`
-~11:10, `3829160` ~11:28.
+**Channel tip:** `origin/3devpnw` = `6d309cad19`, **GREEN** (Rule 9 gate — checked after every push below;
+this docs-only session did not re-run the full suite itself, so no new pass count is quoted here).
+**Installed on the truck:** `6d309ca` — rebooted ~16:46 PT (openpilot disengaged), verified: `git rev-parse HEAD`
+on the device == `6d309cad19`. Earlier installs today, each while disengaged: `2c33ad0` 07:46, `0d24053` ~11:10,
+`3829160` ~11:28, `668607c` ~11:39, `c7aa027` early afternoon, `a6bdca4` afternoon (exact times for the last two
+not independently re-verified — the device only retains the current boot's `uptime -s`).
 
 ## 1. ✅ `clockvalid2pnw` (`37206c2d06`, `465e0a69ef`) — an unsynced clock is no longer trusted
 
@@ -58,3 +60,46 @@ logs a `madsbrake2pnw` warning. No panda change. **Fable: SHIP.** Not yet exerci
 
 Coding rule (owner): code is written only by a background Opus agent at medium effort, never Sonnet, never in the
 main session.
+
+## 8. ✅ `deleterloss2pnw` (`ff8a50aad9`, `c7aa027d5b`) — destroying un-uploaded HD is now visible
+
+The deleter reads the upload xattr uncached now: a stale per-process cache made already-uploaded segments look
+un-uploaded (and vice versa). Deleting a segment that still has files counted against the set the uploader will
+actually send now writes a `deleterLoss` record into `ces_events` and raises the `Offroad_UnuploadedDataDeleted`
+offroad alert. **Owner decision:** the `ces_events` log record is enough — the alert clears on reboot, so it is
+rarely seen in practice. **Fable: SHIP.** Background: `drives/2026-09-24/hd-deletion-check.md`.
+
+## 9. ✅ `terwilliger2pnw` (`dd45576fde`, `bc7a7016cf`, `540dca46e0`, `37fbc49461`) — three Terwilliger fixes
+
+Driver report: Terwilliger too slow, 47/48 mph where 56.6/54.0 was needed. Three fixes:
+* **Fix 1:** curve DB raises now use exactly `sqrt(A/k)` — the 1.25x raise margin is removed, and `cdb2Why`
+  `"margin"` is renamed `"held"`. Held-out check: 2.88 % of passes reach ≥3.0 m/s², 0.46 % reach ≥3.5.
+* **Fix 3:** a 2 s `waySel` flicker ride-through (`cdb2WayHold`) so a momentary map "way" re-selection doesn't
+  drop the curve DB's hold mid-curve.
+* **Fix 2:** a gas press now suspends the ICBM episode in phase `"gas"`, and the restore resumes after the lift
+  with all its guards intact (`icbmGas`, `icbmRestoreWhy`).
+
+**Fable: SHIP.** Report: `drives/2026-09-24/terwilliger-too-slow/DRIVE_REPORT.md`.
+
+## 10. ✅ `curvefix2pnw` (`62a671fddf`, `07a13d16e0`) — vision left/right sign + vision floor
+
+* **Part A:** the vision left/right sign was inverted (`modelV2 orientationRate.z` > 0 actually means RIGHT) in
+  both ICBM and VTSC. Fixed, with new `icbmLeft`/`icbmLeftSrc` telemetry.
+* **Part B:** ICBM vision candidates are now floored at vision's own 2.5 m/s² speed (`icbm_vis_floor_frac` = 1.0).
+  At OR-34 11:19 that floor is about 69.3 mph instead of 66.
+* **Part C** (flooring map candidates at a flat 2.5) was stopped by the replay and replaced by the
+  measured-shape design (`docs/CURVE-MEASURED-SHAPE-DESIGN.md`), now being implemented in shadow mode.
+
+**Fable: SHIP.** Evidence: `drives/2026-09-24/vision-left-flag-check.md`.
+
+## 11. ✅ `gaswin2pnw` (`a6bdca43f5`) — a longer gas press still restores after the lift
+
+A gas press of up to 120 s (was 45 s) still restores after the lift (`ICBM_GAS_RESUME_MAX_S`). **Fable: SHIP.**
+
+## 12. ✅ `noleftfactor2pnw` (`fa47790deb`, `6d309cad19`) — the left-curve penalty factor was tuned against an inverted label
+
+`left_factor` (the extra penalty applied on LEFT curves only) changes **1.15 → 1.0**, because the washout
+registry's 07-11 direction labels were inverted. A claim-verifier check confirmed 28 of 35 washout entries
+disagree with GPS bearing; entry #156 at 18:12 was a right-hander mislabeled left. `tools/washouts.py`'s
+direction convention is fixed (`strAng > 0` = left) and the registry regenerated. **Fable: SHIP.** Docs
+follow-ups: `a538e0ed3c`, `4594a94f9d`.
