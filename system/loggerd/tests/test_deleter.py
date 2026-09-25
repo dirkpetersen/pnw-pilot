@@ -119,6 +119,19 @@ class TestDeleter(UploaderTestCase):
       self.make_file_with_data("crash", self.seg_format2[:-4]),
     ])
 
+  def test_preserve_set_by_another_process_is_not_stale(self):
+    """rule2fixes2pnw: loggerd sets user.preserve from ANOTHER process. A cached read memoised the first "not set"
+    for the life of the deleter, so a segment preserved after that first sweep was deleted as an ordinary one."""
+    seg = self.seg_format.format(0)
+    older = self.make_file_with_data(seg, self.f_type)
+    newer = self.make_file_with_data(self.seg_format.format(1), self.f_type)
+    assert not deleter.has_preserve_xattr(seg)                              # first read: not set (a cache would memo it)
+    assert xattr_cache.getxattr(str(older.parent), deleter.PRESERVE_ATTR_NAME) is None
+    xattr.setxattr(str(older.parent), deleter.PRESERVE_ATTR_NAME, deleter.PRESERVE_ATTR_VALUE)  # raw: bypasses the cache
+    assert deleter.has_preserve_xattr(seg), "stale cached preserve state"
+    assert seg in deleter.get_preserved_segments([seg, self.seg_format.format(1)])
+    self.assertDeleteOrder([newer, older])                                  # the preserved (older) segment goes LAST
+
   def test_no_delete_when_available_space(self):
     f_path = self.make_file_with_data(self.seg_dir, self.f_type)
 
@@ -217,7 +230,13 @@ class TestDeleter(UploaderTestCase):
     assert sum("deleterLoss record" in m for m in msgs) == 2
 
   def test_upload_read_error_is_logged_once_per_sweep(self, monkeypatch, loss):
-    def eio(*a, **k):
+    # rule2fixes2pnw: has_preserve_xattr now shares getxattr_uncached, so fail only the user.upload reads this
+    # test is about (a user.preserve read error propagates, as it did through the cached read before).
+    real = deleter.getxattr_uncached
+
+    def eio(path, attr_name):
+      if attr_name != UPLOAD_ATTR_NAME:
+        return real(path, attr_name)
       raise OSError(errno.EIO, "io error")
     monkeypatch.setattr(deleter, "getxattr_uncached", eio)
     f = self.make_file_with_data(self.seg_dir, self.f_type)

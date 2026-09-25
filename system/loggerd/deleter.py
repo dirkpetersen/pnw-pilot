@@ -13,7 +13,6 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.loggerd.config import get_available_bytes, get_available_percent
 from openpilot.system.loggerd.uploader import (listdir_by_creation, FIREHOSE_FILES, UPLOAD_ATTR_NAME,
                                                 UPLOAD_ATTR_VALUE, uploadable_firehose_files)
-from openpilot.system.loggerd.xattr_cache import getxattr
 
 MIN_BYTES = 5 * 1024 * 1024 * 1024
 MIN_PERCENT = 10
@@ -33,7 +32,10 @@ _upload_read_errors: list[str] = []
 
 
 def has_preserve_xattr(d: str) -> bool:
-  return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+  # rule2fixes2pnw: UNCACHED, same reason as user.upload below (deleterloss2pnw). loggerd sets user.preserve from
+  # ANOTHER process, so xattr_cache's per-process memo kept the first "not set" answer until a reboot and a segment
+  # preserved after that first sweep could be deleted as an ordinary one.
+  return getxattr_uncached(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
 
 
 def getxattr_uncached(path: str, attr_name: str) -> bytes | None:
