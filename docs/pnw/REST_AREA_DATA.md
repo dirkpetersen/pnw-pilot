@@ -88,6 +88,15 @@ of the corridor's mainline (service plazas / truck stops excluded), then writes 
 `pnw/pnw-pilot/system/location_services/data/rest_areas/` and commit on the pnw feature branch. No
 device-code change is needed — the daemon auto-merges any `*.json` it finds there.
 
+> **Hand edits a regen would undo (restarea2pnw, 2026-09-24).** `other/places/i5_rest_areas.py`
+> (a) queries only OSM nodes + ways, so a rest area mapped as a **relation** is dropped — SeaTac NB
+> (I-5 MP 140, `relation/20955377`) was missing for that reason; and (b) takes `dir` from the OSM
+> `name` only, so Maytown / Scatter Creek / Silver Lake came out `""` (shown both ways) although WSDOT
+> names each one-sided (`official_name`, e.g. "Maytown - I-5 southbound"). The shipped
+> `i5_rest_areas.json` now carries SeaTac (N), the corrected directions, and Santiam River (N+S,
+> MP 241) and Oak Grove (N+S, MP 206) in Oregon. Before overwriting it from a regen, diff against it.
+> `tests/test_rest_areas.py` fails if an entry drops out of the load or loses its N/S direction.
+
 > These are small, hand-curated corridor files (I-5/I-90/I-82/US-12/US-95 = the PNW Seattle↔central western Oregon
 > and eastern-WA driving envelope), not a live download — they ship in-tree and are refreshed manually
 > when the route set changes.

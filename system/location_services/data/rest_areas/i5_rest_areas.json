@@ -70,18 +70,29 @@
     "display": "Silver Lake (closed)",
     "town": "Mill Creek",
     "type": "rest_area",
-    "dir": "",
+    "dir": "S",
     "state": "WA",
     "lat": 47.901992,
     "lon": -122.214867,
     "osm": "way/160670081"
   },
   {
+    "name": "SeaTac Rest Area",
+    "display": "SeaTac",
+    "town": "Federal Way",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "WA",
+    "lat": 47.27125,
+    "lon": -122.315302,
+    "osm": "relation/20955377"
+  },
+  {
     "name": "Maytown Rest Area",
     "display": "Maytown",
     "town": "Grand Mound",
     "type": "rest_area",
-    "dir": "",
+    "dir": "S",
     "state": "WA",
     "lat": 46.870803,
     "lon": -122.970089,
@@ -92,7 +103,7 @@
     "display": "Scatter Creek",
     "town": "Grand Mound",
     "type": "rest_area",
-    "dir": "",
+    "dir": "N",
     "state": "WA",
     "lat": 46.835851,
     "lon": -122.985842,
@@ -163,5 +174,49 @@
     "lat": 45.270971,
     "lon": -122.775307,
     "osm": "way/484162085"
+  },
+  {
+    "name": "Santiam River Rest Area - Southbound",
+    "display": "Santiam River",
+    "town": "Jefferson",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "OR",
+    "lat": 44.740717,
+    "lon": -123.054358,
+    "osm": "way/565995681"
+  },
+  {
+    "name": "Santiam River Rest Area - Northbound",
+    "display": "Santiam River",
+    "town": "Jefferson",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "OR",
+    "lat": 44.7391,
+    "lon": -123.0501,
+    "osm": "way/565995681"
+  },
+  {
+    "name": "Oak Grove Rest Area Southbound",
+    "display": "Oak Grove",
+    "town": "Harrisburg",
+    "type": "rest_area",
+    "dir": "S",
+    "state": "OR",
+    "lat": 44.236851,
+    "lon": -123.061713,
+    "osm": "way/1183780839"
+  },
+  {
+    "name": "Oak Grove Rest Area Northbound",
+    "display": "Oak Grove",
+    "town": "Harrisburg",
+    "type": "rest_area",
+    "dir": "N",
+    "state": "OR",
+    "lat": 44.23671,
+    "lon": -123.059561,
+    "osm": "way/1183780838"
   }
 ]
