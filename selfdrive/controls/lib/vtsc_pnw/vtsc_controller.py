@@ -41,6 +41,7 @@ from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslo
 # twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
 # this many seconds (cap() runs at 20 Hz), each counting the failures since the previous line.
 # foldlog2pnw: the map-curve fold (_fold_map_curve) logs on the same interval, with its own first-failure/count state.
+# rule2fixes2pnw: so does the apex turn-direction read (apex_turn_direction), again with its own state.
 TWISTY_ERR_LOG_S = 60.0
 
 
@@ -131,6 +132,8 @@ class VTSCController:
     self._fold_err_t = None    # foldlog2pnw: monotonic time of the last logged map-curve fold failure (None = never)
     self._fold_err_n = 0       # foldlog2pnw: map-curve fold failures since that log line
     self._tele_map_err = ""    # foldlog2pnw: exception type name when THIS tick's map-curve fold failed; "" = it did not
+    self._dir_err_t = None     # rule2fixes2pnw: monotonic time of the last logged turn-direction failure (None = never)
+    self._dir_err_n = 0        # rule2fixes2pnw: turn-direction failures since that log line
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -476,10 +479,19 @@ class VTSCController:
     # so the penalty path sees the identical is_left it always did.
     turn_dir = 0
     if d_apex >= 0.0 or v_curve != float('inf'):
+      # rule2fixes2pnw (Rule 2): was a silent `except Exception: turn_dir = 0`. Fallback unchanged (0 = straight/unknown:
+      # no left-curve factor, telemetry dir ""); it runs on the Tesla too. Now logged, first failure at once, then at
+      # most one line per TWISTY_ERR_LOG_S with the count since the previous line (cap() runs at 20 Hz).
       try:
         turn_dir = apex_turn_direction(model)
-      except Exception:
+      except Exception as e:
         turn_dir = 0
+        self._dir_err_n += 1
+        if self._dir_err_t is None or now - self._dir_err_t >= TWISTY_ERR_LOG_S:
+          cloudlog.exception(f"VTSC: apex turn direction FAILED ({type(e).__name__}) -- treated as straight/unknown, " +
+                             f"no left-curve factor ({self._dir_err_n} failure(s) since the last log)")
+          self._dir_err_t = now
+          self._dir_err_n = 0
       self._tele_dir = "L" if turn_dir > 0 else ("R" if turn_dir < 0 else "")
     if v_curve != float('inf') and self.veh.lightning_curve_slow:
       is_left = turn_dir > 0
