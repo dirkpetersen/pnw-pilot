@@ -203,6 +203,67 @@ before `decide_press()`.
 - `common/params_keys.h` — registered `SpeedAdjustTarget` (`CLEAR_ON_MANAGER_START`, `JSON`)
 - `PNW-PILOT-FEATURES.md`, `docs/pnw/SPEEDADJUST-EXECUTOR.md` (this file) — docs
 
+## Speed-limit look-ahead (limitahead2pnw, 2026-09-24)
+
+**Why:** at 18:57 PT on 2026-09-24 the Lightning reached a 60 → 40 boundary at 74 mph. speedadjust only acted on
+the CURRENT limit, 3 s after the sign, although mapd had announced the 40 1,078 m ahead
+(`drives/2026-09-24/limit-drop-1857/DRIVE_REPORT.md`). Owner: "just do 1 and 2 — the higher the speed the sooner
+you need to start slowing down."
+
+**What it does:**
+- **Look-ahead.** `mapd_configd` bridges `mapdOut.nextSpeedLimit` and `nextSpeedLimitDistance` as the
+  `NextMapSpeedLimit` mem-param `{sl, d, ts}`. When the distance to a lower limit is within
+  `la_start_distance = (v² − v_tgt²)/(2·0.6) + 3·v`, speedadjust slows toward the rule-1/1b target
+  `max(N, N·ratio)`.
+  - `v` = max(vEgo, the driver's set).
+  - 0.6 m/s² is the measured median rate at which the stock ACC follows a tapped-down set.
+  - 74 → 50 mph starts about 620 m out.
+  - Both cars: stock-ACC cars get it as SET- taps, op-long cars as the returned cap.
+- **Restorable until promoted.** The slowdown stays restorable until the lower limit is current and has held for
+  8 s continuously. Only then does the ordinary permanent zone set take over.
+- **Aborts restore the driver's pre-look-ahead set, never higher.** The triggers are:
+  - the boundary passes without the drop;
+  - the announcement vanishes for more than 5 s, or rises or moves;
+  - the new limit goes back up. This is the road-not-taken case: at 19:02 mapd matched onto a 25 on a 50 ramp for
+    4.95 s.
+
+  If a real drop joined the episode, the restore goes only up to that zone's own rule-1 speed.
+- **Driver override.** A driver SET+ cancels the look-ahead for that announcement.
+- **Composition.** Police (limit + 5) and ICBM combine by min(). An ICBM restore cannot run above the look-ahead
+  while the look-ahead's SET- target is on the bus.
+- **Option 2.** An announced drop skips the 2 s `SL_DROP_CONFIRM_S` confirm. Unannounced drops keep it.
+
+**Owner-approved exception (2026-09-24):** sanorestore2pnw says a limit-drop slowdown is never restored. A
+look-ahead is not a limit drop until it is promoted. If the announced drop never materialises, the previous set IS
+restored.
+
+**`LimitAheadMode`** (persistent INT; it only acts with `AutoSpeedReduce=2`):
+
+| Value | Mode | Behavior |
+|---|---|---|
+| 0 | Off | Nothing runs and nothing is logged. |
+| **1** | **Shadow (default)** | The identical state machine runs. It logs every decision and changes nothing, which is tested bit-for-bit against Off. |
+| 2 | Live | The look-ahead acts. |
+
+**Going live needs SSH; there is no UI toggle:**
+
+```
+PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 -c \
+  "from openpilot.common.params import Params; Params().put('LimitAheadMode', 2)"
+```
+
+It takes effect at speedadjust's next 1 Hz read. Setting 1 or 0 reverts it the same way. The key is new:
+`params_pyx.so` must be rebuilt (build-on-boot does it on an update).
+
+**Telemetry:**
+- Each decision is a `speedadjust_lookahead` cloudlog event: `start`, `retarget`, `materialized`,
+  `confirmSkipped`/`wouldSkipConfirm`, `promote`, or `abort` with its reason and restore value.
+- ces_events carries `saLaMode`, `saLaNext`, `saLaNextD`, `saLaN`, `saLaTgt`, `saLaPre`, `saLaDs`, `saLaD`,
+  `saLaMat`, `saLaWhy` and `saLaEvN`.
+
+**Tests:** `speedadjust_pnw/tests/test_limit_ahead.py` (closed loop against the real Ford executor and the ICBM
+episode) and `system/mapd/tests/test_next_limit_bridge.py`.
+
 ## Related
 
 `docs/pnw/ICBM2PNW.md` (the curve-ICBM design this mirrors) · `docs/CES.md` / `docs/VTSC.md` (shared

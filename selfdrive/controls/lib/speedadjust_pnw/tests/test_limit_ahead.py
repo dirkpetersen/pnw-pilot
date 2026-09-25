@@ -108,6 +108,7 @@ def simulate(monkeypatch, road, T, v0_mph=74.0, set0_mph=75.0, mode=2, la_mode=s
   last_dec_ts, frame, sa_tele = None, 0, {}
   r = Run()
   r.trace, r.targets, r.v_at_mark, r.sl_trace, r.outs = [], [], None, [], []
+  r.c, r.x = c, 0.0                                       # visible to driver() hooks mid-run
   while _Clock.t - 1000.0 < T:
     frame += 1
     _Clock.t += 0.01
@@ -121,6 +122,7 @@ def simulate(monkeypatch, road, T, v0_mph=74.0, set0_mph=75.0, mode=2, la_mode=s
     elif v < stock:
       v = min(stock, v + A_UP * 0.01)
     x0, x = x, x + v * 0.01
+    r.x = x
     if x_mark is not None and x0 < x_mark <= x:
       r.v_at_mark = v / MPH
     sm.cs.cruiseState.speed = stock
@@ -326,7 +328,7 @@ def test_the_restore_never_passes_a_real_zone_that_happened_meanwhile(monkeypatc
   r = simulate(monkeypatch, road, 120, x_mark=None)
   assert _acts(r, "start") and _acts(r, "abort"), r.la
   assert _acts(r, "abort")[0]["limitDropJoined"] is True
-  assert r.final <= 62.5 + 1.0, f"restored past the real zone: {r.final}\n{r.trace}"
+  assert abs(r.final - 62.5) <= 1.0, f"want the real 50 zone's speed 62.5, got {r.final}\n{r.trace}"
 
 
 # ---- option 2: the confirm is skipped only for an announced drop ------------------------------------------------------
@@ -458,6 +460,119 @@ def test_a_limit_that_stays_unknown_after_the_drop_ends_the_look_ahead_without_a
   r = simulate(monkeypatch, road, 90)
   assert [a["reason"] for a in _acts(r, "abort")] == ["limitUnknown"], r.la
   assert r.final <= 51.0, f"restored with the limit unknown: {r.final}\n{r.trace}"
+
+
+# ---- Fable review of 855e913 --------------------------------------------------------------------------------------------
+def _dropout_road(t0, length):
+  def road(x, t):
+    if x < XB:
+      return 60, (0 if t0 <= t < t0 + length else 40), XB - x
+    return 40, 0, 0.0
+  return road
+
+
+def test_F1_a_short_announcement_dropout_mid_approach_does_not_abort(monkeypatch):
+  """Fable: a 2.5 s mapd dropout ~600 m out aborted ("gone"), restored 67 -> 75 and dismissed the announcement for good --
+  75 mph at the 40 again. A dropout shorter than SL_HOLD_S is continuity."""
+  r = simulate(monkeypatch, _dropout_road(14.0, 2.6), 80, x_mark=XB)
+  assert not _acts(r, "abort"), r.la
+  assert r.v_at_mark <= 52.0, f"{r.v_at_mark} mph at the boundary\n{r.trace}"
+  assert abs(r.final - 50) <= 1.0
+
+
+def test_F1_a_long_dropout_aborts_but_the_announcement_can_start_again(monkeypatch):
+  """A 6 s dropout while the look-ahead runs (it started ~14.5 s in) does abort ("gone", past SL_HOLD_S) -- and when mapd
+  announces the 40 again the look-ahead must restart (no dismissal on "gone") and the zone still ends at 50."""
+  r = simulate(monkeypatch, _dropout_road(15.0, 6.0), 90, x_mark=XB)
+  starts, aborts = _acts(r, "start"), _acts(r, "abort")
+  assert [a["reason"] for a in aborts] == ["gone"] and len(starts) == 2, r.la
+  assert abs(r.final - 50) <= 1.0, f"{r.final}\n{r.trace}"
+
+
+def test_F1_a_1hz_announcement_flicker_does_not_churn(monkeypatch):
+  def road(x, t):
+    if x < XB:
+      return 60, (40 if (t % 1.0) < 0.5 else 0), XB - x
+    return 40, 0, 0.0
+  r = simulate(monkeypatch, road, 80, x_mark=XB)
+  assert len(_acts(r, "start")) <= 1 and not _acts(r, "abort"), r.la
+  assert abs(r.final - 50) <= 1.0
+
+
+@pytest.mark.parametrize("lag", [0.0, 1.0, 2.0])
+def test_F1_mapd_zeroing_next_at_the_boundary_is_not_gone(monkeypatch, lag):
+  """At d = 0 mapd zeroes `next`; the current limit may follow a little later. That is the boundary, not a vanished
+  announcement: no abort, no restore, promote."""
+  class Rd:
+    t_cross = None
+
+    def __call__(self, x, t):
+      if x < XB:
+        return 60, 40, XB - x
+      if self.t_cross is None:
+        self.t_cross = t
+      return (60, 0, 0.0) if t - self.t_cross < lag else (40, 0, 0.0)
+  r = simulate(monkeypatch, Rd(), 90, x_mark=XB)
+  assert not _acts(r, "abort") and _acts(r, "promote"), r.la
+  assert max(row[3] for row in r.trace if row[1] > XB) <= 50 + 1.0, f"a restore ran at the boundary\n{r.trace}"
+
+
+def test_F1_at_crawl_speed_passed_still_decides_at_the_boundary(monkeypatch):
+  """At ~10 mph the pass margin is its 30 m floor (~6.7 s), longer than the gone grace: mapd zeroing `next` at d = 0 must
+  still not read as "gone" while the current limit catches up (5.5 s here)."""
+  class Rd:
+    t_cross = None
+
+    def __call__(self, x, t):
+      if x < 300:
+        return 20, 10, 300 - x
+      if self.t_cross is None:
+        self.t_cross = t
+      return (20, 0, 0.0) if t - self.t_cross < 5.5 else (10, 0, 0.0)
+  r = simulate(monkeypatch, Rd(), 120, v0_mph=20, set0_mph=20)
+  assert _acts(r, "start") and not _acts(r, "abort") and _acts(r, "promote"), r.la
+
+
+def test_F2_a_false_chained_announcement_restores_to_the_real_zone_speed(monkeypatch):
+  """Real 60 -> 40 (rule 1: 50), then a 35 announced 200 m on that never comes: the look-ahead took the set toward 43.75.
+  It must come back up to 50 -- the 40 zone's own speed -- not stay at 44, and never above 50."""
+  def road(x, t):
+    if x < XB:
+      return 60, 40, XB - x
+    if x < XB + 200:
+      return 40, 35, XB + 200 - x
+    return 40, 0, 0.0
+  r = simulate(monkeypatch, road, 140)
+  assert _acts(r, "retarget") and _acts(r, "abort")[0]["limitDropJoined"] is True, r.la
+  assert _acts(r, "abort")[0]["restore"] == pytest.approx(50 * MPH, abs=0.01)
+  assert abs(r.final - 50) <= 1.0, f"final {r.final}\n{r.trace}"
+  assert max(row[3] for row in r.trace if row[1] > XB + 200) <= 50 + 1.0
+
+
+def test_F5_switching_the_look_ahead_off_puts_an_unconfirmed_drop_back_through_the_confirm(monkeypatch):
+  """A 1.5 s bogus 40 at the boundary, taken at once because the look-ahead announced it; the look-ahead is then switched
+  off. That value must not become a permanent zone just because the look-ahead stopped owning it."""
+  class Rd:
+    t_cross = None
+
+    def __call__(self, x, t):
+      if x < XB:
+        return 60, 40, XB - x
+      if self.t_cross is None:
+        self.t_cross = t
+      return (40, 0, 0.0) if t - self.t_cross < 1.5 else (60, 0, 0.0)
+  state = {"off": False}
+
+  def driver(t, run):
+    if not state["off"] and run.c._sl == pytest.approx(40 * MPH):
+      state["off"] = True
+      run.c.params.la_mode = sa.LA_OFF
+    return None
+  r = simulate(monkeypatch, Rd(), 110, driver=driver)
+  assert state["off"] and _acts(r, "confirmSkipped"), r.la
+  assert [a["reason"] for a in _acts(r, "abort")] == ["modeOff"], r.la
+  assert not [n for n, _ in r.events if n == "speedadjust_zone_set"], "the unconfirmed 40 became a permanent zone"
+  assert r.final == pytest.approx(75.0, abs=0.01), f"{r.final}\n{r.trace}"
 
 
 def test_a_rise_announced_ahead_does_nothing(monkeypatch):

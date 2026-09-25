@@ -255,8 +255,11 @@ LA_PROMOTE_HOLD_S = 8.0  # the lower limit must be CURRENT this long before the 
                          # meanwhile, so the hold costs no distance -- it only decides whether the slowdown is permanent.
 LA_PASS_MARGIN_S = 3.0   # s of travel past the expected boundary before "the drop never came" (read + map-match lag)
 LA_PASS_MARGIN_MIN_M = 30.0
-LA_GONE_GRACE_S = 2.0    # an announcement that vanished / rose, or a limit that went back up, must stay that way this long
+LA_BAD_GRACE_S = 2.0     # an announcement that rose or moved, or a limit that went back up, must stay that way this long
                          # before the look-ahead aborts (one flickering read must not cost a restore and a re-slow)
+LA_GONE_GRACE_S = SL_HOLD_S  # ...and an announcement that VANISHED this long (Fable review: at 2 s a 2.5 s mapd dropout
+                         # 600 m out aborted and restored 67 -> 75, i.e. 75 mph at the 40 again). Deliberately longer than
+                         # the "passed" margin, so at the boundary -- where mapd zeroes next at d = 0 -- "passed" decides.
 LA_INPUT_STALE_S = 2.0   # a NextMapSpeedLimit older than this reads as "no announcement" (dead mapd bridge)
 LA_SAME_ANN_M = 100.0    # an announced boundary that moves by more than this is a different road, not the same drop
 
@@ -399,6 +402,7 @@ class SpeedAdjustController:
     self._la_dismissed = None    # the announced limit (m/s) of an aborted episode: not restarted until that announcement goes
     self._la_why = None          # telemetry: how the last episode ended ("promote" / "abort:<reason>")
     self._la_ev_n = 0            # telemetry: look-ahead decisions logged so far (each one is a cloudlog event)
+    self._la_zone_restore = None # F2: after an aborted look-ahead that a real drop joined, restore up to that zone's speed
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -458,6 +462,7 @@ class SpeedAdjustController:
             self._la_log(ep, "confirmSkipped" if ep["live"] else "wouldSkipConfirm", limit=round(sl, 2))
           if not ep["live"]:
             return self._sl
+          ep["sl_before"] = self._sl           # F5: what to fall back to if the look-ahead stops owning this value
       self._sl_pending = 0.0
       # sazoneset2pnw: a HIGHER limit must persist too (see SL_RISE_CONFIRM_S). A first reading after the
       # limit was genuinely unknown (self._sl == 0) is not a "rise" and is taken at once.
@@ -732,11 +737,19 @@ class SpeedAdjustController:
       self._la_log(ep, "promote", limit=self._sl_raw, held_s=now - ep["hold_t"])
       return
     self._la_why = "abort:" + why
-    if why not in ("modeOff", "modeChanged", "cruiseUnset"):
-      # Not restarted for the same announcement: an aborted look-ahead restarting on the next tick would tap the set
-      # down and back up in a loop (a mapd still announcing a limit it has passed, or a frozen distance). Cleared once
-      # mapd announces something else or nothing.
+    if why in ("passed", "limitRose", "driverOverride"):
+      # Not restarted for the same announcement: a look-ahead restarting on the next tick would tap the set down and
+      # back up in a loop (a mapd still announcing a limit it has passed), or ignore the driver. Cleared once mapd
+      # announces something else or nothing. NOT for "gone"/"moved" (Fable review): an announcement that vanishes and
+      # comes back is the same drop, and must be able to restart.
       self._la_dismissed = ep["n"]
+    if ep["live"] and why in ("modeOff", "modeChanged", "cruiseUnset") and ep.get("sl_before") is not None \
+       and 0.0 < self._sl <= ep["n"] + SL_DROP_EPS:
+      # F5 (Fable review): this limit was taken WITHOUT the confirm (option 2) because the look-ahead owned it. With the
+      # look-ahead gone it would fall straight into _limit_drop_cap as a permanent zone -- so put it back through the
+      # ordinary confirm, as if it had just been read.
+      self._sl_pending, self._sl_pending_t = self._sl, now
+      self._sl = ep["sl_before"]
     if ep["live"] and why == "limitRose" and self._sl_raw > self._sl:
       # We took the lower limit WITHOUT the confirm (option 2). Give it back the same way: kept, the ordinary limit-drop
       # path would turn the bogus value into a permanent zone set the moment the look-ahead stops standing in for it
@@ -747,6 +760,13 @@ class SpeedAdjustController:
     # controller's own ceiling belongs to whatever the real limit-drop path did, so it is not the look-ahead's answer).
     if ep["live"]:
       restore = None if getattr(self, "_ep_limit_drop", False) else self._pub_ceiling
+      if getattr(self, "_ep_limit_drop", False) and 0.0 < self._sl < self._sl_ref and not self._long_ok:
+        # F2 (Fable review): a REAL drop joined the episode (e.g. the 40 of a 60 -> 40 -> false 35 chain). The look-ahead
+        # took the set below that zone's own rule-1/1b speed; give back up to it -- never above it, never above the set
+        # before the look-ahead -- once the zone set completes (_end_zone opens it). Not "no restore at all".
+        zone = max(self._sl, self._sl * self._ratio)
+        top = self._pub_ceiling if self._pub_ceiling is not None else ep["pre"]
+        restore = self._la_zone_restore = min(zone, top)
     else:
       restore = ep["pre"]
     self._la_log(ep, "abort", reason=why, restore=restore, pre=ep["pre"], dist=ep["b"] - self._odo,
@@ -829,7 +849,8 @@ class SpeedAdjustController:
         self._la_end(now, "passed")          # the boundary is behind us and the limit never changed
         return None
       if ann is None:
-        why = "gone"
+        # at or past the boundary mapd zeroes `next` (d = 0): that is not "gone", the "passed" check above decides
+        why = "gone" if ep["b"] - self._odo > 0.0 else None
       elif ann["n"] > ep["n"] + SL_DROP_EPS:
         why = "rose"
       elif abs(ann["b"] - ep["b0"]) > LA_SAME_ANN_M:
@@ -840,7 +861,7 @@ class SpeedAdjustController:
       ep["bad_t"] = None
     elif ep["bad_t"] is None or ep["bad_why"] != why:
       ep["bad_t"], ep["bad_why"] = now, why
-    elif now - ep["bad_t"] >= LA_GONE_GRACE_S:
+    elif now - ep["bad_t"] >= (LA_GONE_GRACE_S if why == "gone" else LA_BAD_GRACE_S):
       self._la_end(now, why)
       return None
     return ep["tgt"] if live else None
@@ -1075,6 +1096,12 @@ class SpeedAdjustController:
       cloudlog.event("speedadjust_zone_set_abandoned", limit=round(float(self._sl), 2),
                      target=round(float(target), 2), stock=round(float(stock_now), 2), elapsed_s=round(elapsed, 1))
     self._publish_target(None)
+    zr, self._la_zone_restore = self._la_zone_restore, None
+    if why == "zoneSet" and zr is not None and stock_now < zr - ZONE_SET_DONE_TOL:
+      # limitahead2pnw F2: the look-ahead took the set below this zone's speed -- open the bounded restore up to it
+      self._restore_ceiling, self._restore_deadline = zr, now + RESTORE_WINDOW_S
+      self._no_restore_why = None
+      cloudlog.event("speedadjust_lookahead_zone_restore", ceiling=round(float(zr), 2), stock=round(float(stock_now), 2))
     return v_cruise
 
   def _step_restore(self, now: float, sm) -> None:
@@ -1536,6 +1563,8 @@ class SpeedAdjustController:
         self._pub_ceiling = v_cruise_set
         self._min_pub_target = self._cap_out
       self._ep_limit_drop = False             # sanorestore2pnw: a fresh episode starts clean
+      if self._la is None:
+        self._la_zone_restore = None          # limitahead2pnw F2: belongs to the episode that set it
       self._no_restore_why = None             # ...and so does the reason (Fable: it stayed stale through the next cap)
     if lc is not None:
       self._ep_limit_drop = True              # sanorestore2pnw: sticky for the rest of the episode
