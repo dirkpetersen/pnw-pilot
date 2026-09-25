@@ -221,24 +221,49 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 def _load_rain_config() -> dict:
   """Read /data/pnw/rain.json defensively (mirror of _load_curve_config): a flat
   {"light_mph": .., "heavy_mph": ..}, unknown keys ignored, each clamped to [0,15] mph. NEVER raises
-  (runs in control code) — missing/malformed -> the hardcoded 3/5 mph defaults."""
+  (runs in control code) — missing/malformed -> the hardcoded 3/5 mph defaults.
+
+  deleterrain2pnw (Rule 2, same fix as rule2fixes2pnw's _load_curve_config): fallbacks unchanged; a MISSING
+  file stays silent (the documented default), an unusable/unreadable/malformed file is a cloudlog.error naming
+  the path and the error, and a clamped or NaN value is one cloudlog.warning per load naming the keys."""
   cfg = dict(_RAIN_DEFAULTS)
+  path = RAIN_CONFIG_PATH
   try:
-    st = os.stat(RAIN_CONFIG_PATH)
+    st = os.stat(path)
     if not stat.S_ISREG(st.st_mode) or st.st_size > _RAIN_CONFIG_MAX_BYTES:
+      cloudlog.error(f"pnw_vehicle: {path} IGNORED (not a regular file, or {st.st_size} B > " +
+                     f"{_RAIN_CONFIG_MAX_BYTES} B) -- using the default rain margins")
       return cfg
-    with open(RAIN_CONFIG_PATH) as f:
+    with open(path) as f:
       data = json.load(f)
+    if not isinstance(data, dict):
+      cloudlog.error(f"pnw_vehicle: {path} IGNORED (expected a JSON object, got {type(data).__name__}) " +
+                     "-- using the default rain margins")
+    nan_keys = []
     if isinstance(data, dict):
       for k in cfg:
         if k in data:
           v = float(data[k])
           if v == v:                          # NaN guard (NaN != NaN)
             cfg[k] = v
-  except Exception:
+          else:
+            nan_keys.append(k)
+    if nan_keys:
+      cloudlog.warning(f"pnw_vehicle: {path}: NaN ignored for {nan_keys} -- those keys keep their defaults")
+  except FileNotFoundError:
+    return dict(_RAIN_DEFAULTS)                # no file = the documented default margins; not an error
+  except Exception as e:
+    cloudlog.error(f"pnw_vehicle: {path} unreadable/malformed ({type(e).__name__}: {e}) -- the WHOLE file is " +
+                   "ignored, using the default rain margins")
     return dict(_RAIN_DEFAULTS)                # any failure -> defaults, never raise
+  clamped = []
   for k, (lo, hi) in _RAIN_BOUNDS.items():
-    cfg[k] = _clamp(cfg[k], lo, hi)
+    v = _clamp(cfg[k], lo, hi)
+    if v != cfg[k]:
+      clamped.append(f"{k}={cfg[k]}->{v}")
+    cfg[k] = v
+  if clamped:
+    cloudlog.warning(f"pnw_vehicle: {path}: out-of-bounds value(s) clamped: {', '.join(clamped)}")
   return cfg
 
 
