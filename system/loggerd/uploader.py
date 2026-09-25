@@ -133,6 +133,13 @@ METERED_BUDGET_PATH = "/data/pnw/metered_budget.json"
 METERED_ORDER: tuple[str, ...] = ("ces_events.jsonl.", "curvedb_obs.jsonl.", "boot/", "net_events.jsonl.")
 
 
+# rule2fixes2pnw: uploadable_firehose_files logs a failing SkipWideCameraUpload read at most once per this many
+# seconds (first failure at once), each line carrying the failures since the previous one.
+FIREHOSE_ERR_LOG_S = 60.0
+_firehose_err_t: float | None = None
+_firehose_err_n = 0
+
+
 def uploadable_firehose_files(params=None) -> set[str]:
   """uploadprio2pnw: the pass-2 files the uploader is EVER going to send, given the permanent-skip
   toggles. The DELETER uses this for its keep-un-uploaded-last ordering: a file that will never be
@@ -147,12 +154,27 @@ def uploadable_firehose_files(params=None) -> set[str]:
   When defer pins every segment, oldest-first-plus-a-loud-error IS the correct last resort.
 
   Best-effort — any param failure falls back to the full set (the pre-existing behaviour)."""
+  global _firehose_err_t, _firehose_err_n
   try:
     p = params if params is not None else Params()
     if p.get_bool(SKIP_WIDE_PARAM):
       return FIREHOSE_FILES - WIDE_CAMERA_FILES
-  except Exception:
-    pass
+  except Exception as e:
+    # rule2fixes2pnw (Rule 2): was `except Exception: pass`. FALLBACK KEPT, AND IT IS THE SAFE ONE: the FULL set,
+    # i.e. SkipWideCameraUpload treated as OFF. Then ecamera still counts as "not yet uploaded", so the deleter
+    # keeps such segments LONGER (worst case: the ordering flattens toward oldest-first) -- whereas the reduced
+    # set would treat ecamera as never-to-be-sent and let it go first. Failing toward the full set can never make
+    # the deleter drop an un-uploaded file earlier than it would with the toggle read correctly.
+    # Caught broadly, not just UnknownKeyName/OSError: the deleter calls this with no guard of its own, and an
+    # escaping exception would end the deleter thread (disk fills, loggerd stops). Logged with the type instead.
+    # The deleter calls this once per sweep, every 0.1 s while out of space -> throttled with a count.
+    _firehose_err_n += 1
+    now = time.monotonic()
+    if _firehose_err_t is None or now - _firehose_err_t >= FIREHOSE_ERR_LOG_S:
+      cloudlog.exception(f"uploader: {SKIP_WIDE_PARAM} unreadable ({type(e).__name__}) -- deleter treats the skip as " +
+                         f"OFF (full firehose set) ({_firehose_err_n} failure(s) since the last log)")
+      _firehose_err_t = now
+      _firehose_err_n = 0
   return FIREHOSE_FILES
 
 # connect2xnor: only real external WiFi clients qualify for pass-2. The comma's

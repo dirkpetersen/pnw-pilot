@@ -455,6 +455,39 @@ class TestUploadableFirehoseFiles:
         raise RuntimeError("params down")
     assert uploadable_firehose_files(Boom()) == FIREHOSE_FILES
 
+  def test_param_failure_is_logged_throttled_and_keeps_the_full_set(self, monkeypatch):
+    """rule2fixes2pnw: the failure used to be `except Exception: pass`. The fallback (full set = skip treated
+    as OFF, the safe direction for the deleter) is unchanged; it is now logged, throttled to FIREHOSE_ERR_LOG_S
+    with a count, because the deleter calls this every 0.1 s while out of space."""
+    import types
+    from openpilot.system.loggerd import uploader as up
+    lines = []
+    monkeypatch.setattr(up, "cloudlog", types.SimpleNamespace(exception=lambda m, *a, **k: lines.append(m)))
+    t = [1000.0]
+    monkeypatch.setattr(up, "time", types.SimpleNamespace(monotonic=lambda: t[0]))
+    monkeypatch.setattr(up, "_firehose_err_t", None)
+    monkeypatch.setattr(up, "_firehose_err_n", 0)
+
+    class Boom:
+      def get_bool(self, k):
+        raise OSError("params down")
+    for i in range(601):                   # 60 s at 10 Hz, plus the call at exactly +60 s
+      t[0] = 1000.0 + i / 10.0
+      assert uploadable_firehose_files(Boom()) == FIREHOSE_FILES
+      if i == 599:
+        assert len(lines) == 1
+    assert len(lines) == 2
+    assert "SkipWideCameraUpload" in lines[0] and "(OSError)" in lines[0] and "(1 failure(s)" in lines[0]
+    assert "(600 failure(s)" in lines[1]
+
+  def test_param_success_logs_nothing(self, monkeypatch):
+    import types
+    from openpilot.system.loggerd import uploader as up
+    lines = []
+    monkeypatch.setattr(up, "cloudlog", types.SimpleNamespace(exception=lambda m, *a, **k: lines.append(m)))
+    uploadable_firehose_files(self._P(SkipWideCameraUpload=True))
+    assert lines == []
+
 
 class TestSkipWideListing:
   """uploadprio2pnw: the _skip_wide branch inside list_upload_files is the ONE place that changes
