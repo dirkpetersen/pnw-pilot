@@ -29,12 +29,22 @@ RAISES (v above today's price) are capped at +8 mph, posted + 10 mph (no posted 
 A lowering is exact. The Lightning's left/descent extras still subtract downstream (owner answer 5); the base hump
 is given back (the shape price becomes the map floor, as Part B does for vision).
 
-This module is PURE except for ShapeStage (commit 2), which holds the latch / waySel hold / counters and reads A.
-Nothing here imports tools/curvedb.
+MODES (curve.json {"lightning": {"icbm_shape": ...}}, owner answer 7: SHADOW FIRST):
+  off     the stage does nothing; ICBM exactly as before.
+  shadow  (default) every decision is computed and logged (shp* fields: what it WOULD do) and ICBM's real pipeline is
+          handed NO pricing function at all, so its targets and taps are those of "off" by construction.
+  live    ICBM's candidates are priced by the stage; the curve DB still overrides afterwards where it has a row.
+Lightning only (PnwVehicle.icbm_shape); every other car reads "off".
+
+Everything above ShapeStage is PURE. ShapeStage holds the latch / waySel hold / counters, reads mapd's A and builds
+the telemetry. Nothing here imports tools/curvedb.
 """
 from __future__ import annotations
 
 import math
+
+from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_live as cl
 
 MPH = 0.44704
 
@@ -232,3 +242,165 @@ class ShapePricer:
   @property
   def any_priced(self) -> bool:
     return any(d[0] is not None for d in self._cache.values())
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the stateful stage (curveshape2pnw 2/3)
+# ---------------------------------------------------------------------------------------------------------------------
+A_POLL_S = 5.0            # mapd's A is re-read this often (a Params file read, off the 4 Hz hot path)
+A_MAX_AGE_S = 30.0        # a reading older than this is no reading
+DECISION_FRESH_S = 1.0    # a record shows the latest decision only if ICBM made one this recently
+ERR_LOG_S = 30.0          # Rule 2: throttle for the failure log (the stage runs at ~4 Hz)
+
+# Every key tele() emits, pinned by the tests (a key added here and not emitted, or vice versa, is a silently-null
+# column -- the VTSCStatus trap).
+TELE_KEYS = ("shpOn", "shpWhy", "shpDir", "shpSrc", "shpKP", "shpKM", "shpK", "shpV", "shpLeg", "shpD", "shpBase",
+             "shpT", "shpA", "shpStable", "shpWayHold", "shpN", "shpNA", "shpNL", "shpNR", "shpErr")
+
+
+def _r(x, nd):
+  return None if x is None else round(float(x), nd)
+
+
+class ShapeStage:
+  """One per controller. tick() is called once per ICBM decision (~4 Hz) with a `core(eff_fn)` callback that runs
+  ICBM's candidate + penalty core (icbm_far_map_candidate -> icbm_curve_target -> icbm_penalise) and returns
+  (target, src, (raw, dist) of the candidate to describe, or None). The stage runs it WITH its pricer (shpT) and,
+  when anything was priced, WITHOUT (shpBase), so shpDir is the stage's effect on that core alone -- before the start
+  gates, the passed-point gate, the curve DB, the posted-limit floor and lead pacing, which are unchanged by it.
+  Returns the pricer for the REAL pipeline in live mode, else None (shadow and off hand ICBM nothing)."""
+
+  def __init__(self, mode, why, a_tgt, a_tgt_hi, read_params=None):
+    self.mode = mode if mode in MODES else "off"
+    self.why_cfg = why
+    self.a_tgt, self.a_tgt_hi = a_tgt, a_tgt_hi
+    self._read_params = read_params
+    self.latch = ShapeLatch()
+    self._a = (None, None, "not read yet")
+    self._a_t = -1e9                  # monotonic time of the last A read attempt
+    self._a_ok_t = -1e9               # ... and of the last GOOD read
+    self._a_logged = None
+    self._way_cur_t = -1e9
+    self.n = self.n_add = self.n_lower = self.n_raise = 0
+    self.n_err = 0
+    self._err_t = -1e9
+    self._last: dict = {}
+    self._last_t = -1e9
+
+  @property
+  def enabled(self) -> bool:
+    return self.mode in ("shadow", "live")
+
+  # -- mapd's A ---------------------------------------------------------------------------------------------------
+  def poll_a(self, now) -> None:
+    if now - self._a_t < A_POLL_S:
+      return
+    self._a_t = now
+    try:
+      raw_s, raw_p = (self._read_params or cl.READ_PARAMS[0])()
+      a, src, why = cl.parse_a(raw_s, raw_p)
+    except Exception as e:           # a failed read is an unreadable A (logged below), never a default
+      a, src, why = None, None, f"read failed ({type(e).__name__})"
+    if a is not None:
+      self._a_ok_t = now
+      self._a = (a, src, why)
+    elif now - self._a_ok_t > A_MAX_AGE_S:
+      self._a = (None, src, why)
+    key = (a, src, why)
+    if key != self._a_logged:        # change-only, both directions
+      if a is None:
+        cloudlog.error(f"icbm_shape: mapd's lateral target A is UNREADABLE ({why}) -- the measured-shape stage " +
+                       "prices nothing until it reads")
+      else:
+        cloudlog.event("icbm_shape_a", a_lat=a, source=src)
+      self._a_logged = key
+
+  def a_mapd(self, now):
+    a = self._a[0]
+    return a if a is not None and now - self._a_ok_t <= A_MAX_AGE_S else None
+
+  # -- waySel flicker hold (the curve DB's WAYSEL_HOLD_S, tracked independently so neither disturbs the other) -----
+  def way_held(self, way_sel, now):
+    if way_sel == "current":
+      self._way_cur_t = now
+      return "current", False
+    hold = now - self._way_cur_t <= cl.WAYSEL_HOLD_S
+    return ("current" if hold else way_sel), hold
+
+  # -- one decision ----------------------------------------------------------------------------------------------
+  def _record(self, now, **kw) -> None:
+    rec = dict.fromkeys(TELE_KEYS)
+    rec.update(shpOn=self.mode, **kw)
+    self._last, self._last_t = rec, now
+
+  def tick(self, now, *, gps_state, way_sel, hwy, reading, reading_t, v_ego, posted, v_set, scale_fn, map_scale,
+           core):
+    if not self.enabled:
+      self._record(now, shpWhy=self.why_cfg)
+      return None
+    self.poll_a(now)
+    way, hold = self.way_held(way_sel, now)
+    stable = self.latch.update(reading_t, *reading, v_ego)
+    a = self.a_mapd(now)
+    base_rec = {"shpKP": _r(reading[0], 6), "shpA": a, "shpStable": stable, "shpWayHold": hold}
+    why = tick_gate(way, hwy, gps_state, cl.RAMP_CLASSES, cl.UNKNOWN_CLASSES) or (None if a is not None else "noA")
+    if why is not None:
+      self._record(now, shpWhy=why, shpDir="none", **base_rec)
+      return None
+    pricer = ShapePricer(scale_fn, map_scale, a, reading, stable, posted, v_set, self.a_tgt, self.a_tgt_hi)
+    t_shape, src, cand = core(pricer)
+    t_base = core(None)[0] if pricer.any_priced else t_shape
+    if t_base is None and t_shape is None:
+      dr = "none"
+    elif t_base is None:
+      dr = "add"
+    elif t_shape is None or t_shape > t_base + ACT_EPS_MS:
+      dr = "raise"
+    elif t_shape < t_base - ACT_EPS_MS:
+      dr = "lower"
+    else:
+      dr = "none"
+    self.n += 1
+    if dr == "add":
+      self.n_add += 1
+    elif dr == "lower":
+      self.n_lower += 1
+    elif dr == "raise":
+      self.n_raise += 1
+    rec = dict(base_rec, shpWhy="noCand", shpDir=dr, shpBase=_r(t_base, 2), shpT=_r(t_shape, 2))
+    if cand is not None:
+      v, cwhy, _cdir, k, km, leg = pricer.decide(*cand)
+      rec.update(shpWhy=cwhy, shpSrc=src if src in ("map", "far") else "map", shpKM=_r(km, 6), shpK=_r(k, 6),
+                 shpV=_r(v, 2), shpLeg=_r(leg, 2), shpD=_r(cand[1], 0))
+    if pricer.err is not None:
+      self.fail(now, pricer.err, rec)
+      return None                      # a defective pricer is not handed to ICBM, even in live mode
+    self._record(now, **rec)
+    return pricer if self.mode == "live" else None
+
+  def fail(self, now, err, rec=None) -> None:
+    """Rule 2: the stage failed this tick. ICBM runs WITHOUT it (the caller passes no pricer); the record says
+    shpOn=err with the exception type, and the log says so (throttled, with a count)."""
+    self.n_err += 1
+    name = err if isinstance(err, str) else type(err).__name__
+    r = dict(rec or {})
+    r.update(shpErr=name)
+    self._record(now, **r)
+    self._last["shpOn"] = "err"
+    if now - self._err_t > ERR_LOG_S:
+      self._err_t = now
+      msg = (f"icbm_shape: measured-shape stage FAILED ({name}) -- ICBM runs WITHOUT it this tick " +
+             f"({self.n_err} failure(s) so far)")
+      if isinstance(err, BaseException):
+        cloudlog.exception(msg)
+      else:
+        cloudlog.error(msg)
+
+  def tele(self, now) -> dict:
+    out = dict.fromkeys(TELE_KEYS)
+    if self._last and now - self._last_t <= DECISION_FRESH_S:
+      out.update(self._last)
+    else:
+      out.update(shpOn=self.mode, shpWhy=self.why_cfg if not self.enabled else "idle")
+    out.update(shpN=self.n, shpNA=self.n_add, shpNL=self.n_lower, shpNR=self.n_raise)
+    return out

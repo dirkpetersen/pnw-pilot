@@ -15,6 +15,7 @@ import stat
 
 from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
 from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
+from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import MODES as SHAPE_MODES   # curveshape2pnw
 
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
@@ -156,7 +157,28 @@ _CURVE_DEFAULTS = {
   # 0 = mapd's own map_curve_target_lat_a, read live from MapdSettings (2 on the truck). A number in [1.0, 3.5] =
   # use that. Read at selfdrived start; logged as curvedb_v2_cfg and in every record (cdb2A / cdb2ASrc).
   "curvedb_v2_lat_a": 2.5,
+  # curveshape2pnw (owner answer 4, 2026-09-24): the lateral target (m/s^2) a map candidate is priced at when the
+  # polyline and mapd's own curvature agree (ces_pnw/icbm_shape.py): v = sqrt(this / mean(k_poly, k_mapd)).
+  "icbm_shape_lat_a": 2.5,
+  # ... and for a shape price at or above 70 mph. The PSCM reached limit level 2 at 2.46 (OR-34 11:19, 73 mph) and
+  # 2.92 (11:18, 77 mph); the owner kept 2.5 there too, as its own knob so it can be lowered alone.
+  "icbm_shape_lat_a_70": 2.5,
 }
+# curveshape2pnw: the measured-shape stage's MODE is a string, so it is NOT in _CURVE_DEFAULTS (whose loop float()s every
+# key -- a string there would throw the WHOLE curve.json back to defaults). "shadow" = compute and log, change nothing
+# (owner answer 7: shadow first). "off" or 0 = the stage does nothing. "live" = it prices ICBM's map candidates.
+SHAPE_MODE_DEFAULT = "shadow"
+
+
+def _parse_shape_mode(raw) -> tuple[str, str]:
+  """(mode, why) for curve.json's lightning.icbm_shape. An unrecognised value is NOT silently read as anything the
+  owner did not write: it falls back to the inert default (shadow) and `why` says so -- CESController logs it as an
+  error at start."""
+  if isinstance(raw, str) and raw.strip().lower() in SHAPE_MODES:
+    return raw.strip().lower(), "curve.json"
+  if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw == 0:
+    return "off", "curve.json"
+  return SHAPE_MODE_DEFAULT, f"INVALID curve.json icbm_shape {raw!r:.24} -> {SHAPE_MODE_DEFAULT}"
 # sane clamp bounds per key (penalties [0,15] mph so a penalty can NEVER invert to a speed-up; speeds
 # [10,80] mph). A bad config can only ever land inside these -> control code stays safe.
 _CURVE_BOUNDS = {
@@ -197,6 +219,10 @@ _CURVE_BOUNDS = {
   "launch_v_mph": (3.0, 25.0),
   "curvedb_v2_live": (0.0, 1.0),   # curvedblive2pnw: a switch; >= 0.5 is ON
   "curvedb_v2_lat_a": (0.0, 3.5),  # curvedblive2pnw: 0 = mapd's A; else clamped to [1.0, 3.5] by the property
+  # curveshape2pnw: never below 1.5 (a price far slower than any measured need) nor above openpilot's own 3.2 lateral
+  # ceiling (the restorehold2pnw bound).
+  "icbm_shape_lat_a": (1.5, 3.2),
+  "icbm_shape_lat_a_70": (1.5, 3.2),
 }
 
 
@@ -274,8 +300,11 @@ def _load_curve_config() -> dict:
 
   rule2fixes2pnw (Rule 2): every fallback used to be silent. Fallbacks unchanged; now a MISSING file stays
   silent (it is the documented default), while an unusable/unreadable/malformed file is a cloudlog.error
-  naming the path and the error, and a clamped or NaN value is one cloudlog.warning per load naming the keys."""
-  cfg = dict(_CURVE_DEFAULTS)
+  naming the path and the error, and a clamped or NaN value is one cloudlog.warning per load naming the keys.
+
+  curveshape2pnw: the string knob icbm_shape is parsed OUTSIDE the numeric loop (which float()s every key it
+  visits -- a string there would throw the whole file back to defaults) and carries its own icbm_shape_why."""
+  cfg = dict(_CURVE_DEFAULTS, icbm_shape=SHAPE_MODE_DEFAULT, icbm_shape_why="default")
   path = CURVE_CONFIG_PATH
   try:
     st = os.stat(path)
@@ -292,21 +321,25 @@ def _load_curve_config() -> dict:
                      ") -- using the default curve ramp")
     nan_keys = []
     if isinstance(light, dict):
-      for k in cfg:
+      for k in _CURVE_DEFAULTS:           # the numeric keys only (curveshape2pnw: icbm_shape is a string)
         if k in light:
           v = float(light[k])
           if v == v:                      # NaN guard (NaN != NaN)
             cfg[k] = v
           else:
             nan_keys.append(k)
+      if "icbm_shape" in light:
+        cfg["icbm_shape"], cfg["icbm_shape_why"] = _parse_shape_mode(light["icbm_shape"])
     if nan_keys:
       cloudlog.warning(f"pnw_vehicle: {path}: NaN ignored for {nan_keys} -- those keys keep their defaults")
   except FileNotFoundError:
-    return dict(_CURVE_DEFAULTS)          # no file = the documented default ramp; not an error
+    return dict(_CURVE_DEFAULTS, icbm_shape=SHAPE_MODE_DEFAULT, icbm_shape_why="default")   # no curve.json: normal
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} unreadable/malformed ({type(e).__name__}: {e}) -- the WHOLE file is " +
                    "ignored, using the default curve ramp")
-    return dict(_CURVE_DEFAULTS)          # any failure -> defaults, never raise
+    # any failure -> defaults, never raise. curveshape2pnw: the stage mode says it came from a failed read.
+    return dict(_CURVE_DEFAULTS, icbm_shape=SHAPE_MODE_DEFAULT,
+                icbm_shape_why=f"default (curve.json unreadable: {type(e).__name__})")
   clamped = []
   for k, (lo, hi) in _CURVE_BOUNDS.items():
     v = _clamp(cfg[k], lo, hi)
@@ -731,6 +764,26 @@ class PnwVehicle:
     if not self.lightning_curve_slow or v <= 0.0:
       return None
     return max(v, 1.0)
+
+  @property
+  def icbm_shape(self) -> str:
+    """curveshape2pnw: the measured-shape stage's mode, "off" / "shadow" / "live". Lightning only (ICBM is its
+    stock-ACC path); every other car reads "off"."""
+    return self._curve_cfg.get("icbm_shape", SHAPE_MODE_DEFAULT) if self.lightning_curve_slow else "off"
+
+  @property
+  def icbm_shape_why(self) -> str:
+    """curveshape2pnw: where icbm_shape came from ("default", "curve.json", "noCapability", or why a value was
+    refused)."""
+    return self._curve_cfg.get("icbm_shape_why", "default") if self.lightning_curve_slow else "noCapability"
+
+  @property
+  def icbm_shape_lat_a(self) -> float:
+    return self._curve_cfg["icbm_shape_lat_a"]
+
+  @property
+  def icbm_shape_lat_a_70(self) -> float:
+    return self._curve_cfg["icbm_shape_lat_a_70"]
 
   @property
   def icbm_lead_lat_accel(self) -> float:

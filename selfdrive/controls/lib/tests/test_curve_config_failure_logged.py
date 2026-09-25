@@ -42,9 +42,16 @@ def _cfg(monkeypatch, tmp_path, text=None, name="curve.json"):
   return str(p)
 
 
+def _is_defaults(cfg):
+  """curveshape2pnw: the loader also returns the string knob icbm_shape (+ its why), outside _CURVE_DEFAULTS. A
+  fallback is the numeric defaults AND the stage's default mode."""
+  numeric = {k: v for k, v in cfg.items() if k not in ("icbm_shape", "icbm_shape_why")}
+  return numeric == pv._CURVE_DEFAULTS and cfg["icbm_shape"] == pv.SHAPE_MODE_DEFAULT
+
+
 def test_missing_file_is_silent_and_defaults(monkeypatch, tmp_path, log):
   _cfg(monkeypatch, tmp_path)
-  assert pv._load_curve_config() == pv._CURVE_DEFAULTS
+  assert _is_defaults(pv._load_curve_config())
   assert log.lines == []
 
 
@@ -62,7 +69,7 @@ def test_valid_file_in_bounds_is_silent(monkeypatch, tmp_path, log):
 ])
 def test_parse_error_is_logged_with_path_and_error_and_defaults(monkeypatch, tmp_path, log, text, err):
   path = _cfg(monkeypatch, tmp_path, text)
-  assert pv._load_curve_config() == pv._CURVE_DEFAULTS                # fallback unchanged: whole file ignored
+  assert _is_defaults(pv._load_curve_config())                # fallback unchanged: whole file ignored
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0] and err in errs[0]
 
@@ -73,7 +80,7 @@ def test_unreadable_file_is_logged(monkeypatch, tmp_path, log):
   path = _cfg(monkeypatch, tmp_path, '{"lightning": {"penalty_max_mph": 6.0}}')
   os.chmod(path, 0)
   try:
-    assert pv._load_curve_config() == pv._CURVE_DEFAULTS
+    assert _is_defaults(pv._load_curve_config())
   finally:
     os.chmod(path, 0o644)
   errs = log.at("error")
@@ -83,14 +90,14 @@ def test_unreadable_file_is_logged(monkeypatch, tmp_path, log):
 def test_not_a_regular_file_is_logged(monkeypatch, tmp_path, log):
   (tmp_path / "curve.json").mkdir()
   path = _cfg(monkeypatch, tmp_path)
-  assert pv._load_curve_config() == pv._CURVE_DEFAULTS
+  assert _is_defaults(pv._load_curve_config())
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0]
 
 
 def test_oversize_file_is_logged(monkeypatch, tmp_path, log):
   path = _cfg(monkeypatch, tmp_path, '{"lightning": {}}' + " " * (pv._CURVE_CONFIG_MAX_BYTES + 1))
-  assert pv._load_curve_config() == pv._CURVE_DEFAULTS
+  assert _is_defaults(pv._load_curve_config())
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0]
 
@@ -98,7 +105,7 @@ def test_oversize_file_is_logged(monkeypatch, tmp_path, log):
 @pytest.mark.parametrize("text", ['[1, 2]', '{"lightning": 5}'])
 def test_wrong_shape_is_logged(monkeypatch, tmp_path, log, text):
   path = _cfg(monkeypatch, tmp_path, text)
-  assert pv._load_curve_config() == pv._CURVE_DEFAULTS
+  assert _is_defaults(pv._load_curve_config())
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0]
 
@@ -122,3 +129,13 @@ def test_nan_is_named_and_keeps_the_default(monkeypatch, tmp_path, log):
   assert cfg["penalty_max_mph"] == pv._CURVE_DEFAULTS["penalty_max_mph"]
   warns = log.at("warning")
   assert len(warns) == 1 and "penalty_max_mph" in warns[0] and "NaN" in warns[0]
+
+
+def test_icbm_shape_live_and_a_numeric_knob_are_both_honoured_silently(monkeypatch, tmp_path, log):
+  """curveshape2pnw x rule2fixes2pnw: the string switch is parsed outside the numeric float() loop, so a valid
+  "live" neither throws the whole file back to defaults nor logs an error, and the numeric knob beside it is kept."""
+  _cfg(monkeypatch, tmp_path, '{"lightning": {"icbm_shape": "live", "penalty_max_mph": 6.0}}')
+  cfg = pv._load_curve_config()
+  assert cfg["icbm_shape"] == "live" and cfg["icbm_shape_why"] == "curve.json"
+  assert cfg["penalty_max_mph"] == 6.0
+  assert log.lines == []

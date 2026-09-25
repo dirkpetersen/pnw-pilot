@@ -44,6 +44,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import (ParkTickGat
 # tests/test_curvedb_read_boundary.py rather than by this comment.
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_shadow import CurveDBShadow, curvedb_tele
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import CurveDbLive, TELE_KEYS as ROADDB_TELE_KEYS
+from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import ShapeStage, TELE_KEYS as SHAPE_TELE_KEYS
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -1095,7 +1096,7 @@ def _icbm_binding_apex(v_ego, ref, apex, dist, a_decel=ICBM_A_DECEL):
 
 
 def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_scale=1.0,
-                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M):
+                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M, eff_fn=None):
   """descentcurve2pnw: FULL-horizon map candidate for ICBM. Scans every mapd path point out to
   `horizon_m` (mapd's 500 m publish cap — vs the old 10 s time window, ~400 m at 90 mph) and
   returns (apex_eff m/s, dist m, apex_RAW m/s) of the MOST-BINDING candidate — the one whose decel-limited brake
@@ -1112,7 +1113,10 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   bounds the Lightning curve penalty needs the candidate's own rating, and this is the only place
   that number is known for certain — re-deriving it later by matching on `best_d` would re-open the
   neighbouring-node trap map_candidate_point's docstring warns about, and inverting the scale would
-  silently rot the day icbm_map_eff_scale changes again (it already has, 2026-08-11)."""
+  silently rot the day icbm_map_eff_scale changes again (it already has, 2026-08-11).
+
+  curveshape2pnw: eff_fn(tv, dist), when given, prices each point instead of scale_fn(tv) * tv * map_scale (the
+  measured-shape stage's ShapePricer, live mode only). None (the default) is the exact old expression."""
   if not points or cur_lat is None or cur_lon is None or ref <= 0.0:
     return 0.0, float('inf'), 0.0
   best_cap = float('inf')
@@ -1127,7 +1131,7 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
       continue
     if not (0.0 < d <= horizon_m):
       continue
-    eff = scale_fn(tv) * tv * map_scale
+    eff = scale_fn(tv) * tv * map_scale if eff_fn is None else eff_fn(tv, d)
     if eff >= ref - ICBM_MIN_DROP_MS:
       continue                                  # reduce-only: not meaningfully below the ceiling
     a = icbm_approach_decel(v_ego, eff, firm_decel)
@@ -1200,7 +1204,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
                       far_v=0.0, far_dist=float('inf'),
-                      track=False):
+                      track=False, eff_fn=None):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
   where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
   VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
@@ -1221,7 +1225,10 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
 
   ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
   capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
-  what to restore to. Reduce-only: target is never above the ceiling."""
+  what to restore to. Reduce-only: target is never above the ceiling.
+
+  curveshape2pnw: eff_fn(map_v, map_dist), when given, prices the MAP candidate instead of scale_fn * map_v *
+  map_scale (the far candidate arrives already priced). None (the default) is the exact old expression."""
   if v_set <= 0:
     return None, None, None                # no valid set speed -> hands off
   ref = ceiling if ceiling is not None else v_set
@@ -1233,7 +1240,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   # The firm decel applies only to the FAR candidate below, where pre-diff there was NO braking at
   # all, so it can only ever ADD slowing.
   if map_v and map_v > 0 and map_dist != float('inf'):
-    eff = scale_fn(map_v) * map_v * map_scale
+    eff = scale_fn(map_v) * map_v * map_scale if eff_fn is None else eff_fn(map_v, map_dist)
     a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
     if a is None and track:
       # icbmtrack2pnw: continuous set-tracking — a binding-RATED map curve within the tracking
@@ -1933,16 +1940,17 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     near = (sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf")))
     far = (far_v, far_dist, far_raw)
     veh = ctl._veh
+    eff_fn = getattr(ctl, "_icbm_eff_fn", None)     # curveshape2pnw: the live pricer, None otherwise
     if src == "map":
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
       if a_near == near:
         _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist, far_raw
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-                                     veh.icbm_map_scale, veh.icbm_firm_decel)
+                                     veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
     else:
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-                                     veh.icbm_map_scale, veh.icbm_firm_decel)
+                                     veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
       if a_far == far:
         _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist, far_raw
@@ -1950,7 +1958,8 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     new_sig = {**sig, "map_target_v": a_near[0], "map_target_dist": a_near[1]}
     new_target, _, new_src = icbm_curve_target(
       sig["v_ego"], sig["v_set"], a_near[0], a_near[1], ceiling, icbm_map_eff_scale, vis[0], vis[1],
-      map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel, far_v=a_far[0], far_dist=a_far[1], track=True)
+      map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel, far_v=a_far[0], far_dist=a_far[1], track=True,
+      eff_fn=eff_fn)
   except Exception:
     try:
       if now - (getattr(ctl, "_icbm_passed_err", None) or -1e9) > ICBM_ERR_LOG_S:
@@ -2208,7 +2217,7 @@ CURVELEAD_TELE_KEYS = ("icbmOwnT", "icbmLeadT", "icbmLeadWhy", "icbmLeadS", "icb
 _ICBM_DIR_ERR = {"t": -1e9, "n": 0}
 
 
-def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_raw):
+def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_raw, pricer=None):
   """The Lightning curve penalty, the map-rating floor and rain, applied to ONE candidate's apex `target` from
   source `src`. Returns (target, map_floor, floor_hit, is_left, dir_src). Lifted verbatim out of _icbm_step
   (curvedblive2pnw) so the curve DB can price every candidate the way ICBM prices the one it picked; _icbm_step
@@ -2218,7 +2227,11 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   curvefix2pnw: `is_left` is the direction the left factor was applied for, and `dir_src` where it came from
   ("vis" / "map" / "far"; "unknown" = no direction could be called, so no left factor; "err" = the lookup raised).
   Both reach ces_events as icbmLeft / icbmLeftSrc: the direction was never logged before, which is how the inverted
-  vision sign below survived from 2026-07-11 to 2026-09-24."""
+  vision sign below survived from 2026-07-11 to 2026-09-24.
+
+  curveshape2pnw: `pricer` (the measured-shape ShapePricer) -- where it priced THIS map/far candidate, its price is
+  the floor (the base hump is given back, as Part B does for vision; the left/descent extras still come off below it,
+  owner answer 5). None, or a candidate it did not price, is the map-rating floor exactly as before."""
   turn, dir_src = 0, "unknown"
   try:
     if src == "vis":
@@ -2283,6 +2296,10 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   else:
     raw_rating = {"map": sig.get("map_target_v", 0.0), "far": far_raw}.get(src, 0.0)
     map_flr = veh.icbm_map_floor_ms(raw_rating)
+    if pricer is not None and src in ("map", "far"):
+      shp = pricer.priced(raw_rating, sig.get("map_target_dist", float("inf")) if src == "map" else far_dist)
+      if shp is not None:
+        map_flr = shp
   pen_base = veh.curve_speed_penalty_ms(target)
   pen_full = veh.curve_speed_penalty_ms(target, pitch_rad=sig.get("pitch"),
                                         is_left=is_left)
@@ -2295,6 +2312,61 @@ def icbm_penalise(veh, map_targets, target, src, sig, plat, plon, far_dist, far_
   # rain2pnw: driver-selected wet-weather curve margin (same reduction the Tesla/VTSC gets).
   target = max(target - veh.rain_penalty_ms(), 0.0)
   return target, map_flr, flr_hit, is_left, dir_src
+
+
+def _icbm_shape_step(ctl, now, sig, plat, plon, gps_state, ref, ep_ceiling, vis_v, vis_dist):
+  """curveshape2pnw: run the measured-shape stage for this ICBM decision (icbm_shape.ShapeStage.tick). Returns the
+  pricer ICBM's candidate functions use -- ONLY in live mode; shadow and off return None, so the real pipeline is
+  byte-for-byte the one without this stage. `core` is ICBM's own candidate + penalty core on the SAME inputs the
+  real pipeline gets. Rule 2: any failure is logged (shpOn=err, throttled cloudlog.exception) and ICBM runs without
+  the stage. A module function taking the controller, like _icbm_passed_gate: the ICBM tests bind _icbm_step onto
+  bare stubs, which have no stage -> None."""
+  st = getattr(ctl, "_icbm_shape", None)
+  if st is None:
+    return None
+  try:
+    veh, pts = ctl._veh, ctl._map_targets
+    v_ego, v_set = sig["v_ego"], sig["v_set"]
+    map_v, map_d = sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf"))
+
+    def core(eff):
+      far_v, far_d, far_raw = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale, veh.icbm_map_scale,
+                                                     veh.icbm_firm_decel, eff_fn=eff)
+      t, _, src = icbm_curve_target(v_ego, v_set, map_v, map_d, ep_ceiling, icbm_map_eff_scale, vis_v, vis_dist,
+                                    map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
+                                    far_v=far_v, far_dist=far_d, track=True, eff_fn=eff)
+      if t is not None:
+        t = icbm_penalise(veh, pts, t, src, sig, plat, plon, far_d, far_raw, pricer=eff)[0]
+      # the candidate the record describes: the one that bound, else the near map candidate, else the far one
+      if src == "far":
+        cand = (far_raw, far_d)
+      elif map_v and map_v > 0 and math.isfinite(map_d):
+        cand = (map_v, map_d)
+      elif far_raw and far_raw > 0 and math.isfinite(far_d):
+        cand = (far_raw, far_d)
+      else:
+        cand = None
+      return t, src, cand
+
+    return st.tick(now, gps_state=gps_state, way_sel=getattr(ctl, "_way_sel", None), hwy=getattr(ctl, "_hwy_class", None),
+                   reading=(ctl._icbm_k, getattr(ctl, "_icbm_k_dist", 0.0), ctl._icbm_k_n, ctl._icbm_k_ahead),
+                   reading_t=getattr(ctl, "_icbm_k_t", None), v_ego=v_ego, posted=sig.get("spd_lim", 0.0), v_set=ref,
+                   scale_fn=icbm_map_eff_scale, map_scale=veh.icbm_map_scale, core=core)
+  except Exception as e:
+    try:
+      st.fail(now, e)
+    except Exception:
+      cloudlog.exception("icbm_shape: the failure path itself FAILED -- ICBM runs without the stage")
+    return None
+
+
+def _shape_tele(ctl) -> dict:
+  """curveshape2pnw: the stage's ces_events fragment. A controller built without it (a permissive test stub) gets every
+  key, nulled, with shpOn "absent" -- never a missing column that reads as "did not trigger"."""
+  st = getattr(ctl, "_icbm_shape", None)
+  if not isinstance(st, ShapeStage):
+    return {**dict.fromkeys(SHAPE_TELE_KEYS), "shpOn": "absent"}
+  return st.tele(time.monotonic())
 
 
 def _roaddb_tele(ctl) -> dict:
@@ -4252,6 +4324,17 @@ class CESController:
       cloudlog.event("ces_icbm_map_floor_cfg", frac=veh._curve_cfg["icbm_map_floor_frac"],
                      vis_frac=veh._curve_cfg["icbm_vis_floor_frac"],     # curvefix2pnw Part B
                      map_scale=veh.icbm_map_scale, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
+    # curveshape2pnw: the measured-shape stage (icbm_shape.py). Lightning only via the capability; "shadow" by default
+    # (owner answer 7) -- it computes and logs, and hands ICBM nothing until curve.json says "live".
+    self._icbm_shape = ShapeStage(veh.icbm_shape, veh.icbm_shape_why, veh.icbm_shape_lat_a, veh.icbm_shape_lat_a_70)
+    self._icbm_eff_fn = None
+    self._icbm_k_t = None
+    if veh.lightning_curve_slow:
+      shape_cfg = dict(mode=veh.icbm_shape, why=veh.icbm_shape_why, lat_a=veh.icbm_shape_lat_a,
+                       lat_a_70=veh.icbm_shape_lat_a_70, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
+      if veh.icbm_shape_why.startswith(("INVALID", "default (curve.json unreadable")):
+        cloudlog.error(f"icbm_shape: curve.json icbm_shape NOT honoured -- {veh.icbm_shape_why}")
+      cloudlog.event("icbm_shape_cfg", **shape_cfg)
     self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
     self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
     self._long_ok = veh.op_long
@@ -4437,6 +4520,7 @@ class CESController:
     self._icbm_k_v = 0.0
     self._icbm_k_n = 0
     self._icbm_k_ahead = True
+    self._icbm_k_t = None     # curveshape2pnw: the refresh stamp of the reading above (ShapeLatch); None = no reading
     if self.mem_params is None:
       self._map_targets = []
       return
@@ -4486,6 +4570,7 @@ class CESController:
       self._icbm_k_v = float(kv) if math.isfinite(kv) else 0.0
       self._icbm_k_n = int(kn)
       self._icbm_k_ahead = bool(kahead)
+      self._icbm_k_t = time.monotonic()
     # cargps2pnw: the CAR's own GPS fix (Ford only), published by the ford carstate from the GWM's
     # APIMGPS messages at 1 Hz. Logged ALONGSIDE the device's own fix above, never instead of it --
     # nothing here or downstream consumes it, this is a side-by-side comparison channel so a drive
@@ -5432,6 +5517,7 @@ class CESController:
         self._icbm_k_at_gap = 0.0
         _curvelead_clear(self)          # curvelead2pnw: no stale lead-pace / sanity telemetry; lead clock restarts
         self._icbm_ep.reset()           # icbmrestore2pnw: forced Chill / no data ends any episode
+        self._icbm_eff_fn = None        # curveshape2pnw: no pricer outlives its tick
         self._icbm_rhold_a = None       # restorehold2pnw: no stale prediction beside icbmT=None ...
         _icbm_rhold_note(self, now, None)   # ... and a hold cut short here is logged as "ended"
         _icbm_rhold_blind(self, None)
@@ -5444,6 +5530,7 @@ class CESController:
       # the null this feature replaced. Cleared here rather than beside `_icbm_gate` below because
       # the far-map scan already ran by that point; this must precede every map lookup in the tick.
       self._icbm_cand_d, self._icbm_cand_pt = None, (None, None)
+      self._icbm_eff_fn = None          # curveshape2pnw: set below for THIS tick only (live mode)
       # curvelead2pnw: advance the lead-continuity clock on EVERY active tick, not only while a curve binds
       # -- "tracked through the approach" has to be measured before the curve asks for it.
       trk = getattr(self, "_icbm_lead_trk", None)
@@ -5481,11 +5568,15 @@ class CESController:
       # judges its candidates against the set it interrupted, exactly as when the ceiling was re-latched there.
       ep_ceiling = self._icbm_ep.bind_ceiling if self._icbm_ep.phase == "cap" else None
       ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
+      # curveshape2pnw: the measured-shape stage. Always computes + logs its decision (shp*); hands ICBM a pricer
+      # ONLY in live mode. In shadow/off `eff_fn` is None and every call below is the pre-curveshape expression.
+      eff_fn = self._icbm_eff_fn = _icbm_shape_step(self, now, sig, plat, plon, gps_state, ref, ep_ceiling,
+                                                    vis_v, vis_dist)
       # icbmtrack2pnw: ICBM-only capped scale (19:58:37Z root cause — the tiered sweeper end
       # inflated a raw 64.9 mph curve to an effective 107 mph, so it never bound vs set 90).
       far_v, far_dist, far_raw = icbm_far_map_candidate(
         self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-        self._veh.icbm_map_scale, self._veh.icbm_firm_decel)
+        self._veh.icbm_map_scale, self._veh.icbm_firm_decel, eff_fn=eff_fn)
       # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
       # START a new episode — a running cap episode (phase 'cap', incl. its S-gap clear debounce)
       # continues with the full candidate set exactly as before ("an episode may continue").
@@ -5502,7 +5593,7 @@ class CESController:
         sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
         vis_v, vis_dist,
         map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-        far_v=far_v, far_dist=far_dist, track=True)
+        far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn)
       if target is not None and starting:
         if in_curve:
           # driver rule 2: NEVER begin a new dec episode while already loaded in the curve — hold
@@ -5521,7 +5612,7 @@ class CESController:
             sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
             0.0, float("inf"),
             map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-            far_v=far_v, far_dist=far_dist, track=True)
+            far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn)
       # behindgate2pnw: a map/far point the truck has already driven past may not START an episode (see
       # icbm_passed_points).
       # behindrun2pnw (owner 2026-09-14, "Behind-curve gate: yes"): nor may it lower a RUNNING cap episode's target or
@@ -5563,7 +5654,7 @@ class CESController:
       if target is not None:
         (target, self._icbm_map_flr, self._icbm_map_flr_hit,
          self._icbm_left, self._icbm_left_src) = icbm_penalise(
-          self._veh, self._map_targets, target, self._icbm_src, sig, plat, plon, far_dist, far_raw)
+          self._veh, self._map_targets, target, self._icbm_src, sig, plat, plon, far_dist, far_raw, pricer=eff_fn)
       # curvedblive2pnw: the learned road table replaces mapd's number for the curve (raise to the measured curve
       # within the +15 mph / posted + 10 caps, lower to exactly it) and adds sharp curves the map missed. Here, after the
       # penalties and before the posted-limit floor, so it compares against the target ICBM would have used.
@@ -5867,12 +5958,13 @@ class CESController:
       inf = float("inf")
       v_ego, v_set = sig["v_ego"], sig["v_set"]
       veh = self._veh
+      eff_fn = getattr(self, "_icbm_eff_fn", None)   # curveshape2pnw: the live pricer, None otherwise
 
       def one(map_v=0.0, map_dist=inf, v_vis=0.0, d_vis=inf, v_far=0.0, d_far=inf):
         # a single source through ICBM's own binding rule
         return icbm_curve_target(v_ego, v_set, map_v, map_dist, ep_ceiling, icbm_map_eff_scale, v_vis, d_vis,
                                  map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
-                                 far_v=v_far, far_dist=d_far, track=True)[0]
+                                 far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn)[0]
 
       def cands_fn():
         vis = (vis_v, vis_dist)
@@ -5883,7 +5975,7 @@ class CESController:
                "far": (one(v_far=far_v, d_far=far_dist), far_dist),
                "vis": (one(v_vis=vis[0], d_vis=vis[1]), vis[1])}
         cands = {s: None if a is None else
-                 (icbm_penalise(veh, self._map_targets, a, s, sig, plat, plon, far_dist, far_raw)[0], d)
+                 (icbm_penalise(veh, self._map_targets, a, s, sig, plat, plon, far_dist, far_raw, pricer=eff_fn)[0], d)
                  for s, (a, d) in pre.items()}
         pts = {"map": map_candidate_point(self._map_targets, plat, plon, md),
                "far": map_candidate_point(self._map_targets, plat, plon, far_dist)}
@@ -5902,12 +5994,12 @@ class CESController:
           sig2, fd, fr = {**sig, "map_target_v": tv, "map_target_dist": td}, far_dist, far_raw
         else:
           fv, td, fr = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale,
-                                              veh.icbm_map_scale, veh.icbm_firm_decel)
+                                              veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
           a = one(v_far=fv, d_far=td)
           sig2, fd = sig, td
         if a is None:
           return None
-        return ((icbm_penalise(veh, self._map_targets, a, s, sig2, plat, plon, fd, fr)[0], td),
+        return ((icbm_penalise(veh, self._map_targets, a, s, sig2, plat, plon, fd, fr, pricer=eff_fn)[0], td),
                 map_candidate_point(pts, plat, plon, td))
 
       src0 = self._icbm_src
@@ -6231,6 +6323,10 @@ class CESController:
       # curvedblive2pnw: the LIVE curve DB's latest ICBM decision (row, curvature, A, v_db, direction, why-not,
       # ICBM's target without the DB and the target applied) + liveness. Keys pinned: ROADDB_TELE_KEYS.
       **_roaddb_tele(self),
+      # curveshape2pnw: the measured-shape stage -- mode (shpOn off/shadow/live/err/absent), why, what it WOULD do to
+      # ICBM's core (shpBase -> shpT, shpDir), the two curvatures and their mean, the price vs today's, counters.
+      # Keys pinned: SHAPE_TELE_KEYS.
+      **_shape_tele(self),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
