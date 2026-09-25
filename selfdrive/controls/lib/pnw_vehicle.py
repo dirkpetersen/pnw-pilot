@@ -14,6 +14,7 @@ import os
 import stat
 
 from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
+from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
 
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
@@ -244,25 +245,51 @@ def _load_rain_config() -> dict:
 def _load_curve_config() -> dict:
   """Read /data/pnw/curve.json defensively (os.stat gate: regular file, <= 64 KiB), overlaying only
   known numeric keys onto the defaults, clamping each to sane bounds. NEVER raises (runs in control
-  code) — any missing/bad/malformed input -> the hardcoded default ramp."""
+  code) — any missing/bad/malformed input -> the hardcoded default ramp.
+
+  rule2fixes2pnw (Rule 2): every fallback used to be silent. Fallbacks unchanged; now a MISSING file stays
+  silent (it is the documented default), while an unusable/unreadable/malformed file is a cloudlog.error
+  naming the path and the error, and a clamped or NaN value is one cloudlog.warning per load naming the keys."""
   cfg = dict(_CURVE_DEFAULTS)
+  path = CURVE_CONFIG_PATH
   try:
-    st = os.stat(CURVE_CONFIG_PATH)
+    st = os.stat(path)
     if not stat.S_ISREG(st.st_mode) or st.st_size > _CURVE_CONFIG_MAX_BYTES:
+      cloudlog.error(f"pnw_vehicle: {path} IGNORED (not a regular file, or {st.st_size} B > " +
+                     f"{_CURVE_CONFIG_MAX_BYTES} B) -- using the default curve ramp")
       return cfg
-    with open(CURVE_CONFIG_PATH) as f:
+    with open(path) as f:
       data = json.load(f)
     light = data.get("lightning", {}) if isinstance(data, dict) else {}
+    if not isinstance(data, dict) or not isinstance(light, dict):
+      cloudlog.error(f"pnw_vehicle: {path} IGNORED (expected {{\"lightning\": {{...}}}}, got {type(data).__name__}" +
+                     (f" with lightning={type(light).__name__}" if isinstance(data, dict) else "") +
+                     ") -- using the default curve ramp")
+    nan_keys = []
     if isinstance(light, dict):
       for k in cfg:
         if k in light:
           v = float(light[k])
           if v == v:                      # NaN guard (NaN != NaN)
             cfg[k] = v
-  except Exception:
+          else:
+            nan_keys.append(k)
+    if nan_keys:
+      cloudlog.warning(f"pnw_vehicle: {path}: NaN ignored for {nan_keys} -- those keys keep their defaults")
+  except FileNotFoundError:
+    return dict(_CURVE_DEFAULTS)          # no file = the documented default ramp; not an error
+  except Exception as e:
+    cloudlog.error(f"pnw_vehicle: {path} unreadable/malformed ({type(e).__name__}: {e}) -- the WHOLE file is " +
+                   "ignored, using the default curve ramp")
     return dict(_CURVE_DEFAULTS)          # any failure -> defaults, never raise
+  clamped = []
   for k, (lo, hi) in _CURVE_BOUNDS.items():
-    cfg[k] = _clamp(cfg[k], lo, hi)
+    v = _clamp(cfg[k], lo, hi)
+    if v != cfg[k]:
+      clamped.append(f"{k}={cfg[k]}->{v}")
+    cfg[k] = v
+  if clamped:
+    cloudlog.warning(f"pnw_vehicle: {path}: out-of-bounds value(s) clamped: {', '.join(clamped)}")
   return cfg
 
 
