@@ -27,33 +27,43 @@ import argparse
 import glob
 import json
 import os
+import sys
 
 MPH_TO_MS = 0.44704
 MIN_SPEED_MS = 55 * MPH_TO_MS   # "at speed": >55 mph, same threshold as the drive report analysis
 CLUSTER_GAP_S = 3.0             # ticks within this gap belong to the same override cluster
 
 
-def _load_folder_records(folder: str) -> list[dict]:
+def _load_folder_records(folder: str, skipped: dict[str, int] | None = None) -> list[dict]:
   """All records from every ces_events*.jsonl in one drive folder, deduped by timestamp (the
   evening/final files overlap — same drive, re-pulled later) and time-sorted.
 
   cesretain2pnw: also picks up ROTATED generations. On-device rotation names them
   `ces_events.jsonl.1` .. `.N`, which the `*.jsonl` glob alone does not match — so a multi-day trip
   pulled off the device generation-by-generation was silently ignored here. Dedup by timestamp makes
-  the overlap between a copied live file and its own rotated copy harmless."""
+  the overlap between a copied live file and its own rotated copy harmless.
+
+  rule2fixes2pnw (Rule 2): unparseable lines were skipped without a count. They are still skipped, but
+  counted per file into `skipped` (path -> count, when given) and warned about on stderr."""
   by_t: dict[float, dict] = {}
   paths = set(glob.glob(os.path.join(folder, "ces_events*.jsonl")))
   paths |= set(glob.glob(os.path.join(folder, "ces_events*.jsonl.[0-9]*")))
   for path in sorted(paths):
+    bad = 0
     with open(path) as f:
       for line in f:
         try:
           r = json.loads(line)
         except json.JSONDecodeError:
+          bad += 1
           continue
         t = r.get("t")
         if isinstance(t, (int, float)):
           by_t[float(t)] = r
+    if bad:
+      print(f"WARNING: {path}: skipped {bad} unparseable line(s)", file=sys.stderr)
+    if skipped is not None:
+      skipped[path] = bad
   return [by_t[t] for t in sorted(by_t)]
 
 
@@ -123,11 +133,12 @@ def main() -> None:
 
   pattern = os.path.join(args.drives_root, args.date or "*", "lightning-*")
   washouts = []
+  skipped: dict[str, int] = {}
   for folder in sorted(glob.glob(pattern)):
     if not os.path.isdir(folder):
       continue
     drive = os.path.relpath(folder, args.drives_root)   # e.g. 2026-07-11/lightning-icbm-nofire
-    recs = _load_folder_records(folder)
+    recs = _load_folder_records(folder, skipped)
     for i, c in enumerate(_clusters(recs), 1):
       washouts.append(_emit(c, drive, i))
 
@@ -141,7 +152,11 @@ def main() -> None:
     json.dump(fixture, f, indent=1)
     f.write("\n")
   binding = sum(1 for w in washouts if w["binding"])
-  print(f"{len(washouts)} washout clusters ({binding} with a binding recorded cap) -> {args.out}")
+  n_bad = sum(skipped.values())
+  print(f"{len(washouts)} washout clusters ({binding} with a binding recorded cap) -> {args.out}; " +
+        f"scanned {len(skipped)} file(s), skipped {n_bad} unparseable line(s)")
+  if n_bad:
+    print(f"WARNING: {n_bad} unparseable line(s) skipped in total -- see the per-file warnings above", file=sys.stderr)
 
 
 if __name__ == "__main__":
