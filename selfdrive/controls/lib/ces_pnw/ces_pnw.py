@@ -4770,9 +4770,11 @@ class CESController:
     kPeakN drops to 0 in every record while this is broken, so the log and the data agree."""
     try:
       v_ego = getattr(car_state, 'vEgo', None)
-      # Achieved, from CAN. DEAD ON THE TESLA by construction (D1) -- tesla/carstate.py never sets
-      # ret.yawRate and the Raven party DBC has no yaw signal -- which is why kPoseP exists.
-      k_actl = _curvature_from_yaw(getattr(car_state, 'yawRate', None), v_ego)
+      # Achieved, from CAN. teslayaw2pnw: the Raven HW3 decodes it now (BrakeMessage 0x20a); D1 above
+      # describes the tree before that. A car with no yaw sensor (PnwVehicle.yaw_rate_source False) still
+      # reads the capnp default 0.0 there, which is no reading -> None, the same no-data rule as vEgo.
+      k_actl = (_curvature_from_yaw(getattr(car_state, 'yawRate', None), v_ego)
+                if self._veh.yaw_rate_source else None)
       # Achieved, from the localizer. Alive on BOTH cars (section 3.1).
       k_pose = _pose_curvature(sm['livePose'], v_ego)
       self._pose_k = k_pose

@@ -137,8 +137,16 @@ class Controls:
     # version would compute (the module's linear-bicycle default under-reads it above ~40 mph).
     # _coop_res is what the SteerLimitStatus publish below reads; NOTHING else reads it -- in
     # particular actuators.steeringAngleDeg is assigned from LaC.update() alone (see state_control).
+    veh = PnwVehicle(self.CP)
+    # teslayaw2pnw: whether CS.yawRate is a real sensor on this car. Where it is not, the carstate leaves the capnp
+    # default 0.0, and kActl/kErr/achLat/peakAchLat publish None instead of a confident "driving straight".
+    # Said once, loudly, so a car that silently lost its yaw source is visible in the log.
+    self._yaw_rate_source = veh.yaw_rate_source
+    if not self._yaw_rate_source:
+      cloudlog.warning(f"teslayaw2pnw: no CAN yaw-rate source for {self.CP.carFingerprint}; " +
+                       "kActl/kErr/achLat/peakAchLat telemetry will publish None")
     self._coop_shadow = CoopSteerShadow.for_vehicle(
-      PnwVehicle(self.CP), DT_CTRL,
+      veh, DT_CTRL,
       deg_for_curvature=lambda k, v: math.degrees(self.VM.get_steer_from_curvature(k, v, 0.0)))
     self._coop_res = None
     self._coop_err_logged = False
@@ -530,8 +538,9 @@ class Controls:
         # *because* it needs openpilot's internal convention; kActl here wants Ford's, so no negation).
         v_ego_kappa = max(CS.vEgo, MIN_SPEED)
         k_cmd = -self.desired_curvature
-        k_actl = float(CS.yawRate) / v_ego_kappa
-        k_err = k_cmd - k_actl
+        # teslayaw2pnw: no yaw sensor on this car -> no achieved curvature (None), never 0.0 = "straight".
+        k_actl = float(CS.yawRate) / v_ego_kappa if self._yaw_rate_source else None
+        k_err = k_cmd - k_actl if k_actl is not None else None
         # steertele2pnw: two additions for capability-analysis drives, both pure observation.
         #   1. latActive -- CC.latActive is already computed above (line ~144) and fed into
         #      LaC.update() this same tick (line 217); reusing it here (not re-deriving) so this
@@ -566,8 +575,8 @@ class Controls:
           "latMax": round(float(lat_accel_max), 4),
           "curvMax": round(float(lat_accel_max / v_ego_sq), 6),
           "kCmd": round(float(k_cmd), 6),
-          "kActl": round(float(k_actl), 6),
-          "kErr": round(float(k_err), 6),
+          "kActl": round(float(k_actl), 6) if k_actl is not None else None,
+          "kErr": round(float(k_err), 6) if k_err is not None else None,
         }
         # coopsteer-shadow2pnw: cp* fragment (coopsteer_pnw.telemetry_fields is the single source of
         # the key names; ces_pnw._read_map cherry-picks exactly those). All-None on a car without the
@@ -855,7 +864,9 @@ class Controls:
                 # episode, same accumulate/fold/latch pattern as peakAngErr above. Meaningful for
                 # offline direction-of-travel capability analysis when driverOverride is False (see
                 # _ach_lat_ms2 docstring / ces_pnw.py's steer/steerEvent records for the heading pairing).
-                "peakAchLat": round(self._flight_peak_achlat, 3),
+                # teslayaw2pnw: None, not 0.0, on a car with no yaw sensor (the 100 Hz accumulator above
+                # only ever saw the capnp-default 0.0 there).
+                "peakAchLat": round(self._flight_peak_achlat, 3) if self._yaw_rate_source else None,
                 # leadrate2pnw: peak commanded steering-RATE (deg/s, the ~5 Hz fold-window slope of
                 # lac_log's desired angle -- see the __init__ comment) and peak ACHIEVED steering-RATE
                 # (deg/s, act_rate_pk picked just above) over this episode -- same latch-at-onset /

@@ -507,6 +507,14 @@ class PnwVehicle:
     # publisher already self-gates on the DBC carrying the messages).
     self.car_gps: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # teslayaw2pnw: carState.yawRate is a real CAN yaw-rate sensor on this car (positive = left). Every Ford
+    # (opendbc ford/carstate.py, Yaw_Data_FD1 -- unconditional for the brand) and the Raven HW3 (tesla/carstate.py,
+    # BrakeMessage 0x20a, pnw-opendbc teslayaw2pnw). On any other car the carstate never assigns it, so it reads the
+    # capnp default 0.0 -- a confident "driving straight". Telemetry derived from it (controlsd kActl/kErr/achLat/
+    # peakAchLat, ces_pnw's CAN half of kPeak) must publish None there instead. Telemetry only: nothing that
+    # actuates reads this.
+    self.yaw_rate_source: bool = brand == "ford" or fp == "TESLA_MODEL_S_HW3"
+
     # gearparkcan2pnw: this car's carstate reports gearShifter == park ONLY from a gear frame that actually
     # arrived -- a never-received gear message decodes `unknown` -- and gear_source_bus names the CANParser
     # (card's CI.can_parsers key) that carries it. That lets selfdrive/car/gear_park.py confirm Park while
