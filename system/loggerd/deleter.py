@@ -29,13 +29,28 @@ LOSS_ALERT = "Offroad_UnuploadedDataDeleted"
 # deleterloss2pnw: user.upload read failures seen in the current sweep; logged ONCE per sweep
 # (a failed read still counts the file as uploaded -- never block freeing space -- but it is not silent)
 _upload_read_errors: list[str] = []
+# deleterrain2pnw: the same, for user.preserve reads (logged once per sweep, next to the upload-read line)
+_preserve_read_errors: list[str] = []
+
+# deleterrain2pnw: a whole sweep that raises is logged at most once per this many seconds (with a count)
+SWEEP_ERR_LOG_S = 60.0
+SWEEP_ERR_RETRY_S = 1.0
 
 
 def has_preserve_xattr(d: str) -> bool:
   # rule2fixes2pnw: UNCACHED, same reason as user.upload below (deleterloss2pnw). loggerd sets user.preserve from
   # ANOTHER process, so xattr_cache's per-process memo kept the first "not set" answer until a reboot and a segment
   # preserved after that first sweep could be deleted as an ordinary one.
-  return getxattr_uncached(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+  path = os.path.join(Paths.log_root(), d)
+  try:
+    return getxattr_uncached(path, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+  except OSError as e:
+    # deleterrain2pnw: a non-ENODATA error (EIO...) used to escape and END the deleter thread, which is not
+    # restarted on crash (restart_if_crash=False) -> the disk fills and recording stops. An unreadable flag counts
+    # as NOT preserved: the fail-safe direction for disk space is to never block freeing it, the same choice
+    # unuploaded_firehose makes for user.upload. Not silent: logged once per sweep, naming the segment.
+    _preserve_read_errors.append(f"{path}: {e}")
+    return False
 
 
 def getxattr_uncached(path: str, attr_name: str) -> bytes | None:
@@ -131,70 +146,97 @@ def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
 def deleter_thread(exit_event: threading.Event):
   params = Params()          # uploadprio2pnw: one handle, reused for every sweep
   loss_count = loss_bytes = 0  # deleterloss2pnw: un-uploaded segments/bytes destroyed since boot
+  sweep_err_t: float | None = None
+  sweep_err_n = 0
   while not exit_event.is_set():
-    out_of_bytes = get_available_bytes(default=MIN_BYTES + 1) < MIN_BYTES
-    out_of_percent = get_available_percent(default=MIN_PERCENT + 1) < MIN_PERCENT
+    # deleterrain2pnw: ANY exception escaping a sweep used to end this thread for good (restart_if_crash=False),
+    # after which nothing frees space and loggerd stops. Log it (throttled, with a count), wait, try again.
+    try:
+      loss_count, loss_bytes = _sweep(exit_event, params, loss_count, loss_bytes)
+    except Exception:
+      sweep_err_n += 1
+      now = time.monotonic()
+      if sweep_err_t is None or now - sweep_err_t >= SWEEP_ERR_LOG_S:
+        cloudlog.exception(f"deleterrain2pnw: deleter sweep FAILED ({sweep_err_n} failure(s) since the last log) " +
+                           f"-- retrying in {SWEEP_ERR_RETRY_S:.0f} s; no space is freed while this persists")
+        sweep_err_t = now
+        sweep_err_n = 0
+      exit_event.wait(SWEEP_ERR_RETRY_S)
 
-    if out_of_percent or out_of_bytes:
-      _upload_read_errors.clear()
-      dirs = listdir_by_creation(Paths.log_root())
-      preserved_dirs = get_preserved_segments(dirs)
 
-      # connect2xnor: precompute which segments still have un-uploaded large
-      # pass-2 files so they sort LAST (deleted only as a last resort).
-      # uploadprio2pnw: read the skip toggle ONCE per sweep, not per segment (one Params() reused).
-      firehose_files = uploadable_firehose_files(params)
-      unuploaded_dirs = {d for d in dirs if has_unuploaded_firehose(d, firehose_files)}
+def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_bytes: int) -> tuple[int, int]:
+  # deleterrain2pnw: ONE sweep -- the body of deleter_thread's loop, moved here unchanged (dedented) so the loop can
+  # catch anything that escapes it. Returns the updated since-boot loss counters.
+  out_of_bytes = get_available_bytes(default=MIN_BYTES + 1) < MIN_BYTES
+  out_of_percent = get_available_percent(default=MIN_PERCENT + 1) < MIN_PERCENT
 
-      # connect2xnor: sort key tuple, ascending -> first element deleted first.
-      #   1. d in DELETE_LAST        (boot/crash kept over normal segments)
-      #   2. d in preserved_dirs     (user.preserve segments)
-      #   3. d in unuploaded_dirs    (NEW: segments with un-uploaded video/rlog)
-      # So a fully-uploaded ordinary segment is always deleted before one whose
-      # firehose files haven't left the device yet. If EVERY remaining segment
-      # is un-uploaded (truly out of space), the oldest is still deleted so
-      # logging never stalls -- and we log that data loss explicitly.
-      ordered = sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs, d in unuploaded_dirs))
-      for delete_dir in ordered:
-        delete_path = os.path.join(Paths.log_root(), delete_dir)
+  if out_of_percent or out_of_bytes:
+    _upload_read_errors.clear()
+    _preserve_read_errors.clear()
+    dirs = listdir_by_creation(Paths.log_root())
+    preserved_dirs = get_preserved_segments(dirs)
 
+    # connect2xnor: precompute which segments still have un-uploaded large
+    # pass-2 files so they sort LAST (deleted only as a last resort).
+    # uploadprio2pnw: read the skip toggle ONCE per sweep, not per segment (one Params() reused).
+    firehose_files = uploadable_firehose_files(params)
+    unuploaded_dirs = {d for d in dirs if has_unuploaded_firehose(d, firehose_files)}
+
+    # connect2xnor: sort key tuple, ascending -> first element deleted first.
+    #   1. d in DELETE_LAST        (boot/crash kept over normal segments)
+    #   2. d in preserved_dirs     (user.preserve segments)
+    #   3. d in unuploaded_dirs    (NEW: segments with un-uploaded video/rlog)
+    # So a fully-uploaded ordinary segment is always deleted before one whose
+    # firehose files haven't left the device yet. If EVERY remaining segment
+    # is un-uploaded (truly out of space), the oldest is still deleted so
+    # logging never stalls -- and we log that data loss explicitly.
+    ordered = sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs, d in unuploaded_dirs))
+    for delete_dir in ordered:
+      delete_path = os.path.join(Paths.log_root(), delete_dir)
+
+      try:
+        # deleterrain2pnw: moved inside the try -- an OSError here (dir vanished, unreadable) used to escape the
+        # sweep; now it is logged below and the NEXT candidate is tried instead of failing the whole sweep.
         if any(name.endswith(".lock") for name in os.listdir(delete_path)):
           continue
 
-        try:
-          # uploadprio2pnw: the ORDERING above uses the reduced set, but the ALARM uses the full one.
-          # A segment can be safe to delete early (its only un-uploaded file is one we deliberately
-          # skip) and still be data that never reached the backend — that must never go out as a
-          # routine info line. One extra scan, of the single directory we are about to destroy.
-          unuploaded = unuploaded_firehose(delete_dir)
-          if delete_dir in unuploaded_dirs or unuploaded:
-            # last resort: nothing fully-uploaded left to free; we are about to
-            # delete data that never made it to the backend.
-            cloudlog.error(f"connect2xnor: deleting UN-UPLOADED segment to free space: {delete_path}")
-          # deleterloss2pnw: the VISIBLE alarm counts only files the uploader would ever send (the
-          # ordering's set) -- a deliberately skipped ecamera is not a loss the driver can act on.
-          lost = [n for n in unuploaded if n in firehose_files]
-          lost_bytes = 0
-          for n in lost:
-            try:
-              lost_bytes += os.path.getsize(os.path.join(delete_path, n))
-            except OSError as e:
-              cloudlog.error(f"deleterloss2pnw: cannot size {n} in {delete_path} ({e}) -- not counted in MB lost")
-          cloudlog.info(f"deleting {delete_path}")
-          shutil.rmtree(delete_path)
-          if lost:
-            loss_count += 1
-            loss_bytes += lost_bytes
-            report_unuploaded_loss(delete_dir, lost, lost_bytes, loss_count, loss_bytes)
-          break
-        except OSError:
-          cloudlog.exception(f"issue deleting {delete_path}")
-      if _upload_read_errors:
-        cloudlog.error(f"deleterloss2pnw: {len(_upload_read_errors)} user.upload read error(s) this sweep, " +
-                       f"counted as uploaded; first: {_upload_read_errors[0]}")
-      exit_event.wait(.1)
-    else:
-      exit_event.wait(30)
+        # uploadprio2pnw: the ORDERING above uses the reduced set, but the ALARM uses the full one.
+        # A segment can be safe to delete early (its only un-uploaded file is one we deliberately
+        # skip) and still be data that never reached the backend — that must never go out as a
+        # routine info line. One extra scan, of the single directory we are about to destroy.
+        unuploaded = unuploaded_firehose(delete_dir)
+        if delete_dir in unuploaded_dirs or unuploaded:
+          # last resort: nothing fully-uploaded left to free; we are about to
+          # delete data that never made it to the backend.
+          cloudlog.error(f"connect2xnor: deleting UN-UPLOADED segment to free space: {delete_path}")
+        # deleterloss2pnw: the VISIBLE alarm counts only files the uploader would ever send (the
+        # ordering's set) -- a deliberately skipped ecamera is not a loss the driver can act on.
+        lost = [n for n in unuploaded if n in firehose_files]
+        lost_bytes = 0
+        for n in lost:
+          try:
+            lost_bytes += os.path.getsize(os.path.join(delete_path, n))
+          except OSError as e:
+            cloudlog.error(f"deleterloss2pnw: cannot size {n} in {delete_path} ({e}) -- not counted in MB lost")
+        cloudlog.info(f"deleting {delete_path}")
+        shutil.rmtree(delete_path)
+        if lost:
+          loss_count += 1
+          loss_bytes += lost_bytes
+          report_unuploaded_loss(delete_dir, lost, lost_bytes, loss_count, loss_bytes)
+        break
+      except OSError:
+        cloudlog.exception(f"issue deleting {delete_path}")
+    if _upload_read_errors:
+      cloudlog.error(f"deleterloss2pnw: {len(_upload_read_errors)} user.upload read error(s) this sweep, " +
+                     f"counted as uploaded; first: {_upload_read_errors[0]}")
+    if _preserve_read_errors:
+      cloudlog.error(f"deleterrain2pnw: {len(_preserve_read_errors)} user.preserve read error(s) this sweep, " +
+                     f"counted as NOT preserved; first: {_preserve_read_errors[0]}")
+    exit_event.wait(.1)
+  else:
+    exit_event.wait(30)
+  return loss_count, loss_bytes
 
 
 def main():

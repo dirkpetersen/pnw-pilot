@@ -1,5 +1,6 @@
 import errno
 import json
+import os
 import time
 import threading
 from collections import namedtuple
@@ -231,7 +232,7 @@ class TestDeleter(UploaderTestCase):
 
   def test_upload_read_error_is_logged_once_per_sweep(self, monkeypatch, loss):
     # rule2fixes2pnw: has_preserve_xattr now shares getxattr_uncached, so fail only the user.upload reads this
-    # test is about (a user.preserve read error propagates, as it did through the cached read before).
+    # test is about (user.preserve read errors have their own test below).
     real = deleter.getxattr_uncached
 
     def eio(path, attr_name):
@@ -244,3 +245,70 @@ class TestDeleter(UploaderTestCase):
     errs = [m for m in self.log.of("error") if "read error" in m]
     assert len(errs) == 1 and "counted as uploaded" in errs[0]
     assert self.records() == []   # a failed read counts as uploaded (never blocks freeing space)
+
+  # deleterrain2pnw: the deleter thread is NOT restarted on crash (restart_if_crash=False) -- anything that escapes a
+  # sweep used to end it for good, after which the disk fills and recording stops.
+  def test_preserve_read_error_is_logged_and_does_not_block_deletion(self, monkeypatch, loss):
+    real = deleter.getxattr_uncached
+
+    def eio(path, attr_name):
+      if attr_name == deleter.PRESERVE_ATTR_NAME:
+        raise OSError(errno.EIO, "io error")
+      return real(path, attr_name)
+    monkeypatch.setattr(deleter, "getxattr_uncached", eio)
+    f = self.make_file_with_data(self.seg_dir, self.f_type, preserve_xattr=deleter.PRESERVE_ATTR_VALUE)
+    self.start_thread()
+    try:
+      with Timeout(5, "Timeout waiting for files to be deleted"):
+        while f.exists():
+          time.sleep(0.01)
+      assert self.del_thread.is_alive(), "deleter thread died on a user.preserve read error"
+    finally:
+      self.join_thread()
+    errs = [m for m in self.log.of("error") if "user.preserve read error" in m]
+    assert errs and "NOT preserved" in errs[0] and self.seg_dir in errs[0] and "io error" in errs[0]
+    assert all(m.startswith("deleterrain2pnw: 1 user.preserve") for m in errs)   # one line per sweep, not per read
+    assert not any("sweep FAILED" in m for m in self.log.of("exception"))         # handled, not a failed sweep
+
+  def test_sweep_exception_is_logged_and_the_loop_continues(self, monkeypatch, loss):
+    monkeypatch.setattr(deleter, "SWEEP_ERR_RETRY_S", 0.01)
+    real = deleter.listdir_by_creation
+    calls = {"n": 0}
+
+    def flaky(d):
+      calls["n"] += 1
+      if calls["n"] <= 3:
+        raise RuntimeError("sweep boom")
+      return real(d)
+    monkeypatch.setattr(deleter, "listdir_by_creation", flaky)
+    f = self.make_file_with_data(self.seg_dir, self.f_type)
+    self.start_thread()
+    try:
+      with Timeout(5, "Timeout waiting for files to be deleted"):
+        while f.exists():
+          time.sleep(0.01)
+      assert self.del_thread.is_alive(), "deleter thread died on a failed sweep"
+    finally:
+      self.join_thread()
+    assert calls["n"] >= 4                                     # it kept sweeping after the failures
+    fails = [m for m in self.log.of("exception") if "sweep FAILED" in m]
+    assert len(fails) == 1 and "1 failure(s)" in fails[0]      # throttled: 3 failures inside SWEEP_ERR_LOG_S -> 1 line
+
+  def test_unlistable_segment_is_skipped_not_fatal(self, loss):
+    if os.geteuid() == 0:
+      pytest.skip("root lists a 0o000 directory")
+    bad = self.make_file_with_data(self.seg_format.format(0), self.f_type)
+    good = self.make_file_with_data(self.seg_format.format(1), self.f_type)
+    os.chmod(bad.parent, 0)
+    try:
+      self.start_thread()
+      try:
+        with Timeout(5, "Timeout waiting for files to be deleted"):
+          while good.exists():
+            time.sleep(0.01)
+        assert self.del_thread.is_alive()
+      finally:
+        self.join_thread()
+    finally:
+      os.chmod(bad.parent, 0o755)
+    assert any(str(bad.parent) in m for m in self.log.of("exception"))   # the per-directory "issue deleting" line
