@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from openpilot.tools.curvedb import roadtable as rt
 from openpilot.tools.curvedb import v2_io
 from openpilot.tools.curvedb.store import haversine_m
-from openpilot.tools.curvedb.v2_build import region
+from openpilot.tools.curvedb.v2_build import scope_class
 
 MPH = 0.44704
 UNWANTED_MAX = 2.2     # owner's own cut (09-21 drive report s3): a@set <= 2.2 is unwanted
@@ -194,8 +194,10 @@ def replay(idx: rt.AnchorIndex, passes, eps: list[Episode], a_mapd: float, tally
     d, pts, i, route = own
     pt = pts[i]
     r["route"], r["road"] = route, pt.road
-    r["region"] = region(ep.site[0], ep.site[1], pt.road)
-    if r["region"] is None:
+    r["region"] = pt.hwy
+    # a KNOWN class the table does not cover; an unknown class (pre-08-15 passes) goes on to the lookup,
+    # whose class gate refuses it unless the row itself carries a class
+    if not scope_class(pt.hwy) and pt.hwy not in rt.UNKNOWN_CLASSES:
       r["status"] = "out of scope"
       rows.append(r)
       continue
@@ -402,8 +404,7 @@ def main(argv=None) -> int:
           f.write(json.dumps(r) + "\n")
     if a.adds:
       dates = {e.date for e in eps if not e.car.startswith(rt.TESLA_PREFIX) and e.date >= a.adds_from}
-      from openpilot.tools.curvedb.v2_build import in_scope
-      adds = scan_adds(idx, passes, eps, amap, dates, in_scope)
+      adds = scan_adds(idx, passes, eps, amap, dates, lambda pt: scope_class(pt.hwy))
       print(f"  ADDS (v2 would slow where ICBM did not; Lightning passes on {len(dates)} episode dates): "
             + ", ".join(f"{k} {v}" for k, v in Counter(e["cls"] for e in adds).most_common()))
       for e in sorted(adds, key=lambda e: -(e["a_app"] or 0))[:40]:

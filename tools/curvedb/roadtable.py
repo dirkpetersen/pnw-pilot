@@ -432,6 +432,22 @@ class AnchorIndex:
     return ai
 
 
+def seed_anchors(index: AnchorIndex, pts: list[Point], *, in_scope) -> int:
+  """Create the anchors one pass would create, WITHOUT attaching observations -- exactly add_pass's creation
+  rule (a finite-bearing, in-scope point with no anchor within radius and heading). Returns how many.
+
+  Used as the first of two build phases so that a pass which cannot CREATE an anchor (MEASURED: every
+  point before 2026-08-15 has no mapd highwayClass, so a class-based scope rejects it) still ATTACHES to
+  the anchors that later passes create on the same road. Anchors never move, so seeding first and
+  attaching second creates the same anchors a single time-ordered pass would."""
+  n = 0
+  for pt in pts:
+    if math.isfinite(pt.brg) and index.nearest(pt.lat, pt.lon, pt.brg)[0] is None and in_scope(pt):
+      index.add(pt.lat, pt.lon, pt.brg)
+      n += 1
+  return n
+
+
 def add_pass(index: AnchorIndex, pts: list[Point], *, date: str, drive: str, car: str, in_scope,
              tally: Counter) -> None:
   """Attach one pass to the table. Each anchor takes at most ONE observation per pass (the nearest

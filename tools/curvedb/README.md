@@ -19,7 +19,9 @@ on §3.9 and this branch does not change that.
 ### v2 (2026-09-24, OFFLINE, NOT DEPLOYED, NO AUTHORITY): the road table from drive logs
 
 Built per the owner's 2026-09-23 decisions (every pass counts; median across >= 2 dates; Tesla never sole
-evidence; I-5 corridor + Seattle first). Method, validation, replay, gate and the on-car shadow proposal:
+evidence; I-5 corridor + Seattle first). **Scope since 2026-09-24 (owner):** no geography in the code -- an anchor
+is seeded only on a motorway/trunk/primary way (mapd class; links and unknown excluded) driven at >= 40 mph, and
+authority is unchanged (`v2_build.in_scope`, `roadtable.seed_anchors`). Method, validation, replay, gate and the on-car shadow proposal:
 **`docs/CURVEDB-V2-BUILD.md`** in the workbench (`~/gh/comma/docs/`). v1's files above are unchanged.
 
 | file | what it is |

@@ -1,12 +1,15 @@
 """curvedb v2: the pure functions (roadtable, v2_replay's target/verdict, v2_validate's pairing)."""
+import gzip
+import json
 import math
+import os
 from collections import Counter
 from dataclasses import replace
 
 import pytest
 
 from openpilot.tools.curvedb import roadtable as rt
-from openpilot.tools.curvedb.v2_build import region
+from openpilot.tools.curvedb import v2_build
 from openpilot.tools.curvedb.v2_replay import MPH, classify, outcome, row_accuracy, v2_target
 from openpilot.tools.curvedb.v2_validate import interp, ratio_stats, window_peak
 
@@ -46,15 +49,6 @@ def test_smooth_signed_skips_none_and_keeps_alignment():
   ts = [0.0, 0.2, 0.4, 0.6]
   out = rt.smooth_signed(ts, [0.001, None, 0.003, 0.002], 1.0)
   assert out[1] is None and out[0] is not None and len(out) == 4
-
-
-def test_region_scope():
-  assert region(45.47, -122.68, "I 5") == "i5"
-  assert region(45.53, -122.68, "I 405;US 30") == "i5"
-  assert region(45.47, -122.68, "I 5|Terwilliger Curves") == "i5"      # wayRef carries the ref
-  assert region(47.6256, -122.3437, "State Route 99") == "home"
-  assert region(44.56, -123.27, "Southwest 35th Street") is None       # Corvallis local: out of scope
-  assert region(43.0, -123.3, "I 5") is None                           # I-5 south of the band
 
 
 # ---------------------------------------------------------------------------------------------
@@ -110,6 +104,65 @@ def test_extent_peak_refuses_partial_extent_and_bad_gps():
   assert rt.extent_peak(pts, len(pts) - 2, 25, 150)[0] is None            # runs past the end
   pts[len(pts) // 2 + 2].fix_ok = False
   assert rt.extent_peak(pts, len(pts) // 2, 25, 150) == (None, "gps")
+
+
+# ---------------------------------------------------------------------------------------------
+# the build scope: class + speed, no geography (owner 2026-09-24)
+# ---------------------------------------------------------------------------------------------
+
+def _pt(hwy, v):
+  return rt.Point(s=0.0, t=0.0, lat=45.0, lon=-122.7, brg=0.0, v=v, k=0.001, fix_ok=True, drv=False,
+                  lat_active=True, way=1, hwy=hwy, road="", spl=0.0, mcs=0.0)
+
+
+def test_scope_is_class_and_speed_not_geography():
+  fast, slow = 40 * MPH + 0.01, 40 * MPH - 0.01
+  for hwy in ("motorway", "trunk", "primary"):
+    assert v2_build.in_scope(_pt(hwy, fast))
+    assert not v2_build.in_scope(_pt(hwy, slow))                  # a 39 mph crawl does not seed anchors
+  for hwy in ("motorwayLink", "trunkLink", "primaryLink", "secondary", "tertiary", "residential", "",
+              "unknown", "None"):
+    assert not v2_build.in_scope(_pt(hwy, 30.0))                   # ramps / unknown / minor roads never
+  assert not hasattr(v2_build, "SEATTLE_BOX") and not hasattr(v2_build, "region")
+
+
+def test_seed_anchors_creates_what_add_pass_creates_without_observations():
+  pts = rt.resample(rt.fuse(_synthetic_doc(), 0.0, P), P)[0]
+  a, b = rt.AnchorIndex(P), rt.AnchorIndex(P)
+  n = rt.seed_anchors(a, pts, in_scope=lambda p: True)
+  rt.add_pass(b, pts, date="2026-09-01", drive="r", car=LIGHTNING, in_scope=lambda p: True, tally=Counter())
+  assert n == len(a.anchors) == len(b.anchors) > 0
+  assert [(x.lat, x.lon, x.brg) for x in a.anchors] == [(x.lat, x.lon, x.brg) for x in b.anchors]
+  assert all(not x.obs for x in a.anchors)
+  assert rt.seed_anchors(a, pts, in_scope=lambda p: True) == 0      # the same road reuses its anchors
+  assert rt.seed_anchors(rt.AnchorIndex(P), pts, in_scope=lambda p: False) == 0
+
+
+def _write_route(d, route, doc, off_s, fp=LIGHTNING):
+  with gzip.open(os.path.join(d, f"{route}--0.qlog.json.gz"), "wt") as f:
+    json.dump(dict(doc, off_s=off_s, fp=fp), f)
+
+
+def test_build_attaches_an_unclassified_earlier_pass_to_anchors_a_later_pass_creates(tmp_path):
+  """MEASURED: no point before 2026-08-15 has a highwayClass. The early pass cannot CREATE anchors under a
+  class scope, but it must still count as a date once a classified pass has created them."""
+  early = _synthetic_doc()
+  early["mapd"] = [[r[0], r[1], "", *r[3:]] for r in early["mapd"]]
+  _write_route(tmp_path, "00000001--aaaa", early, 1_788_000_000.0)             # an earlier PT date, no class
+  _write_route(tmp_path, "00000002--bbbb", _synthetic_doc(), 1_789_000_000.0)  # later: motorway, 56 mph
+  idx = v2_build.build(str(tmp_path), P, Counter())
+  assert idx.anchors
+  assert len({o.date for a in idx.anchors for o in a.obs}) == 2               # the early date is kept
+  verdicts = [rt.row_verdict(a, P, branch=br) for a in idx.anchors for br in rt.branches(a, P.branch_radius_m)]
+  assert any(v.granted and v.n_dates == 2 for v in verdicts)
+
+
+def test_build_creates_no_anchor_on_a_minor_or_slow_road(tmp_path):
+  _write_route(tmp_path, "00000001--aaaa", _synthetic_doc(v=15.0), 1_788_000_000.0)   # motorway at 34 mph
+  minor = _synthetic_doc()
+  minor["mapd"] = [[r[0], r[1], "secondary", *r[3:]] for r in minor["mapd"]]
+  _write_route(tmp_path, "00000002--bbbb", minor, 1_789_000_000.0)
+  assert not v2_build.build(str(tmp_path), P, Counter()).anchors
 
 
 # ---------------------------------------------------------------------------------------------

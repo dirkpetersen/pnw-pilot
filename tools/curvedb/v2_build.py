@@ -3,11 +3,16 @@
 
   tracks (v2_extract.py) -> per route: fuse -> resample every step_m -> passes -> anchors (+1 obs/pass)
 
-Scope (owner, 2026-09-23: "repeat roads first") -- a NEW anchor is only created at an in-scope point:
-  * the I-5 corridor Seattle-Corvallis: mapd's wayRef or road name has an `I 5` or `I 405` token and
-    44.3 <= lat <= 48.0 (Portland's I-405 loop is on the test set; WA I-405 is inside the latitude band
-    and is kept -- it is a repeat road in the Seattle area);
-  * the Seattle home area: SEATTLE_BOX below (the city, SR 99 tunnel approach included).
+Scope (owner 2026-09-24, replacing the I-5/I-405 corridor + home-box rule of 09-23; data-driven, no
+geography in the code) -- a NEW anchor is only created at a point that is:
+  * on a way mapd classes motorway, trunk or primary (links/ramps and an unknown class are separate
+    classes, so they never create anchors -- the same classes the car's live gate refuses);
+  * driven at >= SCOPE_MIN_V_MS on that pass (a city arterial crawled at 25 mph does not seed a table).
+Authority is unchanged (roadtable.row_verdict): >= 2 distinct PT dates, never Tesla-only evidence, no ramp
+in the extent, a known class, dates that agree. A road driven once gets anchors but no row.
+Anchors are SEEDED over every pass first and passes ATTACHED second (roadtable.seed_anchors): MEASURED, no
+point before 2026-08-15 carries a highwayClass, so a class scope would otherwise drop those dates' passes
+wherever a later date creates the anchor.
 Passes of either car, any steering mode, are attached (owner decision). Refusals are counted by reason.
 
 Outputs (in --out):
@@ -31,24 +36,18 @@ from dataclasses import asdict
 from openpilot.tools.curvedb import roadtable as rt
 from openpilot.tools.curvedb import v2_io
 
-# PROVISIONAL: Seattle city limits, rounded outward (lat_min, lat_max, lon_min, lon_max).
-SEATTLE_BOX = (47.49, 47.74, -122.44, -122.24)
-CORRIDOR_ROADS = ("I 5", "I 405")
-CORRIDOR_LAT = (44.3, 48.0)
+SCOPE_CLASSES = ("motorway", "trunk", "primary")   # mapd highwayClass values that may seed anchors
+SCOPE_MIN_V_MS = 40 * 0.44704                      # owner 2026-09-24: "driven at >= 40 mph on the pass"
 
 
-def region(lat: float, lon: float, road: str) -> str | None:
-  """'i5' | 'home' | None. Corridor wins where both apply (I-5 through Seattle)."""
-  toks = {x.strip() for x in (road or "").replace("|", ";").split(";")}
-  if CORRIDOR_LAT[0] <= lat <= CORRIDOR_LAT[1] and toks & set(CORRIDOR_ROADS):
-    return "i5"
-  if SEATTLE_BOX[0] <= lat <= SEATTLE_BOX[1] and SEATTLE_BOX[2] <= lon <= SEATTLE_BOX[3]:
-    return "home"
-  return None
+def scope_class(hwy: str) -> bool:
+  """Is this a class the table covers? Links and unknown are not in the set (mirrors the live gate)."""
+  return hwy in SCOPE_CLASSES
 
 
 def in_scope(pt) -> bool:
-  return region(pt.lat, pt.lon, pt.road) is not None
+  """May this point CREATE an anchor: a scope class, driven at >= SCOPE_MIN_V_MS."""
+  return scope_class(pt.hwy) and pt.v >= SCOPE_MIN_V_MS
 
 
 def car_of(fp) -> str:
@@ -69,11 +68,15 @@ def build(tracks: str, params: rt.V2Params, tally: Counter):
       continue
     loaded.append((samples[0].t, route, car_of(doc["fp"]), samples))
   loaded.sort()            # canonical order: anchors are an accident of nothing
+  passes = []
   for _t0, route, car, samples in loaded:
     tally[f"route loaded ({'tesla' if car.startswith(rt.TESLA_PREFIX) else car})"] += 1
     for pts in rt.resample(samples, params, tally=tally):
-      rt.add_pass(index, pts, date=v2_io.pt_date(pts[0].t), drive=route, car=car, in_scope=in_scope,
-                  tally=tally)
+      passes.append((route, car, pts))
+      tally["anchors seeded"] += rt.seed_anchors(index, pts, in_scope=in_scope)
+  for route, car, pts in passes:     # phase 2: attach only -- every anchor already exists
+    rt.add_pass(index, pts, date=v2_io.pt_date(pts[0].t), drive=route, car=car, in_scope=lambda _pt: False,
+                tally=tally)
   return index
 
 
@@ -84,12 +87,11 @@ def dump(index: rt.AnchorIndex, params: rt.V2Params, out: str, tally: Counter) -
   with gzip.open(os.path.join(out, "table.json.gz"), "wt") as f:
     json.dump(doc, f, separators=(",", ":"))
   rows, lines = [], []
-  reasons, by_region = Counter(), Counter()
+  reasons, by_class = Counter(), Counter()
   mode_c, car_dates = Counter(), Counter()
   for a in index.anchors:
-    road = rt.majority([o.road for o in a.obs], "")
-    reg = region(a.lat, a.lon, road) or "out"
-    by_region[(reg, "anchors")] += 1
+    cls = rt.majority([o.hwy for o in a.obs if o.hwy not in rt.UNKNOWN_CLASSES], "unknown")
+    by_class[(cls, "anchors")] += 1
     for o in a.obs:
       mode_c[o.mode] += 1
     brs = rt.branches(a, params.branch_radius_m)
@@ -107,17 +109,17 @@ def dump(index: rt.AnchorIndex, params: rt.V2Params, out: str, tally: Counter) -
         rows.append({"lat": round(a.lat, 6), "lon": round(a.lon, 6), "brg": round(a.brg, 1),
                      "end_lat": round(br[0], 6), "end_lon": round(br[1], 6),
                      "k": round(v.k, 6), "n_dates": v.n_dates, "n_passes": v.n_passes, "hwy": v.hwy,
-                     "spl": v.spl, "region": reg})
+                     "spl": v.spl})
         car_dates["rows with a tesla pass"] += any(o.car.startswith(rt.TESLA_PREFIX) for o in a.obs)
-    by_region[(reg, ">=2 dates")] += best.n_dates >= 2
-    by_region[(reg, ">=3 dates")] += best.n_dates >= 3
-    by_region[(reg, "authority")] += granted_any
+    by_class[(cls, ">=2 dates")] += best.n_dates >= 2
+    by_class[(cls, ">=3 dates")] += best.n_dates >= 3
+    by_class[(cls, "authority")] += granted_any
   with open(os.path.join(out, "rows.json"), "w") as f:
     json.dump({"params": asdict(params), "rows": rows}, f, separators=(",", ":"))
   lines.append(f"anchors: {len(index.anchors)}   (anchor, branch) rows with authority (all dates): {len(rows)}")
-  lines.append("by region:")
-  for reg in ("i5", "home", "out"):
-    lines.append("  " + reg + ": " + ", ".join(f"{k} {by_region[(reg, k)]}" for k in
+  lines.append("anchors by majority class:")
+  for cls in sorted({c for c, _ in by_class}, key=lambda c: -by_class[(c, "anchors")]):
+    lines.append("  " + cls + ": " + ", ".join(f"{k} {by_class[(cls, k)]}" for k in
                                                ("anchors", ">=2 dates", ">=3 dates", "authority")))
   lines.append("(anchor, branch) verdicts (all dates): " + ", ".join(f"{k} {v}" for k, v in reasons.most_common()))
   lines.append("pass modes admitted: " + ", ".join(f"{k} {v}" for k, v in mode_c.most_common()))
