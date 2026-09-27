@@ -134,6 +134,7 @@ import math
 import time
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.controls.lib.speedadjust_pnw.sign_limit import SignLimitSelector   # fordtsr2pnw
 
 MPH_TO_MS = 0.44704
 MILE_M = 1609.344
@@ -283,7 +284,9 @@ def _police_key(rep):
 
 
 class SpeedAdjustController:
-  def __init__(self, CP, params=None):
+  def __init__(self, CP, params=None, sign_limit=False):
+    """sign_limit: fordtsr2pnw -- the car's own traffic-sign speed limit may be weighed against the map limit
+    (PnwVehicle.camera_speed_limit, passed by the planner). False -> the map limit alone, exactly as before."""
     import platform
     self.CP = CP
     if params is not None:
@@ -403,6 +406,15 @@ class SpeedAdjustController:
     self._la_why = None          # telemetry: how the last episode ended ("promote" / "abort:<reason>")
     self._la_ev_n = 0            # telemetry: look-ahead decisions logged so far (each one is a cloudlog event)
     self._la_zone_restore = None # F2: after an aborted look-ahead that a real drop joined, restore up to that zone's speed
+    # fordtsr2pnw: the camera speed limit (see sign_limit.py). None on a car without the capability: nothing below runs.
+    self._sign = SignLimitSelector() if sign_limit else None
+    self._sign_sm = None         # the SubMaster of the current cap() call (its carState carries the camera value)
+    self._map_fresh = False      # mapd is publishing: NextMapSpeedLimit was fresh on the last read
+    self._sign_on = True         # FordSignSpeedLimit (default ON), read at READ_S
+    self._sign_on_err_t = None
+    self._sign_on_err_n = 0
+    self._sign_cs_err_t = None
+    self._sign_cs_err_n = 0
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -433,6 +445,8 @@ class SpeedAdjustController:
           self._sl_err_n = 0
       if not math.isfinite(sl) or sl <= 0.0 or sl > SANE_MAX_SL:   # reject unknown / NaN / garbage-high
         sl = 0.0
+    if self._sign is not None:
+      sl = self._select_sign(sl)               # fordtsr2pnw: the camera weighed against the map (a RAW reading, below)
     now = time.monotonic()
     self._sl_raw = sl                          # limitahead2pnw: the look-ahead judges the drop on the raw reading
     if sl > 0.0:
@@ -483,6 +497,41 @@ class SpeedAdjustController:
       return self._sl                        # brief dropout → hold the last valid limit
     return 0.0
 
+  def _select_sign(self, map_sl: float) -> float:
+    """fordtsr2pnw: the raw limit after weighing the camera against the map (SignLimitSelector). Inputs: the
+    FordSignSpeedLimit toggle, the camera from sm['carState'], the lower limit mapd announces ahead (option 2's basis)
+    and whether mapd is publishing at all (a dead mapd leaves MapSpeedLimit at its last value)."""
+    now = time.monotonic()
+    try:
+      v = self.params.get("FordSignSpeedLimit", return_default=True)
+      if v is None:
+        raise ValueError("no value and no registered default")
+      self._sign_on = bool(v)
+    except Exception as e:
+      # Rule 2: the fallback is the shipped default (ON), and it is said. What raises: UnknownKeyName on a
+      # params_keys.h / params_pyx.so mismatch. With no map the camera is used either way.
+      self._sign_on = True
+      self._sign_on_err_n += 1
+      if self._sign_on_err_t is None or now - self._sign_on_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: FordSignSpeedLimit unreadable ({type(e).__name__}) -- treated as ON (the " +
+                           f"default) ({self._sign_on_err_n} failed read(s) since the last log)")
+        self._sign_on_err_t = now
+        self._sign_on_err_n = 0
+    num, st = 0.0, "unreadable"
+    try:
+      cs = self._sign_sm['carState'].cruiseState
+      num, st = float(cs.speedLimitSign), str(cs.speedLimitSignStatus)   # capnp enum str() is the bare name
+    except Exception as e:
+      # Rule 2: an unreadable camera is not "no camera" -- the selector treats it as stale (map only) and it is logged.
+      self._sign_cs_err_n += 1
+      if self._sign_cs_err_t is None or now - self._sign_cs_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: camera speed limit unreadable from carState ({type(e).__name__}) -- map limit " +
+                           f"only while this lasts ({self._sign_cs_err_n} failed read(s) since the last log)")
+        self._sign_cs_err_t = now
+        self._sign_cs_err_n = 0
+    ann = self._next_raw[0] if self._next_raw is not None else None
+    return self._sign.select(now, map_sl, self._map_fresh, ann, num, st, self._sign_on)
+
   def _read_police(self):
     if self.mem_params is None:
       return None
@@ -509,7 +558,7 @@ class SpeedAdjustController:
         self._police_err_n = 0
     return None
 
-  def _read_inputs(self):
+  def _read_inputs(self, sm=None):
     try:
       self._mode = int(self.params.get("AutoSpeedReduce", return_default=True) or 0)
     except Exception as e:
@@ -526,10 +575,13 @@ class SpeedAdjustController:
                            f"or limit slowdown while this lasts ({self._mode_err_n} failed read(s) since the last log)")
         self._mode_err_t = now
         self._mode_err_n = 0
+    # fordtsr2pnw: the announcement is read BEFORE the limit -- the camera selection needs mapd's liveness and the lower
+    # limit it announces. _read_next_limit reads only its own param, so the order changes nothing else.
+    self._next_raw = self._read_next_limit()
+    self._sign_sm = sm
     self._sl = self._read_speed_limit()
     self._police = self._read_police()
     self._la_mode = self._read_la_mode()
-    self._next_raw = self._read_next_limit()
     self._update_announcement()
 
   # ---- limitahead2pnw: inputs ------------------------------------------------
@@ -555,6 +607,7 @@ class SpeedAdjustController:
   def _read_next_limit(self):
     """(limit m/s, distance m) of the limit mapd announces ahead, or None for none / stale / unreadable. A stale or
     unreadable value is logged in the policer2pnw style: it means NO look-ahead, and an active one aborts."""
+    self._map_fresh = False                    # fordtsr2pnw: True only for a fresh payload below
     if self.mem_params is None:
       return None
     err = None
@@ -571,8 +624,10 @@ class SpeedAdjustController:
       elif age > LA_INPUT_STALE_S:
         err = f"stale ({age:.1f} s old)"
       elif n <= 0.0 or d <= 0.0 or n > SANE_MAX_SL:
+        self._map_fresh = True
         return None                            # fresh "nothing announced"
       else:
+        self._map_fresh = True
         return n, d
     except Exception as e:
       err = type(e).__name__
@@ -921,6 +976,15 @@ class SpeedAdjustController:
       "laMat": (self._la["mat_t"] is not None) if self._la else None,
       "laWhy": self._la_why,
       "laEvN": self._la_ev_n,
+      # fordtsr2pnw: the camera speed limit vs the map. slCam = the number on the sign (valid only), slCamSt = its
+      # carState status, slMap = the map reading (m/s), slSrc = where the raw limit came from (map / camera / hold),
+      # slWhy = why (agree / cameraOverride / cameraAhead / noMap / pending / heldHigher / stale / noSign / lotSign /
+      # toggleOff / unavailable). All None on a car without the capability (the Tesla).
+      "slCam": self._sign.cam if self._sign else None,
+      "slCamSt": self._sign.cam_st if self._sign else None,
+      "slMap": _r(self._sign.map_sl) if self._sign else None,
+      "slSrc": self._sign.src if self._sign else None,
+      "slWhy": self._sign.why if self._sign else None,
     })
 
   # ---- speedadjust-exec2pnw: stock-ACC button-management publish (mem-param side effect only) ----
@@ -1242,7 +1306,7 @@ class SpeedAdjustController:
     self._odo += max(float(v_ego), 0.0) * dt  # limitahead2pnw: announced boundaries are kept on this odometer
     if now - self._last_read >= READ_S:
       self._last_read = now
-      self._read_inputs()
+      self._read_inputs(sm)
     rise_since, self._sl_rise_since = self._sl_rise_since, None
 
     # speedanchor2pnw (F_uninit, Fable-caught): an uninitialized cruise is not a real driver set —

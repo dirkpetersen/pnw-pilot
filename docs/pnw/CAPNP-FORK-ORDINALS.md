@@ -310,7 +310,8 @@ A schema that fails to load bricks **every** openpilot process. So:
 - **`car.capnp` `SafetyModel @35 mg` / `@36 teslaLegacy` collide with upstream 0.11.2 `byd` / `volvo`.**
   Same class of bug, in opendbc (and the panda firmware's safety-mode numbers). Must be settled before any
   0.11.2 port; out of scope here (Rule 5). `CarState.CruiseState @7 speedClusterUnit` is also a fork field in
-  upstream's `car.capnp` (free upstream today).
+  upstream's `car.capnp` (free upstream today), and so are `@8 speedLimitSign` / `@9 speedLimitSignStatus`
+  (fordtsr2pnw, 2026-09-27; CruiseState still ends at `@6` upstream).
 - **The old `testing` branch put `cesState` at Event @136**, the slot `madsState` uses now -- a fork-internal
   slot reuse across time. Testing-era logs (June 2026) decode that slot as `madsState`. None of the local or
   S3 corpus scanned here is from that era.

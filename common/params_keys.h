@@ -244,6 +244,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"AutoSpeedReduce", {PERSISTENT, INT, "0"}},  // speedadjust2pnw: 3-way auto cruise-speed reduction 0=Off 1=Police(ease to limit+5 ~30s ahead) 2=Police+Limits(also cap proportionally on a posted-limit drop). Reduce-only, op-long only, default OFF.
     {"LimitAheadMode", {PERSISTENT, INT, "1"}},  // limitahead2pnw: slow down AHEAD of a lower limit mapd announces (needs AutoSpeedReduce=2). 0=Off 1=Shadow (log what it would do, change nothing; DEFAULT) 2=Live.
+    {"FordSignSpeedLimit", {PERSISTENT, BOOL, "1"}},  // fordtsr2pnw: use the Lightning camera's traffic-sign speed limit (carState.cruiseState.speedLimitSign) against the map limit in speedadjust. Default ON (owner 2026-09-27). With NO usable map limit the camera is used regardless of this toggle. Read at ~1 Hz, no restart.
     {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
     {"RainMode", {PERSISTENT, INT, "0"}},  // rain2pnw (driver req 2026-07-12): 3-way wet-weather curve-slowdown selector. 0=None, 1=Light (3 mph slower in curves by default), 2=Heavy (5 mph). Applies to BOTH cars, same reduction. Magnitudes tunable in /data/pnw/rain.json. Default None.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable

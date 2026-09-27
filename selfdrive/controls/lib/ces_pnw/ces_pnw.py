@@ -2535,7 +2535,9 @@ SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise",
                 "ovr", "eng", "polLatch", "polSupp", "polKey", "epLim", "noRst", "zoneTgt", "zoneN", "zoneLast",
                 "icbmHold", "inst",
                 # limitahead2pnw: the speed-limit look-ahead (shadow or live) -- see speedadjust _publish_status
-                "laMode", "laNext", "laNextD", "laLive", "laN", "laTgt", "laPre", "laDs", "laD", "laMat", "laWhy", "laEvN")
+                "laMode", "laNext", "laNextD", "laLive", "laN", "laTgt", "laPre", "laDs", "laD", "laMat", "laWhy", "laEvN",
+                # fordtsr2pnw: the camera speed limit vs the map (null on the Tesla) -- see speedadjust _publish_status
+                "slCam", "slCamSt", "slMap", "slSrc", "slWhy")
 
 
 def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:

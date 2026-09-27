@@ -81,8 +81,10 @@ class LongitudinalPlanner:
     self.dt = dt
     self.allow_throttle = True
     self.vtsc = VTSCController(CP)   # vtsc: curve speed control, default OFF (behavior-neutral)
-    self.speedadjust = SpeedAdjustController(CP)   # speedadjust2pnw: limit-drop + police cruise cap, default OFF
     self.veh = PnwVehicle(CP)   # standstillsoft2pnw: Lightning gentle standstill-launch accel cap (Tesla -> inf)
+    # speedadjust2pnw: limit-drop + police cruise cap, default OFF. fordtsr2pnw: told by capability whether the car's own
+    # traffic-sign camera limit may be weighed against the map limit.
+    self.speedadjust = SpeedAdjustController(CP, sign_limit=self.veh.camera_speed_limit)
     self.leadloss = LeadLossHoldShadow()   # leadloss2pnw: SHADOW-only lead-dropout detector (logs, never actuates)
     self._leadloss_err_t = None   # leadlossr2pnw: monotonic time of the last logged detector failure (None = never)
     self._leadloss_err_n = 0      # leadlossr2pnw: detector failures since that log line

@@ -540,6 +540,14 @@ class PnwVehicle:
     # publisher already self-gates on the DBC carrying the messages).
     self.car_gps: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # fordtsr2pnw: the car's own camera reports the posted speed limit, decoded by opendbc into
+    # carState.cruiseState.speedLimitSign(/Status) (Ford CAN FD 0x3CD Traffic_RecognitnData). Measured only on our
+    # 2025 Lightning (drives/2026-09-24/ford-tsr-measure: a limit 99.5 % of driving time, 94 % agreement with mapd).
+    # speedadjust weighs it against the map limit only on a car declaring this; everywhere else the carState fields
+    # read `unavailable` and are never looked at (the Tesla is untouched). Not mirrored in opendbc/car/pnw_vehicle.py:
+    # the decode self-gates on CAN FD + the DBC carrying the message.
+    self.camera_speed_limit: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+
     # teslayaw2pnw: carState.yawRate is a real CAN yaw-rate sensor on this car (positive = left). Every Ford
     # (opendbc ford/carstate.py, Yaw_Data_FD1 -- unconditional for the brand) and the Raven HW3 (tesla/carstate.py,
     # BrakeMessage 0x20a, pnw-opendbc teslayaw2pnw). On any other car the carstate never assigns it, so it reads the

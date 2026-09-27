@@ -83,6 +83,13 @@ DESCRIPTIONS = {
     "whole state automatically (on any network; the sign shows \"-\" until the download completes). " +
     "Requires a GPS fix to display a limit. Turn this ON to hide the display and warning."
   ),
+  # fordtsr2pnw: the Lightning's own traffic-sign speed limit, weighed against the map limit by Auto speed reduce.
+  "FordSignSpeedLimit": tr_noop(
+    "Use the F-150 Lightning's own traffic-sign camera speed limit together with the map. When the two disagree " +
+    "for a few seconds, the camera wins as long as it does not raise the limit (a work zone's lower sign, or a map " +
+    "glitch that drops the limit to the wrong road's). With no map speed limit at all, the camera limit is always " +
+    "used, even with this off. Affects Auto speed reduce only. ON by default. F-150 Lightning only."
+  ),
   "ConditionalExperimentalSwitching": tr_noop(
     "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
     "switch to Experimental Mode only for tight curves, low-speed/city driving, stop lights, and when closing " +
@@ -308,6 +315,14 @@ class TogglesLayout(Widget):
       "NoSpeedLimitDisplay": (
         lambda: tr("No Speed Limit Display/Warning"),
         DESCRIPTIONS["NoSpeedLimitDisplay"],
+        "speed_limit.png",
+        False,
+      ),
+      # fordtsr2pnw: camera speed limit, next to the map speed-limit toggle. Default ON; greyed on a car without
+      # the capability (display only, see _update_toggles). No restart: speedadjust reads it at ~1 Hz.
+      "FordSignSpeedLimit": (
+        lambda: tr("Ford Camera Speed Limit"),
+        DESCRIPTIONS["FordSignSpeedLimit"],
         "speed_limit.png",
         False,
       ),
@@ -557,6 +572,12 @@ class TogglesLayout(Widget):
     # "no fix", which used to make this button enabled with no fix at all; bug fixed 2026-08-15).
     # It enables only when we're somewhere already covered, so the driver can force a fresh
     # re-download of that region's map.
+    # fordtsr2pnw: operable only on a car whose camera reports the limit (PnwVehicle.camera_speed_limit). DISPLAY ONLY --
+    # no put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Tesla this
+    # greys it, and the driver's Lightning setting is left exactly as he set it.
+    if "FordSignSpeedLimit" in self._toggles:
+      self._toggles["FordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)
+
     if "RefreshLocationMap" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")
       self._toggles["RefreshLocationMap"].action_item.set_enabled(covered)
