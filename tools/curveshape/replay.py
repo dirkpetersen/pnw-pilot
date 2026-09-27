@@ -408,9 +408,9 @@ def main(argv=None):
   cache = os.path.join(args.out, "ticks.jsonl")
   if args.rescan or not os.path.exists(cache):
     ticks, inv = scan(ROOTS)
-    with open(cache, "w") as fo:
+    with open(cache, "w") as fh:
       for r in ticks:
-        fo.write(json.dumps(r) + "\n")
+        fh.write(json.dumps(r) + "\n")
     json.dump(inv, open(os.path.join(args.out, "inventory.json"), "w"), indent=1)
     errs = [r for r in inv if r["err"]]
     print(f"scanned {len(inv)} files, {sum(r['rec'] for r in inv)} records, {len(ticks)} unique moving Lightning ticks, " +
@@ -465,8 +465,8 @@ def main(argv=None):
       tag = classify(s) if name != "REMOVED" else ("REAL-LOST" if s["k"] and not s["noop"] and s["a_ref"] >= 2.3 else
                                                    ("NO-OP" if s["noop"] else ("UNJUDGED" if s["k"] is None else "ok")))
       P(f"  [{tag}]{' TOO-DEEP' if too_deep(s) else ''} " + fmt(s))
-  with open(os.path.join(args.out, "report.md"), "w") as fo:
-    fo.write("\n".join(L) + "\n")
+  with open(os.path.join(args.out, "report.md"), "w") as fh:
+    fh.write("\n".join(L) + "\n")
   json.dump({k: {"verdict": v[0], "evidence": v[1]} for k, v in G.items()},
             open(os.path.join(args.out, "gates.json"), "w"), indent=1)
   print("\n".join(L[:12 + len(G)]))

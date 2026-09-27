@@ -47,3 +47,16 @@ def test_main_prints_the_total(tmp_path, capsys, monkeypatch):
   assert "scanned 1 file(s), skipped 1 unparseable line(s)" in cap.out
   assert "1 unparseable line(s) skipped in total" in cap.err
   assert len(json.loads(out.read_text())["washouts"]) == 1
+
+
+def test_discrete_record_does_not_displace_the_tick_at_the_same_timestamp(tmp_path):
+  # curveshape2pnw: a {"ev":"mapdPath"} (or "steer"/"alert") record lands on the same 0.1 s grid as the tick
+  # records. Deduped by `t` alone it replaced the tick at that instant, dropping a steering-override tick.
+  d = tmp_path / "2026-09-26" / "lightning-x"
+  ticks = [dict(r, t=100.0 + i / 10) for i, r in enumerate(GOOD)]
+  lines = [json.dumps(ticks[0]), json.dumps(ticks[1]), json.dumps({"t": ticks[1]["t"], "ev": "mapdPath", "seq": 1}),
+           json.dumps(dict(ticks[2], ev="tick"))]
+  _write(d, lines)
+  recs = w._load_folder_records(str(d))
+  assert recs == [ticks[0], ticks[1], dict(ticks[2], ev="tick")]
+  assert w._clusters(recs)[0]["n"] == 3

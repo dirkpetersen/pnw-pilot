@@ -35,7 +35,7 @@ CLUSTER_GAP_S = 3.0             # ticks within this gap belong to the same overr
 
 
 def _load_folder_records(folder: str, skipped: dict[str, int] | None = None) -> list[dict]:
-  """All records from every ces_events*.jsonl in one drive folder, deduped by timestamp (the
+  """All state records from every ces_events*.jsonl in one drive folder, deduped by timestamp (the
   evening/final files overlap — same drive, re-pulled later) and time-sorted.
 
   cesretain2pnw: also picks up ROTATED generations. On-device rotation names them
@@ -56,6 +56,11 @@ def _load_folder_records(folder: str, skipped: dict[str, int] | None = None) -> 
           r = json.loads(line)
         except json.JSONDecodeError:
           bad += 1
+          continue
+        # curveshape2pnw: keyed by `t` alone, a record that is not a vehicle-state sample (e.g.
+        # {"ev":"mapdPath"}, no vEgo) on the same 0.1 s grid would displace the tick at that instant.
+        # Skip those. Full-state records such as {"ev":"adopt"} (vEgo/strPrs/strAng) are kept, as before.
+        if "vEgo" not in r:
           continue
         t = r.get("t")
         if isinstance(t, (int, float)):
