@@ -171,16 +171,16 @@ class TestLive:
     assert t_on == pytest.approx(math.sqrt(2.5 * R), abs=0.3)
 
   def test_live_raises_within_the_caps(self, monkeypatch, tmp_path):
-    """mapd reads the curve 1.45x sharper than the geometry (inside the band) at ~52 mph: today's price (~55 mph) is
-    below the agreed mean's ~60 mph, so live RAISES -- and every candidate that names the curve (near AND far) must be
-    priced, or the unpriced one keeps the old, lower number."""
-    pts = arc_path(1.45, r=356.0, n_arc=5)     # a 200 m arc: the polyline peak sits within 150 m of the candidate
+    """mapd reads the curve 1.3x sharper than the geometry (inside the x1.35 band) at ~51 mph: today's price (~53 mph)
+    is below the agreed mean's ~58 mph, so live RAISES -- and every candidate that names the curve (near AND far) must
+    be priced, or the unpriced one keeps the old, lower number."""
+    pts = arc_path(1.3, r=310.0, n_arc=5)      # a 200 m arc: the polyline peak sits within 150 m of the candidate
     off, _, _ = _run(monkeypatch, tmp_path / "off", points=pts, shape="off")
     on, recs, _ = _run(monkeypatch, tmp_path / "live", points=pts, shape="live")
     t_off = [t for t in _targets(off) if t is not None][-1]
     t_on = [t for t in _targets(on) if t is not None][-1]
     raw = pts[next(j for j, p in enumerate(pts) if p["velocity"] > 0)]["velocity"]
-    kp, km = 1.0 / 356.0, A_MAPD / raw ** 2
+    kp, km = 1.0 / 310.0, A_MAPD / raw ** 2
     want = math.sqrt(2.5 / (0.5 * (kp + km)))
     assert raw / MPH > 50.0 and t_on > t_off + 1.0
     assert t_on == pytest.approx(want, abs=0.3)

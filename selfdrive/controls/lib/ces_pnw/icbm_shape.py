@@ -10,7 +10,7 @@ where mapd is wrong.
 THE RULE (v1). Two readings of the same curve, both from mapd's own OSM nodes:
   k_poly  the map polyline's horizon-peak curvature (icbmK, 3-point circle fits, legs gated to [25, 300] m);
   k_mapd  mapd's own curvature, recovered from its rating: k_mapd = A_mapd / v_mapd^2 (A_mapd read live).
-Where they AGREE within x1.5 (either way) the candidate is priced at v = sqrt(A / mean(k_poly, k_mapd)), A = 2.5
+Where they AGREE within x1.35 (either way) the candidate is priced at v = sqrt(A / mean(k_poly, k_mapd)), A = 2.5
 m/s^2. Where they disagree NOTHING changes -- the reading that disagrees is the one that has been wrong in the corpus
 (s2.2: I-5 45.72 is mapSharper, I-5 46.64 / 44.85 are polySharper), and neither may veto the other (s2.3). Measured on
 210 mainline curves: the agreeing mean is within +-25 % of the truck's own curvature on 80 % (86 % for k >= 0.002).
@@ -48,7 +48,11 @@ from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_live as cl
 
 MPH = 0.44704
 
-SHAPE_BAND = 1.5                  # owner answer 2: agreement band, k_poly / k_mapd in [1/1.5, 1.5]
+# Agreement band, k_poly / k_mapd in [1/1.35, 1.35]. Owner 2026-09-24 answered x1.5; owner 2026-09-26 approved x1.35
+# after the live replay's G7 failed at x1.5: OR-34 WB 09-22 09:43:58, polyline 1.34x the measured curvature and mapd
+# 0.91x (ratio 1.46) priced 66.3 mph where the curve needed 70.2. Between 1.35 and 1.5 sits the polyline's over-read
+# tail (s2.3 p90 1.55); the 09-22 09:22 Salem latent phantom (ratio 1.37, needed ~113 mph) sits there too.
+SHAPE_BAND = 1.35
 SHAPE_RAW_MIN_MS = 50.0 * MPH     # owner answer 3: v1 only for mapd ratings >= 50 mph
 SHAPE_KN_MIN = 3                  # icbmKN: triplets that passed the spacing gate
 SHAPE_KD_MIN_M = 60.0             # the peak must be at least this far ahead

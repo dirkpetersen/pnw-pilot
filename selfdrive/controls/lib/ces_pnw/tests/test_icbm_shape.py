@@ -73,15 +73,50 @@ def test_the_mean_is_neither_the_sharper_nor_mapd_alone():
 
 
 class TestBand:
-  @pytest.mark.parametrize("ratio,why", [(1.49, "ok"), (1.51, "polySharper"), (1 / 1.49, "ok"), (1 / 1.51, "mapSharper")])
+  @pytest.mark.parametrize("ratio,why", [(1.34, "ok"), (1.36, "polySharper"), (1 / 1.34, "ok"), (1 / 1.36, "mapSharper")])
   def test_the_edges(self, ratio, why):
     km = A_MAPD / (65.0 * MPH) ** 2
     assert price(65.0, km * ratio)[1] == why
 
-  def test_the_band_is_x1_5_not_x1_35(self):
+  def test_the_band_is_x1_35_not_x1_5(self):
+    """Owner 2026-09-26: x1.35 (was x1.5, the 09-24 answer). A 1.3 still agrees; a 1.4 no longer does."""
     km = A_MAPD / (65.0 * MPH) ** 2
-    assert price(65.0, km * 1.4)[1] == "ok"
-    assert price(65.0, km / 1.4)[1] == "ok"
+    assert price(65.0, km * 1.3)[1] == "ok"
+    assert price(65.0, km / 1.3)[1] == "ok"
+    assert price(65.0, km * 1.4)[1] == "polySharper"
+    assert price(65.0, km / 1.4)[1] == "mapSharper"
+
+
+class TestG7:
+  """The two curves the x1.5 band let through (drives/2026-09-24/curveshape-replay/G7-ANALYSIS.md), with the cached
+  replay's own readings: mapd's rating (m/s) and the polyline peak icbmK. No coordinates."""
+
+  def test_or34_wb_0943_the_g7_failure_keeps_todays_price(self):
+    # 09-22 09:43:58 PT, OR-34 westbound: mapd 29.4 m/s (65.8 mph) -> k_mapd 0.002314, 0.91x the measured 0.00253;
+    # polyline 0.003386, 1.34x measured. Their ratio, 1.46, is outside x1.35 -> today's price (81.7, above the 69 set:
+    # discarded) stands. At x1.5 it priced 66.3 mph against a need of 70.2 (3.9 below, no lead): the G7 failure.
+    raw_mph, kp, truth = 29.4 / MPH, 0.003386, 0.00253
+    km = A_MAPD / 29.4 ** 2
+    assert kp / truth == pytest.approx(1.34, abs=0.005) and km / truth == pytest.approx(0.91, abs=0.005)
+    assert kp / km == pytest.approx(1.46, abs=0.01)
+    v, why, dr, k, _ = price(raw_mph, kp, d=127.0, kd=173.0, kn=10, posted_mph=55.0, set_mph=69.0)
+    assert (v, why, dr, k) == (None, "polySharper", "none", None)
+
+  def test_salem_0922_latent_phantom_at_1_37_is_rejected(self):
+    # 09-22 09:22:09 PT, I-5 SB south Salem: mapd 28.4 m/s (63.5 mph) and polyline 0.003403 both over-read a ~1,100 m
+    # sweeper (measured 0.00098, need ~113 mph) and agree at 1.37. x1.5 priced it 65.2 (hidden by a lead).
+    raw_mph, kp = 28.4 / MPH, 0.003403
+    km = A_MAPD / 28.4 ** 2
+    assert kp / km == pytest.approx(1.37, abs=0.005)
+    v, why, dr, _, _ = price(raw_mph, kp, d=182.0, kd=223.0, kn=19, posted_mph=65.0, set_mph=70.0)
+    assert (v, why, dr) == (None, "polySharper", "none")
+
+  def test_a_ratio_of_1_3_is_still_corroborated(self):
+    raw_mph = 29.4 / MPH
+    km = A_MAPD / 29.4 ** 2
+    v, why, dr, k, _ = price(raw_mph, km * 1.3, d=127.0, kd=173.0, kn=10, posted_mph=55.0, set_mph=69.0)
+    assert why == "ok" and dr == "lower" and v < legacy(raw_mph)
+    assert k == pytest.approx(0.5 * (km * 1.3 + km), rel=1e-12)
 
 
 class TestConfidence:
@@ -99,7 +134,7 @@ class TestConfidence:
       price(65.0, ok, stable=False)[1],                   # unstable
       price(61.1, 0.001)[1],                              # mapSharper
       price(73.8, 0.00433)[1],                            # polySharper
-      price(52.0, A_MAPD / (52.0 * MPH) ** 2 * 0.7, posted_mph=0.0)[1],   # noPosted (a raise, no posted limit)
+      price(52.0, A_MAPD / (52.0 * MPH) ** 2 * 0.75, posted_mph=0.0)[1],   # noPosted (a raise, no posted limit)
       s.shape_price(float("nan"), 300.0, 2.0, (0.002, 300.0, 5, True), True, 30.0, 30.0, 35.0, A, A)[1],  # badInput
     }
     assert seen == {"ok", "rawLow", "noA", "sparse", "notAhead", "near", "farApart", "unstable", "mapSharper",
@@ -134,34 +169,35 @@ class TestRaise:
     return A_MAPD / (raw_mph * MPH) ** 2
 
   def test_the_8_mph_cap(self):
-    # raw 62, poly reads 0.7x mapd: v = sqrt(2.5 / (0.85 km)) = 75.2 mph; today 62 * 1.35 * 0.92 = 77.0 -> that is a
-    # lowering. Use a tight-ish rating where today's price is near raw: 52 mph -> today 52 * 1.144 * 0.92 = 54.7.
-    kp = self.km(52.0) * 0.7
-    v, why, dr, _, _ = price(52.0, kp, posted_mph=80.0, set_mph=90.0)
-    want = math.sqrt(A / (0.5 * (kp + self.km(52.0))))
-    assert want > legacy(52.0) + s.RAISE_CAP_MS
-    assert (why, dr) == ("ok", "raise") and v == pytest.approx(legacy(52.0) + s.RAISE_CAP_MS, abs=1e-9)
+    # poly reads 0.75x mapd (inside the x1.35 band, 1/1.35 = 0.741): v = raw * sqrt(2.5 / 1.75) = 1.195 raw. At raw 62
+    # today's 62 * 1.35 * 0.92 = 77.0 is above that -> a lowering. Use a rating where today's price is near raw:
+    # 50.5 mph -> today 50.5 * 1.1125 * 0.92 = 51.7, shape 60.4 > 51.7 + 8.
+    kp = self.km(50.5) * 0.75
+    v, why, dr, _, _ = price(50.5, kp, posted_mph=80.0, set_mph=90.0)
+    want = math.sqrt(A / (0.5 * (kp + self.km(50.5))))
+    assert want > legacy(50.5) + s.RAISE_CAP_MS
+    assert (why, dr) == ("ok", "raise") and v == pytest.approx(legacy(50.5) + s.RAISE_CAP_MS, abs=1e-9)
 
   def test_the_posted_plus_10_cap(self):
-    kp = self.km(52.0) * 0.7
-    v, _, dr, _, _ = price(52.0, kp, posted_mph=50.0, set_mph=90.0)
-    assert dr == "raise" and v == pytest.approx(60.0 * MPH, abs=1e-9)
+    kp = self.km(50.5) * 0.75
+    v, _, dr, _, _ = price(50.5, kp, posted_mph=45.0, set_mph=90.0)
+    assert dr == "raise" and v == pytest.approx(55.0 * MPH, abs=1e-9)
 
   def test_the_set_caps_it(self):
-    kp = self.km(52.0) * 0.7
-    v, _, dr, _, _ = price(52.0, kp, posted_mph=80.0, set_mph=57.0)
+    kp = self.km(50.5) * 0.75
+    v, _, dr, _, _ = price(50.5, kp, posted_mph=80.0, set_mph=57.0)
     assert dr == "raise" and v == pytest.approx(57.0 * MPH, abs=1e-9)
 
   def test_no_posted_limit_no_raise(self):
-    kp = self.km(52.0) * 0.7
+    kp = self.km(50.5) * 0.75
     for posted in (0.0, None):
-      v, why, dr, _, _ = price(52.0, kp, posted_mph=posted)
-      assert (why, dr) == ("noPosted", "held") and v == pytest.approx(legacy(52.0), abs=1e-12)
+      v, why, dr, _, _ = price(50.5, kp, posted_mph=posted)
+      assert (why, dr) == ("noPosted", "held") and v == pytest.approx(legacy(50.5), abs=1e-12)
 
   def test_a_posted_limit_below_todays_price_holds_it(self):
-    kp = self.km(52.0) * 0.7
-    v, why, dr, _, _ = price(52.0, kp, posted_mph=40.0)       # posted + 10 = 50 < today's 54.7
-    assert dr == "held" and v == pytest.approx(legacy(52.0), abs=1e-12)
+    kp = self.km(50.5) * 0.75
+    v, why, dr, _, _ = price(50.5, kp, posted_mph=40.0)       # posted + 10 = 50 < today's 51.7
+    assert dr == "held" and v == pytest.approx(legacy(50.5), abs=1e-12)
 
   def test_a_lowering_is_exact_and_uncapped(self):
     kp = self.km(68.0) * 1.25
