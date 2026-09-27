@@ -135,6 +135,7 @@ import time
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.sign_limit import SignLimitSelector   # fordtsr2pnw
+from openpilot.system.mapd.coverage import region_and_key_for_gps                          # fordtsr2pnw: US states only
 
 MPH_TO_MS = 0.44704
 MILE_M = 1609.344
@@ -227,6 +228,10 @@ SA_ICBM_FRESH_S = 2.0
 # own first-failure/count state.
 # silentexc3pnw: so does the MapSpeedLimit read in _read_speed_limit.
 POLICE_READ_ERR_LOG_S = 60.0
+# fordtsr2pnw: the camera speed limit is read as mph, so it is used in US states only. A LastGPSPosition fix older than this
+# names no region (camera off). The region only changes at a border -- a customs stop -- so a few minutes of GPS outage
+# (a tunnel, a garage) must not switch the source; an hour-old fix must not decide it.
+REGION_FIX_MAX_AGE_S = 300.0
 
 # limitahead2pnw (owner 2026-09-24, "just do 1 and 2 -- the higher the speed the sooner you need to start slowing
 # down"). drives/2026-09-24/limit-drop-1857: at a 60 -> 40 boundary the truck was still at 74 mph, because this module
@@ -415,6 +420,8 @@ class SpeedAdjustController:
     self._sign_on_err_n = 0
     self._sign_cs_err_t = None
     self._sign_cs_err_n = 0
+    self._sign_pos_err_t = None
+    self._sign_pos_err_n = 0
 
   # ---- input reads (params only; ~1 Hz) -------------------------------------
   def _read_speed_limit(self) -> float:
@@ -530,7 +537,33 @@ class SpeedAdjustController:
         self._sign_cs_err_t = now
         self._sign_cs_err_n = 0
     ann = self._next_raw[0] if self._next_raw is not None else None
-    return self._sign.select(now, map_sl, self._map_fresh, ann, num, st, self._sign_on)
+    region, region_us = self._read_region(now)
+    la_n = self._la["n"] if self._la is not None and self._la["live"] else None
+    return self._sign.select(now, map_sl, self._map_fresh, ann, num, st, self._sign_on, region, region_us, la_n)
+
+  def _read_region(self, now: float):
+    """fordtsr2pnw: (region code or None, is a US state) of the LastGPSPosition fix, via mapd's own coverage table.
+    No fix, a fix older than REGION_FIX_MAX_AGE_S, or an unreadable one -> (None, False): the camera is OFF (fail safe;
+    the selector logs the change). An unreadable one is also logged here (Rule 2); a missing one is normal."""
+    try:
+      pos = self.mem_params.get("LastGPSPosition", return_default=True) if self.mem_params is not None else None
+      if pos is None:
+        return None, False
+      if isinstance(pos, (bytes, str)):
+        pos = json.loads(pos)
+      age = now - float(pos["ts"])
+      if not math.isfinite(age) or age > REGION_FIX_MAX_AGE_S:
+        return None, False
+      code, key = region_and_key_for_gps(float(pos["latitude"]), float(pos["longitude"]))
+      return code, bool(key) and key.startswith("us_state.")
+    except Exception as e:
+      self._sign_pos_err_n += 1
+      if self._sign_pos_err_t is None or now - self._sign_pos_err_t >= POLICE_READ_ERR_LOG_S:
+        cloudlog.exception(f"speedadjust: LastGPSPosition unreadable ({type(e).__name__}) -- region unknown, camera " +
+                           f"speed limit OFF while this lasts ({self._sign_pos_err_n} failed read(s) since the last log)")
+        self._sign_pos_err_t = now
+        self._sign_pos_err_n = 0
+      return None, False
 
   def _read_police(self):
     if self.mem_params is None:
@@ -978,8 +1011,9 @@ class SpeedAdjustController:
       "laEvN": self._la_ev_n,
       # fordtsr2pnw: the camera speed limit vs the map. slCam = the number on the sign (valid only), slCamSt = its
       # carState status, slMap = the map reading (m/s), slSrc = where the raw limit came from (map / camera / hold),
-      # slWhy = why (agree / cameraOverride / cameraAhead / noMap / pending / heldHigher / stale / noSign / lotSign /
-      # toggleOff / unavailable). All None on a car without the capability (the Tesla).
+      # slWhy = why (agree / cameraOverride / cameraAhead / noMap / pending / heldHigher / holdExpired / lookAhead /
+      # region / stale / noSign / lotSign / toggleOff / unavailable). All None on a car without the capability (the
+      # Tesla).
       "slCam": self._sign.cam if self._sign else None,
       "slCamSt": self._sign.cam_st if self._sign else None,
       "slMap": _r(self._sign.map_sl) if self._sign else None,

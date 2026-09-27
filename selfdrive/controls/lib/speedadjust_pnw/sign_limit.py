@@ -20,6 +20,8 @@ it). "prev" = what this returned last time (the working limit it may not raise).
 known map and the camera agreed.
   status unavailable (the car does not decode it) ....... map                   why "unavailable" (logged: the capability
                                                                                says this car has it)
+  not in a US state, or position unknown ............... map, EVEN WITH NO MAP  why "region" (the number is read as mph;
+                                                                               a km/h country's 50 would read 50 mph)
   status stale / noLimit / unreadable .................. map                   why "stale" / "noSign"
   a sign below 15 mph (a parking lot's 5 / 10) ......... map                   why "lotSign"
   map unknown (0, or mapd not publishing) .............. camera, ALWAYS, whatever the toggle says:
@@ -32,6 +34,9 @@ known map and the camera agreed.
   camera < map, == the lower limit mapd announces ahead  camera at once         "cameraAhead"     (18:57: 7.2 s early)
   camera > map, camera <= prev, camera == agreed,
     held >= 3 s ........................................ camera (a HOLD)        "cameraOverride"  (19:02: map's false 25)
+      ...but never for more than SIGN_HOLD_MAX_S ....... map                   "holdExpired"
+      ...and never against the limit a LIVE look-ahead
+         announced (the look-ahead owns that drop) ..... map                   "lookAhead"
   camera > map, otherwise .............................. map                   "heldHigher"      (tunnel stale 50, on-ramps)
 The two HIGHER-camera guards were found by replaying 2026-09-24 (19:04:45 PT): mapd dropped out for 7 s just before the
 SR 99 tunnel while the camera had shown its stale 50 for 65 s. Timed from the camera's first 50, the no-map raise passed
@@ -51,6 +56,11 @@ SIGN_CONFIRM_S = 3.0             # a camera value must persist this long before 
 SIGN_RAISE_S = 10.0              # ...and this long before it may RAISE the working limit (map unknown only). Raising is
                                  # the risky direction: the tunnel's stale 50 and the on-ramp jumps are all raises.
 SIGN_EQ_TOL = 1.0 * MPH_TO_MS    # "agree" -- the report's definition (|camera - mapd| < 1 mph)
+SIGN_HOLD_MAX_S = 8.0            # the longest the camera may HOLD a map-agreed limit against a lower map. 19:02's false 25
+                                 # lasted 4.95 s, which the 1 Hz read sees as 4-6 reads; 8 s clears that with margin (the
+                                 # same reasoning and value as the look-ahead's LA_PROMOTE_HOLD_S). A real drop the camera
+                                 # is merely late for (median +1.8 s, up to 12 s on 09-24; a freeway 70 held down an
+                                 # off-ramp onto a 25) must not be held longer (Fable review 2026-09-27).
 SIGN_MIN_MPH = 15.0              # a sign below this is a parking-lot / driveway sign, not a road's limit: ignored. Found by
                                  # replaying 2026-09-24: the module KEEPS the last value (23 of 24 routes started with the
                                  # lot's 5), so a 5 or 10 rode out onto the road -- 11:35:18 PT a 5 against the map's 40
@@ -66,6 +76,8 @@ class SignLimitSelector:
     self._raise_t = None         # when the current no-map raise became eligible (map unknown, camera above prev)
     self._raise_v = 0.0          # ...and the camera value it is for
     self._agreed = 0.0           # the last value the known map and the camera agreed on (m/s), 0 = none yet
+    self._hold_t = None          # when the current hold against a lower map began
+    self.region = None           # the region code the last read was judged in (telemetry / log)
     # telemetry, read by SpeedAdjustController._publish_status
     self.src = None              # "map" / "camera" / "hold" (the previous working limit, kept while the camera persists)
     self.why = None
@@ -74,11 +86,12 @@ class SignLimitSelector:
     self.map_sl = None           # the map reading (m/s, 0 = unknown)
 
   def select(self, now: float, map_sl: float, map_fresh: bool, ann_sl, cam_num: float, cam_status: str,
-             use_camera: bool) -> float:
+             use_camera: bool, region=None, region_us: bool = False, la_n=None) -> float:
     """map_sl: the sanity-checked MapSpeedLimit (m/s, 0 = none). map_fresh: mapd is publishing (NextMapSpeedLimit is
     fresh) -- a dead mapd leaves MapSpeedLimit at its last value. ann_sl: the lower limit mapd announces ahead (m/s) or
-    None. cam_num: the number on the sign (the unit is the region's: mph on US roads -- NOT the car's unit flag, which
-    follows the cluster). use_camera: the FordSignSpeedLimit toggle."""
+    None. cam_num: the number on the sign, read as MPH -- so the camera is used in US STATES ONLY (region_us; NOT the
+    car's unit flag, which follows the cluster). region: the region code for the log (None = position unknown).
+    use_camera: the FordSignSpeedLimit toggle. la_n: the limit (m/s) a LIVE look-ahead episode announced, else None."""
     cam = float(cam_num) * MPH_TO_MS if cam_status == "valid" else 0.0
     if not (math.isfinite(cam) and 0.0 < cam <= SANE_MAX_SL):
       cam = 0.0
@@ -101,8 +114,12 @@ class SignLimitSelector:
         return prev, "hold", why
       return map_sl, "map", why
 
+    self.region = region
+    holding = False
     if cam_status == "unavailable":
       out, src, why = map_sl, "map", "unavailable"
+    elif not region_us:
+      out, src, why = map_sl, "map", "region"
     elif cam <= 0.0:
       out, src, why = map_sl, "map", ("lotSign" if lot else "noSign" if cam_status == "noLimit" else "stale")
     elif not map_known:
@@ -135,11 +152,24 @@ class SignLimitSelector:
       if prev <= 0.0 or cam > prev + SIGN_EQ_TOL or abs(cam - self._agreed) > SIGN_EQ_TOL:
         # it would raise the working limit, or hold a value the map never confirmed: never while the map is known
         out, src, why = map_sl, "map", "heldHigher"
-      elif held >= SIGN_CONFIRM_S:
-        out, src, why = cam, "camera", "cameraOverride"   # it holds the working limit against a map drop
+      elif la_n is not None and abs(map_sl - la_n) <= SIGN_EQ_TOL:
+        # The map just produced the drop a LIVE look-ahead counted down to. The look-ahead owns it (it materializes on
+        # this reading, and it is restorable if the drop proves false). Holding here made it abort "passed" and restore
+        # the driver's set inside the lower zone (Fable review 2026-09-27).
+        out, src, why = map_sl, "map", "lookAhead"
       else:
-        out, src, why = pending("pending")
+        holding = True
+        if self._hold_t is None:
+          self._hold_t = now
+        if now - self._hold_t >= SIGN_HOLD_MAX_S:
+          out, src, why = map_sl, "map", "holdExpired"
+        elif held >= SIGN_CONFIRM_S:
+          out, src, why = cam, "camera", "cameraOverride"   # it holds the working limit against a map drop
+        else:
+          out, src, why = pending("pending")
 
+    if not holding:
+      self._hold_t = None                    # a hold is one continuous stretch
     if why != "heldHigher" or map_known:
       self._raise_t = None                   # a no-map raise must be continuous
     if why == "agree":
@@ -153,10 +183,13 @@ class SignLimitSelector:
     """Rule 2: every change of source or reason is a cloudlog event (camera and map values alongside), and a camera that
     cannot be used says so."""
     kw = dict(why=why, out=round(float(out), 2), cam=self.cam, camSt=self.cam_st, camMs=round(float(cam), 2),
-              map=round(float(map_sl), 2), mapFresh=bool(map_fresh), held=round(float(held), 1))
+              map=round(float(map_sl), 2), mapFresh=bool(map_fresh), held=round(float(held), 1), region=self.region)
     cloudlog.event("speedadjust_sign_limit", **kw)
     if why == "unavailable":
       cloudlog.error("speedadjust: this car declares a camera speed limit but carState reports it unavailable -- " +
                      "map limit only (is the opendbc pin older than fordtsr2pnw?)")
+    elif why == "region":
+      cloudlog.warning(f"speedadjust: camera speed limit OFF -- not in a US state (region {self.region}; None = position " +
+                       "unknown). The sign number is read as mph; map limit only, even with no map")
     elif why == "stale":
       cloudlog.warning(f"speedadjust: camera speed limit not usable ({self.cam_st}) -- map limit only while this lasts")

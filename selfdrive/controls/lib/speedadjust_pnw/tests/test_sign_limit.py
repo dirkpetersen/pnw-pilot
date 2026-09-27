@@ -35,9 +35,15 @@ class _Clock:
     return cls.t
 
 
+SEATTLE = (47.60, -122.33)
+VANCOUVER_BC = (49.28, -123.12)
+PORTLAND = (45.52, -122.68)
+
+
 class _Mem:
   def __init__(self):
     self.map_mph, self.nxt, self.mapd_alive, self.police, self.calls = 0.0, None, True, None, []
+    self.pos, self.pos_age = SEATTLE, 0.5      # LastGPSPosition; pos None = never written, "bad" = garbage
 
   def get(self, k, return_default=True):
     if k == "MapSpeedLimit":
@@ -45,6 +51,12 @@ class _Mem:
     if k == "NextMapSpeedLimit":
       n, d = self.nxt if self.nxt else (0.0, 0.0)
       return next_limit_payload(n * MPH, d, _Clock.t - (0.0 if self.mapd_alive else 30.0))
+    if k == "LastGPSPosition":
+      if self.pos is None:
+        return None
+      if self.pos == "bad":
+        return "{not json"
+      return json.dumps({"latitude": self.pos[0], "longitude": self.pos[1], "src": "device", "ts": _Clock.t - self.pos_age})
     if k == "LocationServices":
       return json.dumps({"police": self.police}) if self.police else "{}"
     return None
@@ -442,20 +454,140 @@ class TestTelemetry:
     assert set(st) <= set(SA_TELE_KEYS), set(st) - set(SA_TELE_KEYS)
 
 
+class TestLookAheadOwnsItsDrop:
+  """Fable review 2026-09-27: map 60 announcing 40, look-ahead LIVE, truck at 60 with the set at 66. The map drops to 40
+  at the boundary, the camera (agreed on 60) is late. Holding 60 made the look-ahead abort "passed" and restore 66 mph
+  inside the 40 zone."""
+
+  def _drive(self, monkeypatch, lag):
+    r = Rig(monkeypatch, set_mph=66.0, la_mode=sa.LA_LIVE)
+    r.v = 60.0 * MPH
+    r.run(5.0, map_mph=60, cam=60)
+    d = 600.0
+    while d > 0.0:
+      r.run(1.0, nxt=(40, d))
+      d -= r.v * 1.0
+    r.run(lag, map_mph=40, cam=60)
+    r.run(15.0, cam=40)
+    return r
+
+  @pytest.mark.parametrize("lag", [3.0, 8.0])
+  def test_a_late_camera_never_aborts_or_restores_the_look_ahead(self, monkeypatch, lag):
+    r = self._drive(monkeypatch, lag)
+    aborts = [kw for n, kw in r.events if n == "speedadjust_lookahead" and kw.get("action") == "abort"]
+    assert aborts == [], aborts
+    assert r.c._la_why == "promote"
+    t_drop = max(t for t, lim, _, _ in r.trace if lim > 50)       # the last moment the working limit was 60
+    assert max(out for t, _, _, out in r.trace if t > t_drop) <= 44.0 + 0.1, "no restore above the 40 zone's target"
+    assert any(why == "lookAhead" for _, _, why, _ in r.trace)
+
+  def test_control_the_hold_is_kept_with_a_shadow_look_ahead(self, monkeypatch):
+    """The 19:02 benefit stays wherever the look-ahead does not act: a SHADOW episode toward the same announced 25
+    (mapd announced it 675 m ahead) must not release the hold."""
+    r = Rig(monkeypatch, set_mph=66.0, la_mode=sa.LA_SHADOW)
+    r.v = 47 * MPH
+    r.run(10.0, map_mph=45, cam=45)
+    d = 300.0
+    while d > 0.0:
+      r.run(1.0, nxt=(25, d))
+      d -= r.v
+    assert r.c._la is not None and not r.c._la["live"], "a shadow episode must be running"
+    r.run(4.9, map_mph=25, nxt=(25, 1.0))
+    assert r.limit == 45 and r.c._sign.why == "cameraOverride"
+
+
+class TestHoldBound:
+  def test_off_ramp_70_held_onto_a_25_ends_within_the_bound(self, monkeypatch):
+    """13:24:47 variant (Fable): the camera keeps the freeway's agreed 70 down the off-ramp onto a 25 street."""
+    r = Rig(monkeypatch, set_mph=75.0)
+    r.run(10.0, map_mph=70, cam=70)
+    t0 = r.trace[-1][0]
+    r.v = 25.0 * MPH
+    r.run(60.0, map_mph=25, cam=70)
+    t_25 = min(t for t, lim, _, _ in r.trace if t > t0 and lim < 30)
+    # the bound, + the first read's phase (1 s), + the ordinary 2 s drop confirm
+    assert t_25 - t0 <= sl_mod.SIGN_HOLD_MAX_S + 1.0 + 2.0 + 0.1, t_25 - t0
+    assert t_25 - t0 >= sl_mod.SIGN_HOLD_MAX_S, "the hold itself must still work"
+    assert r.limit == 25 and r.c._sign.why == "heldHigher"
+    assert any(why == "holdExpired" for _, _, why, _ in r.trace)
+
+  def test_each_hold_gets_its_own_bound(self, monkeypatch):
+    """Two separate false drops (the map back in agreement between them) are two holds, not one long one."""
+    r = Rig(monkeypatch)
+    r.run(10.0, map_mph=45, cam=45)
+    r.run(5.0, map_mph=25)
+    r.run(10.0, map_mph=45)
+    r.run(5.0, map_mph=25)
+    assert min(lim for _, lim, _, _ in r.trace) == pytest.approx(45, abs=0.1)
+
+  def test_the_1902_false_25_is_still_held(self, monkeypatch):
+    r = Rig(monkeypatch)
+    r.run(10.0, map_mph=45, cam=45)
+    r.run(5.0, map_mph=25)
+    r.run(20.0, map_mph=50)
+    assert min(lim for _, lim, _, _ in r.trace) == pytest.approx(45, abs=0.1)
+
+
+KMH = 1000.0 / 3600.0
+
+
+class TestRegion:
+  def test_canada_map_known_80_to_50_kmh_works_map_only(self, monkeypatch):
+    """Fable: in BC a "50" sign read as 50 mph (80 km/h) "agreed" with the map's 80 km/h and then held it through the
+    50 km/h zone. Outside a US state the camera must not be used at all."""
+    r = Rig(monkeypatch, set_mph=55.0)
+    r.mem.pos = VANCOUVER_BC
+    r.run(10.0, map_mph=80 * KMH / MPH, cam=50)
+    r.run(30.0, map_mph=50 * KMH / MPH, cam=50)
+    assert r.c._sl == pytest.approx(50 * KMH, abs=0.05)
+    assert (r.c._sign.why, r.c._sign.region) == ("region", "CA")
+    assert any("not in a US state" in w for w in r.warnings), r.warnings
+
+  def test_canada_no_map_the_camera_is_not_used(self, monkeypatch):
+    r = Rig(monkeypatch, set_mph=55.0)
+    r.mem.pos = VANCOUVER_BC
+    r.run(15.0, map_mph=0, cam=90)
+    assert (r.limit, r.c._sign.why) == (0, "region")
+
+  @pytest.mark.parametrize("pos", [SEATTLE, PORTLAND])
+  def test_us_states_are_unchanged(self, monkeypatch, pos):
+    r = Rig(monkeypatch)
+    r.mem.pos = pos
+    r.run(15.0, map_mph=0, cam=40)
+    assert (r.limit, r.c._sign.why) == (40, "noMap")
+
+  @pytest.mark.parametrize("pos, age", [(None, 0.5), (SEATTLE, sa.REGION_FIX_MAX_AGE_S + 1.0), ("bad", 0.5)])
+  def test_unknown_position_turns_the_camera_off(self, monkeypatch, pos, age):
+    r = Rig(monkeypatch)
+    r.mem.pos, r.mem.pos_age = pos, age
+    r.run(15.0, map_mph=0, cam=40)
+    assert (r.limit, r.c._sign.why, r.c._sign.region) == (0, "region", None)
+    if pos == "bad":
+      assert any("LastGPSPosition unreadable" in e for e in r.errors), r.errors
+
+  def test_crossing_the_border_logs_once(self, monkeypatch):
+    r = Rig(monkeypatch)
+    r.run(10.0, map_mph=60, cam=60)
+    r.mem.pos = VANCOUVER_BC
+    r.run(20.0, map_mph=60 * 1.609 * KMH / MPH)
+    whys = [kw["why"] for n, kw in r.events if n == "speedadjust_sign_limit"]
+    assert whys.count("region") == 1, whys
+
+
 class TestSelectorUnit:
   """Direct rules, no controller. Values in m/s."""
 
   def test_pending_holds_the_camera_source(self):
     s = SignLimitSelector()
     for i in range(5):
-      s.select(float(i), 70 * MPH, True, None, 55, "valid", True)
+      s.select(float(i), 70 * MPH, True, None, 55, "valid", True, "WA", True)
     assert s.src == "camera"
-    out = s.select(5.0, 70 * MPH, True, None, 50, "valid", True)          # the camera moves on inside the zone
+    out = s.select(5.0, 70 * MPH, True, None, 50, "valid", True, "WA", True)          # the camera moves on inside the zone
     assert (s.src, s.why, round(out / MPH)) == ("hold", "pending", 55)
 
   def test_a_value_over_the_sane_bound_is_not_a_camera_value(self):
     s = SignLimitSelector()
-    out = s.select(0.0, 60 * MPH, True, None, 250, "valid", True)
+    out = s.select(0.0, 60 * MPH, True, None, 250, "valid", True, "WA", True)
     assert (round(out / MPH), s.why, s.cam) == (60, "stale", None)
 
 
