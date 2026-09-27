@@ -16,6 +16,7 @@ import stat
 from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
 from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
 from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import MODES as SHAPE_MODES   # curveshape2pnw
+from openpilot.selfdrive.controls.lib.drive_helpers import lat_accel_target   # curvebrain2pnw: curve_lat_a's clip
 
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
@@ -351,6 +352,99 @@ def _load_curve_config() -> dict:
   return cfg
 
 
+# curvebrain2pnw 1/8 (docs/SHARED-CURVE-BRAIN-DESIGN.md s3.4, s5.2): the shared curve brain's per-car lateral target and
+# the Tesla VTSC's consumption mode. NOTHING CONSUMES EITHER YET -- stage 1 only reads, bounds and logs them.
+# The Tesla's knobs live in their own curve.json section, {"tesla": {"curve_lat_a": .., "curve_brain": ..}}, parsed by
+# _load_tesla_curve_config() and only on the car that has the capability. The "lightning" section and its loader are
+# untouched, and _load_curve_config never reads "tesla": one device serves both cars, and nothing written for the Tesla
+# may move a Lightning value.
+CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning's target, and any car without its own
+TESLA_CURVE_LAT_A_DEFAULT = 2.8    # m/s^2: design D1's recommended default. NOT yet signed off by the owner.
+_TESLA_CURVE_LAT_A_BOUNDS = (2.0, 3.2)
+CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
+CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
+CURVE_BRAIN_DEFAULT = "shadow"     # the Tesla's default: compute and log, change nothing
+
+
+def _parse_curve_brain_mode(raw) -> str | None:
+  """curve.json's tesla.curve_brain -> a mode, or None when it is not one (the caller says so)."""
+  if isinstance(raw, str) and raw.strip().lower() in CURVE_BRAIN_MODES:
+    return raw.strip().lower()
+  if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw == 0:
+    return "off"
+  return None
+
+
+def _load_tesla_curve_config() -> dict:
+  """curvebrain2pnw: curve.json's "tesla" section -> {"curve_lat_a", "curve_brain", "why"}. NEVER raises.
+
+  Its own parse of the same file, key by key: a bad value costs that key its default, never the section. Rule 2, the
+  _load_curve_config discipline: a missing file or no "tesla" section is the documented default and silent; an
+  unusable / unreadable / malformed file, a section that is not an object, a value that is not a finite number and a
+  mode that is not one are each a cloudlog.error naming the path; a value clamped into bounds is a cloudlog.warning.
+  `why` says where the values came from ("default", "curve.json", or "INVALID ..." -- CESController logs that as an
+  error at start too)."""
+  cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT, "why": "default"}
+  path = CURVE_CONFIG_PATH
+  try:
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > _CURVE_CONFIG_MAX_BYTES:
+      cloudlog.error(f"pnw_vehicle: {path} IGNORED for the tesla section (not a regular file, or {st.st_size} B > " +
+                     f"{_CURVE_CONFIG_MAX_BYTES} B) -- the curve brain uses its defaults")
+      cfg["why"] = "default (curve.json unusable)"
+      return cfg
+    with open(path) as f:
+      data = json.load(f)
+  except FileNotFoundError:
+    return cfg                                   # no curve.json: normal
+  except Exception as e:
+    cloudlog.error(f"pnw_vehicle: {path} unreadable/malformed ({type(e).__name__}: {e}) -- the curve brain's tesla " +
+                   "section uses its defaults")
+    cfg["why"] = f"default (curve.json unreadable: {type(e).__name__})"
+    return cfg
+  # The key parse is guarded like the read above (Fable F1): json.load turns a 309+ digit literal into an int that
+  # math.isfinite / float() cannot convert (OverflowError), and a raise here would take down EVERY process that builds
+  # a Tesla PnwVehicle. Any failure is logged and the whole section falls back to its defaults.
+  try:
+    tesla = data.get("tesla") if isinstance(data, dict) else None
+    if tesla is None:
+      return cfg                                   # no section: normal
+    if not isinstance(tesla, dict):
+      cloudlog.error(f"pnw_vehicle: {path} tesla section IGNORED (expected an object, got {type(tesla).__name__}) -- " +
+                     "the curve brain uses its defaults")
+      cfg["why"] = f"INVALID curve.json tesla section ({type(tesla).__name__}) -> defaults"
+      return cfg
+    bad, clamped = [], []
+    if "curve_lat_a" in tesla:
+      raw = tesla["curve_lat_a"]
+      if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
+        v = _clamp(float(raw), *_TESLA_CURVE_LAT_A_BOUNDS)
+        if v != raw:
+          clamped.append(f"curve_lat_a={raw}->{v}")
+        cfg["curve_lat_a"] = v
+      else:
+        bad.append(f"curve_lat_a {raw!r:.24} is not a finite number -> {TESLA_CURVE_LAT_A_DEFAULT}")
+    if "curve_brain" in tesla:
+      mode = _parse_curve_brain_mode(tesla["curve_brain"])
+      if mode is None:
+        bad.append(f"curve_brain {tesla['curve_brain']!r:.24} is not one of {'/'.join(CURVE_BRAIN_MODES)} -> " +
+                   CURVE_BRAIN_DEFAULT)
+      else:
+        cfg["curve_brain"] = mode
+    if clamped:
+      cloudlog.warning(f"pnw_vehicle: {path}: tesla value(s) clamped into bounds: {', '.join(clamped)}")
+    if bad:
+      cloudlog.error(f"pnw_vehicle: {path}: tesla value(s) NOT honored: {'; '.join(bad)}")
+      cfg["why"] = "INVALID curve.json tesla: " + "; ".join(bad)
+    else:
+      cfg["why"] = "curve.json"
+  except Exception as e:
+    cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
+    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT,
+            "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
+  return cfg
+
+
 # fpsidebar2pnw: fingerprint -> short driver-facing display name (FINGERPRINT2XNOR.md /
 # pending-work "Fingerprint sidebar"). This is the ONE place that maps a carFingerprint string to a
 # friendly name — same capability-view discipline as the rest of this module: feature/UI code asks
@@ -609,6 +703,12 @@ class PnwVehicle:
     # read the tunable ramp ONCE at construction (defensive; defaults when absent = the intended ramp)
     self._curve_cfg = _load_curve_config()
 
+    # curvebrain2pnw 1/8: VTSC on this car may consume the shared curve brain (design s5; nothing does yet). The Raven
+    # HW3 only: its lateral target was measured on this car (design s5.4), and curve.json's "tesla" section is read
+    # ONLY here, so on every other car -- the Lightning above all -- it is never even opened.
+    self.curve_brain_vtsc: bool = fp == "TESLA_MODEL_S_HW3"
+    self._tesla_curve_cfg = _load_tesla_curve_config() if self.curve_brain_vtsc else None
+
     # rain2pnw: wet-weather curve margin — applies to BOTH cars, SAME reduction (not the Lightning-only
     # curve penalty). Magnitudes from the device-local tunable (defaults 3/5 mph, read once here); the
     # live tier is pushed in by the controllers each ~1 Hz via set_rain_tier so a mid-drive change (it
@@ -811,6 +911,36 @@ class PnwVehicle:
     """restorehold2pnw: the map polyline's own (higher) trigger bar for the restore hold (m/s^2). 0.0 = polyline off
     -- every non-Lightning car, and the Lightning when curve.json sets it to 0."""
     return self._curve_cfg["icbm_restore_hold_poly_lat_accel"] if self.lightning_curve_slow else 0.0
+
+  # ---- curvebrain2pnw 1/8: the shared curve brain's per-car config. NOTHING CONSUMES THESE YET. ----------------
+  def curve_lat_a(self, v_ego) -> float:
+    """The lateral accel (m/s^2) the shared curve brain prices a curve at on this car (design s3.4).
+
+    Tesla (curve_brain_vtsc): curve.json tesla.curve_lat_a (default 2.8, bounds [2.0, 3.2]), capped at openpilot's own
+    lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
+    >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
+    Every other car: CURVE_LAT_A_DEFAULT (2.5). On the Lightning it is for the brain's future need layer only: ICBM
+    keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a, icbm_shape_lat_a(_70), the restore-hold bars)."""
+    if not self.curve_brain_vtsc:
+      return CURVE_LAT_A_DEFAULT
+    return min(self._tesla_curve_cfg["curve_lat_a"], lat_accel_target(v_ego) - CURVE_LAT_CLIP_MARGIN)
+
+  @property
+  def curve_lat_a_cfg(self) -> float:
+    """curve_lat_a before the lateral-clip cap: the configured value (Tesla) or CURVE_LAT_A_DEFAULT."""
+    return self._tesla_curve_cfg["curve_lat_a"] if self.curve_brain_vtsc else CURVE_LAT_A_DEFAULT
+
+  @property
+  def curve_brain(self) -> str:
+    """What VTSC may do with the shared curve brain: "off" / "shadow" / "lower" / "raise" (design s5.2). The Tesla
+    defaults to "shadow"; every other car reads "off" (the Lightning's VTSC never consumes it)."""
+    return self._tesla_curve_cfg["curve_brain"] if self.curve_brain_vtsc else "off"
+
+  @property
+  def curve_brain_why(self) -> str:
+    """Where curve_brain / curve_lat_a came from: "default", "curve.json", "INVALID ...", "default (curve.json ...)",
+    or "noCapability"."""
+    return self._tesla_curve_cfg["why"] if self.curve_brain_vtsc else "noCapability"
 
   def gentle_launch_accel(self, v_ego: float) -> float:
     """standstillsoft2pnw: a soft accel CEILING (m/s^2) out of a standstill so a follow-launch behind a

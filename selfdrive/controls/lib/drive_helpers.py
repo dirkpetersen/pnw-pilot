@@ -273,10 +273,10 @@ class _LatAccelSchedule:
       cloudlog.error(f"drive_helpers: failed to load {LAT_ACCEL_LIMITS_PATH}, reverting to flat " +
                      f"{MAX_LATERAL_ACCEL_NO_ROLL} m/s^2 fail-safe ({type(e).__name__}: {e})")
 
-  def limit(self, v_ego: float) -> float:
-    """Returns the slewed effective cap. LAT_ACCEL_SLEW_RATE-limits the move toward the freshly
-    computed target so a schedule swap (hot-reload, or the fail-safe revert to flat 3.0) is a gentle
-    ramp rather than a single-tick step in the curvature clamp; the target itself is unslewed."""
+  def target(self, v_ego: float) -> float:
+    """The UNSLEWED cap at this speed: the loaded schedule, or the flat fail-safe. limit() slews toward it.
+    curvebrain2pnw: split out of limit() unchanged (same statements, same order) so the curve brain can read the
+    schedule without moving the slew state clip_curvature owns."""
     self._refresh()
 
     try:
@@ -290,7 +290,13 @@ class _LatAccelSchedule:
       target = float(np.interp(v_ego_f, self._xs, self._ys))
       if not math.isfinite(target):
         target = MAX_LATERAL_ACCEL_NO_ROLL
-    target = float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP))
+    return float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP))
+
+  def limit(self, v_ego: float) -> float:
+    """Returns the slewed effective cap. LAT_ACCEL_SLEW_RATE-limits the move toward the freshly
+    computed target so a schedule swap (hot-reload, or the fail-safe revert to flat 3.0) is a gentle
+    ramp rather than a single-tick step in the curvature clamp; the target itself is unslewed."""
+    target = self.target(v_ego)
 
     now = time.monotonic()
     dt = 0.0 if self._last_limit_mono is None else float(np.clip(now - self._last_limit_mono, 0.0, 0.1))
@@ -316,6 +322,14 @@ def lat_accel_limit(v_ego: float) -> float:
   fail-safe revert can never step in a single call. Always returns a finite float in
   _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf."""
   return _lat_accel_schedule.limit(v_ego)
+
+
+def lat_accel_target(v_ego: float) -> float:
+  """The UNSLEWED speed-scheduled lateral cap (m/s^2): what lat_accel_limit() converges to at this speed. It never
+  moves the slew state clip_curvature relies on (it shares only the file cache: the same _refresh() re-read, and the
+  same one-time default seed, as limit()). Same fail-safe (flat MAX_LATERAL_ACCEL_NO_ROLL without a valid file), same
+  clamp, never raises. curvebrain2pnw: PnwVehicle.curve_lat_a."""
+  return _lat_accel_schedule.target(v_ego)
 
 
 def clamp(val, min_val, max_val):

@@ -4340,6 +4340,14 @@ class CESController:
       if veh.icbm_shape_why.startswith(("INVALID", "default (curve.json unreadable")):
         cloudlog.error(f"icbm_shape: curve.json icbm_shape NOT honoured -- {veh.icbm_shape_why}")
       cloudlog.event("icbm_shape_cfg", **shape_cfg)
+    # curvebrain2pnw 1/8: the shared curve brain's config, once per selfdrived start on the car whose VTSC may consume it
+    # (curve.json's "tesla" section is parsed only there). NOTHING CONSUMES IT YET. lat_a is the configured value; the
+    # live one is capped at openpilot's lateral clip - PnwVehicle.CURVE_LAT_CLIP_MARGIN at each speed.
+    if veh.curve_brain_vtsc:
+      if veh.curve_brain_why.startswith(("INVALID", "default (curve.json")):
+        cloudlog.error(f"curve_brain: curve.json tesla section NOT honored -- {veh.curve_brain_why}")
+      cloudlog.event("curve_brain_cfg", mode=veh.curve_brain, why=veh.curve_brain_why, lat_a=veh.curve_lat_a_cfg,
+                     clip_margin=pnw_vehicle_module.CURVE_LAT_CLIP_MARGIN, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
     self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
     self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
     self._long_ok = veh.op_long
