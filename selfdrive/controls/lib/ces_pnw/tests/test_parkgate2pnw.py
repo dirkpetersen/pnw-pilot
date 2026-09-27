@@ -327,6 +327,7 @@ def _make_controller(monkeypatch, **over):
   c._sl_lat_dem = c._sl_lat_max = c._sl_curv_max = 0.0
   c._sl_k_cmd = c._sl_k_actl = c._sl_k_err = 0.02
   c._cp_off = c._cp_tgt = c._cp_cap = c._cp_why = c._cp_tq = c._cp_rate = c._cp_cmd = None
+  c._cp_act = c._cp_app = None  # coopsteer2pnw
   c._curve_peak = m.CurvePeak()
   c._map_targets = []
   c.captured = []

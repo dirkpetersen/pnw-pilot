@@ -566,12 +566,11 @@ class PnwVehicle:
     self.gear_source_bus: str = {"FORD_F_150_LIGHTNING_MK1": "pt", "TESLA_MODEL_S_HW3": "chassis"}.get(fp, "")
     self.gear_unknown_until_seen: bool = self.gear_source_bus != ""
 
-    # coopsteer-shadow2pnw: Penduras "cooperative steering" sub-threshold torque nudge
-    # (selfdrive/controls/lib/coopsteer_pnw.py), SHADOW-LOGGED ONLY this round -- controlsd computes
-    # and publishes what it WOULD do; nothing reaches the actuators. Gated to the exact car the sign
-    # convention will be road-confirmed on (TESLA-MADS-FEASIBILITY.md s3: it is inferred, never
-    # confirmed, on our Raven or on Penduras'); extending to another Tesla class needs its own
-    # confirmation. LOAD-BEARING, not tidiness: the Ford also runs LatControlAngle, so without this
+    # coopsteer-shadow2pnw / coopsteer2pnw: Penduras "cooperative steering" sub-threshold torque nudge
+    # (selfdrive/controls/lib/coopsteer_pnw.py). controlsd always computes and logs it (cp*) and ADDS it
+    # to the actuator only while the CoopSteer toggle (default OFF) is on. Gated to the exact car the
+    # sign convention was road-confirmed on (09-07 and 09-26 Raven rlogs, >= 99 %); extending to
+    # another Tesla class needs its own confirmation. LOAD-BEARING, not tidiness: the Ford also runs LatControlAngle, so without this
     # gate the shadow would run there too and pollute the Lightning's cp* telemetry (actuation-inert
     # either way -- the Ford carcontroller consumes actuators.curvature, never steeringAngleDeg).
     self.coop_steer: bool = fp == "TESLA_MODEL_S_HW3"

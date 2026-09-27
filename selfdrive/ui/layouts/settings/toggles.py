@@ -152,6 +152,16 @@ DESCRIPTIONS = {
     "become uncertain, you signal a turn, or a lane change starts. Turn this ON to disable it — a " +
     "quick escape hatch if steering ever feels off. Advanced tuning: /data/pnw/lanecenter_tuning.json."
   ),
+  # coopsteer2pnw: Tesla Raven cooperative steering. Default OFF (new toggle); a plain toggle_item, so
+  # the description does not disable it (that trap is action BUTTONS, not toggles).
+  "CoopSteer": tr_noop(
+    "EXPERIMENTAL. On the Tesla Model S (HW3), a light push on the wheel (between about 0.5 and " +
+    "1 Nm, below the level that counts as taking over) makes openpilot's steering yield a little " +
+    "toward you instead of holding its line against your hands. The yield is small (at most 12 " +
+    "degrees of steering wheel, less at speed), fades away over several seconds if you keep pushing, and " +
+    "returns to openpilot's line within about a second when you let go. Pushing harder still takes " +
+    "over as before. Tesla Model S HW3 only -- no effect on the F-150 Lightning."
+  ),
   # angleenable / toggles-invert2pnw: EXPERIMENTAL angle-primary lateral is ON by default on the
   # F-150 Lightning; this is the opt-OUT toggle.
   # Intentional two-param bridge: NoFordAngleSteering (here) is the only param the driver sees/writes.
@@ -264,6 +274,14 @@ class TogglesLayout(Widget):
         lambda: tr("Disable Lane Centering"),
         DESCRIPTIONS["DisableLaneCentering"],
         "warning.png",
+        False,
+      ),
+      # coopsteer2pnw: default OFF, no restart (controlsd re-reads it at ~1 Hz). Grayed on a car without
+      # PnwVehicle.coop_steer -- display only, see _update_toggles.
+      "CoopSteer": (
+        lambda: tr("Cooperative Steering (Tesla)"),
+        DESCRIPTIONS["CoopSteer"],
+        "chffr_wheel.png",
         False,
       ),
       # angleenable / toggles-invert2pnw: Ford angle-primary lateral ON by default (F-150 Lightning
@@ -577,6 +595,12 @@ class TogglesLayout(Widget):
     # greys it, and the driver's Lightning setting is left exactly as he set it.
     if "FordSignSpeedLimit" in self._toggles:
       self._toggles["FordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)
+
+    # coopsteer2pnw: operable only on a car with the coop_steer capability (the Raven). DISPLAY ONLY -- no
+    # put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Lightning
+    # this grays it and the driver's Tesla setting is left exactly as he set it (controlsd never reads it there).
+    if "CoopSteer" in self._toggles:
+      self._toggles["CoopSteer"].action_item.set_enabled(veh.coop_steer)
 
     if "RefreshLocationMap" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")

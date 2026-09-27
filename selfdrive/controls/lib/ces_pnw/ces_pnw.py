@@ -4248,6 +4248,8 @@ class CESController:
     self._cp_tq = None           # CS.steeringTorque (Nm) -- THE sign-question input
     self._cp_rate = None         # CS.steeringRateDeg -- THE sign-question response
     self._cp_cmd = None          # angle the wire WOULD have carried (cmd + offset)
+    self._cp_act = None          # coopsteer2pnw: CoopSteer toggle on (actuation enabled) as controlsd read it
+    self._cp_app = None          # coopsteer2pnw: offset (deg) actually added to the actuator this tick
     # steertele2pnw: capability-analysis additions — see the steer_limit_status comment block in
     # controlsd.py for the full derivation of each. Same defaulting rationale as the sl* fields above.
     self._sl_lat_active = False  # CC.latActive this tick -- False means angDes/angAct froze to manual steering, not an openpilot capability signal
@@ -4768,6 +4770,10 @@ class CESController:
       self._cp_rate = round(float(cp_rate), 2) if cp_rate is not None else None
       cp_cmd = sl.get("cpCmd")
       self._cp_cmd = round(float(cp_cmd), 3) if cp_cmd is not None else None
+      cp_act = sl.get("cpAct")
+      self._cp_act = bool(cp_act) if cp_act is not None else None
+      cp_app = sl.get("cpApp")
+      self._cp_app = round(float(cp_app), 3) if cp_app is not None else None
     except Exception:
       self._sl_curv_lim = self._sl_safe_lim = self._sl_sat = False
       self._sl_ang_des = self._sl_ang_act = self._sl_ang_err = None
@@ -4776,6 +4782,7 @@ class CESController:
       self._sl_lat_active = self._sl_ang_sat = False
       self._cp_off = self._cp_tgt = self._cp_cap = self._cp_why = None
       self._cp_tq = self._cp_rate = self._cp_cmd = None
+      self._cp_act = self._cp_app = None
     # steerpower2pnw I3 review fix: append this refresh's (wall_time, bearing, gps_valid) sample to
     # the bounded history — see _nearest_bearing()/_BEARING_HIST_MAXLEN above. gps_valid mirrors the
     # exact "gps" test every record already uses (lat AND lon present); a no-fix sample is still
@@ -5192,6 +5199,7 @@ class CESController:
         # sign(cpTq) vs sign(cpRate)/d(slAngAct) at light torque; cpOff is what we WOULD have added.
         "cpOff": self._cp_off, "cpTgt": self._cp_tgt, "cpCap": self._cp_cap, "cpWhy": self._cp_why,
         "cpTq": self._cp_tq, "cpRate": self._cp_rate, "cpCmd": self._cp_cmd,
+        "cpAct": self._cp_act, "cpApp": self._cp_app,
         # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass
         # heading, to measure the truck's true hands-off steering capability by direction. I4 review
         # fix: heading nulls (not "N") when there's no current GPS fix, rather than _compass()
@@ -6294,6 +6302,7 @@ class CESController:
       # CES-off "steer" breadcrumb carries, so the sign question can be settled on any drive.
       "cpOff": self._cp_off, "cpTgt": self._cp_tgt, "cpCap": self._cp_cap, "cpWhy": self._cp_why,
       "cpTq": self._cp_tq, "cpRate": self._cp_rate, "cpCmd": self._cp_cmd,
+      "cpAct": self._cp_act, "cpApp": self._cp_app,
       # steerpower2pnw: LOGGING ONLY — delivered lateral accel (m/s^2, signed) + 8-pt compass heading,
       # to measure the truck's true hands-off steering capability by direction (see module docstring
       # near _ach_lat/_compass).

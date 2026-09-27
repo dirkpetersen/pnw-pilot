@@ -184,6 +184,7 @@ class _SteerLogHarness:
     # published / no capability; the real class seeds these in __init__).
     self._cp_off = self._cp_tgt = self._cp_cap = self._cp_why = None
     self._cp_tq = self._cp_rate = self._cp_cmd = None
+    self._cp_act = self._cp_app = None  # coopsteer2pnw
     # parkgate2pnw: _steer_log_step now asks the park gate before it does any work. A real gate,
     # seeded with no gear at all -- which is the FAIL-OPEN case, so this harness keeps logging and
     # every assertion below is about the record's content exactly as before.

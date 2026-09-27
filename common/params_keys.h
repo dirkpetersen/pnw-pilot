@@ -174,6 +174,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // correction is hard-clamped to a tiny curvature nudge, confidence-gated, releases smoothly,
     // and this toggle switches it off instantly). Tuning is a hot-reloaded JSON file, not a param.
     {"DisableLaneCentering", {PERSISTENT, BOOL, "0"}},
+    // coopsteer2pnw: Tesla Raven cooperative-steer torque nudge (selfdrive/controls/lib/coopsteer_pnw.py)
+    // ACTUATES only while this is ON. Default OFF (new toggle). Read by controlsd at ~1 Hz, fail-safe OFF;
+    // only on a car with PnwVehicle.coop_steer -- the key is never read on the Lightning.
+    {"CoopSteer", {PERSISTENT, BOOL, "0"}},
     // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt), F-150 Lightning only
     // (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). toggles-invert2pnw: this key is now a
     // LIVE MIRROR, not the driver-facing toggle -- NoFordAngleSteering below is what the UI shows/writes.

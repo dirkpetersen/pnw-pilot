@@ -13,7 +13,7 @@ from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.selfdrive.controls.lib.coopsteer_pnw import CoopSteerShadow, telemetry_fields as coop_telemetry_fields
+from openpilot.selfdrive.controls.lib.coopsteer_pnw import CoopSteer, telemetry_fields as coop_telemetry_fields
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, lat_accel_limit, MIN_SPEED
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
@@ -131,12 +131,12 @@ class Controls:
     except Exception:
       self._mem_params = None
 
-    # coopsteer-shadow2pnw: SHADOW ONLY. CoopSteerShadow.for_vehicle() returns None unless
-    # PnwVehicle.coop_steer (the Raven) -- on the Ford this stays None and every cp* telemetry field
-    # logs None. The real VehicleModel is injected so the logged offset is the one an actuating
-    # version would compute (the module's linear-bicycle default under-reads it above ~40 mph).
-    # _coop_res is what the SteerLimitStatus publish below reads; NOTHING else reads it -- in
-    # particular actuators.steeringAngleDeg is assigned from LaC.update() alone (see state_control).
+    # coopsteer-shadow2pnw / coopsteer2pnw: CoopSteer.for_vehicle() returns None unless
+    # PnwVehicle.coop_steer (the Raven) -- on the Ford this stays None, every cp* telemetry field logs
+    # None and NOTHING below runs. The real VehicleModel is injected so the offset is the one the
+    # Tesla carcontroller's own limiter measures in. The module always runs (its cp* telemetry is the
+    # shadow log); its offset reaches actuators.steeringAngleDeg ONLY while the CoopSteer toggle
+    # (default OFF, read at ~1 Hz, fail-safe OFF) is on -- see _coop_apply in state_control.
     veh = PnwVehicle(self.CP)
     # teslayaw2pnw: whether CS.yawRate is a real sensor on this car. Where it is not, the carstate leaves the capnp
     # default 0.0, and kActl/kErr/achLat/peakAchLat publish None instead of a confident "driving straight".
@@ -145,11 +145,18 @@ class Controls:
     if not self._yaw_rate_source:
       cloudlog.warning(f"teslayaw2pnw: no CAN yaw-rate source for {self.CP.carFingerprint}; " +
                        "kActl/kErr/achLat/peakAchLat telemetry will publish None")
-    self._coop_shadow = CoopSteerShadow.for_vehicle(
+    self._coop_shadow = CoopSteer.for_vehicle(
       veh, DT_CTRL,
       deg_for_curvature=lambda k, v: math.degrees(self.VM.get_steer_from_curvature(k, v, 0.0)))
     self._coop_res = None
     self._coop_err_logged = False
+    # coopsteer2pnw: actuation state. _coop_enabled starts False and only a successful param read
+    # turns it on (fail-safe OFF). _coop_applied is the offset that actually went into the actuator
+    # this tick (0.0 whenever it did not) -- the cpApp telemetry field.
+    self._coop_enabled = False
+    self._coop_frame = 0
+    self._coop_param_err_logged = False
+    self._coop_applied = 0.0
 
     # steerevent2pnw: edge-triggered flight-recorder state (Proposal 1). Fixed-size ring buffer of
     # cheap already-computed steer/lane samples plus a tiny state machine (idle/armed/cooldown) that
@@ -292,6 +299,43 @@ class Controls:
         return bool(mads.active)
     return bool(self.sm['selfdriveState'].active)
 
+  def _coop_apply(self, CC, actuators, steering_angle_deg: float) -> None:
+    """coopsteer2pnw: THE one place the nudge reaches an actuator. Adds the module's offset to the
+    angle LaC produced, only when the toggle is on, lateral is active, the module produced a result
+    this tick, and the offset is finite. Every other case leaves actuators.steeringAngleDeg exactly as
+    LaC set it. The Tesla carcontroller's apply_steer_angle_limits_vm (jerk + lateral-accel limits,
+    the same bounds the panda checks) then limits the SUM, so no safety bound moves."""
+    res = self._coop_res
+    if not (self._coop_enabled and CC.latActive and res is not None):
+      return
+    if not math.isfinite(res.offset_deg):
+      cloudlog.error(f"coopsteer2pnw: non-finite offset {res.offset_deg!r} ({res.reason}); not applied")
+      return
+    self._coop_applied = float(res.offset_deg)
+    actuators.steeringAngleDeg = float(steering_angle_deg) + self._coop_applied
+
+  def _read_coop_enabled(self) -> None:
+    """coopsteer2pnw: refresh the CoopSteer toggle at ~1 Hz (same cadence and pattern as
+    _read_lane_centering_enabled). Only called on a car with the coop_steer capability.
+
+    Fail-safe: ANY error reading the param is "disabled" -- a param-store problem must never leave a
+    steering offset silently applied -- and is logged ONCE (Rule 2: said, not swallowed). A toggle
+    flip in either direction resets the module, so turning it ON starts the nudge from zero instead
+    of stepping in an offset the shadow had been holding."""
+    if self._coop_frame % max(1, int(1.0 / DT_CTRL)) == 0:
+      try:
+        enabled = self.params.get_bool("CoopSteer")
+      except Exception:
+        enabled = False
+        if not self._coop_param_err_logged:
+          self._coop_param_err_logged = True
+          cloudlog.exception("coopsteer2pnw: reading CoopSteer failed; the nudge is NOT applied")
+      if enabled != self._coop_enabled:
+        cloudlog.event("coopsteer2pnw_toggle", enabled=enabled)
+        self._coop_shadow.reset()
+      self._coop_enabled = enabled
+    self._coop_frame += 1
+
   def state_control(self):
     CS = self.sm['carState']
 
@@ -397,11 +441,14 @@ class Controls:
     actuators.torque = float(steer)
     actuators.steeringAngleDeg = float(steeringAngleDeg)
 
-    # coopsteer-shadow2pnw: SHADOW ONLY -- computes the sub-threshold torque nudge the Raven WOULD
-    # get and stores it for telemetry. Placed deliberately AFTER actuators.steeringAngleDeg is
-    # final: the result is written to self._coop_res and nowhere else. Rule 2: a crash inside the
-    # shadow is logged once (cloudlog) and shows up in ces_events as cpWhy="error", never swallowed.
+    # coopsteer-shadow2pnw / coopsteer2pnw: the sub-threshold torque nudge (Raven only; None on every
+    # other car, so nothing in this block runs on the Lightning). Computed AFTER LaC.update() so the
+    # model's angle is final; with the CoopSteer toggle OFF the result feeds telemetry only and the
+    # actuator keeps exactly LaC's angle. Rule 2: a crash inside the module is logged once
+    # (cloudlog), shows up in ces_events as cpWhy="error", and applies NO offset that tick.
+    self._coop_applied = 0.0
     if self._coop_shadow is not None:
+      self._read_coop_enabled()
       try:
         self._coop_res = self._coop_shadow.update(CC.latActive, bool(CS.steeringPressed),
                                                   float(CS.steeringTorque), float(CS.vEgo),
@@ -410,7 +457,8 @@ class Controls:
         self._coop_res = None
         if not self._coop_err_logged:
           self._coop_err_logged = True
-          cloudlog.exception("coopsteer_pnw shadow raised; cp* telemetry will read error")
+          cloudlog.exception("coopsteer_pnw raised; cp* telemetry will read error and no nudge is applied")
+      self._coop_apply(CC, actuators, steeringAngleDeg)
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
       attr = getattr(actuators, p)
@@ -588,14 +636,15 @@ class Controls:
           # Fable should-fix 2: cpTq/cpRate come from CS, not the shadow -- keep them so the sign
           # question stays answerable even on a tick where the shadow itself raised.
           err = coop_telemetry_fields(None)
-          err.update({"cpWhy": "error",
+          err.update({"cpWhy": "error", "cpAct": bool(self._coop_enabled), "cpApp": self._coop_applied,
                       "cpTq": round(float(CS.steeringTorque), 3) if math.isfinite(float(CS.steeringTorque)) else None})
           rate = getattr(CS, "steeringRateDeg", None)
           err["cpRate"] = round(float(rate), 2) if rate is not None and math.isfinite(float(rate)) else None
           steer_limit_status.update(err)
         else:
           steer_limit_status.update(coop_telemetry_fields(self._coop_res, CS.steeringTorque,
-                                                          getattr(CS, "steeringRateDeg", None)))
+                                                          getattr(CS, "steeringRateDeg", None),
+                                                          actuating=self._coop_enabled, applied_deg=self._coop_applied))
         self._mem_params.put_nonblocking("SteerLimitStatus", steer_limit_status)
 
         # steerevent2pnw: PURE OBSERVATION flight-recorder burst (LANE-DEPARTURE-LOGGING-PROPOSALS.md
