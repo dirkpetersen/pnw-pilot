@@ -565,6 +565,35 @@ class TestRegion:
     if pos == "bad":
       assert any("LastGPSPosition unreadable" in e for e in r.errors), r.errors
 
+  CANADA_IN_US_BOXES = {"whitehorse": (60.72, -135.06), "dawson_city": (64.06, -139.43), "inuvik": (68.36, -133.72),
+                        "eagle_plains": (66.37, -136.72), "victoria_bc": (48.43, -123.37),
+                        "beaver_creek_yt": (62.38, -140.87)}
+
+  @pytest.mark.parametrize("name", sorted(CANADA_IN_US_BOXES))
+  def test_the_bbox_table_calls_these_us_states(self, name):
+    """The premise: mapd's coverage table alone resolves these Canadian places to a US state (AK / WA)."""
+    from openpilot.system.mapd.coverage import region_and_key_for_gps
+    assert region_and_key_for_gps(*self.CANADA_IN_US_BOXES[name])[1].startswith("us_state.")
+
+  @pytest.mark.parametrize("map_mph", [0, 50])
+  @pytest.mark.parametrize("name", sorted(CANADA_IN_US_BOXES))
+  def test_canada_inside_a_us_box_turns_the_camera_off(self, monkeypatch, name, map_mph):
+    """Fable re-review: a Whitehorse fix with no map made a "90" sign a 145 km/h working limit."""
+    r = Rig(monkeypatch, set_mph=55.0)
+    r.mem.pos = self.CANADA_IN_US_BOXES[name]
+    r.run(15.0, map_mph=map_mph, cam=90)
+    assert (r.limit, r.c._sign.why, r.c._sign.region) == (map_mph, "region", "canada-override")
+    assert any("canada-override" in w for w in r.warnings), r.warnings
+
+  # ... Juneau AK (lat 58.3), and Tok AK (63.34, -142.99: just west of the 141st meridian)
+  @pytest.mark.parametrize("pos", [SEATTLE, PORTLAND, (58.30, -134.42), (63.34, -142.99)])
+  def test_us_places_next_to_the_exclusions_are_unchanged(self, monkeypatch, pos):
+    r = Rig(monkeypatch)
+    r.mem.pos = pos
+    r.run(15.0, map_mph=0, cam=40)
+    assert (r.limit, r.c._sign.why) == (40, "noMap")
+    assert r.c._sign.region in ("WA", "OR", "AK")
+
   def test_crossing_the_border_logs_once(self, monkeypatch):
     r = Rig(monkeypatch)
     r.run(10.0, map_mph=60, cam=60)

@@ -61,11 +61,34 @@ SIGN_HOLD_MAX_S = 8.0            # the longest the camera may HOLD a map-agreed 
                                  # same reasoning and value as the look-ahead's LA_PROMOTE_HOLD_S). A real drop the camera
                                  # is merely late for (median +1.8 s, up to 12 s on 09-24; a freeway 70 held down an
                                  # off-ramp onto a 25) must not be held longer (Fable review 2026-09-27).
+                                 # The timer restarts if the map flickers back to the agreed value for one read (that ends
+                                 # the hold stretch); a flickering map could so extend a hold. Accepted: a map that keeps
+                                 # returning to the camera's value is corroborating it.
 SIGN_MIN_MPH = 15.0              # a sign below this is a parking-lot / driveway sign, not a road's limit: ignored. Found by
                                  # replaying 2026-09-24: the module KEEPS the last value (23 of 24 routes started with the
                                  # lot's 5), so a 5 or 10 rode out onto the road -- 11:35:18 PT a 5 against the map's 40
                                  # at 38 mph for 11 s, 18:38:58 a 10 against I-5's 60 at 31 mph. 5 and 10 were seen only in
                                  # lots and at business entrances. speedadjust never targets below 10 mph (MIN_CAP) anyway.
+
+
+# Known holes in mapd's bounding-box region table (system/mapd/coverage.py, which is for map DOWNLOADS and is left as is):
+# the Alaska box covers all of Yukon and NWT (Whitehorse, Dawson City, the Dempster, Inuvik all resolve to us_state.AK),
+# and the Washington box covers Victoria BC. The bbox result is necessary but not sufficient for "US state"; these two
+# boxes are forced to NOT US (camera off), failing safe (Fable re-review 2026-09-27). North of 60.3 N the Alaska/Yukon
+# border is the 141st meridian, so the cut is lon > -141 (Fable's -137.5 missed Dawson City, -139.4, and the Top of the
+# World Highway). Cost: the camera is also off in the northern panhandle (Skagway, Haines, Yakutat -- lat >= 59) and at
+# Neah Bay/Cape Flattery WA; Juneau (58.3) keeps it. NOT covered, still resolved as US by the bbox: Windsor ON (MI),
+# Niagara Falls ON (NY), Prince Rupert BC (AK) -- a real country test is follow-up work.
+CANADA_NORTH = (59.0, -141.0)                     # lat >= this and lon > this: Yukon / NWT / the Alaska Highway
+VANCOUVER_ISLAND = (48.3, 49.0, -124.8, -123.1)   # lat_min, lat_max, lon_min, lon_max
+
+
+def canada_override(lat: float, lon: float) -> bool:
+  """True where mapd's bbox table says "US state" but the point is (or may be) in Canada: the camera must be off."""
+  if lat >= CANADA_NORTH[0] and lon > CANADA_NORTH[1]:
+    return True
+  la0, la1, lo0, lo1 = VANCOUVER_ISLAND
+  return la0 <= lat <= la1 and lo0 <= lon <= lo1
 
 
 class SignLimitSelector:

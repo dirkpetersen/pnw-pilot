@@ -134,7 +134,7 @@ import math
 import time
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.controls.lib.speedadjust_pnw.sign_limit import SignLimitSelector   # fordtsr2pnw
+from openpilot.selfdrive.controls.lib.speedadjust_pnw.sign_limit import SignLimitSelector, canada_override   # fordtsr2pnw
 from openpilot.system.mapd.coverage import region_and_key_for_gps                          # fordtsr2pnw: US states only
 
 MPH_TO_MS = 0.44704
@@ -554,7 +554,10 @@ class SpeedAdjustController:
       age = now - float(pos["ts"])
       if not math.isfinite(age) or age > REGION_FIX_MAX_AGE_S:
         return None, False
-      code, key = region_and_key_for_gps(float(pos["latitude"]), float(pos["longitude"]))
+      lat, lon = float(pos["latitude"]), float(pos["longitude"])
+      if canada_override(lat, lon):
+        return "canada-override", False      # the bbox table would call this a US state (see sign_limit.canada_override)
+      code, key = region_and_key_for_gps(lat, lon)
       return code, bool(key) and key.startswith("us_state.")
     except Exception as e:
       self._sign_pos_err_n += 1
