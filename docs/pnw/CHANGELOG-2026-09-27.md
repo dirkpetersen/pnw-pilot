@@ -31,7 +31,9 @@ decoded EPAS torque) that specifically sampled the low-torque range the shadow v
   and slew fractions are unchanged — the drive's longest light push was 1.8s, well inside where 2/3/5s
   washout settings replay identically.
 * **Gated by a new `CoopSteer` param, default OFF** (Raven Tesla only; every other car is unaffected).
-  Fail-safe: any param-read error reads OFF.
+  Fail-safe: any param-read error reads OFF. **Superseded 2026-09-28:** `CoopSteer` was replaced by the
+  `DisableCoopSteer` opt-out (default ON) in v2 — see
+  [`CHANGELOG-2026-09-28.md`](CHANGELOG-2026-09-28.md). This entry is left as written for history.
 * **Replay of the final module** (open loop, calibration drive): median peak intent offset 1.1°, zero
   spurious degree-seconds, zero fight against the driver, zero retract-against-driver, release under 0.1°
   within a 0.15s median (0.37s max), 7.2° maximum offset.
