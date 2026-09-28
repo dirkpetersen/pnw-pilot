@@ -135,8 +135,8 @@ class Controls:
     # PnwVehicle.coop_steer (the Raven) -- on the Ford this stays None, every cp* telemetry field logs
     # None and NOTHING below runs. The real VehicleModel is injected so the offset is the one the
     # Tesla carcontroller's own limiter measures in. The module always runs (its cp* telemetry is the
-    # shadow log); its offset reaches actuators.steeringAngleDeg ONLY while the CoopSteer toggle
-    # (default OFF, read at ~1 Hz, fail-safe OFF) is on -- see _coop_apply in state_control.
+    # shadow log); its offset reaches actuators.steeringAngleDeg unless the DisableCoopSteer toggle is on
+    # (opt-out, default off = nudge ON; read at ~1 Hz; unreadable = no nudge) -- see _coop_apply.
     veh = PnwVehicle(self.CP)
     # teslayaw2pnw: whether CS.yawRate is a real sensor on this car. Where it is not, the carstate leaves the capnp
     # default 0.0, and kActl/kErr/achLat/peakAchLat publish None instead of a confident "driving straight".
@@ -315,7 +315,7 @@ class Controls:
     actuators.steeringAngleDeg = float(steering_angle_deg) + self._coop_applied
 
   def _read_coop_enabled(self) -> None:
-    """coopsteer2pnw: refresh the CoopSteer toggle at ~1 Hz (same cadence and pattern as
+    """coopsteer2pnw: refresh the DisableCoopSteer opt-out at ~1 Hz (same cadence and pattern as
     _read_lane_centering_enabled). Only called on a car with the coop_steer capability.
 
     Fail-safe: ANY error reading the param is "disabled" -- a param-store problem must never leave a
@@ -324,12 +324,12 @@ class Controls:
     of stepping in an offset the shadow had been holding."""
     if self._coop_frame % max(1, int(1.0 / DT_CTRL)) == 0:
       try:
-        enabled = self.params.get_bool("CoopSteer")
+        enabled = not self.params.get_bool("DisableCoopSteer")
       except Exception:
         enabled = False
         if not self._coop_param_err_logged:
           self._coop_param_err_logged = True
-          cloudlog.exception("coopsteer2pnw: reading CoopSteer failed; the nudge is NOT applied")
+          cloudlog.exception("coopsteer2pnw: reading DisableCoopSteer failed; the nudge is NOT applied")
       if enabled != self._coop_enabled:
         cloudlog.event("coopsteer2pnw_toggle", enabled=enabled)
         self._coop_shadow.reset()
@@ -443,7 +443,7 @@ class Controls:
 
     # coopsteer-shadow2pnw / coopsteer2pnw: the sub-threshold torque nudge (Raven only; None on every
     # other car, so nothing in this block runs on the Lightning). Computed AFTER LaC.update() so the
-    # model's angle is final; with the CoopSteer toggle OFF the result feeds telemetry only and the
+    # model's angle is final; with DisableCoopSteer ON the result feeds telemetry only and the
     # actuator keeps exactly LaC's angle. Rule 2: a crash inside the module is logged once
     # (cloudlog), shows up in ces_events as cpWhy="error", and applies NO offset that tick.
     self._coop_applied = 0.0

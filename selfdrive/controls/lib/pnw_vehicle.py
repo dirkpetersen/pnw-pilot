@@ -662,7 +662,7 @@ class PnwVehicle:
 
     # coopsteer-shadow2pnw / coopsteer2pnw: Penduras "cooperative steering" sub-threshold torque nudge
     # (selfdrive/controls/lib/coopsteer_pnw.py). controlsd always computes and logs it (cp*) and ADDS it
-    # to the actuator only while the CoopSteer toggle (default OFF) is on. Gated to the exact car the
+    # to the actuator unless the DisableCoopSteer opt-out toggle is on. Gated to the exact car the
     # sign convention was road-confirmed on (09-07 and 09-26 Raven rlogs, >= 99 %); extending to
     # another Tesla class needs its own confirmation. LOAD-BEARING, not tidiness: the Ford also runs LatControlAngle, so without this
     # gate the shadow would run there too and pollute the Lightning's cp* telemetry (actuation-inert

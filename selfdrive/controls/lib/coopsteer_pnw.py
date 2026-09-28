@@ -1,21 +1,22 @@
 """
 coopsteer_pnw -- Penduras "cooperative steering" torque nudge for the Tesla Raven.
 
-WHAT THIS IS. On angle-controlled cars the EPAS servos toward the commanded angle, so any driver
-torque BELOW the steeringPressed threshold (1.0 Nm on Tesla, opendbc/car/tesla/values.py
-STEER_THRESHOLD) does nothing at all: a light corrective push is either ignored or has to be
-escalated into a full override. Penduras (github.com/Penduras/openpilot, latcontrol_angle.py,
-commits 482d6ed28 / 1422c80e3 / 3b5f67c42) converts that sub-threshold torque into a small,
-bounded angle OFFSET added to the model's commanded angle. This module is the pure, unit-testable
-brain of that idea.
+WHAT THIS IS. On angle-controlled cars the EPAS servos toward the commanded angle, so a driver's
+push does not move the wheel: the car holds its line against the hands until the EPS aborts on its
+own (handsOnLevel 3, ~3.1-4.0 Nm on the Raven), which disengages openpilot. Penduras
+(github.com/Penduras/openpilot, latcontrol_angle.py, commits 482d6ed28 / 1422c80e3 / 3b5f67c42)
+converts driver torque into a bounded angle OFFSET added to the model's commanded angle, so the car
+yields toward the push. This module is the pure, unit-testable brain of that idea.
 
 HISTORY. coopsteer-shadow2pnw (2026-09-07) shipped it SHADOW-ONLY: computed and logged as the cp*
 telemetry, never applied. coopsteerfix2pnw (2026-09-14) fixed the 50 ms full-cap defect (see
-update()). coopsteer2pnw (2026-09-27) makes it ACTUATE -- controlsd adds offset_deg to
-actuators.steeringAngleDeg only while the CoopSteer toggle (default OFF) is on; with the toggle off
-it is still the shadow log it was. Calibration evidence for every constant below:
-drives/2026-09-26/coopsteer-calibration/DRIVE_REPORT.md (Raven, 09-26 morning, 56 engaged minutes
-at 100 Hz, replayed through this module).
+update()). coopsteer2pnw (2026-09-27) makes it ACTUATE: controlsd adds offset_deg to
+actuators.steeringAngleDeg unless the DisableCoopSteer toggle is on; with it on, this is still the
+shadow log it was. v1 acted only on 0.5-1.0 Nm and froze above 1 Nm; the first drive with it ON
+(drives/2026-09-27/coopsteer-first-try/DRIVE_REPORT.md) showed the owner's pushes cross that band in
+~80 ms and then sit at 1-3 Nm, so it did nothing he could feel. v2 (owner 2026-09-27) follows the
+push all the way to 3.0 Nm. Calibration evidence: drives/2026-09-26/coopsteer-calibration/ and
+drives/2026-09-27/coopsteer-first-try/ (100 Hz replays through this module).
 
 THE SIGN, settled twice on real data. offset = +k * torque, and positive steeringTorque goes with
 positive steeringAngleDeg: 09-07 (2 rlogs, 100.0 %, n=1618) and 09-26 (manual driving, |tq| >= 0.5,
@@ -31,19 +32,22 @@ default below. Both are pure functions.
 
 BOUNDS (and why each number):
 
-* COOP_DEADZONE_NM = 0.5 (was Penduras' 0.3), COOP_FULL_NM = 1.0
-  1.0 Nm is where the Tesla carstate's steeringPressed (full override) takes over, so the nudge
-  reaches its own maximum exactly where the override begins. The 0.5 floor is MEASURED (09-26,
+* COOP_DEADZONE_NM = 0.5 (was Penduras' 0.3), COOP_FULL_NM = 3.0 (was 1.0)
+  Proportional from 0.5 to 3.0 Nm, full yield at and above 3.0. 3.0 is just under the lowest EPS
+  hands-on abort seen (7 onsets 09-26/09-27: 3.14-3.97 Nm, the same with or without the blinker), so
+  the whole band where lateral is still active is covered and full yield arrives before the EPS
+  gives up. steeringPressed (1.0 Nm) no longer changes anything here. The 0.5 floor is MEASURED (09-26,
   engaged, not pressed, v > 5): at 0.2-0.4 Nm the torque opposes the wheel's own motion 84 % of the
   time and the steering angle 85-89 % of the time -- that is the resting hand dragging against what
   the EPAS does, not intent. 0.4-0.5 Nm is a coin flip (50/50); from 0.5 Nm it goes WITH the motion
   (67 % at 0.5-0.7, 80 % at 0.7-1.0, 87 % above). With 0.3 a replay applied ~19 deg*s of offset
   with no intent-level torque in the preceding 1.5 s and fired 207 sub-200 ms twitches; with 0.5
-  (plus the filter below) both are zero. Torque above COOP_FULL_NM is an override on the same tick,
-  as is steeringPressed (debounced 50 ms, so it latches later); see `update` for HOLD vs shed.
+  (plus the filter below) both are zero. v2 replay (open loop): pushes >= 1 Nm held >= 0.3 s get
+  a median 9.3 deg (09-26, 83 % of the cap) / 5.7 deg (09-27), half of it within 0.16-0.25 s; light
+  pushes get less than v1 (median 0.64 vs 1.1 deg), the price of the wider band.
 
 * COOP_TQ_TAU_S = 0.1 s  [NEW -- the 09-26 replay]
-  First-order low-pass on the torque feeding the target (never on the override test). 18,665
+  First-order low-pass on the torque feeding the target. 18,665
   separate excursions into 0.3-1.0 Nm while engaged, 99.6 % shorter than 100 ms -- road and hand
   noise. Unfiltered (dz 0.5) the replay fired 34 twitches under 200 ms that reached >= 0.5 deg;
   0.1 s leaves 1, and the 99th-percentile offset rate drops from 60 to 26 deg/s. 0.2 s halves the
@@ -84,15 +88,15 @@ BOUNDS (and why each number):
   response, 1.0 left no budget for the model.
 
 WORST CASE WITH A WRONG SIGN. |offset| <= min(12 deg, angle for 1.5 m/s^2) on every tick, by
-construction (target is clipped, washout only reduces, slew only interpolates toward it, HOLD only
-keeps what was already inside the cap and re-clamps it). Even were this ever applied with the sign
+construction (target is clipped, washout only reduces, slew only interpolates toward it). Even were
+this ever applied with the sign
 inverted, the request stays inside what the model itself may command and inside every panda bound.
 
-WHAT IT CANNOT FIX (09-26). A light touch today changes nothing: the EPAS holds the commanded angle
-(handsOnLevel stays 0-1) and lateral stays engaged. The EPAS aborts on its own only at handsOnLevel
-3 (~3.2+ Nm, EAC_ERROR_HANDS_ON -> steeringDisengage -> full disengage); all 6 such aborts on 09-26
-came after 1.0-1.4 s of the driver pushing at 1-4 Nm against a wheel that did not move. That band
-is ABOVE this nudge; the nudge only stops ADDING to that fight (HOLD, below).
+WHAT IT CANNOT FIX. The EPS abort itself: a push past ~3.1 Nm still ends in handsOnLevel 3 ->
+steeringDisengage. The bet is that once the car yields, the driver's torque falls before that.
+CLOSED LOOP IS UNMEASURED: the yield lowers the very torque that drives it, so the car should settle
+where the push balances the offset (a softer wheel, not a hand-over); whether that settles or hunts
+at the EPS's real stiffness is for the first drive (cpApp vs cpTq in ces_events, 100 Hz rlog).
 """
 import math
 from collections.abc import Callable
@@ -100,14 +104,14 @@ from typing import NamedTuple
 
 # --- torque band ---------------------------------------------------------------------------------
 COOP_DEADZONE_NM = 0.5
-COOP_FULL_NM = 1.0            # == Tesla STEER_THRESHOLD; steeringPressed (full override) starts here
+COOP_FULL_NM = 3.0            # full yield; just under the EPS's own hands-on abort (first seen at 3.14 Nm)
 # --- magnitude caps ------------------------------------------------------------------------------
 COOP_ABS_MAX_DEG = 12.0
 COOP_MAX_LAT_ACCEL = 1.5      # m/s^2
 COOP_V_FLOOR = 1.0            # m/s, keeps a/v^2 finite; 12 deg cap binds long before this matters
 # --- washout -------------------------------------------------------------------------------------
 COOP_WASHOUT_TAU_S = 5.0
-# --- torque input filter (target only; the override test uses the raw torque) --------------------
+# --- torque input filter ------------------------------------------------------------------------
 COOP_TQ_TAU_S = 0.1
 # --- slew (tied to the lateral-jerk bound, NOT to MAX_ANGLE_RATE) --------------------------------
 COOP_JERK_REF_MS3 = 3.6       # mirrors tesla ANGLE_LIMITS.MAX_LATERAL_JERK; pinned by the unit test
@@ -122,8 +126,6 @@ RAVEN_WHEELBASE_M = 2.96
 # means the module decided on zero and says why. None (absent) in telemetry means the car has no
 # coop_steer capability at all -- see telemetry_fields().
 REASON_INACTIVE = "inactive"    # lateral not active: state reset, offset 0
-REASON_OVERRIDE = "override"    # steeringPressed (debounced) OR |torque| > 1 Nm, torque NOT with the held offset: shed it
-REASON_HOLD = "hold"            # the same override, torque pushing the SAME way as the held offset: frozen, never shed
 REASON_DEADZONE = "deadzone"    # filtered |torque| <= COOP_DEADZONE_NM: nothing to respond to
 REASON_BAD_INPUT = "badInput"   # NaN/inf on an input: refuse to compute rather than guess
 REASON_ACTIVE = "active"
@@ -200,18 +202,16 @@ class CoopSteer:
       self.reset()
       return CoopSteerResult(0.0, 0.0, 0.0, 0.0, REASON_INACTIVE, float(angle_cmd_deg) if _finite(angle_cmd_deg) else 0.0)
 
-    # coopsteerfix2pnw: override is decided from the torque ITSELF as well as from steeringPressed.
-    # Tesla's steeringPressed is debounced (update_steering_pressed(|tq| > 1.0, 5): 6 consecutive
-    # frames), so for ~50 ms after the driver crosses 1.0 Nm it is still False. Without this the
-    # module stayed "active" in that window and the ratio saturated at 1.0 -> the FULL 12 deg cap,
-    # emitted exactly as the driver takes over (drive 2026-09-07: 77 of 1585 active ticks, up to
-    # 2.98 Nm). Strict `>` matches the carstate's own `abs(torque) > STEER_THRESHOLD`. The debounced
-    # flag is kept too: its hysteresis holds the override for a few frames after torque dips under
-    # 1.0 Nm, which is the conservative side. Do NOT shorten the carstate debounce instead -- that
-    # flag is shared with disengagement logic. Decided from the RAW torque, never the filtered one
-    # below: the filter must not delay an override.
-    override = bool(steering_pressed) or (_finite(torque_nm) and abs(float(torque_nm)) > COOP_FULL_NM)
-
+    # coopsteer2pnw v2 (owner 2026-09-27, after the first drive with it ON): NO override branch. The
+    # first version zeroed (and then froze) the offset at 1 Nm, but the owner's real pushes cross
+    # 0.5 -> 1.0 Nm in a median 80 ms and then sit at 1-3 Nm for up to 5 s until the EPS aborts itself
+    # (handsOnLevel 3, first seen at 3.14 Nm) -- so the car resisted exactly as before. Now the offset
+    # FOLLOWS the push proportionally from COOP_DEADZONE_NM up to COOP_FULL_NM = 3.0 Nm, i.e. across
+    # the whole band where lateral is still active, and the target always has the torque's sign, so
+    # it can never push against the driver. `steering_pressed` is deliberately not used any more
+    # (kept in the signature for the call site); the 50 ms debounce window it used to leave open is
+    # moot because a >1 Nm push is now meant to get a large yield, and the slew below still limits
+    # how fast any of it arrives.
     if not (_finite(torque_nm) and _finite(v_ego) and _finite(angle_cmd_deg)):
       # A NaN torque is a broken input, not "no torque": target zero (the held offset then decays at
       # the normal slew), and SAY SO via the reason code. The torque filter restarts from zero so a
@@ -222,32 +222,16 @@ class CoopSteer:
     else:
       v_eff = float(v_ego)
       cap = self.cap_deg(v_eff)
-      tq = float(torque_nm)
-      # coopsteer2pnw: first-order low-pass on the torque that feeds the TARGET (never the override
-      # test above). Input clipped to +-COOP_FULL_NM so the filter state stays inside the band and a
-      # 3 Nm push cannot linger as a full-cap target after the driver releases the wheel.
-      self._tq_f += (_clamp(tq, -COOP_FULL_NM, COOP_FULL_NM) - self._tq_f) * self._tq_alpha
-      if override:
-        # coopsteer2pnw: HOLD, don't shed, while the driver pushes the SAME way as the held offset.
-        # On the Raven lateral stays active from 1 Nm up to the EPS's own hands-on abort (~3-4 Nm,
-        # handsOnLevel 3; 09-26 drive: 1.0-1.4 s in that band before each of 6 aborts), so shedding
-        # here would drive the wheel back toward the model's line AGAINST the driver's hands -- the
-        # one thing this feature must never do. Holding adds nothing either: no growth past what
-        # the light-touch band earned, so the 50 ms full-cap defect above stays fixed. Torque
-        # OPPOSING the held offset (or no held offset) is the Penduras 1422c80e3 case: shed it at the
-        # full jerk budget, below.
-        if self._offset != 0.0 and (tq * self._offset) > 0.0 and _finite(cap):
-          self._offset = _clamp(self._offset, -cap, cap)   # the per-tick cap invariant still holds
-          return CoopSteerResult(self._offset, self._offset, self._offset, cap, REASON_HOLD,
-                                 float(angle_cmd_deg) + self._offset)
-        target, reason = 0.0, REASON_OVERRIDE
+      # first-order low-pass on the torque (road/hand noise, see COOP_TQ_TAU_S). Input clipped to
+      # +-COOP_FULL_NM: nothing above full scale can matter, and a 9 Nm grab must not linger in the
+      # filter after the driver releases the wheel.
+      self._tq_f += (_clamp(float(torque_nm), -COOP_FULL_NM, COOP_FULL_NM) - self._tq_f) * self._tq_alpha
+      dz = math.copysign(max(0.0, abs(self._tq_f) - COOP_DEADZONE_NM), self._tq_f)
+      if dz == 0.0:
+        target, reason = 0.0, REASON_DEADZONE
       else:
-        dz = math.copysign(max(0.0, abs(self._tq_f) - COOP_DEADZONE_NM), self._tq_f)
-        if dz == 0.0:
-          target, reason = 0.0, REASON_DEADZONE
-        else:
-          ratio = _clamp(dz / (COOP_FULL_NM - COOP_DEADZONE_NM), -1.0, 1.0)
-          target, reason = ratio * cap, REASON_ACTIVE
+        ratio = _clamp(dz / (COOP_FULL_NM - COOP_DEADZONE_NM), -1.0, 1.0)
+        target, reason = ratio * cap, REASON_ACTIVE
 
     # Fable review (2026-09-07) must-fix: the injected deg_for_curvature is the one thing this module
     # does not control. A NaN/inf cap would otherwise latch _lp/_offset at NaN for the rest of the
@@ -263,12 +247,10 @@ class CoopSteer:
     washed = _clamp(washed, 0.0, target) if target >= 0.0 else _clamp(washed, target, 0.0)
 
     # --- slew toward the washed target at a fraction of the jerk-limited rate ---------------------
-    # Full jerk budget when the driver's fresh torque OPPOSES the held offset (Penduras 1422c80e3), and
-    # ALSO during an override that reaches here (Fable should-fix 3): an override only reaches this
-    # point when the torque opposes the held offset or there is none (the same-direction case HOLDS
-    # above), so the full rate is spent getting OUT of the driver's way. A plain release (torque -> 0,
-    # not pressed) keeps the gentle half rate so the return to the model's line is not a snap.
-    opposing = (target != 0.0 and self._offset != 0.0 and (target * self._offset) < 0.0) or override
+    # Full jerk budget when the driver's fresh torque OPPOSES the held offset (Penduras 1422c80e3):
+    # a stale offset must get out of the way of a reversal fast. Growing with the push, or a plain
+    # release (torque -> 0), keeps the gentle half rate so neither the yield nor the return is a snap.
+    opposing = target != 0.0 and self._offset != 0.0 and (target * self._offset) < 0.0
     frac = COOP_SLEW_FRAC_OPPOSING if opposing else COOP_SLEW_FRAC_SAME
     rate = min(frac * self.jerk_rate_deg_s(v_eff), COOP_SLEW_MAX_DEG_S)
     if not _finite(rate):
@@ -306,7 +288,7 @@ def telemetry_fields(res: CoopSteerResult | None, torque_nm=None, steering_rate_
   every key present, every value None, so a Ford row is distinguishable from a Tesla row whose
   module produced zero (cpWhy carries a reason string there).
 
-  coopsteer2pnw: cpAct = the CoopSteer toggle as controlsd last read it (actuation ON), cpApp = the
+  coopsteer2pnw: cpAct = actuation ON as controlsd last read it (DisableCoopSteer off), cpApp = the
   offset that actually went into actuators.steeringAngleDeg this tick (0.0 whenever it did not:
   toggle off, lateral inactive, error). cpOff is what the module computed either way, so
   cpOff != cpApp with cpAct true is itself a finding."""

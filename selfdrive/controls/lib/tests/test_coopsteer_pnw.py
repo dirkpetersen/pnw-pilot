@@ -99,61 +99,51 @@ class TestFlatCap:
 
 
 class TestOverrideAndDeadzone:
-  def test_override_against_the_held_offset_sheds_it(self):
-    """steeringPressed with torque OPPOSING the held offset zeroes the target and sheds the offset.
-    Mutation: drop the override branch (the -1.5 would read as an active full-cap target the other way)."""
-    s = CoopSteer(DT)
-    _run(s, 0.9, 20 * MPH, 300)               # build up an offset first
-    assert s.offset_deg > 1.0
-    r = _run(s, -1.5, 20 * MPH, 400, pressed=True)
-    assert r.reason == cs.REASON_OVERRIDE
-    assert r.target_deg == 0.0
-    assert r.offset_deg == 0.0
-
-  def test_override_with_the_held_offset_holds_it_never_pulls_back(self):
-    """coopsteer2pnw: on the Raven lateral stays ACTIVE from 1 Nm up to the EPS's own hands-on abort,
-    so shedding a held offset while the driver pushes the SAME way drives the wheel back against his
-    hands (the base module did that for 35.7 deg in total over the 09-26 morning replay). The offset
-    must be frozen -- not shed, and not grown past what the light-touch band earned. Both signs, both
-    override sources (debounced flag, raw torque). Mutation: delete the HOLD branch -> REASON_OVERRIDE
-    and the offset falls every tick."""
-    for sign in (1.0, -1.0):
-      for pressed, tq in ((True, 1.5), (False, 2.5), (True, 0.8)):
+  def test_follows_the_push_through_1nm_up_to_full_yield_at_3nm(self, unfiltered):
+    """coopsteer2pnw v2 (owner 2026-09-27): proportional from 0.5 to 3.0 Nm, full yield at and above
+    3.0 -- no override at 1 Nm any more. Mutations: COOP_FULL_NM = 1.0 (the v1 band: 1.0 Nm would
+    already be full), or any zeroing of the target above 1 Nm."""
+    for tq, frac in ((1.0, 0.2), (1.75, 0.5), (3.0, 1.0), (5.0, 1.0)):
+      for sign in (1.0, -1.0):
         s = CoopSteer(DT)
-        _run(s, sign * 0.9, 20 * MPH, 300)
-        held = s.offset_deg
-        assert abs(held) > 1.0
-        for _ in range(300):
-          r = s.update(True, pressed, sign * tq, 20 * MPH, 0.0)
-          assert r.reason == cs.REASON_HOLD, (sign, pressed, tq, r)
-          assert r.offset_deg == held
-        # ...and it is released gently once the driver releases the wheel (no snap, no wrong-way undershoot)
-        prev = abs(s.offset_deg)
-        for _ in range(300):
-          r = s.update(True, False, 0.0, 20 * MPH, 0.0)
-          assert 0.0 <= abs(r.offset_deg) <= prev and r.offset_deg * sign >= 0.0
-          prev = abs(r.offset_deg)
-        assert r.offset_deg == 0.0
+        r = s.update(True, abs(tq) > 1.0, sign * tq, 20 * MPH, 0.0)
+        assert r.reason == cs.REASON_ACTIVE, (tq, r)
+        assert r.target_deg == pytest.approx(sign * frac * r.cap_deg, rel=1e-6), (tq, sign, r)
 
-  def test_hold_still_respects_the_speed_cap(self):
-    """A HOLD earned at low speed (12 deg flat cap) must not outlive a lower cap as speed rises:
-    the per-tick |offset| <= cap(v) invariant covers the HOLD branch too. Mutation: drop the clamp in
-    the HOLD branch."""
-    s = CoopSteer(DT)
-    _run(s, 1.0, 10 * MPH, 400)
-    assert s.offset_deg > 5.0
-    r = s.update(True, True, 1.5, 70 * MPH, 0.0)
-    assert r.reason == cs.REASON_HOLD
-    assert r.offset_deg == pytest.approx(s.cap_deg(70 * MPH)) and r.offset_deg < 5.0
+  def test_steering_pressed_changes_nothing(self):
+    """The debounced flag no longer gates anything: the same torque trace gives the same offsets with
+    it forced True or False. Mutation: reintroduce `if steering_pressed: target = 0.0`."""
+    trace = [0.3] * 20 + [0.8, 1.2, 1.8, 2.4, 2.9] + [2.9] * 150 + [1.2] * 50 + [0.0] * 100
+    a, b = CoopSteer(DT), CoopSteer(DT)
+    for tq in trace:
+      ra = a.update(True, False, tq, 15.0, 0.0)
+      rb = b.update(True, True, tq, 15.0, 0.0)
+      assert ra == rb
 
-  def test_debounced_pressed_still_overrides_below_full_torque(self):
-    """coopsteerfix2pnw: the debounced flag must keep its own authority. Its hysteresis holds it True
-    for a few frames after the torque dips back under 1.0 Nm; those frames must stay override, not
-    flip to a 0.9 Nm (near-full) active nudge. Mutation: `override = <torque test only>` (drop
-    `bool(steering_pressed)`) -> reason active, target ~ 0.86 cap."""
-    s = CoopSteer(DT)
-    r = s.update(True, True, 0.9, 20 * MPH, 0.0)
-    assert r.reason == cs.REASON_OVERRIDE and r.target_deg == 0.0 and r.offset_deg == 0.0
+  def test_a_firm_push_is_followed_never_retracted_while_it_grows(self):
+    """THE v1 complaint: a real push crosses 0.5 -> 1.0 Nm in ~80 ms and then sits at 1-3 Nm. While the
+    push GROWS the yield must only grow, always with the torque's sign, and reach most of the cap.
+    Runs the REAL Tesla debouncer so steeringPressed latches on the way up, as on the car. Mutation:
+    reintroduce the v1 zeroing/freeze on pressed -> the offset stops growing or falls at 1 Nm."""
+    from opendbc.car.interfaces import CarStateBase
+    from opendbc.car.tesla.values import STEER_THRESHOLD
+    for sign in (1.0, -1.0):
+      deb = type("Deb", (), {"steering_pressed_cnt": 0})()
+      s = CoopSteer(DT)
+      ramp = [0.5 + 0.0625 * i for i in range(41)]          # 0.5 -> 3.0 Nm in 0.4 s
+      prev, peak, pressed_seen = 0.0, 0.0, False
+      trace = ramp + [3.0] * 150
+      for i, tq in enumerate(trace):
+        pressed = CarStateBase.update_steering_pressed(deb, abs(tq) > STEER_THRESHOLD, 5)
+        pressed_seen |= pressed
+        r = s.update(True, pressed, sign * tq, 11.0, 0.0)
+        assert r.offset_deg == 0.0 or math.copysign(1, r.offset_deg) == sign
+        if i < len(ramp) + 20:        # the ramp + 0.2 s; once the offset catches its target the 5 s washout eases it back
+          assert r.offset_deg * sign >= prev - 1e-12, (tq, r)
+        prev = r.offset_deg * sign
+        peak = max(peak, prev)
+      assert pressed_seen
+      assert peak > 0.7 * r.cap_deg, (peak, r.cap_deg)
 
   def test_zero_torque_is_exactly_zero(self):
     """Mutation: COOP_DEADZONE_NM = -0.1 -> zero torque produces a non-zero ratio... it does not,
@@ -175,9 +165,9 @@ class TestOverrideAndDeadzone:
     assert r.offset_deg == 0.0 and r.reason == cs.REASON_DEADZONE
 
   def test_ratio_is_proportional_between_deadzone_and_full(self, unfiltered):
-    """0.75 Nm is the midpoint of 0.5-1.0 -> target = cap/2. Mutation: COOP_FULL_NM = 2.0."""
+    """1.75 Nm is the midpoint of 0.5-3.0 -> target = cap/2. Mutation: COOP_FULL_NM = 2.0."""
     s = CoopSteer(DT)
-    r = s.update(True, False, 0.75, 20 * MPH, 0.0)
+    r = s.update(True, False, 1.75, 20 * MPH, 0.0)
     assert r.target_deg == pytest.approx(0.5 * r.cap_deg, rel=1e-6)
 
   def test_inactive_resets_state(self):
@@ -189,83 +179,36 @@ class TestOverrideAndDeadzone:
     assert r.reason == cs.REASON_INACTIVE and r.offset_deg == 0.0 and s._lp == 0.0
 
 
-class TestTorqueOverrideBeforeDebounce:
-  """coopsteerfix2pnw -- the 2026-09-07 100 Hz replay defect. Tesla's steeringPressed needs 6
-  consecutive frames of |tq| > 1.0 Nm, so for ~50 ms after the driver crosses 1.0 Nm the flag reads
-  False. The module must call that override from the torque itself, not emit the saturated 12 deg
-  cap in the window (77 of 1585 active ticks on the drive, up to 2.98 Nm)."""
+class TestNoSnapOnATakeover:
+  """coopsteerfix2pnw (2026-09-14) stopped v1 emitting its FULL cap in the 50 ms before the debounced
+  steeringPressed latched. In v2 a >1 Nm push is meant to get a large yield, so the invariant that
+  survives is the one that mattered: however hard and fast the grab, the yield ARRIVES at the slew
+  rate, never as a step."""
 
-  def test_2nm_without_pressed_is_override_not_saturated_active(self):
-    """THE defect. Mutation: `elif override:` -> `elif steering_pressed:` (the pre-fix branch) ->
-    reason active, target = the full 12 deg cap."""
-    for tq in (2.0, -2.0):
-      s = CoopSteer(DT)
-      r = s.update(True, False, tq, 10 * MPH, 0.0)
-      assert r.reason == cs.REASON_OVERRIDE, (tq, r)
-      assert r.target_deg == 0.0 and r.offset_deg == 0.0
-
-  def test_exact_boundary_is_strict_greater_than_1nm(self, unfiltered):
-    """1.0 Nm exactly is still the top of the nudge band (ratio 1 -> target == cap), matching the
-    carstate's own strict `abs(torque) > STEER_THRESHOLD`; the next representable float above it is
-    override. Literal 1.0 on purpose, not COOP_FULL_NM. Mutations: `>` -> `>=` (1.0 becomes
-    override); `abs(...)` dropped (-1.0000000000000002 stays active)."""
-    above = math.nextafter(1.0, math.inf)
-    for sign in (1.0, -1.0):
-      s = CoopSteer(DT)
-      r = s.update(True, False, sign * 1.0, 20 * MPH, 0.0)
-      assert r.reason == cs.REASON_ACTIVE, (sign, r)
-      assert r.target_deg == pytest.approx(sign * r.cap_deg, rel=1e-9)
-      s = CoopSteer(DT)
-      r = s.update(True, False, sign * above, 20 * MPH, 0.0)
-      assert r.reason == cs.REASON_OVERRIDE, (sign, r)
-      assert r.target_deg == 0.0
-
-  def test_real_tesla_debounce_window_never_reads_active_above_1nm(self):
-    """End to end against the REAL opendbc debouncer (CarStateBase.update_steering_pressed with the
-    Tesla carstate's arguments: > STEER_THRESHOLD, min count 5): a driver ramping from a held 0.9 Nm
-    push to 2.98 Nm, and a fresh 2.98 Nm grab with no offset held. On every tick where |tq| > 1.0 the
-    module must be in override (HOLD of what the light band already earned, or a zero target) -- never
-    'active', never growing -- and the window where steeringPressed is still False must actually
-    exist (else the test is vacuous). Mutation: the pre-fix branch (`elif steering_pressed:`) ->
-    active ticks with |tq| > 1.0 and the offset climbing toward the 12 deg cap."""
+  def test_a_sudden_3nm_grab_arrives_at_the_slew_rate(self):
+    """A 0 -> 2.98 Nm grab (the 09-07 peak) at 4.6 m/s through the real debouncer: every tick moves at
+    most the same-direction slew step, so the first 50 ms carry at most 5 steps. Mutation: slew step
+    = 1e9 (no slew) -> the first tick jumps to the filtered target."""
     from opendbc.car.interfaces import CarStateBase
     from opendbc.car.tesla.values import STEER_THRESHOLD
-    for lead_in in (300, 0):
-      deb = type("Deb", (), {"steering_pressed_cnt": 0})()
-      s = CoopSteer(DT)
-      trace = [0.9] * lead_in + [1.2, 1.6, 2.1, 2.6] + [2.98] * 10
-      window, held = 0, None
-      for tq in trace:
-        pressed = CarStateBase.update_steering_pressed(deb, abs(tq) > STEER_THRESHOLD, 5)
-        before = s.offset_deg
-        r = s.update(True, pressed, tq, 4.6, 0.0)
-        if abs(tq) > 1.0:
-          window += 0 if pressed else 1
-          held = before if held is None else held
-          assert r.reason in (cs.REASON_OVERRIDE, cs.REASON_HOLD), (tq, pressed, r)
-          assert abs(r.offset_deg) <= abs(held) + 1e-12, (tq, pressed, r)
-          if held == 0.0:
-            assert r.reason == cs.REASON_OVERRIDE and r.target_deg == 0.0 and r.offset_deg == 0.0
-      assert window >= 5, f"debounce window not exercised ({window} unpressed ticks above 1 Nm)"
-
-  def test_torque_override_sheds_held_offset_at_the_full_jerk_rate(self):
-    """A torque-derived override AGAINST the held offset is the same override: the offset sheds at the
-    full jerk budget (Fable should-fix 3), not the gentle release rate. Mutation: slew `or override`
-    -> `or bool(steering_pressed)` -> sheds at half rate in the debounce window."""
+    deb = type("Deb", (), {"steering_pressed_cnt": 0})()
     s = CoopSteer(DT)
-    _run(s, 0.9, 30.0, 400)
-    before = s.offset_deg
-    assert before > 0.5
-    r = s.update(True, False, -2.0, 30.0, 0.0)
-    assert r.reason == cs.REASON_OVERRIDE
-    assert before - r.offset_deg == pytest.approx(1.0 * s.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
+    step = min(cs.COOP_SLEW_FRAC_SAME * s.jerk_rate_deg_s(4.6), cs.COOP_SLEW_MAX_DEG_S) * DT
+    prev = 0.0
+    for i, tq in enumerate([2.98] * 100):
+      pressed = CarStateBase.update_steering_pressed(deb, abs(tq) > STEER_THRESHOLD, 5)
+      r = s.update(True, pressed, tq, 4.6, 0.0)
+      assert r.offset_deg - prev <= step + 1e-9, (i, r)
+      if i == 4:
+        assert r.offset_deg <= 5 * step + 1e-9
+      prev = r.offset_deg
 
-  def test_nonfinite_torque_is_still_bad_input_at_the_release_rate(self):
+  def test_nonfinite_torque_is_bad_input_not_a_huge_push(self):
     """inf torque is a broken input, not a 'huge push': reason badInput and the held offset decays at
-    the pre-fix (half) rate, i.e. the badInput path is unchanged by this fix. Mutation: drop the
-    `_finite(torque_nm) and` guard in the override test -> abs(inf) > 1 -> full-rate shed."""
+    the gentle release rate. Mutation: drop `_finite(torque_nm)` from the bad-input test -> inf is
+    clamped to full scale and the offset GROWS."""
     s = CoopSteer(DT)
-    _run(s, 0.9, 30.0, 400)
+    _run(s, 2.0, 30.0, 400)
     before = s.offset_deg
     assert before > 0.5
     r = s.update(True, False, float("inf"), 30.0, 0.0)
@@ -316,9 +259,7 @@ class TestWashout:
     the un-clipped ratio (e.g. `self._lp += (tq * 100 - self._lp) * ...`)."""
     s = CoopSteer(DT)
     for _ in range(5000):
-      # coopsteerfix2pnw: was an absurd 50 Nm, which is now an override (target 0) and would make this
-      # test vacuous. 1.0 Nm is the largest torque that still drives the target to the full cap.
-      s.update(True, False, 1.0, 5.0, 0.0)
+      s.update(True, False, 50.0, 5.0, 0.0)     # an absurd push: the target is clipped to the cap
     assert s._lp == pytest.approx(12.0, abs=1e-3)   # it DID wind up to the cap (the test is live)...
     assert abs(s._lp) <= 12.0 + 1e-9                 # ...and no further
 
@@ -345,10 +286,10 @@ class TestSlewTiedToJerk:
   def test_opposing_torque_unwinds_at_the_full_jerk_rate(self, unfiltered):
     """Mutation: COOP_SLEW_FRAC_OPPOSING = 0.5."""
     s = CoopSteer(DT)
-    _run(s, 0.9, 30.0, 400)
+    _run(s, 2.0, 30.0, 400)
     before = s.offset_deg
     assert before > 0.5
-    r = s.update(True, False, -0.9, 30.0, 0.0)
+    r = s.update(True, False, -2.0, 30.0, 0.0)
     assert before - r.offset_deg == pytest.approx(1.0 * s.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
 
   def test_low_speed_slew_is_capped_at_60_deg_s(self, unfiltered):
@@ -438,19 +379,19 @@ class TestWrongSignWorstCase:
     assert r.reason == cs.REASON_ACTIVE and r.cap_deg == pytest.approx(12.0)
     assert r.offset_deg == 0.0                     # held, not jumped to the 12 deg washed target
 
-  def test_override_unwinds_at_the_full_jerk_rate(self, unfiltered):
-    """Fable should-fix 3: a held offset the driver pushes AGAINST (steeringPressed) must shed at the
-    full jerk budget, not the gentle half rate. Mutation: drop `or override` in the slew."""
+  def test_firm_push_against_the_offset_unwinds_at_the_full_jerk_rate(self, unfiltered):
+    """Fable should-fix 3, v2 form: a held offset the driver pushes AGAINST (1.5 Nm, pressed) sheds at
+    the full jerk budget, not the gentle half rate. Mutation: `opposing = False`."""
     s = CoopSteer(DT)
-    _run(s, 0.9, 30.0, 400)
+    _run(s, 2.0, 30.0, 400)
     before = s.offset_deg
     assert before > 0.5
     r = s.update(True, True, -1.5, 30.0, 0.0)
-    assert r.reason == cs.REASON_OVERRIDE
+    assert r.reason == cs.REASON_ACTIVE and r.target_deg < 0.0
     assert before - r.offset_deg == pytest.approx(1.0 * s.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
     # ...while a plain release (not pressed) keeps the gentle half rate
     s2 = CoopSteer(DT)
-    _run(s2, 0.9, 30.0, 400)
+    _run(s2, 2.0, 30.0, 400)
     b2 = s2.offset_deg
     r2 = s2.update(True, False, 0.0, 30.0, 0.0)
     assert b2 - r2.offset_deg == pytest.approx(0.5 * s2.jerk_rate_deg_s(30.0) * DT, rel=1e-6)
@@ -605,19 +546,25 @@ class TestTorqueFilter:
     r = _run(s, 0.8, 20 * MPH, 30)
     assert r.reason == cs.REASON_ACTIVE and r.offset_deg > 0.5
 
-  def test_filter_never_delays_the_override(self):
-    """The override test reads the RAW torque: a 2 Nm grab against a held offset sheds it on the very
-    first tick. Mutation: test `abs(self._tq_f) > COOP_FULL_NM` for the override."""
+  def test_a_reversal_gets_out_of_the_way_within_150ms(self):
+    """With no override branch, a reversal is seen through the filter: a -2 Nm grab against a held
+    +offset must shrink it on every tick from the first, and flip the target within 150 ms.
+    Mutation: COOP_TQ_TAU_S = 5.0 -> the target is still positive after 150 ms."""
     s = CoopSteer(DT)
-    _run(s, 0.9, 20 * MPH, 100)
-    r = s.update(True, False, -2.0, 20 * MPH, 0.0)
-    assert r.reason == cs.REASON_OVERRIDE and r.target_deg == 0.0
+    _run(s, 2.0, 20 * MPH, 100)
+    prev = s.offset_deg
+    assert prev > 1.0
+    for _ in range(15):
+      r = s.update(True, True, -2.0, 20 * MPH, 0.0)
+      assert r.offset_deg < prev
+      prev = r.offset_deg
+    assert r.target_deg < 0.0
 
-  def test_filter_state_is_clipped_to_the_band(self):
-    """A long 3 Nm override must not leave the filter at 3 Nm (it would linger as a full-cap target after
+  def test_filter_state_is_clipped_to_full_scale(self):
+    """A 9 Nm grab must not leave the filter at 9 Nm (it would linger as a full-cap target after the
     release). Mutation: drop the _clamp on the filter input."""
     s = CoopSteer(DT)
-    _run(s, 3.0, 20 * MPH, 500)
+    _run(s, 9.0, 20 * MPH, 500)
     assert abs(s._tq_f) <= cs.COOP_FULL_NM + 1e-12
 
 
@@ -896,7 +843,7 @@ class _Params:
   def __init__(self, value=None, exc=None):
     self.value, self.exc, self.reads = value, exc, 0
   def get_bool(self, key):
-    assert key == "CoopSteer"
+    assert key == "DisableCoopSteer"
     self.reads += 1
     if self.exc:
       raise self.exc
@@ -916,21 +863,27 @@ class TestToggleRead:
     assert sum(1 for n, _, _ in log.calls if n == "exception") == 1
 
   def test_read_at_1hz_and_a_flip_resets_the_module(self):
-    """Mutation: drop the reset on a flip -> the offset the shadow was holding steps onto the wire."""
+    """DisableCoopSteer false -> actuation ON. Mutations: drop the reset on a flip (the offset the shadow
+    was holding steps onto the wire), or drop the `not` (the opt-out polarity)."""
     shadow = CoopSteer(DT)
-    _run(shadow, 0.9, 20 * MPH, 100)
+    _run(shadow, 2.0, 20 * MPH, 100)
     assert shadow.offset_deg > 0.5
     c = _ctrl(False, None, shadow=shadow)
-    c.params = _Params(value=True)
+    c.params = _Params(value=False)
     for _ in range(250):
       Controls._read_coop_enabled(c)
     assert c.params.reads == 3 and c._coop_enabled is True
     assert shadow.offset_deg == 0.0
+    c.params = _Params(value=True)            # the driver turns the opt-out ON
+    for _ in range(100):
+      Controls._read_coop_enabled(c)
+    assert c._coop_enabled is False
 
-  def test_default_is_off(self):
-    """New toggle, default OFF (CLAUDE.md). Mutation: params_keys.h default "1"."""
+  def test_opt_out_toggle_defaults_off_so_the_feature_is_on(self):
+    """Owner 2026-09-27: a toggle's default is always OFF; cooperative steering itself is ON by default.
+    Mutation: params_keys.h default "1"."""
     from openpilot.common.params import Params
-    assert Params().get("CoopSteer", return_default=True) is False
+    assert Params().get("DisableCoopSteer", return_default=True) is False
 
 
 class TestLightningUntouched:

@@ -4248,7 +4248,7 @@ class CESController:
     self._cp_tq = None           # CS.steeringTorque (Nm) -- THE sign-question input
     self._cp_rate = None         # CS.steeringRateDeg -- THE sign-question response
     self._cp_cmd = None          # angle the wire WOULD have carried (cmd + offset)
-    self._cp_act = None          # coopsteer2pnw: CoopSteer toggle on (actuation enabled) as controlsd read it
+    self._cp_act = None          # coopsteer2pnw: actuation enabled (DisableCoopSteer off) as controlsd read it
     self._cp_app = None          # coopsteer2pnw: offset (deg) actually added to the actuator this tick
     # steertele2pnw: capability-analysis additions — see the steer_limit_status comment block in
     # controlsd.py for the full derivation of each. Same defaulting rationale as the sl* fields above.
