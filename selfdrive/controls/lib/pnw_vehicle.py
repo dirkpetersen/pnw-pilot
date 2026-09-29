@@ -382,36 +382,42 @@ CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lo
 # curve_brain_cfg, and cloudlog.error for the invalid cases); a bad file DURING a drive is not applied (last config kept).
 # To take the acting default back out, change this one constant to "shadow".
 CURVE_BRAIN_DEFAULT = "lower"
+# A PRESENT but corrupt tesla section / unreadable file / invalid mode at start is NOT "no config": it falls to this (compute + log,
+# change nothing) with the cloudlog.error and `why`. Only a MISSING file or MISSING section gets the acting default. A file DELETED
+# mid-drive reverts to the acting default (event curve_brain_cfg_reload file=absent) -- a documented footgun.
+CURVE_BRAIN_CORRUPT = "shadow"
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
-# curvebrain2b2pnw A2/A3: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
-# clipped in opendbc/car/lateral.py apply_steer_angle_limits_vm at get_max_angle_vm(v) -- the angle the vehicle model
-# needs for opendbc.car.tesla.values.CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL = ISO 3.0 + g * 0.06 (a banked-road
-# tolerance) = 3.5886 m/s^2 at EVERY speed (panda's steer_angle_cmd_checks_vm enforces the same figure). 2026-09-28 22:35 the
-# applied angle stalled at 14.42 deg at 70.3 mph = get_max_angle_vm(31.4 m/s) exactly, and the road there alone (k 0.00401)
-# needs 3.96 m/s^2 at 70.3 mph. The ceiling used here is that limit MINUS CURVE_STEER_MARGIN (0.3, the same margin the
-# schedule clip keeps), read from the SAME constant -- never a copy of 3.5886: 3.2886 m/s^2 at every speed (= 64.1 mph at
-# k 0.00401). Headroom is 0.3 (8 %); the response measured at the clamp on the adverse-camber left curve (2.9-3.0 delivered)
-# says the true margin there may be thinner: a derating that is data, not a guess, is the calibration the shadow drive owes.
-# A curve speed that assumes more than the ceiling can run into the clamp: the car runs wide, "Turn Exceeds Steering Limit".
+# curvebrain2b2pnw A2/A3/A4: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
+# clipped in opendbc/car/lateral.py apply_steer_angle_limits_vm at get_max_angle_vm(v), the angle the vehicle model needs for
+# opendbc.car.tesla.values.CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL = ISO 3.0 + g * AVERAGE_ROAD_ROLL(0.06) = 3.5886
+# m/s^2 at every speed. THAT NUMBER IS NOT A CAPABILITY: the + g*roll part is a favourable-camber ALLOWANCE in model units
+# (panda's own torque lower bound uses ISO - g*roll = 2.41, safety/lateral.h). Evidence: on 2026-09-28 22:35 the applied angle
+# stalled at the clamp (14.42 deg at 70.3 mph) and the car delivered only 3.0-3.1 m/s^2 (tesla-max-lat-accel s1.8; tesla-
+# terwilliger s4: openpilot alone reached 3.0-3.1 with the angle at the clamp, running wide on the adverse-camber left curve).
+# So the ceiling is built from the ISO part: (MAX_LATERAL_ACCEL - g * AVERAGE_ROAD_ROLL) - CURVE_STEER_MARGIN = 3.0 - 0.2 =
+# 2.8 m/s^2 at every speed, read from opendbc's own constants (never a copy of 3.5886 / 3.0). 3.0 is the absolute most.
+# CONSEQUENCE (owner-visible): the owner's 4.0 (tesla.curve_lat_a) is his REQUESTED target, and this clip makes it 2.8. Terwilliger
+# left curve (k 0.00401) is priced at 59.1 mph, the right curve (k 0.00474) at 54.4 mph; the DB has no camber or direction
+# awareness, so one ceiling has to cover the adverse-camber case. Raise it only from shadow-drive calibration (tesla_lat).
 # The import is done ONCE, at PnwVehicle construction on the Tesla, never inside a control loop (a ~30 ms import in
-# selfdrived's 100 Hz loop is a commIssue). If the constant cannot be read the ceiling is the fixed 3.0 (ISO), LOWER than
-# the real one -- the safe direction -- and it is a cloudlog.error.
-CURVE_STEER_MARGIN = 0.3
-_STEER_LAT_CEILING_FALLBACK = 3.0
+# selfdrived's 100 Hz loop is a commIssue). If the constants cannot be read the ceiling is the fixed 2.8 and it is a
+# cloudlog.error.
+CURVE_STEER_MARGIN = 0.2
+_STEER_LAT_CEILING_FALLBACK = 2.8
 _steer_lat_ceiling_cache: float | None = None
 
 
 def _tesla_steer_lat_ceiling() -> float:
-  """The Tesla steering-angle clamp expressed as a lateral acceleration (m/s^2), less CURVE_STEER_MARGIN. Cached."""
+  """The Tesla steering clamp's ISO lateral acceleration (m/s^2), less CURVE_STEER_MARGIN. Cached."""
   global _steer_lat_ceiling_cache
   if _steer_lat_ceiling_cache is None:
     v = _STEER_LAT_CEILING_FALLBACK
     try:
-      from opendbc.car.tesla.values import CarControllerParams
-      lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
-      if not (isinstance(lim, (int, float)) and math.isfinite(lim) and 2.0 <= lim <= 5.0):
-        raise ValueError(f"MAX_LATERAL_ACCEL {lim!r} is not a plausible lateral acceleration")
+      from opendbc.car.tesla.values import ACCELERATION_DUE_TO_GRAVITY, AVERAGE_ROAD_ROLL, CarControllerParams
+      lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL
+      if not (isinstance(lim, (int, float)) and math.isfinite(lim) and 2.0 <= lim <= 4.0):
+        raise ValueError(f"ISO lateral acceleration {lim!r} is not plausible")
       v = float(lim) - CURVE_STEER_MARGIN
     except Exception as e:
       cloudlog.error("pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
@@ -446,6 +452,7 @@ def _load_tesla_curve_config() -> dict:
       cloudlog.error(f"pnw_vehicle: {path} IGNORED for the tesla section (not a regular file, or {st.st_size} B > " +
                      f"{_CURVE_CONFIG_MAX_BYTES} B) -- the curve brain uses its defaults")
       cfg["why"] = "default (curve.json unusable)"
+      cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
       return cfg
     with open(path) as f:
       data = json.load(f)
@@ -455,6 +462,7 @@ def _load_tesla_curve_config() -> dict:
     cloudlog.error(f"pnw_vehicle: {path} unreadable/malformed ({type(e).__name__}: {e}) -- the curve brain's tesla " +
                    "section uses its defaults")
     cfg["why"] = f"default (curve.json unreadable: {type(e).__name__})"
+    cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
     return cfg
   # The key parse is guarded like the read above (Fable F1): json.load turns a 309+ digit literal into an int that
   # math.isfinite / float() cannot convert (OverflowError), and a raise here would take down EVERY process that builds
@@ -467,6 +475,7 @@ def _load_tesla_curve_config() -> dict:
       cloudlog.error(f"pnw_vehicle: {path} tesla section IGNORED (expected an object, got {type(tesla).__name__}) -- " +
                      "the curve brain uses its defaults")
       cfg["why"] = f"INVALID curve.json tesla section ({type(tesla).__name__}) -> defaults"
+      cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
       return cfg
     bad, clamped = [], []
     if "curve_lat_a" in tesla:
@@ -482,19 +491,22 @@ def _load_tesla_curve_config() -> dict:
       mode = _parse_curve_brain_mode(tesla["curve_brain"])
       if mode is None:
         bad.append(f"curve_brain {tesla['curve_brain']!r:.24} is not one of {'/'.join(CURVE_BRAIN_MODES)} -> " +
-                   CURVE_BRAIN_DEFAULT)
+                   CURVE_BRAIN_CORRUPT)
+        cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
       else:
         cfg["curve_brain"] = mode
     if clamped:
       cloudlog.warning(f"pnw_vehicle: {path}: tesla value(s) clamped into bounds: {', '.join(clamped)}")
     if bad:
+      if "curve_brain" not in tesla:
+        cfg["curve_brain"] = CURVE_BRAIN_CORRUPT      # a corrupt section with no explicit mode is not "no config"
       cloudlog.error(f"pnw_vehicle: {path}: tesla value(s) NOT honored: {'; '.join(bad)}")
       cfg["why"] = "INVALID curve.json tesla: " + "; ".join(bad)
     else:
       cfg["why"] = "curve.json"
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
-    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT,
+    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
 
@@ -1008,8 +1020,8 @@ class PnwVehicle:
     lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
-    minus CURVE_STEER_MARGIN, 3.2886), so the 4.0 default is a target the code can never turn into a speed the steering
-    cannot hold: at most 3.29 at any speed, 3.2 at 75 mph, 2.7 at >= 80 mph. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
+    ISO part, 3.0, minus CURVE_STEER_MARGIN = 2.8), so the owner's requested 4.0 is clipped to 2.8 at every speed up to
+    ~77 mph (2.7 from 80 mph): a target the code can never turn into a speed the steering cannot hold. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
     Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
     icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:

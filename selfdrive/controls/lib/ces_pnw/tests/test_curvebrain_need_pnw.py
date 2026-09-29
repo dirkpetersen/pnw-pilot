@@ -29,7 +29,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import brake_cap_for_ape
 
 MPH = 0.44704
 DEFAULT_MODE = pv.CURVE_BRAIN_DEFAULT      # the Tesla's shipped mode when curve.json says nothing
-CEIL = 3.5886 - 0.3          # the Tesla steering ceiling (CarControllerParams MAX_LATERAL_ACCEL - CURVE_STEER_MARGIN)
+CEIL = 2.8                   # the Tesla steering ceiling: ISO 3.0 (MAX_LATERAL_ACCEL - g*roll) - CURVE_STEER_MARGIN 0.2
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
 
@@ -144,14 +144,14 @@ class TestRowSpeed:
     """2026-09-28 22:35, the left curve, DB row k = 0.0040 (R 250 m), the car arriving at 70 mph.
     (a) A = 4.0 alone commands 70.7 mph -- the speed at which the applied angle stalled at the clamp and the driver
         took over. (b) with only the lataccel schedule clip (target - 0.3) it is still 67.8 mph. (c) with the
-        steering ceiling it is 64.1 mph."""
+        steering ceiling it is 59.2 mph."""
     k, v_now = 0.0040, 70.3 * MPH
     va, _ = cb.row_speed(Veh(lambda v: 4.0), k, v_now)
     vb, _ = cb.row_speed(Veh(lambda v: min(4.0, dh.lat_accel_target(v) - 0.3)), k, v_now)
     vc, ac = cb.row_speed(tesla(), k, v_now)
     assert va / MPH == pytest.approx(70.7, abs=0.05)
     assert vb / MPH == pytest.approx(67.8, abs=0.15) and vb < va
-    assert vc / MPH == pytest.approx(64.1, abs=0.1) and ac == pytest.approx(CEIL, abs=1e-3)
+    assert vc / MPH == pytest.approx(59.2, abs=0.1) and ac == pytest.approx(CEIL, abs=1e-3)
     assert vc < vb < va
 
 
@@ -372,6 +372,19 @@ class TestParseEntry:
   def test_anything_else_is_ignored_and_named(self, raw, problem):
     entry, why, _ = cb.parse_entry(raw, self.NOW)
     assert entry is None and why == problem
+
+  def test_a_publish_that_landed_after_the_reader_took_its_clock_is_fresh_not_stale(self):
+    """Fable F2: VTSC captures `now` at the top of cap() and reads the param later; a publish in between (plus ts rounding)
+    has a small NEGATIVE age. That is fresh -- the age is clamped to 0 -- not a false stale."""
+    for skew in (0.0005, 0.02, 0.1, 0.2499):
+      entry, problem, age = cb.parse_entry(self._e(ts=self.NOW + skew), self.NOW)
+      assert problem is None and entry["v"] == 25.0 and age == 0.0, skew
+    assert cb.parse_entry(self._e(ts=self.NOW + cb.PUBLISH_S + 0.01), self.NOW)[1] == "stale"   # another boot's clock
+
+  def test_a_real_one_and_a_half_second_old_entry_is_stale(self):
+    assert cb.parse_entry(self._e(ts=self.NOW - 1.5), self.NOW)[1] == "stale"
+    assert cb.parse_entry(self._e(ts=self.NOW - 1.0001), self.NOW)[1] == "stale"
+    assert cb.parse_entry(self._e(ts=self.NOW - 1.0), self.NOW)[1] is None
 
   def test_it_never_raises(self):
     class Weird:
@@ -618,15 +631,15 @@ class TestClosedLoop:
   def test_the_tesla_enters_the_tight_part_at_the_speed_the_steering_can_hold_not_at_the_speed_that_failed(
       self, monkeypatch, tmp_path, cfgpath, schedule):
     trace = self._run(monkeypatch, tmp_path, cfgpath, "lower")
-    need = math.sqrt(CEIL / self.K)                                    # 28.6 m/s = 64.1 mph
+    need = math.sqrt(CEIL / self.K)                                    # 26.4 m/s = 59.1 mph
     entrance = self._at(trace, self.ROW_Y - 25.0)
-    assert entrance[2] / MPH == pytest.approx(need / MPH, abs=1.0), entrance          # 64 mph, not 70+
+    assert entrance[2] / MPH == pytest.approx(need / MPH, abs=1.0), entrance          # 59 mph, not 70+
     inside = [r for r in trace if self.ROW_Y - 25.0 <= r[1] <= self.ROW_Y + 150.0]
     assert max(r[2] for r in inside) <= need + 0.6 and min(r[2] for r in inside) >= need - 0.6   # neither fast nor over-slow
     caps = [r[3] for r in trace]                                       # the cap itself is decel-limited (regen 2.0) ...
     assert min((b - a) / 0.05 for a, b in zip(caps, caps[1:], strict=False)) >= -2.0 - 1e-6
     assert max(r[2] - r[3] for r in trace) <= 0.3                      # ... and a car following it is never far above it
-    assert min((r[4] for r in trace if r[1] < self.ROW_Y - 25.0 - 350.0), default=0.0) >= -1e-6   # nothing until ~350 m out
+    assert min((r[4] for r in trace if r[1] < self.ROW_Y - 25.0 - 450.0), default=0.0) >= -1e-6   # nothing until ~450 m out
     assert self.K * max(r[2] for r in inside) ** 2 <= CEIL + 0.35                      # the lateral acceleration it asks for
 
   def test_without_the_brain_the_same_car_enters_at_the_set_speed(self, monkeypatch, tmp_path, cfgpath, schedule):

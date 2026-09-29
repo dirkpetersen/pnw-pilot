@@ -15,7 +15,7 @@ from openpilot.selfdrive.controls.lib import drive_helpers as dh
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 
 MPH = 0.44704
-CEIL = 3.5886 - 0.3      # the Tesla steering ceiling: CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL - CURVE_STEER_MARGIN
+CEIL = 2.8               # the Tesla steering ceiling: (MAX_LATERAL_ACCEL - g*roll = ISO 3.0) - CURVE_STEER_MARGIN 0.2
 TESLA = "TESLA_MODEL_S_HW3"
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
@@ -141,7 +141,7 @@ def test_curve_lat_a_is_clamped_into_bounds_and_says_so(cfg, log, raw, want):
 def test_a_curve_lat_a_that_is_not_a_finite_number_keeps_the_default_and_is_an_error(cfg, log, text):
   path = cfg(text)
   t = tesla()                                    # never raises
-  assert t.curve_lat_a_cfg == 4.0 and math.isfinite(t.curve_lat_a(30.0)) and t.curve_brain == pv.CURVE_BRAIN_DEFAULT
+  assert t.curve_lat_a_cfg == 4.0 and math.isfinite(t.curve_lat_a(30.0)) and t.curve_brain == pv.CURVE_BRAIN_CORRUPT
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0]
   if "0" * 400 in text:                          # the parse itself failed: the whole section is its defaults
@@ -154,7 +154,7 @@ def test_a_curve_lat_a_that_is_not_a_finite_number_keeps_the_default_and_is_an_e
 def test_a_mode_that_is_not_one_falls_back_to_the_default_and_is_an_error(cfg, log, raw):
   path = cfg({"tesla": {"curve_brain": raw, "curve_lat_a": 2.9}})
   t = tesla()
-  assert t.curve_brain == pv.CURVE_BRAIN_DEFAULT and t.curve_lat_a_cfg == 2.9    # a bad key costs only itself
+  assert t.curve_brain == pv.CURVE_BRAIN_CORRUPT and t.curve_lat_a_cfg == 2.9     # a bad key costs only itself
   assert t.curve_brain_why.startswith("INVALID") and "curve_brain" in t.curve_brain_why
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0] and "curve_brain" in errs[0]
@@ -164,14 +164,14 @@ def test_a_mode_that_is_not_one_falls_back_to_the_default_and_is_an_error(cfg, l
 def test_a_section_that_is_not_an_object_is_an_error(cfg, log, doc):
   path = cfg(doc)
   t = tesla()
-  assert (t.curve_brain, t.curve_lat_a_cfg) == (pv.CURVE_BRAIN_DEFAULT, 4.0) and t.curve_brain_why.startswith("INVALID")
+  assert (t.curve_brain, t.curve_lat_a_cfg) == (pv.CURVE_BRAIN_CORRUPT, 4.0) and t.curve_brain_why.startswith("INVALID")
   assert len(log.at("error")) == 1 and path in log.at("error")[0]
 
 
 def test_an_unreadable_file_is_an_error_for_the_tesla_section_too(cfg, log):
   path = cfg('{"tesla": {"curve_lat_a": 3.0')                                  # truncated JSON
   t = tesla()
-  assert (t.curve_brain, t.curve_lat_a_cfg) == (pv.CURVE_BRAIN_DEFAULT, 4.0)
+  assert (t.curve_brain, t.curve_lat_a_cfg) == (pv.CURVE_BRAIN_CORRUPT, 4.0)
   assert t.curve_brain_why == "default (curve.json unreadable: JSONDecodeError)"
   # one error from each loader, each naming the path: the Lightning section's (it runs on every car) and the Tesla's
   assert len(log.at("error")) == 2 and all(path in e for e in log.at("error"))
@@ -237,17 +237,17 @@ def test_the_tesla_section_is_never_opened_on_the_lightning(cfg, monkeypatch):
 # the lateral-clip cap
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("mph, cfg_a, want", [
-  (55.0, 4.0, CEIL),       # schedule 5.5 -> clip 5.2; the STEERING ceiling (3.2886) binds the 4.0 target
+  (55.0, 4.0, CEIL),       # schedule 5.5 -> clip 5.2; the STEERING ceiling (2.8) binds the 4.0 target
   (60.0, 4.0, CEIL),       # 5.0 -> 4.7
   (60.0, 4.5, CEIL),       # the upper bound is capped the same way
   (65.0, 4.5, CEIL),       # 4.5 -> 4.2
   (70.0, 4.0, CEIL),       # 4.0 -> 3.7: the schedule clip no longer binds either; steering does
   (70.0, 2.5, 2.5),        # a low config is never RAISED by any clip
-  (70.0, 3.0, 3.0),
+  (70.0, 3.0, 2.8),
   (72.0, 4.0, CEIL),       # 3.8 -> 3.5
-  (74.0, 4.0, CEIL),       # 3.6 -> 3.3: still above the ceiling by 0.01
-  (75.0, 4.0, 3.2),        # 3.5 -> 3.2: from here the schedule clip binds
-  (78.0, 4.5, 2.9),        # 3.2 -> 2.9
+  (74.0, 4.0, CEIL),       # 3.6 -> 3.3
+  (75.0, 4.0, CEIL),       # 3.5 -> 3.2
+  (78.0, 4.5, CEIL),       # 3.2 -> 2.9: still above 2.8
   (80.0, 4.0, 2.7),        # 3.0 (ISO) -> 2.7: EFFECTIVELY 2.7 at >= 80 mph
   (95.0, 4.5, 2.7),        # held flat past the last breakpoint
 ])
@@ -297,10 +297,13 @@ def test_the_steering_ceiling_is_the_vehicle_model_clamp_minus_the_margin():
   from opendbc.car.tesla.values import ACCELERATION_DUE_TO_GRAVITY, AVERAGE_ROAD_ROLL, CarControllerParams
   from opendbc.car.vehicle_model import VehicleModel
   lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
-  assert pv.CURVE_STEER_MARGIN == 0.3
-  assert pv._tesla_steer_lat_ceiling() == pytest.approx(lim - 0.3) == pytest.approx(CEIL, abs=1e-3)   # read, not copied
+  assert pv.CURVE_STEER_MARGIN == 0.2 and pv.CURVE_STEER_MARGIN >= 0.2
+  iso = lim - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL
+  assert iso == pytest.approx(ISO_LATERAL_ACCEL)
+  assert pv._tesla_steer_lat_ceiling() == pytest.approx(iso - 0.2) == pytest.approx(CEIL, abs=1e-3)   # read, not copied
+  assert pv._tesla_steer_lat_ceiling() < ISO_LATERAL_ACCEL                     # never the favourable-camber allowance
   assert lim == pytest.approx(ISO_LATERAL_ACCEL + ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)
-  assert pv._STEER_LAT_CEILING_FALLBACK < pv._tesla_steer_lat_ceiling()      # the degraded value errs LOW, never high
+  assert pv._STEER_LAT_CEILING_FALLBACK <= pv._tesla_steer_lat_ceiling() + 1e-9   # the degraded value is never higher
   # the 09-28 22:35 stall: the applied angle plateaued at 14.42 deg at 70.3 mph == the clamp at that speed
   vm = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
   assert get_max_angle_vm(70.3 * MPH, vm, CarControllerParams) == pytest.approx(14.42, abs=0.01)
@@ -332,7 +335,7 @@ def test_a_steering_ceiling_that_cannot_be_read_falls_back_loudly(monkeypatch, l
     return real_import(name, *a, **k)
   monkeypatch.setattr(builtins, "__import__", broken)
   try:
-    assert pv._tesla_steer_lat_ceiling() == pv._STEER_LAT_CEILING_FALLBACK == 3.0   # unreadable -> the LOWER ceiling
+    assert pv._tesla_steer_lat_ceiling() == pv._STEER_LAT_CEILING_FALLBACK == 2.8   # unreadable -> the same 2.8
   finally:
     monkeypatch.undo()
   assert any("steering lateral ceiling" in e and "ImportError" in e for e in log.at("error"))
@@ -340,7 +343,7 @@ def test_a_steering_ceiling_that_cannot_be_read_falls_back_loudly(monkeypatch, l
 
 def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_failed(cfg, schedule):
   """The 09-28 22:35 left curve, DB row k = 0.0040 (R 250 m): (a) 4.0 alone = 70.7 mph, the speed at which the applied
-  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 64.1 mph."""
+  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 59.1 mph."""
   cfg(None)
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   k = 0.0040
@@ -349,7 +352,7 @@ def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_fa
   assert math.sqrt(a_sched / k) / MPH == pytest.approx(67.4, abs=0.1)                           # (b) at the fail speed
   a_full = tesla().curve_lat_a(70.7 * MPH)
   assert a_full == pytest.approx(CEIL, abs=1e-3)
-  assert math.sqrt(a_full / k) / MPH == pytest.approx(64.1, abs=0.1)                            # (c)
+  assert math.sqrt(a_full / k) / MPH == pytest.approx(59.1, abs=0.1)                            # (c)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -463,7 +466,7 @@ def test_the_tesla_logs_its_curve_brain_config_at_start(cfg, monkeypatch):
 def test_a_config_it_did_not_honour_is_an_error_at_start(cfg, monkeypatch):
   cfg({"tesla": {"curve_brain": "sideways"}})
   ev, errs = _controller(TESLA, "tesla", True, monkeypatch)
-  assert len(ev) == 1 and ev[0]["mode"] == pv.CURVE_BRAIN_DEFAULT and ev[0]["why"].startswith("INVALID")
+  assert len(ev) == 1 and ev[0]["mode"] == pv.CURVE_BRAIN_CORRUPT and ev[0]["why"].startswith("INVALID")
   assert len(errs) == 1 and "sideways" in errs[0]
 
 
@@ -485,15 +488,37 @@ def test_the_tesla_default_mode_is_acting_lower_and_the_lightning_is_never_actin
   assert lightning().curve_brain == "off"                       # the Lightning's VTSC never consumes the brain
 
 
-@pytest.mark.parametrize("doc", [None, '{"tesla": {"curve_brain": "bogus"}}', '{"tesla": [1]}', '{"tesla": {"curve_lat_a": '])
-def test_a_missing_or_corrupt_file_at_start_is_the_acting_default_and_says_so(cfg, log, doc):
-  """Owner: missing/corrupt -> the ACTING default with a log line, never silently off. (Missing is the documented normal;
-  every corrupt / invalid form is a cloudlog.error naming the path; CESController also logs curve_brain_cfg at start.)"""
+def test_a_missing_file_or_section_at_start_is_the_acting_default(cfg, log):
+  """A MISSING file or section is "no config": the owner's acting default. Silent (the documented normal)."""
+  cfg(None)
+  assert tesla().curve_brain == "lower"
+  cfg({"lightning": {"penalty_max_mph": 6.0}})
+  assert tesla().curve_brain == "lower" and log.lines == []
+
+
+@pytest.mark.parametrize("doc", ['{"tesla": {"curve_brain": "bogus"}}', '{"tesla": {"curve_brain": ""}}', '{"tesla": [1]}',
+                                 '{"tesla": "lower"}', '{"tesla": {"curve_lat_a": ', 'not json',
+                                 '{"tesla": {"curve_lat_a": 1' + '0' * 400 + '}}'])
+def test_a_present_but_corrupt_file_at_start_is_shadow_and_says_so(cfg, log, doc):
+  """Fable F3: a file that IS there but cannot be read as written is not "no config" -- it must not turn the acting
+  default on by accident. It falls to shadow (compute + log, change nothing) with the error naming the path."""
   cfg(doc)
   t = tesla()
-  assert t.curve_brain == "lower"
-  if doc is not None:
-    assert log.at("error") and all("curve.json" in e for e in log.at("error"))
+  assert t.curve_brain == "shadow" == pv.CURVE_BRAIN_CORRUPT
+  assert log.at("error") and all("curve.json" in e for e in log.at("error"))
+  assert t.curve_brain_why.startswith(("INVALID", "default (curve.json"))
+
+
+def test_an_unusable_file_at_start_is_shadow(tmp_path, monkeypatch, log):
+  d = tmp_path / "curve.json"
+  d.mkdir()
+  monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(d))
+  assert tesla().curve_brain == "shadow"
+
+
+def test_a_valid_mode_beside_a_bad_lat_a_keeps_its_mode(cfg, log):
+  cfg({"tesla": {"curve_brain": "lower", "curve_lat_a": "fast"}})
+  assert tesla().curve_brain == "lower"
 
 
 def test_the_kill_switch_beats_the_acting_default(cfg, log):
@@ -501,3 +526,14 @@ def test_the_kill_switch_beats_the_acting_default(cfg, log):
   assert tesla().curve_brain == "shadow"
   cfg({"tesla": {"curve_brain": "off"}})
   assert tesla().curve_brain == "off"
+
+
+def test_a_file_deleted_mid_drive_reverts_to_the_acting_default_and_says_so(cfg, log):
+  """The documented footgun: shadow written for a reason, file then removed -> the acting default, with the reload event."""
+  import os
+  path = cfg({"tesla": {"curve_brain": "shadow"}})
+  t = tesla()
+  os.unlink(path)
+  assert t.refresh_curve_brain_cfg(t._tesla_cfg_poll + 1.0) is True
+  assert t.curve_brain == "lower"
+  assert "curve_brain_cfg_reload" in [m for lvl, m in log.lines if lvl == "event"]

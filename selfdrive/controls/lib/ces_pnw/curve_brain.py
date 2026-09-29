@@ -14,11 +14,11 @@ and publishes it as the `CurveBrain` mem-param (a heartbeat with or without a ne
 2026-09-28) -- this file is the Tesla's; the Lightning keeps ICBM's own chain, untouched.
 
 A IS A SPEED TARGET, NOT A STEERING CAPABILITY. A = PnwVehicle.curve_lat_a(v) = min(curve.json tesla.curve_lat_a (4.0),
-lat_accel_target(v) - 0.3, the steering ceiling 3.0). The min() is what keeps a 4.0 target from ever becoming a speed the
+lat_accel_target(v) - 0.3, the steering ceiling 2.8). The min() is what keeps a 4.0 target from ever becoming a speed the
 car cannot steer: the lataccel2pnw schedule (5.0 to 60 mph, 4.0 at 70, 3.0 from 80; flat 3.0 without a valid file), and
-the vehicle-model steering-ANGLE clamp (carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 bank
-tolerance; the applied angle stalled at exactly that clamp on 2026-09-28 22:35, at 70.3 mph, and the car delivered
-2.9-3.0 m/s^2). The EPS torque abort (2.7-3.8 Nm) is a third limit nothing here can see. So the speed for a row is
+the vehicle-model steering-ANGLE clamp (carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 favourable-camber
+allowance, NOT a capability; the applied angle stalled at that clamp on 2026-09-28 22:35, at 70.3 mph, and the car delivered
+3.0-3.1 m/s^2), taken as ISO 3.0 minus a 0.2 margin = 2.8 (see pnw_vehicle.CURVE_STEER_MARGIN). The EPS torque abort (2.7-3.8 Nm) is a third limit nothing here can see. So the speed for a row is
 priced at the LOWEST A over the speeds involved (the speed now, and the speed the row itself asks for), never above.
 
 WHAT THE TESLA MAY ACT ON: only rows WITH authority (>= 2 dates), i.e. evidence "measured". Not built here, and said so
@@ -217,8 +217,11 @@ def parse_entry(raw, now) -> tuple[dict | None, str | None, float | None]:
     if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
       return None, "bad", None
     age = float(now) - float(ts)
-    if not 0.0 <= age <= ENTRY_MAX_AGE_S:
+    # A publish that landed just AFTER the reader captured `now` (plus ts rounding) has a small negative age: fresh, not
+    # stale. Only a timestamp further in the future than one publish period (another boot) is refused.
+    if not -PUBLISH_S <= age <= ENTRY_MAX_AGE_S:
       return None, "stale", age
+    age = max(age, 0.0)
     mode = raw.get("mode")
     if mode not in MODES:
       return None, "bad", age

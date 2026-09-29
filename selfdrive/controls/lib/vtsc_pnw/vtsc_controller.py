@@ -691,8 +691,12 @@ class VTSCController:
     in selfdrived), the distance is dead-reckoned by the entry's age, rain lowers it as it lowers every curve speed,
     V_MIN floors it, and the cap follows VTSC's own decel envelope (brake_cap_for_apex with A_DECEL, finishing
     APEX_FINISH_S before the row) through its own rate limiter (regen-only decel, A_RELAX up) -- a separate term, not
-    VTSC's apex state machine, because a DB row is a STRETCH [anchor - 25 m, anchor + 150 m], not an apex: the
-    machine's "release before the apex" would accelerate into the middle of it."""
+    VTSC's apex state machine, because a DB row is a STRETCH [anchor - 25 m, anchor + 150 m] whose k is the PEAK over
+    it, not an apex, and the machine's "release before the apex" would accelerate into the middle of it. What the term
+    actually does: the need is held while an anchor still within ~40 m of the car carries that peak k (rows are keyed
+    every 25 m, so overlapping rows chain along a curve); once the car is past the last such anchor the row stops
+    matching and the term releases at A_RELAX -- i.e. right after the tightest point, NOT after the extent's +150 m.
+    Its effective reach ahead is about 350 m of mapd's 500 m path (the rest is the branch test's 150 m of look-past)."""
     if not self.veh.curve_brain_vtsc:
       return capped
     try:
