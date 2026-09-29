@@ -318,6 +318,10 @@ class TestStep:
     assert set(b.tele(100.0)) == set(cb.TELE_KEYS) and len(set(cb.TELE_KEYS)) == len(cb.TELE_KEYS)
 
 
+def _ll_north(y):
+  return LAT0 + y / 111320.0, LON0
+
+
 def _ll_east(dx):
   return LAT0, LON0 + dx / (111320.0 * math.cos(math.radians(LAT0)))
 
@@ -534,3 +538,95 @@ class TestEndToEnd:
     payload = _puts(c)[-1]
     caps, p = self._vtsc(monkeypatch, payload, secs=2.5)
     assert p["cbUse"] == "stale" and p["cbStaleN"] > 0 and caps[-1] == 33.5    # no heartbeat -> VTSC as before
+
+
+# =====================================================================================================
+# closed loop: the real need layer + the real VTSC term + a car that follows the cap (the Terwilliger left curve)
+# =====================================================================================================
+class TestClosedLoop:
+  ROW_Y, K = 470.0, 0.00401           # the DB's tight part: R 250 m, seen 470 m ahead (the 22:34:56 view)
+
+  def _run(self, monkeypatch, tmp_path, cfgpath, mode, v0=32.6, v_set=33.5, seconds=40.0):
+    import types
+
+    from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_controller as vc
+    if mode is not None:
+      cfgpath.write_text(json.dumps({"tesla": {"curve_brain": mode}}))
+    # the real table has an anchor every 25 m along a road: a curve's stretch is covered by overlapping rows, each with
+    # its own 175 m extent, so the row stays in force until the last of them is 40 m behind the car
+    rows = [_anchor(y, self.K) for y in range(int(self.ROW_Y) - 100, int(self.ROW_Y) + 176, 25)]
+    b = _brain(tmp_path, monkeypatch, anchors=rows)
+    clock = [1000.0]
+    monkeypatch.setattr(vc, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    latest = {}
+
+    class Mem:
+      def get(self, k, return_default=False):
+        return latest.get("p") if k == "CurveBrain" else None
+
+      def put_nonblocking(self, k, val):
+        pass
+
+    class Prm:
+      def get(self, k, return_default=False):
+        return "2" if k == "CESMode" else None
+
+      def get_bool(self, k):
+        return False
+
+    class NS:
+      pass
+    c = vc.VTSCController(FakeCP(TESLA, "tesla", True), params=Prm())
+    c.mem_params = Mem()
+    pts = _path(y1=2000.0)
+    y, v, t, trace = 0.0, v0, 0.0, []
+    next_brain = 0.0
+    while t < seconds:
+      clock[0] = 1000.0 + t
+      if t >= next_brain:
+        plat, plon = _ll_north(y)
+        latest["p"] = b.step(clock[0], v_ego=v, points=pts, plat=plat, plon=plon, gps_state="proj", way_sel="current",
+                             hwy="motorway", a_decel=1.2)
+        next_brain += 0.25
+      mdl = NS()
+      mdl.orientationRate, mdl.velocity, mdl.position, mdl.action = NS(), NS(), NS(), NS()
+      mdl.orientationRate.z, mdl.orientationRate.t = [0.0] * 20, [i * 0.25 for i in range(20)]
+      mdl.velocity.x, mdl.position.x = [v] * 20, [v * i * 0.25 for i in range(20)]
+      mdl.action.shouldStop = False
+      cc = NS()
+      cc.orientationNED = [0.0, 0.0, 0.0]
+      cap = c.cap({"modelV2": mdl, "carControl": cc}, v_set, v)
+      dt = 0.05
+      v_new = min(max(cap, v - 2.0 * dt), v + 1.1 * dt)          # ACC: regen-limited decel, +1.1 m/s^2 accel
+      trace.append((t, y, v, cap, (v_new - v) / dt))
+      y += v * dt
+      v = v_new
+      t += dt
+    return trace
+
+  def _at(self, trace, y_at):
+    return next(r for r in trace if r[1] >= y_at)
+
+  def test_the_tesla_enters_the_tight_part_at_the_speed_the_steering_can_hold_not_at_the_speed_that_failed(
+      self, monkeypatch, tmp_path, cfgpath, schedule):
+    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower")
+    need = math.sqrt(CEIL / self.K)                                    # 28.6 m/s = 64.1 mph
+    entrance = self._at(trace, self.ROW_Y - 25.0)
+    assert entrance[2] / MPH == pytest.approx(need / MPH, abs=1.0), entrance          # 64 mph, not 70+
+    inside = [r for r in trace if self.ROW_Y - 25.0 <= r[1] <= self.ROW_Y + 150.0]
+    assert max(r[2] for r in inside) <= need + 0.6 and min(r[2] for r in inside) >= need - 0.6   # neither fast nor over-slow
+    caps = [r[3] for r in trace]                                       # the cap itself is decel-limited (regen 2.0) ...
+    assert min((b - a) / 0.05 for a, b in zip(caps, caps[1:], strict=False)) >= -2.0 - 1e-6
+    assert max(r[2] - r[3] for r in trace) <= 0.3                      # ... and a car following it is never far above it
+    assert min((r[4] for r in trace if r[1] < self.ROW_Y - 25.0 - 350.0), default=0.0) >= -1e-6   # nothing until ~350 m out
+    assert self.K * max(r[2] for r in inside) ** 2 <= CEIL + 0.35                      # the lateral acceleration it asks for
+
+  def test_without_the_brain_the_same_car_enters_at_the_set_speed(self, monkeypatch, tmp_path, cfgpath, schedule):
+    for mode in ("off", "shadow"):
+      trace = self._run(monkeypatch, tmp_path, cfgpath, mode)
+      entrance = self._at(trace, self.ROW_Y - 25.0)
+      assert entrance[2] > 32.5, (mode, entrance)                     # ~73 mph: the failure
+
+  def test_the_brain_never_slows_a_car_that_is_already_slower(self, monkeypatch, tmp_path, cfgpath, schedule):
+    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower", v0=20.0, v_set=20.0)
+    assert all(abs(r[2] - 20.0) < 1e-6 for r in trace)
