@@ -54,3 +54,28 @@ default always means that a toggle is disabled."
 Reviewed under the standing Fable-before-push policy; SHIP (a second post-push review said
 FIX-THEN-SHIP: a rigidly braced grip can hunt — see the watch items above). Channel tip GREEN (4,556 passed at this
 commit). Pushed to `3devpnw` and installed.
+
+## 2. `teslamads2pnw` (`c53bae6ed8`, opendbc `c0d12514`) - the Tesla Raven's steering now survives a brake press
+
+Brake was the largest single cause of the Raven dropping out of engagement: 17 of 31 engaged-to-disengaged transitions in the
+rlogs were a brake press. The Raven now gets the same MADS lateral-through-brake behaviour the Ford already had, without
+auto-resume (there is no stock-ACC button path to spoof on the Raven).
+
+* **Panda (opendbc, internal panda only):** the safety code accepts the MADS `alternative_experience` bits for the Raven's internal
+  panda (`SAFETY_TESLA_LEGACY` + `FLAG_HW3`, no external-panda flag). Every other Tesla config (external/longitudinal panda, HW1, HW2)
+  still refuses them, so the longitudinal message can never see a lateral latch. `acc_main_on` is now written from `DI_cruiseState`
+  (revoke-only, as on the Ford). **The internal panda's safety code was reflashed.**
+* **openpilot:** `PnwVehicle.mads_lateral` includes the Raven; `mads_resume` stays False. No new param or toggle: it is ON by
+  default via `PandaMadsSafety=1` with the existing "Disengage on brake" toggle at its default OFF. That toggle, previously greyed
+  out on the Tesla, is now enabled; turning it on reverts the Raven to stock brake-disengage but also affects the Ford (one shared
+  param; a per-car opt-out is a follow-up).
+* **Measured basis:** the brake frame is logged 19-51 ms before the frame that drops cruise, and cruise goes to STANDBY (never OFF)
+  after both a brake and a stalk cancel, so the panda's own "cruise falling edge while not braking" rule is what tells them apart.
+  The old claim that the EPS inhibits itself on a brake press is not supported (`eacStatus` goes ACTIVE to AVAILABLE, error 0).
+* **Status:** channel tip GREEN (4556 passed). Installed; the owner reports steering continues through braking and it works well.
+  Not yet verified: the parked `alternativeExperience` readback on both pandas.
+* **Review:** Fable, SHIP conditional on a supervised first test and two accepted gaps: (1) no driver-reachable exit from
+  steering-only except a firm steer (or stalk pull then push) - a stalk read is a required follow-up; (2) if the EPS refuses angle
+  commands while cruise is STANDBY the failure is silent - an alert is a required follow-up. Also open: black-panda readback,
+  the unneeded 600 ms Ford re-latch window on the Raven, and the per-car opt-out.
+* The code was written by a Sonnet agent under an owner-approved one-job exception to the never-Sonnet rule.
