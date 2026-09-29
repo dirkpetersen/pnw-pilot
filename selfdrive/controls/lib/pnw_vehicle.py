@@ -12,6 +12,7 @@ import json
 import math
 import os
 import stat
+import time
 
 from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
 from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
@@ -372,6 +373,38 @@ _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
 CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
 CURVE_BRAIN_DEFAULT = "shadow"     # the Tesla's default: compute and log, change nothing
+CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
+
+# curvebrain2b2pnw A2: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
+# clipped in opendbc/car/lateral.py apply_steer_angle_limits_vm at get_max_angle_vm(v) -- the angle the vehicle model
+# needs for CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL, which is ISO_LATERAL_ACCEL (3.0) + g * AVERAGE_ROAD_ROLL
+# (0.6, a banked-road tolerance) = 3.5886 m/s^2 at EVERY speed (panda's steer_angle_cmd_checks_vm enforces the same
+# figure). 2026-09-28 22:35 the applied angle stalled at 14.42 deg at 70.3 mph = get_max_angle_vm(31.4 m/s) exactly.
+# What the car DELIVERED at that clamp on the adverse-camber left curve was 2.9-3.0 m/s^2 -- the model's figure minus
+# the very bank tolerance -- so the ceiling used here is the model's limit WITHOUT that tolerance: ISO_LATERAL_ACCEL.
+# A curve speed that assumes more than this can run into the clamp: the car runs wide, "Turn Exceeds Steering Limit".
+# Imported lazily: a missing opendbc must not break this module in every process; the fallback is loud and pinned by a
+# test to the real value.
+_STEER_LAT_CEILING_FALLBACK = 3.0
+_steer_lat_ceiling_cache: float | None = None
+
+
+def _tesla_steer_lat_ceiling() -> float:
+  """The Tesla steering-angle clamp expressed as a lateral acceleration (m/s^2): opendbc's ISO_LATERAL_ACCEL. Cached."""
+  global _steer_lat_ceiling_cache
+  if _steer_lat_ceiling_cache is None:
+    v = _STEER_LAT_CEILING_FALLBACK
+    try:
+      from opendbc.car.lateral import ISO_LATERAL_ACCEL
+      if not (isinstance(ISO_LATERAL_ACCEL, (int, float)) and math.isfinite(ISO_LATERAL_ACCEL)
+              and 1.5 <= ISO_LATERAL_ACCEL <= 4.0):
+        raise ValueError(f"ISO_LATERAL_ACCEL {ISO_LATERAL_ACCEL!r} is not a plausible lateral acceleration")
+      v = float(ISO_LATERAL_ACCEL)
+    except Exception as e:
+      cloudlog.error(f"pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
+                     f"({type(e).__name__}: {e}) -- using the fixed {_STEER_LAT_CEILING_FALLBACK} m/s^2")
+    _steer_lat_ceiling_cache = v
+  return _steer_lat_ceiling_cache
 
 
 def _parse_curve_brain_mode(raw) -> str | None:
@@ -451,6 +484,23 @@ def _load_tesla_curve_config() -> dict:
     return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
+
+
+def _curve_file_sig():
+  """(mtime_ns, size) of curve.json, None when it does not exist, ("err", errno) when it cannot be stat'ed."""
+  try:
+    st = os.stat(CURVE_CONFIG_PATH)
+    return (st.st_mtime_ns, st.st_size)
+  except FileNotFoundError:
+    return None
+  except OSError as e:
+    return ("err", e.errno)
+
+
+def _tesla_cfg_is_honored(cfg: dict) -> bool:
+  """True when the tesla section was read as written (or is the documented default), False for an unreadable file, a
+  section that is not an object, or a key that was not honoured -- the cases a hot reload must not act on."""
+  return not str(cfg["why"]).startswith(("INVALID", "default (curve.json"))
 
 
 # fpsidebar2pnw: fingerprint -> short driver-facing display name (FINGERPRINT2XNOR.md /
@@ -727,7 +777,10 @@ class PnwVehicle:
     # HW3 only: its lateral target was measured on this car (design s5.4), and curve.json's "tesla" section is read
     # ONLY here, so on every other car -- the Lightning above all -- it is never even opened.
     self.curve_brain_vtsc: bool = fp == "TESLA_MODEL_S_HW3"
+    self._tesla_cfg_sig = _curve_file_sig() if self.curve_brain_vtsc else None   # curvebrain2b2pnw: hot-reload state
     self._tesla_curve_cfg = _load_tesla_curve_config() if self.curve_brain_vtsc else None
+    self._tesla_cfg_good = bool(self.curve_brain_vtsc and _tesla_cfg_is_honored(self._tesla_curve_cfg))
+    self._tesla_cfg_poll = time.monotonic()
 
     # rain2pnw: wet-weather curve margin — applies to BOTH cars, SAME reduction (not the Lightning-only
     # curve penalty). Magnitudes from the device-local tunable (defaults 3/5 mph, read once here); the
@@ -939,11 +992,53 @@ class PnwVehicle:
     Tesla (curve_brain_vtsc): curve.json tesla.curve_lat_a (default 4.0, bounds [2.0, 4.5]), capped at openpilot's own
     lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
-    Every other car: CURVE_LAT_A_DEFAULT (2.5). On the Lightning it is for the brain's future need layer only: ICBM
-    keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a, icbm_shape_lat_a(_70), the restore-hold bars)."""
+    ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
+    without its bank tolerance, 3.0), so the 4.0 default is a target the code can never turn into a speed the steering
+    cannot hold: at most 3.0 at any speed, 2.7 at >= 80 mph. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
+    Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
+    icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:
       return CURVE_LAT_A_DEFAULT
-    return min(self._tesla_curve_cfg["curve_lat_a"], lat_accel_target(v_ego) - CURVE_LAT_CLIP_MARGIN)
+    return min(self._tesla_curve_cfg["curve_lat_a"], lat_accel_target(v_ego) - CURVE_LAT_CLIP_MARGIN,
+               _tesla_steer_lat_ceiling())
+
+  def refresh_curve_brain_cfg(self, now: float | None = None) -> bool:
+    """curvebrain2b2pnw: hot-reload curve.json's "tesla" section (the owner's kill switch: {"tesla": {"curve_brain":
+    "shadow"}} or "off" takes effect within CURVE_CFG_POLL_S plus the caller's own cadence, no restart). One os.stat
+    per poll; the file is re-parsed only when its (mtime, size) changed. Returns True when the live config changed.
+    Never raises. A no-op on a car without the capability.
+
+    A file that is now unreadable, malformed, not an object, or holds a key that cannot be honoured is NOT applied:
+    the last config is kept and it is a cloudlog.error -- a typo typed mid-drive must not silently swap "shadow" for
+    the acting default. A file that is simply GONE reverts to the documented default (acting), and says so."""
+    if not self.curve_brain_vtsc:
+      return False
+    now = time.monotonic() if now is None else now
+    if now - self._tesla_cfg_poll < CURVE_CFG_POLL_S:
+      return False
+    self._tesla_cfg_poll = now
+    try:
+      sig = _curve_file_sig()
+      if sig == self._tesla_cfg_sig:
+        return False
+      self._tesla_cfg_sig = sig
+      old = self._tesla_curve_cfg
+      new = _load_tesla_curve_config()
+      if not _tesla_cfg_is_honored(new) and self._tesla_cfg_good:
+        cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
+                       f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']}")
+        self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
+        return False
+      self._tesla_curve_cfg = new
+      self._tesla_cfg_good = _tesla_cfg_is_honored(new)
+      changed = (new["curve_brain"], new["curve_lat_a"]) != (old["curve_brain"], old["curve_lat_a"])
+      cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
+                     prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
+                     file="absent" if sig is None else "present")
+      return changed
+    except Exception as e:
+      cloudlog.error(f"pnw_vehicle: curve.json hot-reload FAILED ({type(e).__name__}: {e}) -- keeping the last config")
+      return False
 
   @property
   def curve_lat_a_cfg(self) -> float:

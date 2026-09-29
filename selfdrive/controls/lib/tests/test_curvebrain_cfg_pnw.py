@@ -37,7 +37,7 @@ class _Log:
     self.lines = []
 
   def __getattr__(self, level):
-    if level in ("debug", "info", "warning", "error", "exception", "critical"):
+    if level in ("debug", "info", "warning", "error", "exception", "critical", "event"):
       return lambda msg, *a, **k: self.lines.append((level, msg))
     raise AttributeError(level)
 
@@ -87,7 +87,7 @@ def test_defaults_tesla_shadow_4_0_everyone_else_off_2_5(cfg, schedule, log):
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   t = tesla()
   assert t.curve_brain_vtsc and t.curve_brain == "shadow" and t.curve_brain_why == "default"
-  assert t.curve_lat_a_cfg == 4.0 and t.curve_lat_a(65 * MPH) == 4.0          # the clip (4.5 - 0.3) does not bind
+  assert t.curve_lat_a_cfg == 4.0 and t.curve_lat_a(65 * MPH) == 3.0          # the steering ceiling binds the 4.0
   for v in (lightning(), pv.PnwVehicle(None), pv.PnwVehicle(CP("TOYOTA_RAV4", "toyota", True))):
     assert not v.curve_brain_vtsc and v.curve_brain == "off" and v.curve_brain_why == "noCapability"
     assert v.curve_lat_a(20.0) == v.curve_lat_a(40.0) == v.curve_lat_a_cfg == 2.5
@@ -236,32 +236,45 @@ def test_the_tesla_section_is_never_opened_on_the_lightning(cfg, monkeypatch):
 # the lateral-clip cap
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("mph, cfg_a, want", [
-  (55.0, 4.0, 4.0),        # schedule 5.5 -> clip 5.2: the config binds
-  (60.0, 4.0, 4.0),        # 5.0 -> 4.7: the config binds
-  (60.0, 4.5, 4.5),        # 4.7: the upper bound still under the clip
-  (65.0, 4.5, 4.2),        # 4.5 -> 4.2: the clip binds a 4.5 config
-  (65.0, 4.0, 4.0),        # 4.5 -> 4.2
-  (70.0, 4.0, 3.7),        # 4.0 -> 3.7: the owner's 4.0 is EFFECTIVELY 3.7 at 70 mph
-  (70.0, 2.5, 2.5),        # a low config is never RAISED by the clip
-  (75.0, 4.0, 3.2),        # 3.5 -> 3.2
-  (78.0, 4.5, 2.9),        # 3.2 -> 2.9
+  (55.0, 4.0, 3.0),        # schedule 5.5 -> clip 5.2; the STEERING ceiling (3.0) binds the 4.0 target
+  (60.0, 4.0, 3.0),        # 5.0 -> 4.7
+  (60.0, 4.5, 3.0),        # the upper bound is capped the same way
+  (65.0, 4.5, 3.0),        # 4.5 -> 4.2
+  (70.0, 4.0, 3.0),        # 4.0 -> 3.7: the schedule clip no longer binds either; steering does
+  (70.0, 2.5, 2.5),        # a low config is never RAISED by any clip
+  (74.0, 4.0, 3.0),        # 3.6 -> 3.3
+  (75.0, 4.0, 3.0),        # 3.5 -> 3.2
+  (78.0, 4.5, 2.9),        # 3.2 -> 2.9: now the schedule clip binds
   (80.0, 4.0, 2.7),        # 3.0 (ISO) -> 2.7: EFFECTIVELY 2.7 at >= 80 mph
   (95.0, 4.5, 2.7),        # held flat past the last breakpoint
 ])
-def test_the_target_is_capped_at_openpilots_lateral_clip_minus_0_3(cfg, schedule, mph, cfg_a, want):
+def test_the_target_is_capped_at_the_lateral_clip_minus_0_3_and_the_steering_ceiling(cfg, schedule, mph, cfg_a, want):
   cfg({"tesla": {"curve_lat_a": cfg_a}})
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
 
 
-def test_the_default_4_0_never_assumes_more_than_the_lateral_clip_allows(cfg, schedule):
-  """A 4.0 SPEED target is not a steering capability: at every speed the target stays 0.3 under the schedule."""
+def test_the_schedule_clip_alone_binds_a_high_config_only_above_73_mph(cfg, schedule, monkeypatch):
+  """With the steering ceiling out of the picture (a hypothetical 100 m/s^2), the design's min(cfg, target - 0.3) is
+  what Task A specified: 4.0 at 60 mph, 3.7 at 70, 2.7 at >= 80. Pins that the schedule term is still in the min."""
+  cfg({"tesla": {"curve_lat_a": 4.0}})
+  schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
+  monkeypatch.setattr(pv, "_steer_lat_ceiling_cache", 100.0)
+  t = tesla()
+  for mph, want in ((55.0, 4.0), (60.0, 4.0), (65.0, 4.0), (70.0, 3.7), (75.0, 3.2), (80.0, 2.7), (95.0, 2.7)):
+    assert t.curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
+
+
+def test_the_default_4_0_never_assumes_more_than_the_limits_allow(cfg, schedule):
+  """A 4.0 SPEED target is not a steering capability: at every speed the target stays 0.3 under the schedule AND at or
+  under the steering ceiling."""
   cfg(None)
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   t = tesla()
   for mph in range(10, 121, 5):
-    assert t.curve_lat_a(mph * MPH) <= dh.lat_accel_target(mph * MPH) - 0.3 + 1e-9
-    assert t.curve_lat_a(mph * MPH) <= 4.0 + 1e-9
+    a = t.curve_lat_a(mph * MPH)
+    assert a <= dh.lat_accel_target(mph * MPH) - 0.3 + 1e-9
+    assert a <= pv._tesla_steer_lat_ceiling() + 1e-9 and a <= 4.0 + 1e-9
 
 
 def test_without_a_schedule_the_clip_is_the_flat_iso_3_0(cfg, schedule):
@@ -270,6 +283,134 @@ def test_without_a_schedule_the_clip_is_the_flat_iso_3_0(cfg, schedule):
   t = tesla()
   for v in (5.0, 25.0, 40.0, float("nan")):
     assert t.curve_lat_a(v) == pytest.approx(2.7)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the steering ceiling: derived from opendbc's own constants, never a copy that can drift
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_steering_ceiling_is_the_vehicle_model_clamp_without_its_bank_tolerance():
+  from opendbc.car.lateral import ISO_LATERAL_ACCEL, get_max_angle_vm
+  from opendbc.car.tesla.values import AVERAGE_ROAD_ROLL, CarControllerParams
+  from opendbc.car.vehicle_model import VehicleModel
+  from opendbc.car.tesla.interface import CarInterface
+  from opendbc.car.tesla.values import ACCELERATION_DUE_TO_GRAVITY
+  assert pv._tesla_steer_lat_ceiling() == ISO_LATERAL_ACCEL == pv._STEER_LAT_CEILING_FALLBACK
+  lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
+  assert lim - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL == pytest.approx(pv._tesla_steer_lat_ceiling())
+  # the 09-28 22:35 stall: the applied angle plateaued at 14.42 deg at 70.3 mph == the clamp at that speed
+  vm = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
+  assert get_max_angle_vm(70.3 * MPH, vm, CarControllerParams) == pytest.approx(14.42, abs=0.01)
+  # and the clamp is a constant lateral acceleration at every speed: angle -> curvature -> a_lat round-trips to `lim`
+  for mph in (40.0, 55.0, 70.3, 80.0):
+    v = mph * MPH
+    ang = math.radians(get_max_angle_vm(v, vm, CarControllerParams))
+    assert vm.calc_curvature(ang, v, 0.0) * v * v == pytest.approx(lim, rel=1e-3)
+
+
+def test_panda_enforces_the_same_lateral_accel_figure():
+  """panda's steer_angle_cmd_checks_vm builds its limit from the same two constants; if either side is edited the
+  ceiling above no longer describes the clamp."""
+  import pathlib
+  import re
+  import opendbc
+  h = pathlib.Path(opendbc.__file__).parent.joinpath("safety", "lateral.h").read_text()
+  assert re.search(r"MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL \+ \(EARTH_G \* AVERAGE_ROAD_ROLL\)", h)
+
+
+def test_a_steering_ceiling_that_cannot_be_read_falls_back_loudly(monkeypatch, log):
+  monkeypatch.setattr(pv, "_steer_lat_ceiling_cache", None)
+  import builtins
+  real_import = builtins.__import__
+
+  def broken(name, *a, **k):
+    if name == "opendbc.car.lateral":
+      raise ImportError("boom")
+    return real_import(name, *a, **k)
+  monkeypatch.setattr(builtins, "__import__", broken)
+  try:
+    assert pv._tesla_steer_lat_ceiling() == 3.0
+  finally:
+    monkeypatch.undo()
+  assert any("steering lateral ceiling" in e and "ImportError" in e for e in log.at("error"))
+
+
+def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_failed(cfg, schedule):
+  """The 09-28 22:35 left curve, DB row k = 0.0040 (R 250 m): (a) 4.0 alone = 70.7 mph, the speed at which the applied
+  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 61.3 mph."""
+  cfg(None)
+  schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
+  k = 0.0040
+  assert math.sqrt(4.0 / k) / MPH == pytest.approx(70.7, abs=0.05)                              # (a)
+  a_sched = min(4.0, dh.lat_accel_target(70.7 * MPH) - 0.3)
+  assert math.sqrt(a_sched / k) / MPH == pytest.approx(67.4, abs=0.1)                           # (b) at the fail speed
+  a_full = tesla().curve_lat_a(70.7 * MPH)
+  assert a_full == pytest.approx(3.0)
+  assert math.sqrt(a_full / k) / MPH == pytest.approx(61.3, abs=0.1)                            # (c)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the kill switch: hot reload of curve.json's tesla section
+# ---------------------------------------------------------------------------------------------------------------------
+def _reload(t, cfg_writer, doc, now):
+  """Rewrite curve.json (a new mtime is forced) and poll once at `now`."""
+  path = cfg_writer(doc)
+  import os
+  st = os.stat(path)
+  os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+  return t.refresh_curve_brain_cfg(now)
+
+
+def test_a_mode_change_in_curve_json_takes_effect_within_the_poll_interval(cfg, log):
+  cfg({"tesla": {"curve_brain": "lower"}})
+  t = tesla()
+  assert t.curve_brain == "lower"
+  assert _reload(t, cfg, {"tesla": {"curve_brain": "shadow"}}, t._tesla_cfg_poll + 1.0) is True
+  assert t.curve_brain == "shadow" and t.curve_brain_why == "curve.json"
+  assert _reload(t, cfg, {"tesla": {"curve_brain": "off", "curve_lat_a": 3.2}}, t._tesla_cfg_poll + 1.0) is True
+  assert (t.curve_brain, t.curve_lat_a_cfg) == ("off", 3.2)
+  assert log.at("error") == []
+
+
+def test_the_poll_is_throttled_and_an_unchanged_file_is_not_reparsed(cfg, monkeypatch):
+  cfg({"tesla": {"curve_brain": "lower"}})
+  t = tesla()
+  calls = []
+  real = pv._load_tesla_curve_config
+  monkeypatch.setattr(pv, "_load_tesla_curve_config", lambda: calls.append(1) or real())
+  t0 = t._tesla_cfg_poll
+  assert t.refresh_curve_brain_cfg(t0 + 0.2) is False          # inside the interval: not even a stat
+  assert t.refresh_curve_brain_cfg(t0 + 1.5) is False          # a stat, same signature: no re-parse
+  assert calls == []
+
+
+def test_a_typo_mid_drive_keeps_the_last_good_config_and_says_so(cfg, log):
+  cfg({"tesla": {"curve_brain": "shadow"}})
+  t = tesla()
+  assert _reload(t, cfg, {"tesla": {"curve_brain": "shadw"}}, t._tesla_cfg_poll + 1.0) is False
+  assert t.curve_brain == "shadow"                                              # NOT the acting default
+  assert any("NOT applied" in e for e in log.at("error"))
+  log.lines.clear()
+  assert _reload(t, cfg, '{"tesla": {"curve_brain": "lower"', t._tesla_cfg_poll + 1.0) is False   # truncated JSON
+  assert t.curve_brain == "shadow"
+  assert any("NOT applied" in e for e in log.at("error"))
+  assert _reload(t, cfg, {"tesla": {"curve_brain": "lower"}}, t._tesla_cfg_poll + 1.0) is True   # a good file applies
+  assert t.curve_brain == "lower"
+
+
+def test_a_deleted_file_reverts_to_the_documented_default_and_says_so(cfg, log):
+  path = cfg({"tesla": {"curve_brain": "shadow"}})
+  t = tesla()
+  import os
+  os.unlink(path)
+  t.refresh_curve_brain_cfg(t._tesla_cfg_poll + 1.0)
+  assert t.curve_brain == pv.CURVE_BRAIN_DEFAULT and t.curve_brain_why == "default"
+  assert "curve_brain_cfg_reload" in [m for lvl, m in log.lines if lvl == "event"]
+
+
+def test_the_reload_is_inert_on_a_car_without_the_capability(cfg):
+  cfg({"tesla": {"curve_brain": "lower"}})
+  v = lightning()
+  assert v.refresh_curve_brain_cfg(1e9) is False and v.curve_brain == "off"
 
 
 def test_reading_the_clip_never_moves_clip_curvatures_slew(schedule):
