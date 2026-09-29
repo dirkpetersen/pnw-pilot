@@ -367,7 +367,8 @@ CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning'
 # (and flat 3.0 - 0.3 = 2.7 without a valid schedule file); (2) the Tesla vehicle model's steering-angle limit (~14.4
 # deg at 70 mph in the Terwilliger left curve: 2026-09-28 22:35 the applied angle stalled at the model limit, the car
 # drifted wide, "Turn Exceeds Steering Limit"); (3) the EPS torque abort (2.7-3.8 Nm). Nothing here may command a speed
-# that assumes more lateral acceleration than those allow; the min() below is the only one of the three the code can see.
+# that assumes more lateral acceleration than those allow; curve_lat_a()'s min() enforces (1) and (2) (the steering ceiling
+# below is (2) less a margin); (3) is a limit nothing here can see.
 TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
 _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
@@ -375,31 +376,35 @@ CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lo
 CURVE_BRAIN_DEFAULT = "shadow"     # the Tesla's default: compute and log, change nothing
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
-# curvebrain2b2pnw A2: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
+# curvebrain2b2pnw A2/A3: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
 # clipped in opendbc/car/lateral.py apply_steer_angle_limits_vm at get_max_angle_vm(v) -- the angle the vehicle model
-# needs for CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL, which is ISO_LATERAL_ACCEL (3.0) + g * AVERAGE_ROAD_ROLL
-# (0.6, a banked-road tolerance) = 3.5886 m/s^2 at EVERY speed (panda's steer_angle_cmd_checks_vm enforces the same
-# figure). 2026-09-28 22:35 the applied angle stalled at 14.42 deg at 70.3 mph = get_max_angle_vm(31.4 m/s) exactly.
-# What the car DELIVERED at that clamp on the adverse-camber left curve was 2.9-3.0 m/s^2 -- the model's figure minus
-# the very bank tolerance -- so the ceiling used here is the model's limit WITHOUT that tolerance: ISO_LATERAL_ACCEL.
-# A curve speed that assumes more than this can run into the clamp: the car runs wide, "Turn Exceeds Steering Limit".
-# Imported lazily: a missing opendbc must not break this module in every process; the fallback is loud and pinned by a
-# test to the real value.
+# needs for opendbc.car.tesla.values.CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL = ISO 3.0 + g * 0.06 (a banked-road
+# tolerance) = 3.5886 m/s^2 at EVERY speed (panda's steer_angle_cmd_checks_vm enforces the same figure). 2026-09-28 22:35 the
+# applied angle stalled at 14.42 deg at 70.3 mph = get_max_angle_vm(31.4 m/s) exactly, and the road there alone (k 0.00401)
+# needs 3.96 m/s^2 at 70.3 mph. The ceiling used here is that limit MINUS CURVE_STEER_MARGIN (0.3, the same margin the
+# schedule clip keeps), read from the SAME constant -- never a copy of 3.5886: 3.2886 m/s^2 at every speed (= 64.1 mph at
+# k 0.00401). Headroom is 0.3 (8 %); the response measured at the clamp on the adverse-camber left curve (2.9-3.0 delivered)
+# says the true margin there may be thinner: a derating that is data, not a guess, is the calibration the shadow drive owes.
+# A curve speed that assumes more than the ceiling can run into the clamp: the car runs wide, "Turn Exceeds Steering Limit".
+# The import is done ONCE, at PnwVehicle construction on the Tesla, never inside a control loop (a ~30 ms import in
+# selfdrived's 100 Hz loop is a commIssue). If the constant cannot be read the ceiling is the fixed 3.0 (ISO), LOWER than
+# the real one -- the safe direction -- and it is a cloudlog.error.
+CURVE_STEER_MARGIN = 0.3
 _STEER_LAT_CEILING_FALLBACK = 3.0
 _steer_lat_ceiling_cache: float | None = None
 
 
 def _tesla_steer_lat_ceiling() -> float:
-  """The Tesla steering-angle clamp expressed as a lateral acceleration (m/s^2): opendbc's ISO_LATERAL_ACCEL. Cached."""
+  """The Tesla steering-angle clamp expressed as a lateral acceleration (m/s^2), less CURVE_STEER_MARGIN. Cached."""
   global _steer_lat_ceiling_cache
   if _steer_lat_ceiling_cache is None:
     v = _STEER_LAT_CEILING_FALLBACK
     try:
-      from opendbc.car.lateral import ISO_LATERAL_ACCEL
-      if not (isinstance(ISO_LATERAL_ACCEL, (int, float)) and math.isfinite(ISO_LATERAL_ACCEL)
-              and 1.5 <= ISO_LATERAL_ACCEL <= 4.0):
-        raise ValueError(f"ISO_LATERAL_ACCEL {ISO_LATERAL_ACCEL!r} is not a plausible lateral acceleration")
-      v = float(ISO_LATERAL_ACCEL)
+      from opendbc.car.tesla.values import CarControllerParams
+      lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
+      if not (isinstance(lim, (int, float)) and math.isfinite(lim) and 2.0 <= lim <= 5.0):
+        raise ValueError(f"MAX_LATERAL_ACCEL {lim!r} is not a plausible lateral acceleration")
+      v = float(lim) - CURVE_STEER_MARGIN
     except Exception as e:
       cloudlog.error(f"pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
                      f"({type(e).__name__}: {e}) -- using the fixed {_STEER_LAT_CEILING_FALLBACK} m/s^2")
@@ -780,6 +785,8 @@ class PnwVehicle:
     self._tesla_cfg_sig = _curve_file_sig() if self.curve_brain_vtsc else None   # curvebrain2b2pnw: hot-reload state
     self._tesla_curve_cfg = _load_tesla_curve_config() if self.curve_brain_vtsc else None
     self._tesla_cfg_good = bool(self.curve_brain_vtsc and _tesla_cfg_is_honored(self._tesla_curve_cfg))
+    if self.curve_brain_vtsc:
+      _tesla_steer_lat_ceiling()          # curvebrain2b2pnw: pay the one-time opendbc import here, not in a control loop
     self._tesla_cfg_poll = time.monotonic()
 
     # rain2pnw: wet-weather curve margin — applies to BOTH cars, SAME reduction (not the Lightning-only
@@ -993,8 +1000,8 @@ class PnwVehicle:
     lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
-    without its bank tolerance, 3.0), so the 4.0 default is a target the code can never turn into a speed the steering
-    cannot hold: at most 3.0 at any speed, 2.7 at >= 80 mph. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
+    minus CURVE_STEER_MARGIN, 3.2886), so the 4.0 default is a target the code can never turn into a speed the steering
+    cannot hold: at most 3.29 at any speed, 3.2 at 75 mph, 2.7 at >= 80 mph. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
     Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
     icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:

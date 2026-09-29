@@ -28,6 +28,8 @@ from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import Fa
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import brake_cap_for_apex
 
 MPH = 0.44704
+DEFAULT_MODE = pv.CURVE_BRAIN_DEFAULT      # the Tesla's shipped mode when curve.json says nothing
+CEIL = 3.5886 - 0.3          # the Tesla steering ceiling (CarControllerParams MAX_LATERAL_ACCEL - CURVE_STEER_MARGIN)
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
 
@@ -142,14 +144,14 @@ class TestRowSpeed:
     """2026-09-28 22:35, the left curve, DB row k = 0.0040 (R 250 m), the car arriving at 70 mph.
     (a) A = 4.0 alone commands 70.7 mph -- the speed at which the applied angle stalled at the clamp and the driver
         took over. (b) with only the lataccel schedule clip (target - 0.3) it is still 67.8 mph. (c) with the
-        steering ceiling it is 61.3 mph."""
+        steering ceiling it is 64.1 mph."""
     k, v_now = 0.0040, 70.3 * MPH
     va, _ = cb.row_speed(Veh(lambda v: 4.0), k, v_now)
     vb, _ = cb.row_speed(Veh(lambda v: min(4.0, dh.lat_accel_target(v) - 0.3)), k, v_now)
     vc, ac = cb.row_speed(tesla(), k, v_now)
     assert va / MPH == pytest.approx(70.7, abs=0.05)
     assert vb / MPH == pytest.approx(67.8, abs=0.15) and vb < va
-    assert vc / MPH == pytest.approx(61.3, abs=0.1) and ac == pytest.approx(3.0)
+    assert vc / MPH == pytest.approx(64.1, abs=0.1) and ac == pytest.approx(CEIL, abs=1e-3)
     assert vc < vb < va
 
 
@@ -227,9 +229,9 @@ class TestStep:
   def test_a_row_ahead_is_priced_at_the_teslas_a(self, tmp_path, monkeypatch, cfgpath, schedule, log):
     b = _brain(tmp_path, monkeypatch)
     out = _step(b)
-    assert out["v"] == pytest.approx(math.sqrt(3.0 / 0.004), abs=0.01) and out["a"] == 3.0
+    assert out["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.01) and out["a"] == pytest.approx(CEIL, abs=0.01)
     assert (out["d"], out["src"], out["ev"], out["row"], out["k"]) == (275.0, "db", "measured", "0:0", 0.004)
-    assert out["mode"] == "shadow" and out["ts"] == 100.0 and out["seq"] == 1
+    assert out["mode"] == DEFAULT_MODE and out["ts"] == 100.0 and out["seq"] == 1
     t = b.tele(100.0)
     assert t["cbWhy"] == "ok" and t["cbN"] == 1 and t["cbRows"] == 1 and t["cbDb"] == "ok" and t["cbV"] == out["v"]
     assert log.errors == [] and log.exceptions == []
@@ -237,7 +239,7 @@ class TestStep:
   def test_it_is_a_heartbeat_when_there_is_no_need(self, tmp_path, monkeypatch, cfgpath, schedule, log):
     b = _brain(tmp_path, monkeypatch, anchors=[[0.5, 0.5, 0.0, [[0.5013, 0.5, 0.001, 3]]]])     # a row far away
     o1, o2 = _step(b, 100.0), _step(b, 100.25)
-    assert (o1["seq"], o2["seq"]) == (1, 2) and o2["ts"] == 100.25 and o1["v"] is None and o1["mode"] == "shadow"
+    assert (o1["seq"], o2["seq"]) == (1, 2) and o2["ts"] == 100.25 and o1["v"] is None and o1["mode"] == DEFAULT_MODE
     assert b.tele(100.25)["cbWhy"] == "noRow"
 
   @pytest.mark.parametrize("kw, why", [
@@ -296,7 +298,7 @@ class TestStep:
     b = _brain(tmp_path, monkeypatch)
     _step(b, 100.0)
     t = b.tele(100.0 + 5.0)
-    assert t["cbWhy"] == "idle" and t["cbV"] is None and t["cbOn"] == "shadow"
+    assert t["cbWhy"] == "idle" and t["cbV"] is None and t["cbOn"] == DEFAULT_MODE
 
   def test_the_mode_is_hot_reloaded_into_the_payload(self, tmp_path, monkeypatch, cfgpath, schedule):
     import os
@@ -402,10 +404,10 @@ class TestController:
     puts = _puts(c)
     assert 10 <= len(puts) <= 14                                       # 300 ticks at 100 Hz = 3 s -> ~4 Hz
     assert [p["seq"] for p in puts] == list(range(1, len(puts) + 1))
-    assert all(p["v"] == pytest.approx(math.sqrt(3.0 / 0.004), abs=0.05) and p["ev"] == "measured" for p in puts)
-    assert all(p["mode"] == "shadow" for p in puts)                    # the shipped default in THIS commit
+    assert all(p["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.05) and p["ev"] == "measured" for p in puts)
+    assert all(p["mode"] == DEFAULT_MODE for p in puts)
     r = recs[-1]
-    assert r["cbOn"] == "shadow" and r["cbDb"] == "ok" and r["cbWhy"] == "ok" and r["cbRow"] == "0:0"
+    assert r["cbOn"] == DEFAULT_MODE and r["cbDb"] == "ok" and r["cbWhy"] == "ok" and r["cbRow"] == "0:0"
 
   def test_no_row_no_need_but_the_heartbeat_continues(self, monkeypatch, tmp_path, schedule):
     _, recs, c = _tesla_drive(monkeypatch, tmp_path, [[0.5, 0.5, 0.0, [[0.5013, 0.5, 0.001, 3]]]])
@@ -437,7 +439,7 @@ class TestController:
     for rec in lines:
       assert set(cb.TELE_KEYS) <= set(rec), set(cb.TELE_KEYS) - set(rec)
     r = [x for x in lines if x["cbWhy"] == "ok"][-1]
-    assert r["cbOn"] == "shadow" and r["cbA"] == 3.0 and r["cbK"] == 0.004 and r["cbSrc"] == "db"
+    assert r["cbOn"] == DEFAULT_MODE and r["cbA"] == pytest.approx(CEIL, abs=0.01) and r["cbK"] == 0.004 and r["cbSrc"] == "db"
     assert r["cbD"] == pytest.approx(275.0 - 33.0 * 0.3, abs=1.5)         # the 0.3 s old fix, projected to now (keep_s 0)
 
   def test_a_missing_db_is_a_loud_no_need_and_the_car_still_drives(self, monkeypatch, tmp_path, schedule, log):
@@ -465,3 +467,70 @@ class TestController:
     monkeypatch.setattr(m, "icbm_project_position", spy)
     _tesla_drive(monkeypatch, tmp_path, ROW)
     assert seen and set(seen) == {0.0}
+
+
+# =====================================================================================================
+# selfdrived -> mem-param -> plannerd, end to end (the contract as ONE flow, not two halves that agree by construction)
+# =====================================================================================================
+class TestEndToEnd:
+  NEAR = [_anchor(120.0, 0.004)]                # a real curve 120 m ahead: the envelope binds at 33 m/s
+
+  def _vtsc(self, monkeypatch, payload, secs=0.5, v=33.0, v_set=33.5):
+    import types
+
+    from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_controller as vc
+    clock = [payload["ts"] + 0.05]
+    monkeypatch.setattr(vc, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Mem:
+      def get(self, k, return_default=False):
+        return payload if k == "CurveBrain" else None
+
+      def put_nonblocking(self, k, val):
+        pass
+
+    class Prm:
+      def get(self, k, return_default=False):
+        return "2" if k == "CESMode" else None
+
+      def get_bool(self, k):
+        return False
+
+    class NS:
+      pass
+    mdl = NS()
+    mdl.orientationRate, mdl.velocity, mdl.position, mdl.action = NS(), NS(), NS(), NS()
+    mdl.orientationRate.z, mdl.orientationRate.t = [0.0] * 20, [i * 0.25 for i in range(20)]
+    mdl.velocity.x, mdl.position.x = [v] * 20, [v * i * 0.25 for i in range(20)]
+    mdl.action.shouldStop = False
+    cc = NS()
+    cc.orientationNED = [0.0, 0.0, 0.0]
+    c = vc.VTSCController(FakeCP(TESLA, "tesla", True), params=Prm())
+    c.mem_params = Mem()
+    caps = []
+    for i in range(int(secs * 20)):
+      clock[0] = payload["ts"] + 0.05 + i / 20.0
+      caps.append(c.cap({"modelV2": mdl, "carControl": cc}, v_set, v))
+    return caps, c.overlay_payload()
+
+  def test_the_published_need_lowers_the_tesla_vtsc_cap(self, monkeypatch, tmp_path, schedule):
+    _, recs, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode="lower")
+    payload = _puts(c)[-1]
+    assert payload["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.05) and 40.0 < payload["d"] < 100.0
+    caps, p = self._vtsc(monkeypatch, payload)
+    want = brake_cap_for_apex(payload["v"], payload["d"], 33.0, 1.2)
+    assert p["cbUse"] == "lower" and p["cbWouldV"] < 33.4 and p["cbAge"] == pytest.approx(0.05, abs=0.06 + 0.5)
+    assert caps[-1] < 33.5 - 0.5 and caps[-1] >= want - 1e-6 and caps == sorted(caps, reverse=True)
+
+  def test_the_same_flow_in_shadow_changes_nothing(self, monkeypatch, tmp_path, schedule):
+    _, recs, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode="shadow")
+    payload = _puts(c)[-1]
+    assert payload["mode"] == "shadow" and payload["v"] is not None
+    caps, p = self._vtsc(monkeypatch, payload)
+    assert set(caps) == {33.5} and p["cbUse"] == "shadow"          # acting needs BOTH processes to agree
+
+  def test_a_dead_brain_is_ignored_after_a_second(self, monkeypatch, tmp_path, schedule):
+    _, _, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode="lower")
+    payload = _puts(c)[-1]
+    caps, p = self._vtsc(monkeypatch, payload, secs=2.5)
+    assert p["cbUse"] == "stale" and p["cbStaleN"] > 0 and caps[-1] == 33.5    # no heartbeat -> VTSC as before
