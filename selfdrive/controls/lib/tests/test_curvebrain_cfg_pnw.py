@@ -472,3 +472,32 @@ def test_the_lightning_logs_no_curve_brain_config(cfg, monkeypatch):
   ev, errs = _controller(LIGHTNING, "ford", False, monkeypatch)
   assert ev == [] and errs == []
 
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the acting default (owner 2026-09-28: "i don't want shadow, make the tesla use the curve db")
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_tesla_default_mode_is_acting_lower_and_the_lightning_is_never_acting(cfg):
+  """One constant, one owner decision -- a change to it is a change to what the Tesla does with no file. Pinned so it
+  cannot move silently in either direction."""
+  cfg(None)
+  assert pv.CURVE_BRAIN_DEFAULT == "lower" and tesla().curve_brain == "lower"
+  assert lightning().curve_brain == "off"                       # the Lightning's VTSC never consumes the brain
+
+
+@pytest.mark.parametrize("doc", [None, '{"tesla": {"curve_brain": "bogus"}}', '{"tesla": [1]}', '{"tesla": {"curve_lat_a": '])
+def test_a_missing_or_corrupt_file_at_start_is_the_acting_default_and_says_so(cfg, log, doc):
+  """Owner: missing/corrupt -> the ACTING default with a log line, never silently off. (Missing is the documented normal;
+  every corrupt / invalid form is a cloudlog.error naming the path; CESController also logs curve_brain_cfg at start.)"""
+  cfg(doc)
+  t = tesla()
+  assert t.curve_brain == "lower"
+  if doc is not None:
+    assert log.at("error") and all("curve.json" in e for e in log.at("error"))
+
+
+def test_the_kill_switch_beats_the_acting_default(cfg, log):
+  cfg({"tesla": {"curve_brain": "shadow"}})
+  assert tesla().curve_brain == "shadow"
+  cfg({"tesla": {"curve_brain": "off"}})
+  assert tesla().curve_brain == "off"

@@ -373,7 +373,15 @@ TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
 _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
 CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
-CURVE_BRAIN_DEFAULT = "shadow"     # the Tesla's default: compute and log, change nothing
+# curvebrain2b2pnw: the Tesla's DEFAULT mode is ACTING -- "lower" (T2: lower-only against VTSC's own cap, at rows of the curve DB
+# with authority). Owner, 2026-09-28: "i don't want shadow, make the tesla use the curve db". This overrides the design's
+# "shadow first" (SHARED-CURVE-BRAIN-DESIGN s5.2 / D3) and CLAUDE.md's "new toggles default OFF": the G-T2 gate (a Tesla shadow
+# drive, D4) has NOT been run, which the commit message and the report say. curve.json is the override and the kill switch:
+# {"tesla": {"curve_brain": "shadow"}} (compute + log, change nothing) or "off" take effect within ~1-2 s, hot-reloaded. A
+# MISSING file, and a file that is corrupt or holds an invalid mode AT START, get this acting default (logged at start:
+# curve_brain_cfg, and cloudlog.error for the invalid cases); a bad file DURING a drive is not applied (last config kept).
+# To take the acting default back out, change this one constant to "shadow".
+CURVE_BRAIN_DEFAULT = "lower"
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
 # curvebrain2b2pnw A2/A3: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is

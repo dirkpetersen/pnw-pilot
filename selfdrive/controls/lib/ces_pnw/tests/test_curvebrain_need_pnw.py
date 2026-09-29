@@ -526,6 +526,14 @@ class TestEndToEnd:
     assert p["cbUse"] == "lower" and p["cbWouldV"] < 33.4 and p["cbAge"] == pytest.approx(0.05, abs=0.06 + 0.5)
     assert caps[-1] < 33.5 - 0.5 and caps[-1] >= want - 1e-6 and caps == sorted(caps, reverse=True)
 
+  def test_with_no_curve_json_at_all_the_default_acts_end_to_end(self, monkeypatch, tmp_path, schedule):
+    """The owner's default: nothing to configure, the Tesla uses the DB. (The kill switch is the file.)"""
+    _, recs, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode=None)
+    payload = _puts(c)[-1]
+    assert payload["mode"] == "lower" and recs[-1]["cbOn"] == "lower"
+    caps, p = self._vtsc(monkeypatch, payload)
+    assert p["cbUse"] == "lower" and caps[-1] < 33.5 - 0.5
+
   def test_the_same_flow_in_shadow_changes_nothing(self, monkeypatch, tmp_path, schedule):
     _, recs, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode="shadow")
     payload = _puts(c)[-1]
