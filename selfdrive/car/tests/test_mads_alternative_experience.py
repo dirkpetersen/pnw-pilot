@@ -4,9 +4,10 @@
 These tests hold down the claims card.py makes:
   1. alternativeExperience is COMPUTED, not hardcoded to 0 (the pre-mads2pnw state, which made
      every alternative-experience bit unreachable);
-  2. the MADS bits are set ONLY for a car with the mads_lateral capability, and ONLY when
-     PandaMadsSafety declares the flashed panda actually carries controls_allowed_lateral -- so
-     the Tesla Raven can never receive them, and neither can a Lightning on a stock panda;
+  2. the MADS bits are set ONLY for a car with the mads_lateral capability (the Lightning and, since
+     teslamads2pnw, the Tesla Raven), and ONLY when PandaMadsSafety declares the flashed panda actually
+     carries controls_allowed_lateral -- so neither car can receive them on a stock panda, and no other
+     car ever can;
   3. the toggle's INVERTED polarity: DisengageOnBrake OFF (the shipping default) = REMAIN_ACTIVE
      (steering survives the brake); ON = DISENGAGE (stock).
 
@@ -76,12 +77,26 @@ class TestMadsAlternativeExperience:
     assert car._alternative_experience() == 0
 
   @pytest.mark.parametrize("toggle_on", [False, True])
-  @pytest.mark.parametrize("panda_mads", [False, True])
-  def test_tesla_never_gets_mads(self, toggle_on, panda_mads):
-    """The Raven must be entirely unaffected, in every combination."""
-    assert _StubCar(RAVEN, toggle_on, panda_mads)._alternative_experience() == 0
+  def test_raven_gets_mads_only_with_the_flashed_panda_declaration(self, toggle_on):
+    """teslamads2pnw: the Raven is treated exactly like the Lightning -- bits only with PandaMadsSafety,
+    inverted toggle polarity -- and gets NOTHING on a stock panda."""
+    assert _StubCar(RAVEN, toggle_on, panda_mads=False)._alternative_experience() == 0
+    expected = DISENGAGE if toggle_on else REMAIN_ACTIVE
+    assert _StubCar(RAVEN, toggle_on, panda_mads=True)._alternative_experience() == expected
 
-  def test_capability_is_lightning_only(self):
+  def test_other_cars_never_get_mads(self):
+    """No other car, in any toggle/panda combination (defense in depth for the capability list)."""
+    for toggle_on in (False, True):
+      for panda_mads in (False, True):
+        for fp in ("TESLA_MODEL_3_PARTY", "FORD_F_150_MK14", "HONDA_CIVIC"):
+          assert _StubCar(fp, toggle_on, panda_mads)._alternative_experience() == 0, fp
+
+  def test_capability_list(self):
     assert PnwVehicle(_StubCP(LIGHTNING)).mads_lateral
-    assert not PnwVehicle(_StubCP(RAVEN)).mads_lateral
+    assert PnwVehicle(_StubCP(RAVEN)).mads_lateral
+    assert not PnwVehicle(_StubCP("TESLA_MODEL_3_PARTY")).mads_lateral
     assert not PnwVehicle(None).mads_lateral
+
+  def test_raven_has_no_auto_resume(self):
+    """mads_resume needs the stock-ACC button path, which the Raven does not have."""
+    assert not PnwVehicle(_StubCP(RAVEN)).mads_resume

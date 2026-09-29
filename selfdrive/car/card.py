@@ -278,8 +278,8 @@ class Car:
 
       * PnwVehicle says this car has the mads_lateral capability (today: the F-150 Lightning --
         it runs stock ACC, so steering is all openpilot does for it and a brake tap takes away
-        everything). Capability view, never a fingerprint test in feature code; the Raven is
-        excluded and can never receive these bits.
+        everything -- and, since teslamads2pnw, the Tesla Raven's internal panda). Capability view,
+        never a fingerprint test in feature code.
       * PandaMadsSafety says the panda CURRENTLY FLASHED carries the controls_allowed_lateral
         safety build. Default OFF, set by hand as part of the flash procedure -- there is no
         honest runtime probe (docs/pnw/MADS2PNW.md explains why). Without it we send 0, i.e. the

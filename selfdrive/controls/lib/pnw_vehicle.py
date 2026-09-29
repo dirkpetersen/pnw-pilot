@@ -607,11 +607,16 @@ class PnwVehicle:
 
     # mads2pnw: "lateral survives a brake press" (sunnypilot MADS's controls_allowed_lateral).
     # The Lightning runs STOCK ACC, so steering is the ONLY thing openpilot does for it and a brake
-    # tap today takes away everything. The Raven is excluded on a CAPABILITY basis, not because it
-    # is a Tesla: its EPS inhibits itself (EAC_INHIBITED) on a brake press, so a parallel panda-side
-    # lateral authority would buy it nothing — and it already keeps openpilot longitudinal, so a
-    # brake tap does not leave it with nothing. Every other car: False.
-    self.mads_lateral: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+    # tap today takes away everything. Every other car: False.
+    #
+    # teslamads2pnw: the Raven now has it too. The earlier exclusion ("its EPS inhibits itself
+    # (EAC_INHIBITED) on a brake press") is NOT supported by the rlogs: after 9/9 sampled brake
+    # disengages eacStatus goes ACTIVE -> AVAILABLE with error 0 (the inhibit is the handsOnLevel-3
+    # case), and brake is ~55% of Raven disengages (drives/2026-09-28/tesla-brake-census). What the
+    # data does NOT show is the EPS accepting angle commands while DI_cruiseState is STANDBY -- never
+    # observed on this car; the first on-car test must check it. mads_resume stays False below (the
+    # Raven has no stock-ACC button path).
+    self.mads_lateral: bool = fp in ("FORD_F_150_LIGHTNING_MK1", "TESLA_MODEL_S_HW3")
 
     # madsresume2pnw: openpilot may tap the stock ACC's RESUME button once, on the driver's behalf,
     # to give back the speed the driver had ALREADY SET, after a brake press left MADS steering

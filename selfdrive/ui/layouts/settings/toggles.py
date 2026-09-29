@@ -141,8 +141,11 @@ DESCRIPTIONS = {
     "already set -- never higher, never a new speed -- and only if the road ahead is clear: no " +
     "close vehicle, none closing fast, within a few seconds of releasing the brake, once per " +
     "brake press. Any further pedal input cancels it, and your foot on the brake always wins.\n\n" +
-    "Ford F-150 Lightning only, and only with a panda flashed with the matching lateral-safety " +
-    "firmware -- without it this is locked ON."
+    "Ford F-150 Lightning and Tesla Model S (HW3) only, and only with a panda flashed with the " +
+    "matching lateral-safety firmware -- without it this is locked ON.\n\n" +
+    "Tesla Model S: there is no auto-resume. After a brake press, steering stays on and cruise is " +
+    "off; pull the cruise stalk to bring cruise back. Pushing the stalk to cancel AFTER the brake " +
+    "does not stop steering -- a firm push on the wheel does."
   ),
   # lanecenter2pnw: Lane Centering is ON by default; this is the opt-OUT toggle. Tuning lives in a
   # hot-reloaded file, not the UI, so the description points there rather than to sliders.
