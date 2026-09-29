@@ -79,3 +79,43 @@ auto-resume (there is no stock-ACC button path to spoof on the Raven).
   commands while cruise is STANDBY the failure is silent - an alert is a required follow-up. Also open: black-panda readback,
   the unneeded 600 ms Ford re-latch window on the Raven, and the per-car opt-out.
 * The code was written by a Sonnet agent under an owner-approved one-job exception to the never-Sonnet rule.
+
+## 3. Three more `3devpnw` changes: police cap memory, selfdrived loop diagnostics, Tesla stalk + EPS-refusal alert
+
+All three were reviewed before the push and the channel tip was GREEN after each.
+
+### `policecap2pnw` (`cc036ae2ef`) - a released police cap is remembered for 10 s
+
+On the openpilot-longitudinal path (the Tesla) a police cap that had just released was forgotten, so a second alert arriving right after
+the first re-ramped from the driver's set speed. On a real drive that produced a 65 to 73 mph surge in the middle of a curve. A released cap
+is now remembered for 10 s and a re-engaging cap seeds from it. Police handling is unchanged otherwise (exactly limit + 5; a false positive
+is acceptable, a miss is not). Not part of the Ford stock-ACC path.
+
+* **Status:** pushed. Follow-up open: an alert reported at zero distance still releases the cap at the report itself; a fix is in progress.
+
+### `loopdiag2pnw` (`ee3fb55fd1`) - always-on selfdrived slow-loop and event-log write timing (diagnostic only)
+
+A one-off "Communication Issue" alert traced to a 113 ms stall in the selfdrived publish loop, with the cause undetermined. selfdrived now
+logs any loop iteration over 50 ms with a per-stage breakdown, and the timing of the ces_events write, so the next occurrence shows whether
+it was a stall inside selfdrived or something outside it. No behaviour change.
+
+* **Reading the output:** the sleep/scheduling stage reads about 0 by design, because selfdrived is paced by a blocking carState receive;
+  a late carState therefore shows up as time in the data-sample stage, not as sleep.
+* **Status:** pushed; channel tip GREEN (4575 passed).
+
+### `teslastalk2pnw` (opendbc `66439dfd`, pnw-pilot `fdaad20168`) - the Raven's stalk ends steering-only, and an EPS refusal is no longer silent
+
+Two follow-ups required by the review of section 2 (steering survives a brake press). **No panda change and no new parameter.**
+
+* **Stalk read:** the cruise stalk (`STW_ACTN_RQ`, `SpdCtrlLvr_Stat`) is decoded passively. Forward push = cancel (`mainCruise`), rearward
+  pull = resume (`resumeCruise`). It is wired into the existing off-request path, so a stalk push while in steering-only ends everything.
+  Measured basis, 166 Raven logs: the rearward pull was seen on 29 of 32 presses; the forward push was established by a single event, and a
+  forward push from STANDBY has never been observed (unverified on-car). The earlier feasibility note had the two positions the wrong way
+  round, and the UP/DN 1ST/2ND values are speed detents, not engage/cancel.
+* **EPS-refusal detector:** if lateral is active and being commanded, but not fully engaged and the EPS is not reporting ACTIVE, for 50
+  consecutive frames, the car raises a temporary steering fault and logs an `epsRef` telemetry event. The review corrected the expectation
+  for steering-only: this alert is not loud there. Hands off for 1.5 s or more: lateral ends with a chime and no text. Wheel touched: a
+  repeating small warning about every half second. Firm hand: silent apart from log entries. The safety property (the failure is not
+  invisible and lateral ends) holds.
+* **Status:** pushed; channel tip GREEN (4583 passed). Staged on the device, not yet installed. Still to check on the car: the stalk events
+  in steering-only, forward-push-from-STANDBY, and steer-through-brake.
