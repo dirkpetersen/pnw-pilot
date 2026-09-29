@@ -184,6 +184,7 @@ class _StepCar(_StubCar):
     self.sm = _Seen(carControl=structs.CarControl(), onroadEvents=[])
     self._cs = structs.CarState()
     self._accdrop = None
+    self._epsref = None   # teslastalk2pnw: card.step now also ticks the Raven-only EPS-refusal logger
     self._pscmlim = pscmlim
     self.calls: list = []
 

@@ -628,6 +628,13 @@ class PnwVehicle:
     # (non-MADS) panda makes this inert even on a car that declares the capability.
     self.mads_resume: bool = self.mads_lateral and self.button_management
 
+    # teslastalk2pnw: mirrors opendbc/car/pnw_vehicle.py. The Raven's stalk (0x45) is read into ButtonEvents:
+    # FWD push -> mainCruise, RWD pull -> resumeCruise. selfdrived reads this to (a) let a stalk cancel end
+    # steering-only even with a foot on the accelerator (the onoffgas2pnw gate protects a THUMB on the wheel
+    # button, not a deliberate stalk push). eps_refusal_alert: card surfaces carstate's EPS-refusal verdict.
+    self.stalk_cruise_buttons: bool = fp == "TESLA_MODEL_S_HW3"
+    self.eps_refusal_alert: bool = fp == "TESLA_MODEL_S_HW3"
+
     # nudgeless (blinker-hold) lane change support — BSM-gated in DesireHelper
     self.nudgeless: bool = brand == "tesla" or fp == "FORD_F_150_LIGHTNING_MK1"
 

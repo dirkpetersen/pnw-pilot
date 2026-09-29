@@ -254,6 +254,17 @@ class Car:
     self._pscmlim = self._pscm_limit_logger()
     self._pscmlim_err = 0
 
+    # teslastalk2pnw: LOGGING ONLY -- one ces_events record per change of the Raven's EPS-refusal verdict (epsref_pnw.py).
+    # The verdict itself (and the alert) is opendbc carstate's; this only records it.
+    self._epsref = None
+    self._epsref_err = 0
+    try:
+      if PnwVehicle(self.CP).eps_refusal_alert:
+        from openpilot.selfdrive.car.epsref_pnw import EpsRefusalLogger
+        self._epsref = EpsRefusalLogger()
+    except Exception:
+      cloudlog.exception("teslastalk2pnw: EPS-refusal logger construction FAILED -- refusals on this drive will NOT be logged")
+
     # gearparkcan2pnw: on a car whose gear decodes `unknown` until its frame arrives, let GearPark confirm
     # Park from the gear message's own parser when another bus makes canValid False (selfdrive/car/gear_park.py).
     try:
@@ -574,6 +585,16 @@ class Car:
     # pscmlimlog2pnw: also after sendcan. None on every car PnwVehicle names no message for (the Tesla).
     if self._pscmlim is not None:
       self._log_pscm_limit(CS)
+
+    # teslastalk2pnw: after sendcan, like the loggers above. None on every car but the Raven.
+    if self._epsref is not None:
+      try:
+        _cs = self.CI.CS
+        self._epsref.update(_cs.eps_refused, _cs.eac_status_raw, _cs.eac_error_raw, self.sm['carControl'], CS)
+      except Exception:
+        self._epsref_err += 1
+        if self._epsref_err == 1 or self._epsref_err % 6000 == 0:
+          cloudlog.exception(f"teslastalk2pnw: EPS-refusal logging FAILED ({self._epsref_err} ticks) -- refusals are DARK in ces_events")
 
   def _pscm_limit_logger(self):
     """pscmlimlog2pnw: the PSCM lateral-limit logger, or None where PnwVehicle names no message (every car but the

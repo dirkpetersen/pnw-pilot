@@ -216,10 +216,21 @@ def off_request_latches(main_press: bool, lateral_only: bool, gas_pressed: bool)
   driver-button holdoff is the only interaction, but it is a real behaviour change.
 
   Deliberately NOT a fingerprint check: any car whose wheel reports mainCruise gets the same rule (Ford,
-  Honda, GM; the Tesla never produces one). Every other way to stop the system is untouched -- overpowering
+  Honda, GM; the Raven's stalk push is one since teslastalk2pnw). Every other way to stop the system is untouched -- overpowering
   the wheel, the brake, shifting out of drive, the same press with the foot lifted, the UI toggle.
   """
   return bool(main_press) and bool(lateral_only) and not bool(gas_pressed)
+
+
+def off_request_gas_input(gas_pressed: bool, stalk_source: bool) -> bool:
+  """PURE. The `gas_pressed` argument off_request_latches() should see.
+
+  teslastalk2pnw: the onoffgas2pnw accelerator gate protects a THUMB brushing the wheel's ACC ON/OFF button while the driver
+  accelerates away from a crossing. The Raven's off-request comes from the speed-control stalk instead (a deliberate push of
+  the lever), so the gate is not applied to it: with it, "push the stalk to end steering-only" would silently do nothing
+  whenever the driver's foot was on the pedal at all (Tesla gasPressed is ANY pedal travel).
+  """
+  return bool(gas_pressed) and not bool(stalk_source)
 
 
 class MadsPnw:

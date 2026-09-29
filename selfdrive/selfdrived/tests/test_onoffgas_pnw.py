@@ -68,7 +68,7 @@ def test_selfdrived_uses_the_predicate_and_says_so_when_it_swallows_a_press():
   re-implemented condition that could drift from it), and an ignored press is NOT silent (Rule 2)."""
   import pathlib
   src = (pathlib.Path(__file__).parent.parent / "selfdrived.py").read_text()
-  assert src.count("off_request_latches(main_press, self.mads.lateral_only, CS.gasPressed)") == 1, \
+  assert src.count("off_request_latches(main_press, self.mads.lateral_only, off_request_gas_input(CS.gasPressed, self.stalk_off_ignores_gas))") == 1, \
     "the latch must be decided by the pure predicate"
   assert src.count("self.off_request_t = self.sm.frame * DT_CTRL") == 1, \
     "exactly one place may set the off-request latch"

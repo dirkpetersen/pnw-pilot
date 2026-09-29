@@ -24,7 +24,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.loopdiag_pnw import LoopDiag  # loopdiag2pnw: slow-loop timing (observation only)
 # madsop2pnw: parallel lateral authority
-from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_latches,
+from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_gas_input, off_request_latches,
                                                      MADS_BRAKE_PANDA_GRACE_FRAMES, panda_lateral_view)
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
@@ -171,6 +171,9 @@ class SelfdriveD:
     # onebutton2pnw: monotonic time of the last ACC ON/OFF press made while openpilot was NOT fully
     # engaged (i.e. the driver asking for everything off out of the steering-only state).
     self.off_request_t = 0.0
+    # teslastalk2pnw: the Raven's stalk push is a mainCruise ButtonEvent too, but it is a deliberate lever gesture, so
+    # the onoffgas2pnw accelerator gate (built for a thumb brushing the wheel's ON/OFF button) does not apply to it.
+    self.stalk_off_ignores_gas = False
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -179,6 +182,7 @@ class SelfdriveD:
       # `noCruise` every time: a feature that cannot do its job, failing quietly. Capability view,
       # never a fingerprint test (driver directive).
       veh = PnwVehicle(self.CP)
+      self.stalk_off_ignores_gas = bool(veh.stalk_cruise_buttons)
       if not veh.mads_resume:
         self.mads_resume = None
       else:
@@ -334,8 +338,10 @@ class SelfdriveD:
     # the one moment the driver has said they want the system to hold on is the acceleration away from a
     # crossing. The rule itself is unchanged everywhere else.
     main_press = any(be.pressed and be.type == ButtonType.mainCruise for be in CS.buttonEvents)
-    if off_request_latches(main_press, self.mads.lateral_only, CS.gasPressed):
+    if off_request_latches(main_press, self.mads.lateral_only, off_request_gas_input(CS.gasPressed, self.stalk_off_ignores_gas)):
       self.off_request_t = self.sm.frame * DT_CTRL
+      if self.stalk_off_ignores_gas:
+        cloudlog.warning("teslastalk2pnw: stalk cancel while steering-only -> everything off (v_ego=%.1f m/s)", CS.vEgo)
     elif main_press and self.mads.lateral_only:
       # Rule 2: a press that is deliberately not acted on must SAY so. Without this a driver who DID mean it
       # sees nothing happen with no way to tell a swallowed press from a missed one.
