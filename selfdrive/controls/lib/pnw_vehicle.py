@@ -414,7 +414,7 @@ def _tesla_steer_lat_ceiling() -> float:
         raise ValueError(f"MAX_LATERAL_ACCEL {lim!r} is not a plausible lateral acceleration")
       v = float(lim) - CURVE_STEER_MARGIN
     except Exception as e:
-      cloudlog.error(f"pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
+      cloudlog.error("pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
                      f"({type(e).__name__}: {e}) -- using the fixed {_STEER_LAT_CEILING_FALLBACK} m/s^2")
     _steer_lat_ceiling_cache = v
   return _steer_lat_ceiling_cache

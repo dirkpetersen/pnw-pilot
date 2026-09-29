@@ -231,5 +231,5 @@ def parse_entry(raw, now) -> tuple[dict | None, str | None, float | None]:
       return None, "bad", age
     return {"mode": mode, "v": float(v), "d": float(d), "ev": raw["ev"], "src": raw.get("src"), "row": raw.get("row"),
             "a": raw.get("a"), "k": raw.get("k")}, None, age
-  except Exception:   # noqa: BLE001 -- anything else in an untrusted param is "malformed": the caller counts and logs it
+  except Exception:   # anything else in an untrusted param is "malformed": the caller counts and logs it
     return None, "bad", None
