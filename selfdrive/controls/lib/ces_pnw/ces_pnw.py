@@ -46,6 +46,10 @@ from openpilot.selfdrive.controls.lib.ces_pnw.park_tick_gate import (ParkTickGat
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_shadow import CurveDBShadow, curvedb_tele
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import CurveDbLive, TELE_KEYS as ROADDB_TELE_KEYS
 from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import ShapeStage, TELE_KEYS as SHAPE_TELE_KEYS
+# curvebrain2b2pnw: the Tesla's need layer (curve DB -> the CurveBrain mem-param VTSC reads). No ces_pnw import inside it.
+from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, PUBLISH_S as CURVE_BRAIN_PUBLISH_S,
+                                                                  TELE_KEYS as CURVE_BRAIN_TELE_KEYS)
+from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VTSC_C
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
@@ -2370,6 +2374,18 @@ def _shape_tele(ctl) -> dict:
   return st.tele(time.monotonic())
 
 
+def _curvebrain_tele(ctl) -> dict:
+  """curvebrain2b2pnw: the Tesla need layer's ces_events fragment. A controller built without the attribute (a permissive
+  test stub) gets every key, nulled, with cbOn "absent"; one built on a car without the capability (the Lightning) has
+  the attribute set to None and reads cbOn "off" -- never a missing column that reads as "did not trigger"."""
+  cb = getattr(ctl, "_curve_brain", "absent")
+  if cb == "absent":
+    return {**dict.fromkeys(CURVE_BRAIN_TELE_KEYS), "cbOn": "absent"}
+  if cb is None:
+    return {**dict.fromkeys(CURVE_BRAIN_TELE_KEYS), "cbOn": "off", "cbWhy": "noCapability"}
+  return cb.tele(time.monotonic())
+
+
 def _roaddb_tele(ctl) -> dict:
   """curvedblive2pnw: the curve DB's ces_events fragment. A controller built without it (a permissive test stub)
   gets every key, nulled, with cdb2On "absent" -- never a missing column that reads as "did not trigger"."""
@@ -4349,6 +4365,12 @@ class CESController:
         cloudlog.error(f"curve_brain: curve.json tesla section NOT honored -- {veh.curve_brain_why}")
       cloudlog.event("curve_brain_cfg", mode=veh.curve_brain, why=veh.curve_brain_why, lat_a=veh.curve_lat_a_cfg,
                      clip_margin=pnw_vehicle_module.CURVE_LAT_CLIP_MARGIN, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
+    # curvebrain2b2pnw: the Tesla's need layer -- loads the SAME curve DB file the Lightning uses (read-only index, own
+    # thread) and publishes the CurveBrain mem-param VTSC reads. None on any car without the capability.
+    self._curve_brain = CurveBrain(veh) if veh.curve_brain_vtsc else None
+    self._cb_last_pub = 0.0
+    self._cb_err_t = None
+    self._cb_err_n = 0
     self._rain_err_t = None                # silentexc3pnw: monotonic time of the last logged RainMode push failure
     self._rain_err_n = 0                   # silentexc3pnw: RainMode push failures since that log line
     self._long_ok = veh.op_long
@@ -4951,7 +4973,33 @@ class CESController:
     # to reach it. Publishing empty in Chill stops the executor.
     if self._shadow:
       self._icbm_step(sig, active=(sig is not None and self._button == C.BTN_CES))
+    if getattr(self, "_curve_brain", None) is not None:      # getattr: permissive test stubs are built without it
+      self._curve_brain_step(sig, now_t)
     return want and self._long_ok
+
+  def _curve_brain_step(self, sig, now) -> None:
+    """curvebrain2b2pnw: publish the CurveBrain mem-param (~4 Hz) for the Tesla's VTSC. Never raises into the control
+    path; without a `sig` (no model / carState this cycle) nothing is published, so VTSC sees an aging entry and ignores it
+    (>1 s = stale). The GPS position is projected to NOW (keep_s 0): the Lightning's 1.59 s lag is ICBM's tap-timing
+    calibration, and a curve that looks ~50 m farther than it is would start the Tesla's slowdown late."""
+    if now - self._cb_last_pub < CURVE_BRAIN_PUBLISH_S or self.mem_params is None or sig is None:
+      return
+    self._cb_last_pub = now
+    try:
+      plat, plon, _age, gps_state = icbm_project_position(self._cur_lat, self._cur_lon, self._cur_bearing,
+                                                          getattr(self, "_gps_fix_ts", None), sig["v_ego"], now, keep_s=0.0)
+      prof = VTSC_C.GENTLE_PROFILE if self._gentle else VTSC_C.DEFAULT_PROFILE
+      payload = self._curve_brain.step(now, v_ego=sig["v_ego"], points=self._map_targets, plat=plat, plon=plon,
+                                       gps_state=gps_state, way_sel=self._way_sel, hwy=self._hwy_class,
+                                       a_decel=prof["A_DECEL"])
+      self.mem_params.put_nonblocking("CurveBrain", payload)
+    except Exception as e:
+      # Rule 2: throttled, with a count. The consequence is stated: VTSC gets no entry (stale) and runs as before.
+      self._cb_err_n += 1
+      if self._cb_err_t is None or now - self._cb_err_t >= 60.0:
+        cloudlog.exception(f"curve_brain: publish FAILED ({type(e).__name__}) -- the Tesla VTSC gets no curve-DB need " +
+                           f"(it ignores the stale entry and runs as before) ({self._cb_err_n} failure(s) since the last log)")
+        self._cb_err_t, self._cb_err_n = now, 0
 
   # curvedbtel2pnw: the lateralControlState union members that carry a `saturated` field. The union
   # also has two legacy SCALAR members (desiredLateralJerk, version) that do not, so the membership
@@ -6348,6 +6396,9 @@ class CESController:
       # ICBM's core (shpBase -> shpT, shpDir), the two curvatures and their mean, the price vs today's, counters.
       # Keys pinned: SHAPE_TELE_KEYS.
       **_shape_tele(self),
+      # curvebrain2b2pnw: the Tesla need layer (cbOn = the live mode off/shadow/lower/raise, cbDb = the DB state, cbWhy
+      # = why there is / is not a need, cbV/cbD/cbA/cbK/cbRow = the row it priced). Keys pinned: CURVE_BRAIN_TELE_KEYS.
+      **_curvebrain_tele(self),
       # icbm2pnw: steering angle + driver-override flag (lateral quality forensics), and the shadow
       # marker — True on the Lightning where the planner path never actuates (ICBM may).
       "strAng": self._str_ang, "strPrs": self._str_prs, "shadow": self._shadow,
