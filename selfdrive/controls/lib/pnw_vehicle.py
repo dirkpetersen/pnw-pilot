@@ -388,37 +388,35 @@ CURVE_BRAIN_DEFAULT = "lower"
 CURVE_BRAIN_CORRUPT = "shadow"
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
-# curvebrain2b2pnw A2/A3/A4: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
+# curvebrain2b2pnw A2..A5: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
 # clipped in opendbc/car/lateral.py apply_steer_angle_limits_vm at get_max_angle_vm(v), the angle the vehicle model needs for
 # opendbc.car.tesla.values.CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL = ISO 3.0 + g * AVERAGE_ROAD_ROLL(0.06) = 3.5886
-# m/s^2 at every speed. THAT NUMBER IS NOT A CAPABILITY: the + g*roll part is a favourable-camber ALLOWANCE in model units
-# (panda's own torque lower bound uses ISO - g*roll = 2.41, safety/lateral.h). Evidence: on 2026-09-28 22:35 the applied angle
-# stalled at the clamp (14.42 deg at 70.3 mph) and the car delivered only 3.0-3.1 m/s^2 (tesla-max-lat-accel s1.8; tesla-
-# terwilliger s4: openpilot alone reached 3.0-3.1 with the angle at the clamp, running wide on the adverse-camber left curve).
-# So the ceiling is built from the ISO part: (MAX_LATERAL_ACCEL - g * AVERAGE_ROAD_ROLL) - CURVE_STEER_MARGIN = 3.0 - 0.2 =
-# 2.8 m/s^2 at every speed, read from opendbc's own constants (never a copy of 3.5886 / 3.0). 3.0 is the absolute most.
-# CONSEQUENCE (owner-visible): the owner's 4.0 (tesla.curve_lat_a) is his REQUESTED target, and this clip makes it 2.8. Terwilliger
-# left curve (k 0.00401) is priced at 59.1 mph, the right curve (k 0.00474) at 54.4 mph; the DB has no camber or direction
-# awareness, so one ceiling has to cover the adverse-camber case. Raise it only from shadow-drive calibration (tesla_lat).
-# The import is done ONCE, at PnwVehicle construction on the Tesla, never inside a control loop (a ~30 ms import in
-# selfdrived's 100 Hz loop is a commIssue). If the constants cannot be read the ceiling is the fixed 2.8 and it is a
-# cloudlog.error.
-CURVE_STEER_MARGIN = 0.2
-_STEER_LAT_CEILING_FALLBACK = 2.8
+# m/s^2 at every speed. OWNER DECISION 2026-09-29: "set it to 3.6, no panda flash needed for now" -> the ceiling is
+# min(CURVE_STEER_CEILING_OWNER 3.6, that clamp) = the clamp itself, ZERO margin. The owner was told what that means: the vehicle-
+# model angle limit clips commands at exactly this point; delivered lateral acceleration is ~3.6 on flat roads but only ~3.0 on
+# adverse camber (2026-09-28 22:35: the applied angle stalled at the clamp, 14.42 deg at 70.3 mph, and the car delivered 3.0-3.1,
+# running wide). (Fable F1 had asked for 2.8 = ISO - 0.2; the owner overrode it.) That is only acceptable because KNOWN bad curves
+# get their own lower limit: /data/pnw/curve_overrides.json (curve_brain.Overrides), and if that file is missing or invalid the
+# brain drops to CURVE_STEER_FALLBACK (2.8) for everything until it is valid. The owner's 4.0 (tesla.curve_lat_a) stays his
+# REQUESTED target and this clip makes it <= 3.6. The import is done ONCE, at PnwVehicle construction on the Tesla, never in a control
+# loop (a ~30 ms import in selfdrived's 100 Hz loop is a commIssue). Unreadable constant -> CURVE_STEER_FALLBACK + cloudlog.error.
+CURVE_STEER_CEILING_OWNER = 3.6
+CURVE_STEER_FALLBACK = 2.8
+_STEER_LAT_CEILING_FALLBACK = CURVE_STEER_FALLBACK
 _steer_lat_ceiling_cache: float | None = None
 
 
 def _tesla_steer_lat_ceiling() -> float:
-  """The Tesla steering clamp's ISO lateral acceleration (m/s^2), less CURVE_STEER_MARGIN. Cached."""
+  """min(CURVE_STEER_CEILING_OWNER, the Tesla vehicle-model clamp's MAX_LATERAL_ACCEL) in m/s^2. Cached."""
   global _steer_lat_ceiling_cache
   if _steer_lat_ceiling_cache is None:
     v = _STEER_LAT_CEILING_FALLBACK
     try:
-      from opendbc.car.tesla.values import ACCELERATION_DUE_TO_GRAVITY, AVERAGE_ROAD_ROLL, CarControllerParams
-      lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL
-      if not (isinstance(lim, (int, float)) and math.isfinite(lim) and 2.0 <= lim <= 4.0):
-        raise ValueError(f"ISO lateral acceleration {lim!r} is not plausible")
-      v = float(lim) - CURVE_STEER_MARGIN
+      from opendbc.car.tesla.values import CarControllerParams
+      lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
+      if not (isinstance(lim, (int, float)) and math.isfinite(lim) and 2.0 <= lim <= 5.0):
+        raise ValueError(f"MAX_LATERAL_ACCEL {lim!r} is not plausible")
+      v = min(CURVE_STEER_CEILING_OWNER, float(lim))
     except Exception as e:
       cloudlog.error("pnw_vehicle: the Tesla steering lateral ceiling could not be read from opendbc " +
                      f"({type(e).__name__}: {e}) -- using the fixed {_STEER_LAT_CEILING_FALLBACK} m/s^2")
@@ -1020,8 +1018,8 @@ class PnwVehicle:
     lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
-    ISO part, 3.0, minus CURVE_STEER_MARGIN = 2.8), so the owner's requested 4.0 is clipped to 2.8 at every speed up to
-    ~77 mph (2.7 from 80 mph): a target the code can never turn into a speed the steering cannot hold. Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
+    min(3.6 owner, MAX_LATERAL_ACCEL 3.5886), zero margin -- see the comment above it), so the owner's requested 4.0 is
+    clipped to 3.59 at speeds up to ~66 mph, then by the schedule (3.5 at 72 mph ... 2.7 from 80 mph). Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
     Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
     icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:

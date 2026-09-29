@@ -384,7 +384,6 @@ class TestTelemetry:
 class TestNoStaleBrainState:
   def _run(self, env, gap):
     """Act in a curve (need 20 m/s), then `gap` ticks off, then a straight road with no need: the cap must be the set."""
-    state = {"mode": "2"}
 
     def fn(t):
       return entry(v=20.0, d=0.0)(t) if t < 1000.0 + 5.0 else {"ts": t, "seq": 2, "mode": "lower", "v": None}

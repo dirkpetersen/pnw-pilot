@@ -29,7 +29,8 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import brake_cap_for_ape
 
 MPH = 0.44704
 DEFAULT_MODE = pv.CURVE_BRAIN_DEFAULT      # the Tesla's shipped mode when curve.json says nothing
-CEIL = 2.8                   # the Tesla steering ceiling: ISO 3.0 (MAX_LATERAL_ACCEL - g*roll) - CURVE_STEER_MARGIN 0.2
+CEIL = 3.5886                # the Tesla steering ceiling: min(owner 3.6, MAX_LATERAL_ACCEL 3.5886) = the clamp itself
+A33 = 3.318                  # min(4.0, schedule(33 m/s = 73.8 mph) - 0.3, CEIL): what a car at 33 m/s is priced at
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
 
@@ -151,7 +152,9 @@ class TestRowSpeed:
     vc, ac = cb.row_speed(tesla(), k, v_now)
     assert va / MPH == pytest.approx(70.7, abs=0.05)
     assert vb / MPH == pytest.approx(67.8, abs=0.15) and vb < va
-    assert vc / MPH == pytest.approx(59.2, abs=0.1) and ac == pytest.approx(CEIL, abs=1e-3)
+    assert vc / MPH == pytest.approx(67.0, abs=0.1) and ac == pytest.approx(CEIL, abs=1e-3)
+    vo, ao = cb.row_speed(tesla(), k, v_now, a_cap=2.8)                 # (d) the Terwilliger-left override (a_max 2.8)
+    assert vo / MPH == pytest.approx(59.1, abs=0.1) and ao == pytest.approx(2.8)
     assert vc < vb < va
 
 
@@ -211,6 +214,12 @@ class TestMostBinding:
 ROW = [_anchor(300.0, 0.004)]                 # a real curve 300 m ahead of the car at y = 0, k = 0.004
 
 
+def write_overrides(entries, raw=None):
+  """Write the per-curve override file the brain will read (the path is the conftest's tmp file)."""
+  import pathlib
+  pathlib.Path(cb.OVERRIDES_PATH).write_text(raw if raw is not None else json.dumps({"overrides": entries}))
+
+
 def _brain(tmp_path, monkeypatch, anchors=ROW, veh=None):
   d = tmp_path / "db"
   if anchors is not None:
@@ -229,7 +238,7 @@ class TestStep:
   def test_a_row_ahead_is_priced_at_the_teslas_a(self, tmp_path, monkeypatch, cfgpath, schedule, log):
     b = _brain(tmp_path, monkeypatch)
     out = _step(b)
-    assert out["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.01) and out["a"] == pytest.approx(CEIL, abs=0.01)
+    assert out["v"] == pytest.approx(math.sqrt(A33 / 0.004), abs=0.05) and out["a"] == pytest.approx(A33, abs=0.01)
     assert (out["d"], out["src"], out["ev"], out["row"], out["k"]) == (275.0, "db", "measured", "0:0", 0.004)
     assert out["mode"] == DEFAULT_MODE and out["ts"] == 100.0 and out["seq"] == 1
     t = b.tele(100.0)
@@ -421,7 +430,7 @@ class TestController:
     puts = _puts(c)
     assert 10 <= len(puts) <= 14                                       # 300 ticks at 100 Hz = 3 s -> ~4 Hz
     assert [p["seq"] for p in puts] == list(range(1, len(puts) + 1))
-    assert all(p["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.05) and p["ev"] == "measured" for p in puts)
+    assert all(p["v"] == pytest.approx(math.sqrt(A33 / 0.004), abs=0.05) and p["ev"] == "measured" for p in puts)
     assert all(p["mode"] == DEFAULT_MODE for p in puts)
     r = recs[-1]
     assert r["cbOn"] == DEFAULT_MODE and r["cbDb"] == "ok" and r["cbWhy"] == "ok" and r["cbRow"] == "0:0"
@@ -456,7 +465,7 @@ class TestController:
     for rec in lines:
       assert set(cb.TELE_KEYS) <= set(rec), set(cb.TELE_KEYS) - set(rec)
     r = [x for x in lines if x["cbWhy"] == "ok"][-1]
-    assert r["cbOn"] == DEFAULT_MODE and r["cbA"] == pytest.approx(CEIL, abs=0.01) and r["cbK"] == 0.004 and r["cbSrc"] == "db"
+    assert r["cbOn"] == DEFAULT_MODE and r["cbA"] == pytest.approx(A33, abs=0.01) and r["cbK"] == 0.004 and r["cbSrc"] == "db"
     assert r["cbD"] == pytest.approx(275.0 - 33.0 * 0.3, abs=1.5)         # the 0.3 s old fix, projected to now (keep_s 0)
 
   def test_a_missing_db_is_a_loud_no_need_and_the_car_still_drives(self, monkeypatch, tmp_path, schedule, log):
@@ -533,7 +542,7 @@ class TestEndToEnd:
   def test_the_published_need_lowers_the_tesla_vtsc_cap(self, monkeypatch, tmp_path, schedule):
     _, recs, c = _tesla_drive(monkeypatch, tmp_path, self.NEAR, mode="lower")
     payload = _puts(c)[-1]
-    assert payload["v"] == pytest.approx(math.sqrt(CEIL / 0.004), abs=0.05) and 40.0 < payload["d"] < 100.0
+    assert payload["v"] == pytest.approx(math.sqrt(A33 / 0.004), abs=0.05) and 40.0 < payload["d"] < 100.0
     caps, p = self._vtsc(monkeypatch, payload)
     want = brake_cap_for_apex(payload["v"], payload["d"], 33.0, 1.2)
     assert p["cbUse"] == "lower" and p["cbWouldV"] < 33.4 and p["cbAge"] == pytest.approx(0.05, abs=0.06 + 0.5)
@@ -567,7 +576,8 @@ class TestEndToEnd:
 class TestClosedLoop:
   ROW_Y, K = 470.0, 0.00401           # the DB's tight part: R 250 m, seen 470 m ahead (the 22:34:56 view)
 
-  def _run(self, monkeypatch, tmp_path, cfgpath, mode, v0=32.6, v_set=33.5, seconds=40.0):
+  def _run(self, monkeypatch, tmp_path, cfgpath, mode, v0=32.6, v_set=33.5, seconds=40.0, k=None, ovr=False):
+    k = self.K if k is None else k
     import types
 
     from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_controller as vc
@@ -575,7 +585,10 @@ class TestClosedLoop:
       cfgpath.write_text(json.dumps({"tesla": {"curve_brain": mode}}))
     # the real table has an anchor every 25 m along a road: a curve's stretch is covered by overlapping rows, each with
     # its own 175 m extent, so the row stays in force until the last of them is 40 m behind the car
-    rows = [_anchor(y, self.K) for y in range(int(self.ROW_Y) - 100, int(self.ROW_Y) + 176, 25)]
+    if ovr:      # the Terwilliger-left override: a circle over the stretch, heading north (the test road), a_max 2.8
+      write_overrides([{"lat": LAT0 + (self.ROW_Y + 20.0) / 111320.0, "lon": LON0, "radius_m": 300.0, "heading_deg": 0.0,
+                        "heading_tol_deg": 50.0, "a_max": 2.8, "note": "test left"}])
+    rows = [_anchor(y, k) for y in range(int(self.ROW_Y) - 100, int(self.ROW_Y) + 176, 25)]
     b = _brain(tmp_path, monkeypatch, anchors=rows)
     clock = [1000.0]
     monkeypatch.setattr(vc, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
@@ -628,19 +641,31 @@ class TestClosedLoop:
   def _at(self, trace, y_at):
     return next(r for r in trace if r[1] >= y_at)
 
-  def test_the_tesla_enters_the_tight_part_at_the_speed_the_steering_can_hold_not_at_the_speed_that_failed(
-      self, monkeypatch, tmp_path, cfgpath, schedule):
-    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower")
-    need = math.sqrt(CEIL / self.K)                                    # 26.4 m/s = 59.1 mph
+  def _check(self, trace, k, a):
+    need = math.sqrt(a / k)
     entrance = self._at(trace, self.ROW_Y - 25.0)
-    assert entrance[2] / MPH == pytest.approx(need / MPH, abs=1.0), entrance          # 59 mph, not 70+
+    assert entrance[2] / MPH == pytest.approx(need / MPH, abs=1.0), entrance
     inside = [r for r in trace if self.ROW_Y - 25.0 <= r[1] <= self.ROW_Y + 150.0]
     assert max(r[2] for r in inside) <= need + 0.6 and min(r[2] for r in inside) >= need - 0.6   # neither fast nor over-slow
     caps = [r[3] for r in trace]                                       # the cap itself is decel-limited (regen 2.0) ...
-    assert min((b - a) / 0.05 for a, b in zip(caps, caps[1:], strict=False)) >= -2.0 - 1e-6
+    assert min((b - a_) / 0.05 for a_, b in zip(caps, caps[1:], strict=False)) >= -2.0 - 1e-6
     assert max(r[2] - r[3] for r in trace) <= 0.3                      # ... and a car following it is never far above it
-    assert min((r[4] for r in trace if r[1] < self.ROW_Y - 25.0 - 450.0), default=0.0) >= -1e-6   # nothing until ~450 m out
-    assert self.K * max(r[2] for r in inside) ** 2 <= CEIL + 0.35                      # the lateral acceleration it asks for
+    return need / MPH
+
+  def test_left_curve_with_the_override_enters_at_59_mph(self, monkeypatch, tmp_path, cfgpath, schedule):
+    """k 0.00401 (Terwilliger left) with its override (a_max 2.8): 59 mph, not the 67 the clamp alone would allow and not
+    the 70+ that failed."""
+    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower", ovr=True)
+    assert self._check(trace, self.K, 2.8) == pytest.approx(59.1, abs=0.1)
+
+  def test_left_curve_without_the_override_is_the_clamp_67_mph(self, monkeypatch, tmp_path, cfgpath, schedule):
+    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower")
+    assert self._check(trace, self.K, CEIL) == pytest.approx(67.0, abs=0.1)
+
+  def test_right_curve_k_0_00474_has_no_override_and_takes_the_clamp_61_6_mph(self, monkeypatch, tmp_path, cfgpath, schedule):
+    """The owner: 64 mph was fine on the right curve, it can do more. No override there, so A = 3.5886 -> 61.6 mph."""
+    trace = self._run(monkeypatch, tmp_path, cfgpath, "lower", k=0.00474)
+    assert self._check(trace, 0.00474, CEIL) == pytest.approx(61.6, abs=0.1)
 
   def test_without_the_brain_the_same_car_enters_at_the_set_speed(self, monkeypatch, tmp_path, cfgpath, schedule):
     for mode in ("off", "shadow"):
@@ -651,3 +676,209 @@ class TestClosedLoop:
   def test_the_brain_never_slows_a_car_that_is_already_slower(self, monkeypatch, tmp_path, cfgpath, schedule):
     trace = self._run(monkeypatch, tmp_path, cfgpath, "lower", v0=20.0, v_set=20.0)
     assert all(abs(r[2] - 20.0) < 1e-6 for r in trace)
+
+
+# =====================================================================================================
+# curvebrain2b2pnw A5: the per-curve override list (the price of the 3.6 ceiling) and its fail-safe
+# =====================================================================================================
+def _ovr_entry(**kw):
+  e = {"lat": LAT0 + 300.0 / 111320.0, "lon": LON0, "radius_m": 200.0, "heading_deg": 0.0, "heading_tol_deg": 40.0,
+       "a_max": 2.8, "note": "test curve"}
+  e.update(kw)
+  return e
+
+
+def _fresh(entries=None, raw=None):
+  write_overrides(entries or [], raw=raw)
+  return cb.Overrides()
+
+
+class TestOverridesLoader:
+  def test_a_valid_file_loads(self, log):
+    o = _fresh([_ovr_entry()])
+    assert not o.failsafe and len(o.entries) == 1 and o.entries[0]["a_max"] == 2.8 and log.errors == []
+
+  def test_an_explicitly_empty_list_is_valid_no_overrides(self, log):
+    o = _fresh([])
+    assert not o.failsafe and o.entries == [] and o.limit(LAT0, LON0, 0.0) == (None, None) and log.errors == []
+
+  def test_a_missing_file_is_failsafe_and_loud(self, tmp_path, monkeypatch, log):
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "nope.json"))
+    o = cb.Overrides()
+    assert o.failsafe and len(log.errors) == 1 and "INVALID/MISSING" in log.errors[0]
+    assert "2.8" in log.errors[0]
+
+  @pytest.mark.parametrize("raw", ["not json", "[]", '{"overrides": {}}', '{"overrides": [1]}', "", '{"overrides": [{"lat": 1}]}'])
+  def test_a_corrupt_file_is_failsafe_and_loud(self, log, raw):
+    o = _fresh(raw=raw)
+    assert o.failsafe and len(log.errors) == 1 and "INVALID" in log.errors[0]
+
+  @pytest.mark.parametrize("bad", [
+    dict(lat=float("nan")), dict(lat=91.0), dict(lon=-181.0), dict(radius_m=0.0), dict(radius_m=5000.0), dict(heading_deg=400.0),
+    dict(heading_tol_deg=0.0), dict(heading_tol_deg=181.0), dict(a_max=0.5), dict(a_max=9.0), dict(a_max="2.8"),
+    dict(a_max=True), dict(a_max=None), dict(radius_m=1e400)])
+  def test_any_invalid_entry_makes_the_whole_file_failsafe(self, log, bad):
+    raw = json.dumps({"overrides": [_ovr_entry(), _ovr_entry(**bad)]}).replace("Infinity", "1e999").replace("NaN", "NaN")
+    o = _fresh(raw=raw)
+    assert o.failsafe and log.errors
+
+  def test_the_failsafe_a_is_the_vehicles_fallback(self):
+    assert cb.FAILSAFE_A == pv.CURVE_STEER_FALLBACK == 2.8
+
+  def test_the_error_repeats_once_a_minute_not_every_poll(self, tmp_path, monkeypatch, log):
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "nope.json"))
+    o = cb.Overrides()
+    for t in range(1, 59):
+      o.refresh(float(t))
+    assert len(log.errors) == 1
+    o.refresh(61.0)
+    assert len(log.errors) == 2
+
+  def test_hot_reload_applies_a_good_edit_within_the_poll_and_not_before(self, log):
+    import os
+    o = _fresh([_ovr_entry()])
+    write_overrides([_ovr_entry(a_max=2.5), _ovr_entry(lat=LAT0)])
+    st = os.stat(cb.OVERRIDES_PATH)
+    os.utime(cb.OVERRIDES_PATH, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    o.refresh(0.5)
+    assert len(o.entries) == 1                                     # inside the 1 s poll: not re-read
+    o.refresh(1.5)
+    assert len(o.entries) == 2 and o.entries[0]["a_max"] == 2.5
+
+  def test_a_typo_mid_drive_keeps_the_last_valid_list_and_says_so(self, log):
+    import os
+    o = _fresh([_ovr_entry()])
+    write_overrides([], raw='{"overrides": [{"lat": ')
+    st = os.stat(cb.OVERRIDES_PATH)
+    os.utime(cb.OVERRIDES_PATH, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    o.refresh(2.0)
+    assert not o.failsafe and len(o.entries) == 1
+    assert len(log.errors) == 1 and "NOT applied" in log.errors[0]
+
+  def test_a_file_that_disappears_mid_drive_is_failsafe(self, log):
+    import os
+    o = _fresh([_ovr_entry()])
+    os.unlink(cb.OVERRIDES_PATH)
+    o.refresh(2.0)
+    assert o.failsafe and log.errors
+
+  def test_a_directory_in_place_of_the_file_is_failsafe(self, tmp_path, monkeypatch, log):
+    d = tmp_path / "ovr"
+    d.mkdir()
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(d))
+    assert cb.Overrides().failsafe and log.errors
+
+
+class TestOverrideMatching:
+  def test_inside_the_circle_and_heading_window_it_limits(self):
+    o = _fresh([_ovr_entry()])
+    assert o.limit(LAT0 + 300.0 / 111320.0, LON0, 0.0)[0] == 2.8
+    assert o.limit(LAT0 + 300.0 / 111320.0, LON0, 39.0)[0] == 2.8 and o.limit(LAT0 + 300.0 / 111320.0, LON0, 321.0)[0] == 2.8
+
+  def test_outside_the_radius_it_does_not(self):
+    o = _fresh([_ovr_entry()])
+    assert o.limit(LAT0 + 300.0 / 111320.0 + 230.0 / 111320.0, LON0, 0.0)[0] is None       # 230 m > 200 m
+    assert o.limit(LAT0 + 300.0 / 111320.0 + 190.0 / 111320.0, LON0, 0.0)[0] == 2.8
+
+  def test_the_opposite_heading_and_a_heading_outside_the_window_do_not(self):
+    o = _fresh([_ovr_entry()])
+    la = LAT0 + 300.0 / 111320.0
+    assert o.limit(la, LON0, 180.0)[0] is None and o.limit(la, LON0, 41.0)[0] is None and o.limit(la, LON0, 319.0)[0] is None
+
+  def test_the_heading_window_wraps_at_north(self):
+    o = _fresh([_ovr_entry(heading_deg=350.0, heading_tol_deg=20.0)])
+    la = LAT0 + 300.0 / 111320.0
+    assert o.limit(la, LON0, 5.0)[0] == 2.8 and o.limit(la, LON0, 335.0)[0] == 2.8 and o.limit(la, LON0, 30.0)[0] is None
+
+  def test_the_lowest_of_several_wins(self):
+    o = _fresh([_ovr_entry(a_max=3.0, note="a"), _ovr_entry(a_max=2.4, note="b"), _ovr_entry(a_max=2.9, note="c")])
+    assert o.limit(LAT0 + 300.0 / 111320.0, LON0, 0.0) == (2.4, "b")
+
+
+class TestOverridePricing:
+  def test_an_override_only_ever_lowers_a(self):
+    t = Veh(lambda v: 3.3)
+    base = cb.row_speed(t, 0.004, 30.0)
+    for cap in (3.0, 3.3, 3.31, 4.0, 9.0):
+      v, a = cb.row_speed(t, 0.004, 30.0, a_cap=cap)
+      assert a <= base[1] + 1e-12 and v <= base[0] + 1e-9
+    assert cb.row_speed(t, 0.004, 30.0, a_cap=2.8)[1] == 2.8
+
+  def test_the_brain_prices_a_row_inside_an_override_lower_and_names_it(self, tmp_path, monkeypatch, cfgpath, schedule):
+    write_overrides([_ovr_entry(lat=LAT0 + 300.0 / 111320.0)])
+    b = _brain(tmp_path, monkeypatch)
+    out = _step(b)
+    assert out["a"] == pytest.approx(2.8) and out["v"] == pytest.approx(math.sqrt(2.8 / 0.004), abs=0.01)
+    t = b.tele(100.0)
+    assert t["cbOvr"] == "test curve" and t["cbOvrN"] == 1 and t["cbWhy"] == "ok"
+
+  def test_a_row_outside_the_override_is_untouched(self, tmp_path, monkeypatch, cfgpath, schedule):
+    write_overrides([_ovr_entry(lat=LAT0 + 3000.0 / 111320.0)])
+    b = _brain(tmp_path, monkeypatch)
+    out = _step(b)
+    assert out["a"] == pytest.approx(A33, abs=0.01)
+    assert b.tele(100.0)["cbOvr"] is None and b.tele(100.0)["cbOvrN"] == 1
+
+  def test_the_opposite_direction_of_the_same_road_is_untouched(self, tmp_path, monkeypatch, cfgpath, schedule):
+    write_overrides([_ovr_entry(heading_deg=180.0)])                    # the row's anchor heads north (0)
+    b = _brain(tmp_path, monkeypatch)
+    assert _step(b)["a"] == pytest.approx(A33, abs=0.01)
+
+  def test_an_override_that_a_lower_clip_beats_is_not_claimed(self, tmp_path, monkeypatch, cfgpath, schedule):
+    write_overrides([_ovr_entry(a_max=3.9)])                            # above the 3.3 the chain already gives
+    b = _brain(tmp_path, monkeypatch)
+    out = _step(b)
+    assert out["a"] == pytest.approx(A33, abs=0.01) and b.tele(100.0)["cbOvr"] is None
+
+  def test_a_missing_file_prices_every_row_at_no_more_than_2_8_and_says_failsafe(self, tmp_path, monkeypatch, cfgpath, schedule, log):
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "gone.json"))
+    b = _brain(tmp_path, monkeypatch)
+    out = _step(b)
+    assert out["a"] == pytest.approx(2.8) and out["v"] == pytest.approx(math.sqrt(2.8 / 0.004), abs=0.01)
+    t = b.tele(100.0)
+    assert t["cbOvr"] == "failsafe" and t["cbOvrN"] == 0 and any("MISSING" in e for e in log.errors)
+
+  def test_the_file_appearing_lifts_the_failsafe(self, tmp_path, monkeypatch, cfgpath, schedule, log):
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "later.json"))
+    b = _brain(tmp_path, monkeypatch)
+    assert _step(b, 100.0)["a"] == pytest.approx(2.8)
+    (tmp_path / "later.json").write_text('{"overrides": []}')
+    out = _step(b, 102.0)
+    assert out["a"] == pytest.approx(A33, abs=0.01) and b.tele(102.0)["cbOvr"] is None
+
+  def test_the_tele_keys_still_match_what_tele_emits(self, tmp_path, monkeypatch, cfgpath, schedule):
+    b = _brain(tmp_path, monkeypatch)
+    _step(b)
+    assert {"cbOvr", "cbOvrN"} <= set(cb.TELE_KEYS) and set(b.tele(100.0)) == set(cb.TELE_KEYS)
+
+
+import os as _os
+import pathlib as _pl
+
+_SEED = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curve_overrides.json"))
+_TABLE = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curvedb_v2"))
+
+
+@pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists()), reason="private data (the seed override file + the curve DB) not present")
+class TestTheSeedFileAgainstTheRealTable:
+  """The private seed file and the deployed table: the Terwilliger LEFT tight rows are covered, the RIGHT curve and the
+  northbound rows are not (owner: no override on the right curve)."""
+
+  def _rows(self):
+    idx, _ = cl.load_rows(str(_TABLE))
+    return idx
+
+  def test_the_seed_is_valid_and_has_the_one_entry(self):
+    o = cb.Overrides(str(_SEED))
+    assert not o.failsafe and len(o.entries) == 1 and o.entries[0]["a_max"] == 2.8 and "Terwilliger left" in o.entries[0]["note"]
+
+  def test_left_tight_rows_are_covered_right_curve_and_northbound_are_not(self):
+    o, idx = cb.Overrides(str(_SEED)), self._rows()
+    tight = [a for a in idx.anchors if 45.4695 < a[0] < 45.4703 and -122.6902 < a[1] < -122.6880 and 220 < a[2] < 260
+             and any(b[2] and b[2] > 0.0035 for b in a[3])]
+    assert len(tight) >= 3
+    assert all(o.limit(a[0], a[1], a[2])[0] == 2.8 for a in tight), [(a[0], a[1], a[2]) for a in tight]
+    right = [a for a in idx.anchors if 45.4690 < a[0] < 45.4735 and -122.6830 < a[1] < -122.6770 and any(b[2] and b[2] > 0.0035 for b in a[3])]
+    assert right and all(o.limit(a[0], a[1], a[2])[0] is None for a in right)
+    nb = [a for a in idx.anchors if 45.4690 < a[0] < 45.4705 and -122.6910 < a[1] < -122.6880 and (a[2] < 90 or a[2] > 330)]
+    assert nb and all(o.limit(a[0], a[1], a[2])[0] is None for a in nb)

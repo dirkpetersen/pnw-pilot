@@ -15,7 +15,7 @@ from openpilot.selfdrive.controls.lib import drive_helpers as dh
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 
 MPH = 0.44704
-CEIL = 2.8               # the Tesla steering ceiling: (MAX_LATERAL_ACCEL - g*roll = ISO 3.0) - CURVE_STEER_MARGIN 0.2
+CEIL = 3.5886            # the Tesla steering ceiling: min(owner 3.6, CarControllerParams MAX_LATERAL_ACCEL 3.5886) = the clamp itself
 TESLA = "TESLA_MODEL_S_HW3"
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 
@@ -51,6 +51,15 @@ def log(monkeypatch):
   lg = _Log()
   monkeypatch.setattr(pv, "cloudlog", lg)
   return lg
+
+
+@pytest.fixture(autouse=True)
+def _overrides_valid(tmp_path, monkeypatch):
+  """A valid, empty per-curve override file: a missing one is the fail-safe, which is not what these tests are about."""
+  from openpilot.selfdrive.controls.lib.ces_pnw import curve_brain as cb
+  p = tmp_path / "curve_overrides.json"
+  p.write_text('{"overrides": []}')
+  monkeypatch.setattr(cb, "OVERRIDES_PATH", str(p))
 
 
 @pytest.fixture
@@ -237,17 +246,17 @@ def test_the_tesla_section_is_never_opened_on_the_lightning(cfg, monkeypatch):
 # the lateral-clip cap
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("mph, cfg_a, want", [
-  (55.0, 4.0, CEIL),       # schedule 5.5 -> clip 5.2; the STEERING ceiling (2.8) binds the 4.0 target
+  (55.0, 4.0, CEIL),       # schedule 5.5 -> clip 5.2; the STEERING ceiling (the clamp, 3.5886) binds the 4.0 target
   (60.0, 4.0, CEIL),       # 5.0 -> 4.7
   (60.0, 4.5, CEIL),       # the upper bound is capped the same way
   (65.0, 4.5, CEIL),       # 4.5 -> 4.2
   (70.0, 4.0, CEIL),       # 4.0 -> 3.7: the schedule clip no longer binds either; steering does
   (70.0, 2.5, 2.5),        # a low config is never RAISED by any clip
-  (70.0, 3.0, 2.8),
-  (72.0, 4.0, CEIL),       # 3.8 -> 3.5
-  (74.0, 4.0, CEIL),       # 3.6 -> 3.3
-  (75.0, 4.0, CEIL),       # 3.5 -> 3.2
-  (78.0, 4.5, CEIL),       # 3.2 -> 2.9: still above 2.8
+  (70.0, 3.0, 3.0),
+  (72.0, 4.0, 3.5),        # 3.8 -> 3.5: the schedule clip binds from here
+  (74.0, 4.0, 3.3),        # 3.6 -> 3.3
+  (75.0, 4.0, 3.2),        # 3.5 -> 3.2
+  (78.0, 4.5, 2.9),        # 3.2 -> 2.9
   (80.0, 4.0, 2.7),        # 3.0 (ISO) -> 2.7: EFFECTIVELY 2.7 at >= 80 mph
   (95.0, 4.5, 2.7),        # held flat past the last breakpoint
 ])
@@ -291,17 +300,16 @@ def test_without_a_schedule_the_clip_is_the_flat_iso_3_0(cfg, schedule):
 # ---------------------------------------------------------------------------------------------------------------------
 # the steering ceiling: derived from opendbc's own constants, never a copy that can drift
 # ---------------------------------------------------------------------------------------------------------------------
-def test_the_steering_ceiling_is_the_vehicle_model_clamp_minus_the_margin():
+def test_the_steering_ceiling_is_the_vehicle_model_clamp_capped_at_the_owners_3_6():
   from opendbc.car.lateral import ISO_LATERAL_ACCEL, get_max_angle_vm
   from opendbc.car.tesla.interface import CarInterface
   from opendbc.car.tesla.values import ACCELERATION_DUE_TO_GRAVITY, AVERAGE_ROAD_ROLL, CarControllerParams
   from opendbc.car.vehicle_model import VehicleModel
   lim = CarControllerParams.ANGLE_LIMITS.MAX_LATERAL_ACCEL
-  assert pv.CURVE_STEER_MARGIN == 0.2 and pv.CURVE_STEER_MARGIN >= 0.2
-  iso = lim - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL
-  assert iso == pytest.approx(ISO_LATERAL_ACCEL)
-  assert pv._tesla_steer_lat_ceiling() == pytest.approx(iso - 0.2) == pytest.approx(CEIL, abs=1e-3)   # read, not copied
-  assert pv._tesla_steer_lat_ceiling() < ISO_LATERAL_ACCEL                     # never the favourable-camber allowance
+  assert pv.CURVE_STEER_CEILING_OWNER == 3.6 and pv.CURVE_STEER_FALLBACK == 2.8
+  assert pv._tesla_steer_lat_ceiling() == pytest.approx(min(3.6, lim)) == pytest.approx(CEIL, abs=1e-3)   # read, not copied
+  assert pv._tesla_steer_lat_ceiling() <= lim                                  # never above the clamp itself
+  assert lim - ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL == pytest.approx(ISO_LATERAL_ACCEL)
   assert lim == pytest.approx(ISO_LATERAL_ACCEL + ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)
   assert pv._STEER_LAT_CEILING_FALLBACK <= pv._tesla_steer_lat_ceiling() + 1e-9   # the degraded value is never higher
   # the 09-28 22:35 stall: the applied angle plateaued at 14.42 deg at 70.3 mph == the clamp at that speed
@@ -343,7 +351,7 @@ def test_a_steering_ceiling_that_cannot_be_read_falls_back_loudly(monkeypatch, l
 
 def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_failed(cfg, schedule):
   """The 09-28 22:35 left curve, DB row k = 0.0040 (R 250 m): (a) 4.0 alone = 70.7 mph, the speed at which the applied
-  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 59.1 mph."""
+  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 67.0 mph (the clamp: little help here, the override is what holds this curve)."""
   cfg(None)
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   k = 0.0040
@@ -352,7 +360,7 @@ def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_fa
   assert math.sqrt(a_sched / k) / MPH == pytest.approx(67.4, abs=0.1)                           # (b) at the fail speed
   a_full = tesla().curve_lat_a(70.7 * MPH)
   assert a_full == pytest.approx(CEIL, abs=1e-3)
-  assert math.sqrt(a_full / k) / MPH == pytest.approx(59.1, abs=0.1)                            # (c)
+  assert math.sqrt(a_full / k) / MPH == pytest.approx(67.0, abs=0.1)                            # (c)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
