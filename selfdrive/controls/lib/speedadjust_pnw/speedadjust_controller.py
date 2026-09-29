@@ -184,6 +184,12 @@ ZONE_SET_TIMEOUT_S = 60.0                # s of ACC-engaged, pedal-free time the
                                          # plus taps; 60 s only ever trips on a genuine failure to actuate.
 CAP_SLEW = 1.0                           # m/s per s — emitted cap RAMPS toward its target, never steps
 RELEASE_S = 2.0                          # cap sources must stay clear this long before the cap releases
+# policecap2pnw: back-to-back police alerts. When one alert ends and the next arrives after the release debounce
+# (2026-09-28 20:31 PT: ~2 s apart), the cap had fully released and the new cap re-seeded at the driver's SET, so
+# the car surged 65 -> 72.9 mph mid-curve before being ramped back. A police cap that released within this window
+# hands its last value to the next police cap as the slew seed (op-long cars only). Never affects when a cap
+# engages, only where its ramp starts; expiry with no new alert restores exactly as before.
+POLICE_HANDOFF_S = 10.0
 # speedadjust-exec2pnw: the stock-ACC button-management publish (mem-param only; never touches the
 # op-long return value)
 PUB_THROTTLE_S = 0.25                    # publish cadence — matches icbm2pnw's IcbmTarget cadence,
@@ -353,6 +359,9 @@ class SpeedAdjustController:
     self._engaged = False        # for engage/release logging only
     self._cap_out = None         # the SLEWED cap currently emitted (None = not capping)
     self._release_t = None       # when the cap sources first went clear (release debounce)
+    self._ep_police = False      # policecap2pnw: a police cap took part in the current cap episode
+    self._pol_hold_cap = None    # policecap2pnw: last value of a police cap that just released (m/s) ...
+    self._pol_hold_t = -1e9      # ... and when (monotonic); seeds the next police cap within POLICE_HANDOFF_S
     self._last_t = None          # last cap() call time (for slew dt)
     # speedadjust-exec2pnw: stock-ACC button-management publish state (SpeedAdjustTarget mem-param).
     # Inert / never touched on any op-long car (self._long_ok True) -- see _publish_target().
@@ -1615,6 +1624,10 @@ class SpeedAdjustController:
         self._no_restore_why = "noCeiling"
         # else: no restore this episode — leave _restore_ceiling/_restore_deadline at None (already
         # None unless a prior tick set them, which can't happen on a fresh release).
+      if self._ep_police and self._cap_out is not None:
+        self._pol_hold_cap = self._cap_out   # policecap2pnw: remembered for a back-to-back police alert
+        self._pol_hold_t = now
+      self._ep_police = False
       self._cap_out = None
       self._release_t = None
       self._pub_ceiling = None
@@ -1655,6 +1668,15 @@ class SpeedAdjustController:
       # target ("won't come back up to my set"). `out` below is still bounded by the effective `v_cruise`
       # on every tick, so seeding high here can never cause a jump — the min() catches it immediately.
       self._cap_out = v_cruise_set
+      # policecap2pnw: a police cap right after another police cap released starts its ramp from that cap, not from
+      # the set -- op-long only (a stock-ACC car's cap is a tap target; that path is deliberately unchanged).
+      if (self._long_ok and pc is not None and self._pol_hold_cap is not None
+          and now - self._pol_hold_t <= POLICE_HANDOFF_S and self._pol_hold_cap < v_cruise_set):
+        self._cap_out = self._pol_hold_cap
+        cloudlog.info(f"speedadjust: police handoff -- new police cap seeded at {self._pol_hold_cap:.1f} m/s " +
+                      f"(previous police cap released {now - self._pol_hold_t:.1f} s ago), not the set {v_cruise_set:.1f}")
+      self._pol_hold_cap = None
+      self._ep_police = False
       # speedadjust-exec2pnw: latch the ceiling at cap ENGAGE (icbm2pnw ceiling-latch parity) — the
       # value a later bounded restore may walk back up to, never higher. restore-hardening #1: skip
       # the latch if the driver is intervening THIS tick (pedal/ACC-off) — no restore episode should
@@ -1667,6 +1689,8 @@ class SpeedAdjustController:
       if self._la is None:
         self._la_zone_restore = None          # limitahead2pnw F2: belongs to the episode that set it
       self._no_restore_why = None             # ...and so does the reason (Fable: it stayed stale through the next cap)
+    if pc is not None:
+      self._ep_police = True                  # policecap2pnw (after the seed block above reset it for a new episode)
     if lc is not None:
       self._ep_limit_drop = True              # sanorestore2pnw: sticky for the rest of the episode
     # sazoneset2pnw (driver directive 2026-09-13): a LIMIT-DROP slowdown is a one-shot ZONE SET, not a cap

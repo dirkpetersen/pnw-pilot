@@ -16,7 +16,7 @@ import pytest
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import (
   SpeedAdjustController, MPH_TO_MS, POLICE_MARGIN, MIN_CAP, CAP_SLEW, RELEASE_S, RESTORE_WINDOW_S,
   SA_DRIVER_LOWER_TOL, SET_CHANGE_EPS, SA_ACTUATION_GRACE_S, SL_DROP_CONFIRM_S, SL_RISE_CONFIRM_S,
-  ZONE_SET_TIMEOUT_S, ZONE_SET_DONE_TOL, SA_ICBM_FRESH_S,
+  ZONE_SET_TIMEOUT_S, ZONE_SET_DONE_TOL, SA_ICBM_FRESH_S, POLICE_HANDOFF_S,
   _police_key)
 
 MPH = MPH_TO_MS
@@ -2125,3 +2125,110 @@ def test_limit_drop_41_in_a_45_on_stock_acc_publishes_exactly_25():
   assert payload is not None, "the zone must publish a SET- target on stock ACC"
   assert "dir" not in payload
   assert abs(payload["target"] - V25) < 0.01, f"want exactly 25 mph, got {payload['target'] / MPH:.2f}"
+
+
+# policecap2pnw: only a POLICE cap hands off; a released limit-drop cap must not remember anything.
+def test_limit_drop_cap_release_stores_no_police_handoff():
+  c = _drop(mode=2)
+  _settle(c, V75, V60)                                # limit-drop cap only
+  assert c._cap_out is not None and c._ep_police is False
+  c._sl = V60                                         # limit back up -> source clears
+  c._sl_ref = V60
+  c._last_t -= 0.5
+  _cap(c, V75, V60)
+  if c._release_t is not None:
+    c._release_t -= (RELEASE_S + 0.1)
+  c._last_t -= 0.5
+  _cap(c, V75, V60)
+  assert c._pol_hold_cap is None
+
+
+# policecap2pnw (Olympia, 2026-09-28 20:31 PT): two police alerts ~2 s apart. The first ended, the cap released after
+# the debounce, and the second alert's cap re-seeded at the driver's SET (79 mph), so the Tesla surged 65 -> 72.9 mph
+# for ~2 s inside a curve before being ramped back. A police cap that follows another police cap within
+# POLICE_HANDOFF_S must start its ramp from the previous cap, never from the set.
+V80 = 80 * MPH
+
+
+def _release_after_first_alert(c):
+  """Latch alert A, settle at limit+5, end A, let the release debounce elapse; returns the settled cap."""
+  c._police = _police(0.3, "confirmed", cap_uuid="A")
+  settled = _settle(c, V80, V60)
+  assert abs(settled - (V60 + POLICE_MARGIN)) < 1e-6
+  c._police = {"state": "clear"}
+  c._last_t -= 0.5
+  _cap(c, V80, V60)                                   # debounce starts, cap still held
+  c._release_t -= (RELEASE_S + 0.1)
+  c._last_t -= 0.5
+  assert _cap(c, V80, V60) == V80                     # released -> back at the set (the gap between the alerts)
+  assert c._cap_out is None
+  return settled
+
+
+def test_police_back_to_back_second_alert_keeps_the_active_cap():
+  c = _ctrl(mode=1, sl=V60)
+  settled = _release_after_first_alert(c)
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  c._last_t -= 0.5
+  first = _cap(c, V80, V60)                           # first tick of alert B: pre-fix this was ~V80 - slew
+  assert first <= settled + 1e-6, f"cap restarted from the set: {first / MPH:.1f} mph (was {settled / MPH:.1f})"
+  peak = first
+  for _ in range(40):
+    c._last_t -= 0.5
+    peak = max(peak, _cap(c, V80, V60))
+  assert peak <= settled + 1e-6, "a renewed police alert must never raise the target above the active cap"
+  assert abs(_settle(c, V80, V60) - settled) < 1e-6
+
+
+def test_police_second_alert_with_a_lower_cap_adopts_the_lower():
+  c = _ctrl(mode=1, sl=V60)
+  settled = _release_after_first_alert(c)
+  c._sl = V45                                         # posted limit drops: new cap is 50 mph
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  out = _settle(c, V80, V45)
+  assert abs(out - (V45 + POLICE_MARGIN)) < 1e-6 and out < settled
+
+
+def test_police_second_alert_with_a_higher_cap_ramps_up_never_above_it():
+  # a limit rise between the alerts: the new cap is HIGHER than the old one -> ramp up from the old cap, bounded by
+  # the new target and the set. No step, never above limit+5 (never less cautious than a fresh alert would be).
+  c = _ctrl(mode=1, sl=V60)
+  settled = _release_after_first_alert(c)
+  c._sl = 70 * MPH
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  c._last_t -= 0.5
+  first = _cap(c, V80, V60)
+  assert first <= settled + CAP_SLEW * 0.5 + 1e-6
+  assert abs(_settle(c, V80, V60) - (70 * MPH + POLICE_MARGIN)) < 1e-6
+
+
+def test_police_expiry_without_a_second_alert_restores_as_before():
+  c = _ctrl(mode=1, sl=V60)
+  _release_after_first_alert(c)                       # asserts the release returns exactly the set
+  c._last_t -= 0.5
+  assert _cap(c, V80, V60) == V80                     # and stays there with no new alert
+  assert c._pol_hold_cap is not None                  # only a remembered value, no effect until a police cap engages
+
+
+def test_police_second_alert_after_the_handoff_window_seeds_from_the_set():
+  c = _ctrl(mode=1, sl=V60)
+  _release_after_first_alert(c)
+  c._pol_hold_t -= POLICE_HANDOFF_S + 1.0             # long gap: a fresh episode, exactly the old behaviour
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  c._last_t -= 0.5
+  first = _cap(c, V80, V60)
+  assert first > V80 - 2 * CAP_SLEW * 0.5, "beyond the handoff window the ramp still starts from the set"
+
+
+def test_police_handoff_is_op_long_only_stock_acc_unchanged():
+  c = _stock_ctrl(mode=1, sl=V60)
+  c._police = _police(0.3, "confirmed", cap_uuid="A")
+  _settle_pub(c, V80, V60)
+  c._police = {"state": "clear"}
+  _tick(c, V80, V60)
+  c._release_t -= (RELEASE_S + 0.1)
+  _tick(c, V80, V60)
+  assert c._cap_out is None
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  _tick(c, V80, V60)
+  assert c._cap_out > V80 - 2 * CAP_SLEW * 0.5, "the stock-ACC seed is still the set (Lightning path unchanged)"
