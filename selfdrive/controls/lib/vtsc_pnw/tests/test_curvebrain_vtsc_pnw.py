@@ -376,3 +376,49 @@ class TestTelemetry:
   def test_the_lightning_reports_nulls_not_missing_keys(self, env):
     p = _drive(env, "off", lambda t: None, car=LIGHTNING, ticks=10)[0][-1][1]
     assert set(CB_KEYS) <= set(p) and p["cbUse"] is None and p["cbStaleN"] == 0
+
+
+# =====================================================================================================
+# Opus review: the brain term's state must not outlive a gap in which VTSC did not run
+# =====================================================================================================
+class TestNoStaleBrainState:
+  def _run(self, env, gap):
+    """Act in a curve (need 20 m/s), then `gap` ticks off, then a straight road with no need: the cap must be the set."""
+    state = {"mode": "2"}
+
+    def fn(t):
+      return entry(v=20.0, d=0.0)(t) if t < 1000.0 + 5.0 else {"ts": t, "seq": 2, "mode": "lower", "v": None}
+
+    def hook(i, c):
+      if gap == "ces":
+        c.params.mode = "0" if 100 <= i < 140 else "2"
+        c._last_read = -1e9
+      elif gap == "model" and 100 <= i < 140:
+        c._model_gone = True
+      elif gap == "model":
+        c._model_gone = False
+    _set_mode(env, "lower")
+    _CLOCK[0] = 1000.0
+    c = vc.VTSCController(_CP(*TESLA), params=_Params())
+    c.mem_params = _Mem(fn)
+    out = []
+    for i in range(240):
+      _CLOCK[0] = 1000.0 + i / 20.0
+      hook(i, c)
+      sm = _sm()
+      if getattr(c, "_model_gone", False):
+        sm = {}
+      out.append(c.cap(sm, V_SET, V_SET))
+    return out
+
+  @pytest.mark.parametrize("gap", ["ces", "model"])
+  def test_no_phantom_brake_after_a_gap(self, env, gap):
+    out = self._run(env, gap)
+    assert min(out[:100]) < 26.0                       # it really was acting before the gap
+    assert min(out[140:]) > V_SET - 0.2, min(out[140:])  # and nothing is left over after it
+
+  def test_reset_clears_the_brain_term(self, env):
+    c = vc.VTSCController(_CP(*TESLA), params=_Params())
+    c._cb_applied = 12.0
+    c._reset()
+    assert c._cb_applied is None

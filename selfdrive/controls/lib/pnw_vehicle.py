@@ -378,8 +378,8 @@ CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lo
 # "shadow first" (SHARED-CURVE-BRAIN-DESIGN s5.2 / D3) and CLAUDE.md's "new toggles default OFF": the G-T2 gate (a Tesla shadow
 # drive, D4) has NOT been run, which the commit message and the report say. curve.json is the override and the kill switch:
 # {"tesla": {"curve_brain": "shadow"}} (compute + log, change nothing) or "off" take effect within ~1-2 s, hot-reloaded. A
-# MISSING file, and a file that is corrupt or holds an invalid mode AT START, get this acting default (logged at start:
-# curve_brain_cfg, and cloudlog.error for the invalid cases); a bad file DURING a drive is not applied (last config kept).
+# MISSING file or section gets this acting default (logged at start: curve_brain_cfg); a PRESENT-but-corrupt file or invalid mode
+# at start gets CURVE_BRAIN_CORRUPT (shadow) + cloudlog.error; a bad file DURING a drive is not applied (last config kept).
 # To take the acting default back out, change this one constant to "shadow".
 CURVE_BRAIN_DEFAULT = "lower"
 # A PRESENT but corrupt tesla section / unreadable file / invalid mode at start is NOT "no config": it falls to this (compute + log,

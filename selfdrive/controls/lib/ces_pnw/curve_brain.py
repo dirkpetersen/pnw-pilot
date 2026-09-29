@@ -18,7 +18,8 @@ lat_accel_target(v) - 0.3, the steering ceiling 2.8). The min() is what keeps a 
 car cannot steer: the lataccel2pnw schedule (5.0 to 60 mph, 4.0 at 70, 3.0 from 80; flat 3.0 without a valid file), and
 the vehicle-model steering-ANGLE clamp (carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 favourable-camber
 allowance, NOT a capability; the applied angle stalled at that clamp on 2026-09-28 22:35, at 70.3 mph, and the car delivered
-3.0-3.1 m/s^2), taken as ISO 3.0 minus a 0.2 margin = 2.8 (see pnw_vehicle.CURVE_STEER_MARGIN). The EPS torque abort (2.7-3.8 Nm) is a third limit nothing here can see. So the speed for a row is
+3.0-3.1 m/s^2), taken as ISO 3.0 minus a 0.2 margin = 2.8 (see pnw_vehicle.CURVE_STEER_MARGIN).
+The EPS torque abort (2.7-3.8 Nm) is a third limit nothing here can see. So the speed for a row is
 priced at the LOWEST A over the speeds involved (the speed now, and the speed the row itself asks for), never above.
 
 WHAT THE TESLA MAY ACT ON: only rows WITH authority (>= 2 dates), i.e. evidence "measured". Not built here, and said so

@@ -242,6 +242,7 @@ class VTSCController:
   def _reset(self):
     self._state = "idle"
     self._applied = None
+    self._cb_applied = None     # the brain term's own state must not outlive a CES-off / model-loss gap
     self._below = 0
     self._clear = 0
 
@@ -416,6 +417,7 @@ class VTSCController:
     try:
       model = sm['modelV2']
     except Exception:
+      self._cb_applied = None
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
     # sharpcurve2pnw: keep the driver's SET speed for display; the state machine works against a possibly
