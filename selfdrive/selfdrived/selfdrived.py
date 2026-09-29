@@ -22,6 +22,7 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController, CESStub  # ces2xnor / stophold2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.green_light import attentive_now  # dmgate2pnw: attention gate
 from openpilot.selfdrive.selfdrived.state import StateMachine
+from openpilot.selfdrive.selfdrived.loopdiag_pnw import LoopDiag  # loopdiag2pnw: slow-loop timing (observation only)
 # madsop2pnw: parallel lateral authority
 from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_latches,
                                                      MADS_BRAKE_PANDA_GRACE_FRAMES, panda_lateral_view)
@@ -224,6 +225,7 @@ class SelfdriveD:
     self.recalibrating_seen = False
     self.state_machine = StateMachine()
     self.rk = Ratekeeper(100, print_delay_threshold=None)
+    self.loop_diag = LoopDiag()   # loopdiag2pnw
 
     # Determine startup event
     self.startup_event = EventName.startup if build_metadata.openpilot.comma_remote and build_metadata.tested_channel else EventName.startupMaster
@@ -771,9 +773,11 @@ class SelfdriveD:
 
   def step(self):
     CS = self.data_sample()
+    self.loop_diag.mark("dataSample")   # loopdiag2pnw: stage timing, observation only
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
+    self.loop_diag.mark("events")
 
     # madsop2pnw: run the parallel lateral authority AFTER our own state machine has already
     # decided self.enabled/self.active. Order matters and is the whole safety argument: openpilot's
@@ -817,7 +821,9 @@ class SelfdriveD:
       # steering behind a UI that just says "disengaged".
       self.events.add(EventNamePnw.madsLateralOnly)
 
+    self.loop_diag.mark("mads")
     self.update_alerts(CS)
+    self.loop_diag.mark("alerts")
 
     # ces2xnor: effective experimental = manual ExperimentalMode OR CES's per-cycle decision.
     # SAFETY (Gemini-reviewed): (1) wrap the CES core call in try/except — selfdrived is safety-critical
@@ -830,12 +836,14 @@ class SelfdriveD:
       cloudlog.exception("ces_pnw: experimental_request raised -> chill")
       ces_req = False
     self.experimental_mode = self.CP.openpilotLongitudinalControl and (self.manual_experimental_mode or ces_req)
+    self.loop_diag.mark("ces")
 
     self._log_take_control_edge(CS)
 
     self.publish_selfdriveState(CS)
 
     self.CS_prev = CS
+    self.loop_diag.mark("publish")
 
   def _mads_resume_step(self, CS) -> None:
     """madsresume2pnw: run the auto-resume brain and publish/withdraw its offer.
@@ -1059,8 +1067,11 @@ class SelfdriveD:
     try:
       t.start()
       while True:
+        self.loop_diag.begin()
         self.step()
         self.rk.monitor_time()
+        # getattr: CESStub (a CES that failed to construct) has no write timer -- then only the stages are logged
+        self.loop_diag.end(getattr(self.ces_pnw, "event_write_timing", None))
     finally:
       e.set()
       t.join()

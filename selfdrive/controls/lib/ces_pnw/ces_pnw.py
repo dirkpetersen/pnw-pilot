@@ -16,6 +16,7 @@ SAFETY: this module is PURE DECISION LOGIC. It does not command the car. It must
 effective-experimental computation (selfdrived) only after review + on-road verification. It never
 touches panda safety. The decision core (`decide_active`) takes primitives and is unit-tested.
 """
+import collections
 import json
 import math
 import os
@@ -6428,7 +6429,27 @@ class CESController:
       rec["clockBad"] = True
     return rec
 
+  # loopdiag2pnw: the last few synchronous ces_events appends as (end time, seconds), incl. the 20 MB rotation.
+  # selfdrived's loop diagnostic asks only when an iteration was slow, "how long did event writes take since t?",
+  # to say whether a telemetry write was the stall. Observation only. A bounded deque: no growth, no lock (all
+  # writers and the reader are the selfdrived main thread).
+  _event_writes = None
+
+  def event_write_timing(self, since: float) -> dict:
+    ws = [dt for (t, dt) in (self._event_writes or ()) if t >= since]
+    return {"ces_event_writes": float(len(ws)), "ces_event_write_total": sum(ws), "ces_event_write_max": max(ws, default=0.0)}
+
   def _append_event(self, rec: dict) -> None:
+    t0 = time.monotonic()
+    try:
+      self._append_event_impl(rec)
+    finally:
+      t1 = time.monotonic()
+      if self._event_writes is None:
+        self._event_writes = collections.deque(maxlen=16)
+      self._event_writes.append((t1, t1 - t0))
+
+  def _append_event_impl(self, rec: dict) -> None:
     """Append one JSON line to the persistent CES_EVENT_LOG (append-only, outside the overlay so it
     survives reboot + swaglog rotation). Best-effort; never breaks control — but repeated failure
     is no longer SILENT (stophold2pnw C: the 07-12 investigation burned hours proving a silence
