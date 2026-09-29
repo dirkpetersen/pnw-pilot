@@ -6172,6 +6172,7 @@ class CESController:
       # icbmrestorecap2pnw (Fable review): the hold publishes nothing, so without the phase a 45 s
       # hold is indistinguishable from idle in ces_events -- and on-car validation depends on it.
       tele["icbmPhase"] = getattr(getattr(self, "_icbm_ep", None), "phase", None)
+      tele["icbmC"] = self._icbm_ceiling   # uimax2pnw: the driver's latched max (m/s) for the SCREEN's MAX SPEED; None = no episode
       tele["icbmZoneWhy"] = getattr(getattr(self, "_icbm_ep", None), "zone_why", None)      # sazoneset2pnw
       tele["icbmRestoreWhy"] = getattr(getattr(self, "_icbm_ep", None), "restore_why", None)  # terwilliger2pnw
       tele["icbmGas"] = getattr(getattr(self, "_icbm_ep", None), "gas_res", None)             # terwilliger2pnw

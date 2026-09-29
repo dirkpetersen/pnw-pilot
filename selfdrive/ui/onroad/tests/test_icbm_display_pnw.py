@@ -11,8 +11,8 @@ KPH_PER_MPH = 1.609344
 NOW = 1_000_000.0
 
 
-def status(phase="cap", c=60 * MPH, ts=NOW - 0.2, rcap=0.0):
-  return {"icbmPhase": phase, "icbmC": c, "ts": ts, "icbmRCap": rcap}
+def status(phase="cap", c=60 * MPH, ts=NOW - 0.2, rcap=0.0, t=40 * MPH):
+  return {"icbmPhase": phase, "icbmC": c, "ts": ts, "icbmRCap": rcap, "icbmT": t}
 
 
 def show(cluster_mph, st, capable=True, now=NOW):
@@ -138,8 +138,8 @@ class TestPoller:
 class TestAgainstTheRealEpisode:
   """Feed the real IcbmEpisode's phase/ceiling/zone_cap through the chooser (the 5 Hz CESStatus shape)."""
 
-  def _st(self, ep, ts=NOW):
-    return {"icbmPhase": ep.phase, "icbmC": ep.ceiling, "ts": ts,
+  def _st(self, ep, ts=NOW, t=40 * MPH):
+    return {"icbmPhase": ep.phase, "icbmC": ep.ceiling, "ts": ts, "icbmT": t,
             "icbmRCap": float(ep.zone_cap) if ep.zone_cap is not None else 0.0}
 
   def test_cap_then_restore_then_driver_set_change(self):
@@ -212,3 +212,103 @@ def test_mici_hud_number_uses_the_chooser_and_no_flash_when_only_the_truck_set_c
   r._icbm_max = NS(choose=lambda cluster, cap: cluster)
   r._update_state()
   assert r.set_speed == 60.0 and r._set_speed_changed_time == 123.0
+
+
+class TestSetChangeDuringCap:
+  """ces_pnw keeps phase=cap and the ceiling after a driver SET- while the curve binds; the chooser must judge it."""
+
+  def test_set_minus_mid_cap_follows_the_cluster(self):
+    v, why = show(30, status(t=40 * MPH))          # ICBM wants 40, the truck set is 30: the driver went lower
+    assert v == pytest.approx(30) and why and "driver lowered" in why
+
+  def test_truck_set_at_or_above_icbm_target_keeps_the_ceiling(self):
+    assert show(40, status(t=40 * MPH))[0] == pytest.approx(60)      # ICBM's own tap landed
+    assert show(47, status(t=40 * MPH))[0] == pytest.approx(60)      # set still above target, taps in progress
+    assert show(39, status(t=40 * MPH))[0] == pytest.approx(60)      # within the tap tolerance
+
+  def test_set_plus_above_the_ceiling_mid_cap_shows_the_higher_cluster(self):
+    v, why = show(70, status(t=40 * MPH))          # never a max lower than the set the driver just asked for
+    assert v == pytest.approx(70) and why
+
+  def test_set_plus_below_the_ceiling_mid_cap_keeps_the_ceiling(self):
+    assert show(55, status(t=40 * MPH))[0] == pytest.approx(60)
+
+  def test_icbmT_none_without_a_reference_falls_back_and_says_so(self):
+    v, why = show(40, status(t=None))
+    assert v == pytest.approx(40) and why and "icbmT" in why
+
+  def test_icbmT_none_uses_the_last_target_of_the_episode(self):
+    v, why = max_speed_display(40 * KPH_PER_MPH, status(t=None), NOW, True, ref_target_ms=40 * MPH)
+    assert why is None and v == pytest.approx(60 * KPH_PER_MPH)
+
+  def test_the_target_check_is_cap_phase_only_restore_targets_the_ceiling(self):
+    assert show(41, status("restore", t=60 * MPH))[0] == pytest.approx(60)
+
+  def test_poller_debounce_gap_keeps_the_ceiling_but_a_lowered_set_does_not(self):
+    mem = FakeMem(status(t=40 * MPH))
+    t = [0.0]
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+    assert m.choose(40 * KPH_PER_MPH, True) == pytest.approx(60 * KPH_PER_MPH)
+    t[0] += 0.3
+    mem.st = status(t=None)                       # 3 s clear debounce: ICBM silent, still cap
+    assert m.choose(40 * KPH_PER_MPH, True) == pytest.approx(60 * KPH_PER_MPH)
+    t[0] += 0.3
+    assert m.choose(30 * KPH_PER_MPH, True) == pytest.approx(30 * KPH_PER_MPH)   # SET- in the gap
+    t[0] += 0.3
+    mem.st = status("idle", c=None, t=None)       # episode over: reference forgotten
+    m.choose(40 * KPH_PER_MPH, True)
+    t[0] += 0.3
+    mem.st = status(t=None)
+    assert m.choose(40 * KPH_PER_MPH, True) == pytest.approx(40 * KPH_PER_MPH)   # new cap, no target yet -> cluster
+
+
+class TestGasHold:
+  def test_a_short_gas_press_does_not_flip_the_shown_max(self):
+    mem = FakeMem(status(t=40 * MPH))
+    t = [0.0]
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+    assert m.choose(40 * KPH_PER_MPH, True) == pytest.approx(60 * KPH_PER_MPH)
+    t[0] += 0.3
+    mem.st = status("gas", t=None)
+    assert m.choose(45 * KPH_PER_MPH, True) == pytest.approx(60 * KPH_PER_MPH)   # held
+    t[0] += 0.3
+    mem.st = status(t=40 * MPH)
+    assert m.choose(45 * KPH_PER_MPH, True) == pytest.approx(60 * KPH_PER_MPH)   # back in the episode: no flip
+
+  def test_a_long_gas_press_follows_the_cluster_after_the_hold(self):
+    mem = FakeMem(status(t=40 * MPH))
+    t = [0.0]
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+    m.choose(40 * KPH_PER_MPH, True)
+    mem.st = status("gas", t=None)
+    for _ in range(int(D.GAS_HOLD_S / 0.3) + 2):
+      t[0] += 0.3
+      v = m.choose(52 * KPH_PER_MPH, True)
+    assert v == pytest.approx(52 * KPH_PER_MPH)
+
+  def test_gas_with_no_prior_override_shows_the_cluster(self):
+    mem = FakeMem(status("gas", t=None))
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: 0.0, wall=lambda: NOW)
+    assert m.choose(52 * KPH_PER_MPH, True) == pytest.approx(52 * KPH_PER_MPH)
+
+
+class TestRealPublisherFeedsTheChooser:
+  """No hand-built dict: the REAL ces_pnw._publish_status output goes into the chooser."""
+
+  def _published(self, phase, ceiling, target):
+    import time
+    from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_icbmcurv import TestOverlayFeed
+    ep = NS(phase=phase)
+    st = TestOverlayFeed._status(_icbm_ep=ep, _icbm_ceiling=ceiling, _icbm_last_target=target)
+    return st, time.time()  # noqa: TID251 -- the publisher stamps ts with wall clock
+
+  def test_cap_episode_ceiling_reaches_the_screen(self):
+    st, now = self._published("cap", 60 * MPH, 40 * MPH)
+    assert st["icbmC"] == pytest.approx(60 * MPH)
+    v, why = max_speed_display(40 * KPH_PER_MPH, st, now, True)
+    assert why is None and v == pytest.approx(60 * KPH_PER_MPH)
+
+  def test_idle_episode_shows_the_cluster(self):
+    st, now = self._published("idle", None, None)
+    v, why = max_speed_display(40 * KPH_PER_MPH, st, now, True)
+    assert why is None and v == pytest.approx(40 * KPH_PER_MPH)
