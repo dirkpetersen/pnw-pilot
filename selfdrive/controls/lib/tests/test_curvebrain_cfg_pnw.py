@@ -82,12 +82,12 @@ def schedule(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------------------------------------------------
 # defaults and the capability
 # ---------------------------------------------------------------------------------------------------------------------
-def test_defaults_tesla_shadow_2_8_everyone_else_off_2_5(cfg, schedule, log):
+def test_defaults_tesla_shadow_4_0_everyone_else_off_2_5(cfg, schedule, log):
   cfg(None)
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   t = tesla()
   assert t.curve_brain_vtsc and t.curve_brain == "shadow" and t.curve_brain_why == "default"
-  assert t.curve_lat_a_cfg == 2.8 and t.curve_lat_a(65 * MPH) == 2.8          # the clip (4.5 - 0.3) does not bind
+  assert t.curve_lat_a_cfg == 4.0 and t.curve_lat_a(65 * MPH) == 4.0          # the clip (4.5 - 0.3) does not bind
   for v in (lightning(), pv.PnwVehicle(None), pv.PnwVehicle(CP("TOYOTA_RAV4", "toyota", True))):
     assert not v.curve_brain_vtsc and v.curve_brain == "off" and v.curve_brain_why == "noCapability"
     assert v.curve_lat_a(20.0) == v.curve_lat_a(40.0) == v.curve_lat_a_cfg == 2.5
@@ -97,7 +97,7 @@ def test_defaults_tesla_shadow_2_8_everyone_else_off_2_5(cfg, schedule, log):
 def test_no_tesla_section_is_silent_and_default(cfg, log):
   cfg({"lightning": {"penalty_max_mph": 6.0}})
   t = tesla()
-  assert (t.curve_brain, t.curve_lat_a_cfg, t.curve_brain_why) == ("shadow", 2.8, "default")
+  assert (t.curve_brain, t.curve_lat_a_cfg, t.curve_brain_why) == ("shadow", 4.0, "default")
   assert log.lines == []
 
 
@@ -115,7 +115,7 @@ def test_a_valid_section_is_honoured(cfg, log):
 # ---------------------------------------------------------------------------------------------------------------------
 # the loader: bounds, NaN, invalid -- each said (Rule 2)
 # ---------------------------------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("raw, want", [(5.0, 3.2), (1.0, 2.0), (-3, 2.0), (3.2, 3.2), (2.0, 2.0)])
+@pytest.mark.parametrize("raw, want", [(5.0, 4.5), (9.9, 4.5), (1.0, 2.0), (-3, 2.0), (4.5, 4.5), (4.0, 4.0), (2.0, 2.0)])
 def test_curve_lat_a_is_clamped_into_bounds_and_says_so(cfg, log, raw, want):
   path = cfg({"tesla": {"curve_lat_a": raw}})
   t = tesla()
@@ -140,7 +140,7 @@ def test_curve_lat_a_is_clamped_into_bounds_and_says_so(cfg, log, raw, want):
 def test_a_curve_lat_a_that_is_not_a_finite_number_keeps_the_default_and_is_an_error(cfg, log, text):
   path = cfg(text)
   t = tesla()                                    # never raises
-  assert t.curve_lat_a_cfg == 2.8 and math.isfinite(t.curve_lat_a(30.0)) and t.curve_brain == "shadow"
+  assert t.curve_lat_a_cfg == 4.0 and math.isfinite(t.curve_lat_a(30.0)) and t.curve_brain == "shadow"
   errs = log.at("error")
   assert len(errs) == 1 and path in errs[0]
   if "0" * 400 in text:                          # the parse itself failed: the whole section is its defaults
@@ -163,14 +163,14 @@ def test_a_mode_that_is_not_one_falls_back_to_shadow_and_is_an_error(cfg, log, r
 def test_a_section_that_is_not_an_object_is_an_error(cfg, log, doc):
   path = cfg(doc)
   t = tesla()
-  assert (t.curve_brain, t.curve_lat_a_cfg) == ("shadow", 2.8) and t.curve_brain_why.startswith("INVALID")
+  assert (t.curve_brain, t.curve_lat_a_cfg) == ("shadow", 4.0) and t.curve_brain_why.startswith("INVALID")
   assert len(log.at("error")) == 1 and path in log.at("error")[0]
 
 
 def test_an_unreadable_file_is_an_error_for_the_tesla_section_too(cfg, log):
   path = cfg('{"tesla": {"curve_lat_a": 3.0')                                  # truncated JSON
   t = tesla()
-  assert (t.curve_brain, t.curve_lat_a_cfg) == ("shadow", 2.8)
+  assert (t.curve_brain, t.curve_lat_a_cfg) == ("shadow", 4.0)
   assert t.curve_brain_why == "default (curve.json unreadable: JSONDecodeError)"
   # one error from each loader, each naming the path: the Lightning section's (it runs on every car) and the Tesla's
   assert len(log.at("error")) == 2 and all(path in e for e in log.at("error"))
@@ -236,12 +236,17 @@ def test_the_tesla_section_is_never_opened_on_the_lightning(cfg, monkeypatch):
 # the lateral-clip cap
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("mph, cfg_a, want", [
-  (65.0, 2.8, 2.8),        # schedule 4.5 -> clip 4.2: the config binds
-  (70.0, 3.2, 3.2),        # 4.0 -> 3.7
-  (75.0, 3.2, 3.2),        # 3.5 -> 3.2: exactly at the bound
-  (78.0, 3.2, 2.9),        # 3.2 -> 2.9: the clip binds
-  (80.0, 2.8, 2.7),        # 3.0 (ISO) -> 2.7: the design's "2.7 at >= 80 mph"
-  (95.0, 2.8, 2.7),        # held flat past the last breakpoint
+  (55.0, 4.0, 4.0),        # schedule 5.5 -> clip 5.2: the config binds
+  (60.0, 4.0, 4.0),        # 5.0 -> 4.7: the config binds
+  (60.0, 4.5, 4.5),        # 4.7: the upper bound still under the clip
+  (65.0, 4.5, 4.2),        # 4.5 -> 4.2: the clip binds a 4.5 config
+  (65.0, 4.0, 4.0),        # 4.5 -> 4.2
+  (70.0, 4.0, 3.7),        # 4.0 -> 3.7: the owner's 4.0 is EFFECTIVELY 3.7 at 70 mph
+  (70.0, 2.5, 2.5),        # a low config is never RAISED by the clip
+  (75.0, 4.0, 3.2),        # 3.5 -> 3.2
+  (78.0, 4.5, 2.9),        # 3.2 -> 2.9
+  (80.0, 4.0, 2.7),        # 3.0 (ISO) -> 2.7: EFFECTIVELY 2.7 at >= 80 mph
+  (95.0, 4.5, 2.7),        # held flat past the last breakpoint
 ])
 def test_the_target_is_capped_at_openpilots_lateral_clip_minus_0_3(cfg, schedule, mph, cfg_a, want):
   cfg({"tesla": {"curve_lat_a": cfg_a}})
@@ -249,8 +254,18 @@ def test_the_target_is_capped_at_openpilots_lateral_clip_minus_0_3(cfg, schedule
   assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
 
 
+def test_the_default_4_0_never_assumes_more_than_the_lateral_clip_allows(cfg, schedule):
+  """A 4.0 SPEED target is not a steering capability: at every speed the target stays 0.3 under the schedule."""
+  cfg(None)
+  schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
+  t = tesla()
+  for mph in range(10, 121, 5):
+    assert t.curve_lat_a(mph * MPH) <= dh.lat_accel_target(mph * MPH) - 0.3 + 1e-9
+    assert t.curve_lat_a(mph * MPH) <= 4.0 + 1e-9
+
+
 def test_without_a_schedule_the_clip_is_the_flat_iso_3_0(cfg, schedule):
-  cfg({"tesla": {"curve_lat_a": 3.2}})
+  cfg({"tesla": {"curve_lat_a": 4.5}})
   schedule(None)
   t = tesla()
   for v in (5.0, 25.0, 40.0, float("nan")):

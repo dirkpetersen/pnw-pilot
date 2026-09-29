@@ -359,8 +359,16 @@ def _load_curve_config() -> dict:
 # untouched, and _load_curve_config never reads "tesla": one device serves both cars, and nothing written for the Tesla
 # may move a Lightning value.
 CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning's target, and any car without its own
-TESLA_CURVE_LAT_A_DEFAULT = 2.8    # m/s^2: design D1's recommended default. NOT yet signed off by the owner.
-_TESLA_CURVE_LAT_A_BOUNDS = (2.0, 3.2)
+# curvebrain2pnw A (owner decision 2026-09-28, design D1): the Tesla's curve SPEED target is 4.0 m/s^2 ("the tesla can do
+# 4.0"; a human reached 5.16, openpilot-steered 3.61 verified). THIS IS A SPEED TARGET, NOT A STEERING CAPABILITY. Steering
+# stays bounded elsewhere and a higher target can run into those limits: (1) the lataccel2pnw lateral cap, which
+# curve_lat_a() keeps as min(target, lat_accel_target(v) - 0.3), so 4.0 is EFFECTIVELY 3.7 at 70 mph and 2.7 at >= 80 mph
+# (and flat 3.0 - 0.3 = 2.7 without a valid schedule file); (2) the Tesla vehicle model's steering-angle limit (~14.4
+# deg at 70 mph in the Terwilliger left curve: 2026-09-28 22:35 the applied angle stalled at the model limit, the car
+# drifted wide, "Turn Exceeds Steering Limit"); (3) the EPS torque abort (2.7-3.8 Nm). Nothing here may command a speed
+# that assumes more lateral acceleration than those allow; the min() below is the only one of the three the code can see.
+TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
+_TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
 CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
 CURVE_BRAIN_DEFAULT = "shadow"     # the Tesla's default: compute and log, change nothing
@@ -928,7 +936,7 @@ class PnwVehicle:
   def curve_lat_a(self, v_ego) -> float:
     """The lateral accel (m/s^2) the shared curve brain prices a curve at on this car (design s3.4).
 
-    Tesla (curve_brain_vtsc): curve.json tesla.curve_lat_a (default 2.8, bounds [2.0, 3.2]), capped at openpilot's own
+    Tesla (curve_brain_vtsc): curve.json tesla.curve_lat_a (default 4.0, bounds [2.0, 4.5]), capped at openpilot's own
     lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (4.0 at 70 mph, 3.0 at
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
     Every other car: CURVE_LAT_A_DEFAULT (2.5). On the Lightning it is for the brain's future need layer only: ICBM
