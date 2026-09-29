@@ -2232,3 +2232,129 @@ def test_police_handoff_is_op_long_only_stock_acc_unchanged():
   c._police = _police(0.3, "confirmed", cap_uuid="B")
   _tick(c, V80, V60)
   assert c._cap_out > V80 - 2 * CAP_SLEW * 0.5, "the stock-ACC seed is still the set (Lightning path unchanged)"
+
+
+# policedist2pnw (Olympia, 2026-09-28 20:31 PT, 4 of 4 police passes): location_servicesd rounds dist_mi to 0.1 mi, so it is
+# exactly 0.0 for the last ~80 m before the report. `dist_m <= 0.0 -> return None` treated that as garbage with the latch
+# still set: the cap released after RELEASE_S and the car accelerated AT the police car. 0.0 is "at the report" -> hold.
+def _age(c, dt=0.5):
+  """Advance the simulated clock the way _tick() does, including the release-debounce timestamp."""
+  if c._release_t is not None:
+    c._release_t -= dt
+
+
+def test_police_dist_zero_keeps_the_latched_cap():
+  c = _ctrl(mode=1, sl=V60, police=_police(0.3, "confirmed"))
+  settled = _settle(c, V80, V60)
+  assert abs(settled - (V60 + POLICE_MARGIN)) < 1e-6
+  c._police = _police(0.0, "confirmed")               # AT the report
+  assert c._police_cap(V80, V60) == V60 + POLICE_MARGIN
+  assert c._police_latched is True
+  for _ in range(40):                                 # 20 s at the cop: far beyond RELEASE_S
+    c._last_t -= 0.5
+    _age(c)
+    out = _cap(c, V80, V60)
+    assert c._release_t is None and c._cap_out is not None, "the cap must never start releasing at the report"
+    assert out <= V60 + POLICE_MARGIN + 1e-6
+
+
+def test_police_dist_zero_first_seen_latches():
+  # a report first seen at 0.0 (e.g. a control-report handover right at the car) is at least as close as the
+  # approach window: latch, never ignore -- never miss a police
+  c = _ctrl(mode=1, sl=V60, police=_police(0.0, "confirmed"))
+  assert c._police_cap(V80, V60) == V60 + POLICE_MARGIN
+  assert c._police_latched is True
+
+
+def test_police_dist_zero_untiered_payload_also_holds():
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": 0.4})
+  _settle(c, V80, V60)
+  c._police = {"state": "alert", "dist_mi": 0.0}
+  assert c._police_cap(V80, V60) == V60 + POLICE_MARGIN
+
+
+def test_police_negative_missing_or_nonfinite_distance_is_still_garbage():
+  for bad in (-0.1, float("nan"), float("inf"), float("-inf"), "junk", None):
+    c = _ctrl(mode=1, sl=V60, police={"state": "alert", "dist_mi": bad})
+    assert c._police_cap(V80, V60) is None, bad
+    assert c._police_latched is False, bad
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert"})                       # key MISSING: must not default to 0.0
+  assert c._police_cap(V80, V60) is None and c._police_latched is False
+  c = _ctrl(mode=1, sl=V60, police={"state": "alert", "tier": "confirmed", "cap": {"uuid": "c"}})
+  assert c._police_cap(V80, V60) is None and c._police_latched is False
+
+
+def test_police_garbage_distance_after_latch_keeps_the_old_behaviour():
+  c = _ctrl(mode=1, sl=V60, police=_police(0.3, "confirmed"))
+  _settle(c, V80, V60)
+  c._police = _police(-0.1, "confirmed")
+  assert c._police_cap(V80, V60) is None              # unchanged: garbage never acts (latch itself is untouched)
+  assert c._police_latched is True
+
+
+def test_police_replay_2031_the_cap_holds_through_the_report_and_releases_when_retired():
+  """Synthetic replay of Olympia 20:31:24 PT: 65 mph (29 m/s) on a cap of limit+5, a report closing from 0.4 mi with
+  dist_mi rounded to 0.1, then 0.0 for ~5.5 s at the cop. Pre-fix the cap released at ~2 s of 0.0 and the target rose."""
+  v = 29.0
+  c = _ctrl(mode=1, sl=60 * MPH)                      # 60 mph road -> cap 65 mph
+  c._police = _police(0.4, "confirmed", cap_uuid="A")
+  settled = _settle(c, V80, v)
+  assert abs(settled - 65 * MPH) < 1e-6
+  d_m = 0.4 * 1609.344
+  peak = settled
+  for _ in range(60):                                 # 30 s of 0.5 s ticks
+    d_m = max(0.0, d_m - v * 0.5)
+    c._police = _police(round(d_m / 1609.344, 1), "confirmed", cap_uuid="A")
+    c._last_t -= 0.5
+    _age(c)
+    peak = max(peak, _cap(c, V80, v))
+    assert c._cap_out is not None and c._release_t is None
+  assert round(d_m / 1609.344, 1) == 0.0
+  assert peak <= settled + 1e-6, f"target rose to {peak / MPH:.1f} mph at the cop"
+  c._police = {"state": "clear"}                      # location_servicesd retires the report
+  c._last_t -= 0.5
+  _cap(c, V80, v)
+  assert c._release_t is not None                     # normal debounce starts...
+  c._release_t -= RELEASE_S + 0.1
+  c._last_t -= 0.5
+  assert _cap(c, V80, v) == V80 and c._cap_out is None   # ...and the cap releases as before
+
+
+def test_police_dist_zero_stock_acc_path_unchanged_shape():
+  c = _stock_ctrl(mode=1, sl=V60, police=_police(0.4, "confirmed"))
+  _settle_pub(c, V80, V60)
+  c._police = _police(0.0, "confirmed")
+  for _ in range(20):
+    _tick(c, V80, V60)
+    assert c._release_t is None
+  assert abs(c.mem_params.last["target"] - (V60 + POLICE_MARGIN)) < 0.01
+  assert c._cap_out is not None
+
+
+# policecap2pnw handoff, mutants Fable found surviving: (a) the seed guard `_pol_hold_cap < v_cruise_set`, (b) the
+# `pc is not None` gate + consuming the hold.
+def test_police_handoff_never_seeds_above_a_lowered_set():
+  c = _ctrl(mode=1, sl=V60)
+  settled = _release_after_first_alert(c)             # held handoff value = 65 mph
+  V55 = 55 * MPH
+  assert V55 < settled
+  c._police = _police(0.3, "confirmed", cap_uuid="B")
+  c._last_t -= 0.5
+  first = _cap(c, V55, V60, v_cruise_set=V55)         # driver's set went BELOW the held cap inside the window
+  assert first <= V55 + 1e-6, "the ramp must never start above the driver's own (lower) set"
+  assert c._cap_out <= V55 + CAP_SLEW * 0.5 + 1e-6, f"seeded at {c._cap_out / MPH:.1f} mph, above the lowered set"
+
+
+def test_limit_drop_only_engage_inside_the_handoff_window_seeds_from_the_set_and_consumes_the_hold():
+  c = _ctrl(mode=2, sl=V60)
+  _release_after_first_alert(c)                       # holds 65 mph, in the window; no police source now
+  assert c._pol_hold_cap is not None
+  c._police = None
+  c._sl_ref = V60                                     # limit drops 60 -> 45 with the driver at 80: a limit-drop cap
+  c._ratio = V80 / V60
+  c._sl = V45
+  c._last_t -= 0.5
+  first = _cap(c, V80, V60)
+  assert c._ep_police is False and c._cap_out is not None
+  assert first > V80 - 2 * CAP_SLEW * 0.5, "a limit-drop engage seeds from the set, never the police handoff value"
+  assert c._pol_hold_cap is None, "the engage consumes the hold (it must not leak into a later police cap)"

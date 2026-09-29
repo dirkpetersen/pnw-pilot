@@ -758,11 +758,20 @@ class SpeedAdjustController:
       self._police_latched_key = None
     if self._police_suppressed:              # speedadjustreset2pnw: driver dismissed THIS alert via a
       return None                            # manual set change — stay off until it clears (see cap())
+    # policedist2pnw (Olympia 2026-09-28 20:31 PT, 4 of 4 passes): location_servicesd publishes dist_mi rounded to
+    # 0.1 mi, so it is EXACTLY 0.0 for the last ~80 m before the report. That is "AT the report", a legitimate value
+    # -- treating it as garbage returned None with the latch still set, the cap released after RELEASE_S (~5 s inside
+    # that radius at 29 m/s) and the car accelerated AT the police car. Only a MISSING key (never defaulted to 0.0),
+    # a non-numeric / non-finite value or a NEGATIVE distance is garbage. Zero keeps the latch and, if not yet
+    # latched, latches (ttr = 0 <= POLICE_ENGAGE_S): only ever more cautious than before.
+    _d = src.get("dist_mi")
+    if _d is None:
+      return None
     try:
-      dist_m = float(src.get("dist_mi", 0.0)) * MILE_M
+      dist_m = float(_d) * MILE_M
     except (TypeError, ValueError):
       return None
-    if not math.isfinite(dist_m) or dist_m <= 0.0:   # NaN/inf/garbage distance → don't act, don't latch
+    if not math.isfinite(dist_m) or dist_m < 0.0:    # NaN/inf/negative/garbage distance → don't act, don't latch
       return None
     ttr = dist_m / max(v_ego, 1.0)           # time-to-report at current speed
     if ttr <= POLICE_ENGAGE_S and not self._police_latched:
