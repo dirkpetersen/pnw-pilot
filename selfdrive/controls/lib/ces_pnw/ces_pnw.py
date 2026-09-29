@@ -74,7 +74,13 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis",
                   "timeToApex",
                   "mapErr",   # foldlog2pnw: VTSC's map-curve fold failed this tick ("" = it did not)
-                  "gpsAge")   # vtscgpsage2pnw: age (s) of the fix VTSC's map fold used; null = none (NOT icbmGpsAge)
+                  "gpsAge",   # vtscgpsage2pnw: age (s) of the fix VTSC's map fold used; null = none (NOT icbmGpsAge)
+                  # curvebrain2b2pnw: the Tesla VTSC's consumption of the shared curve brain. cbUse = none / off /
+                  # shadow / lower / stale / bad / absent; cbAge = age (s) of the entry it read; cbWould = the brain's
+                  # cap is below VTSC's own (would bind / did bind); cbWouldV = that cap (m/s); vtscPre = VTSC's cap
+                  # BEFORE the brain (m/s); cbCap = the cap the brain term applied (m/s, null = not acting);
+                  # cbStaleN / cbBadN = entries ignored since start (cumulative); cbMode = VTSC's own live mode.
+                  "cbUse", "cbAge", "cbWould", "cbWouldV", "vtscPre", "cbCap", "cbStaleN", "cbBadN", "cbMode")
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation

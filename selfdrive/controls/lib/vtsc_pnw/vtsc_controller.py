@@ -36,6 +36,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   most_binding_map_curve, twisty_section_cap, required_decel,   # sharpcurve2pnw
   apex_turn_direction)                                          # descentcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
+from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import parse_entry as parse_curve_brain_entry   # curvebrain2b2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
 # twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
@@ -134,6 +135,19 @@ class VTSCController:
     self._tele_map_err = ""    # foldlog2pnw: exception type name when THIS tick's map-curve fold failed; "" = it did not
     self._dir_err_t = None     # rule2fixes2pnw: monotonic time of the last logged turn-direction failure (None = never)
     self._dir_err_n = 0        # rule2fixes2pnw: turn-direction failures since that log line
+    # curvebrain2b2pnw: the shared curve brain's need (CurveBrain mem-param), consumed lower-only on the Raven. State is
+    # inert on every car without PnwVehicle.curve_brain_vtsc (the Lightning): nothing below is read or published there.
+    self._cb_read_t = -1e9     # monotonic time of the last CurveBrain read
+    self._cb_entry = None      # the last parsed entry (dict) or None
+    self._cb_problem = "absent"  # why there is no usable entry: absent / bad / stale / noNeed / None (a usable entry)
+    self._cb_age = None        # age (s) of the entry at its last read
+    self._cb_stale_n = 0       # entries ignored as stale since start
+    self._cb_bad_n = 0         # entries ignored as malformed since start
+    self._cb_err_t = None      # monotonic time of the last logged CurveBrain read/apply failure
+    self._cb_err_n = 0
+    self._cb_applied = None    # the brain term's own rate-limited cap (m/s); None = not acting
+    self._cb_raise_logged = False
+    self._tele_cb = self._cb_tele_blank()
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -167,6 +181,12 @@ class VTSCController:
                                f"while this lasts ({self._rain_err_n} failure(s) since the last log)")
             self._rain_err_t = now
             self._rain_err_n = 0
+        # curvebrain2b2pnw: hot-reload curve.json's tesla section (the owner's kill switch: "shadow"/"off" -> here within
+        # ~1 s). Never raises; a no-op on the Lightning. Its own try so a failure can never take VTSC's enable read down.
+        try:
+          self.veh.refresh_curve_brain_cfg(now)
+        except Exception as e:
+          self._note_cb_err(now, e, "curve.json hot-reload")
         self._enabled = self._long_ok and CES.ces_enabled(self._mode)
         self.tune = dict(C.GENTLE_PROFILE) if CES.ces_is_gentle(self._mode) else dict(C.DEFAULT_PROFILE)
         # ces-i90-2pnw (MTSC): fold map curves only when VTSC is enabled AND opted-in via the param
@@ -372,6 +392,7 @@ class VTSCController:
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
+    self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
     # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
     # LastGPSPosition "fix_ts", the clock and timestamp ces_pnw's icbm_project_position uses for icbmGpsAge. Negative
     # (a fix_ts ahead of this clock) is reported as it is. None when the fold uses no position: map curves off or VTSC
@@ -586,6 +607,9 @@ class VTSCController:
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
     self._applied = apply_limits(self._applied, target, v_cruise, dt, self._a_decel_max, self.tune['A_RELAX'])
     capped = min(v_cruise, self._applied)
+    # curvebrain2b2pnw: the shared curve brain's DB need, LOWER-ONLY, after VTSC's own state machine and before the
+    # posted-limit floor below (so the floor still bounds it: T2 never crosses the freeway floor).
+    capped = self._apply_brain(now, dt, v_cruise, v_ego, capped)
 
     # SPEED-LIMIT FLOOR (driver rule 2026-07-01): on a HIGHWAY, never trim below the posted limit — only from
     # the set speed DOWN TOWARD the limit. This bounds the downside (worst case = the limit, never the old deep
@@ -613,6 +637,99 @@ class VTSCController:
                     "ENGAGE" if engaged else "clear", self._state, capped, v_cruise_set, v_ego, d_apex, tta)
       self._engaged = engaged
     return self._finish(capped, v_cruise_set, v_ego, k_apex, d_apex, v_curve, now)
+
+  @staticmethod
+  def _cb_tele_blank() -> dict:
+    return {"cbUse": None, "cbAge": None, "cbWould": None, "cbWouldV": None, "vtscPre": None, "cbCap": None, "cbMode": None}
+
+  def _note_cb_err(self, now, e, what) -> None:
+    self._cb_err_n += 1
+    if self._cb_err_t is None or now - self._cb_err_t >= TWISTY_ERR_LOG_S:
+      cloudlog.exception(f"VTSC: curve brain {what} FAILED ({type(e).__name__}) -- the brain term is OFF for this tick, " +
+                         f"VTSC runs exactly as before ({self._cb_err_n} failure(s) since the last log)")
+      self._cb_err_t = now
+      self._cb_err_n = 0
+
+  def _read_brain(self, now) -> None:
+    """Read + validate the CurveBrain param (<= ~20 Hz). Sets _cb_entry / _cb_problem / _cb_age. An entry that is stale
+    or malformed is ignored AND counted (Rule 2): it never acts."""
+    if now - self._cb_read_t < 0.05:
+      return
+    self._cb_read_t = now
+    try:
+      raw = self.mem_params.get("CurveBrain", return_default=True) if self.mem_params is not None else None
+      entry, problem, age = parse_curve_brain_entry(raw, now)
+    except Exception as e:
+      entry, problem, age = None, "bad", None
+      self._note_cb_err(now, e, "read")
+    if problem == "stale":
+      self._cb_stale_n += 1
+    elif problem == "bad":
+      self._cb_bad_n += 1
+    self._cb_entry, self._cb_problem, self._cb_age = entry, problem, age
+
+  def _apply_brain(self, now, dt, v_cruise, v_ego, capped) -> float:
+    """curvebrain2b2pnw T1/T2 (design s5.2): returns `capped`, LOWERED only when the brain's DB need binds and the mode
+    is acting. Never above `capped`. Never raises: any failure is logged and costs only the brain term.
+
+    Mode (curve.json tesla.curve_brain, hot-reloaded): "off" nothing read; "shadow" computes what it WOULD do (cbWould*)
+    and changes nothing; "lower" applies it; "raise" is treated as "lower" (T3, the raise stage, is NOT built -- said once
+    in the log). The brain (selfdrived) publishes its own view of the mode in every entry and VTSC acts only if BOTH agree,
+    so either process seeing "shadow"/"off" stops the effect.
+
+    The term: the need is priced at the Tesla's own target (A = min(cfg, lat_accel_target(v) - 0.3, steering ceiling),
+    in selfdrived), the distance is dead-reckoned by the entry's age, rain lowers it as it lowers every curve speed,
+    V_MIN floors it, and the cap follows VTSC's own decel envelope (brake_cap_for_apex with A_DECEL, finishing
+    APEX_FINISH_S before the row) through its own rate limiter (regen-only decel, A_RELAX up) -- a separate term, not
+    VTSC's apex state machine, because a DB row is a STRETCH [anchor - 25 m, anchor + 150 m], not an apex: the
+    machine's "release before the apex" would accelerate into the middle of it."""
+    if not self.veh.curve_brain_vtsc:
+      return capped
+    try:
+      mode = self.veh.curve_brain
+      self._tele_cb["cbMode"] = mode
+      if mode == "raise" and not self._cb_raise_logged:
+        self._cb_raise_logged = True
+        cloudlog.error("VTSC: curve_brain mode 'raise' requested but the raise stage (T3) is NOT built -- behaving as 'lower'")
+      if mode == "off":
+        self._cb_applied = None
+        self._tele_cb["cbUse"] = "off"
+        return capped
+      self._read_brain(now)
+      self._tele_cb["cbAge"] = round(self._cb_age, 2) if self._cb_age is not None else None
+      self._tele_cb["vtscPre"] = round(float(capped), 2)
+      acting = mode in ("lower", "raise")
+      e = self._cb_entry
+      if e is None or e.get("v") is None:
+        # no usable need: stale / bad / absent are problems (counted, shown); noNeed is the normal "nothing ahead"
+        self._tele_cb["cbUse"] = ("shadow" if not acting else "none") if self._cb_problem == "noNeed" else self._cb_problem
+        target = float("inf")
+      else:
+        age = self._cb_age or 0.0
+        d_now = max(e["d"] - v_ego * age, 0.0)
+        v_need = max(e["v"] - self.veh.rain_penalty_ms(), C.V_MIN)
+        env = brake_cap_for_apex(v_need, d_now, v_ego, self.tune["A_DECEL"])
+        target = env
+        would = env < capped - 0.05
+        self._tele_cb["cbWould"] = bool(would)
+        self._tele_cb["cbWouldV"] = round(float(env), 2)
+        acting = acting and e["mode"] in ("lower", "raise")     # both processes must agree the switch is on
+        self._tele_cb["cbUse"] = "shadow" if not acting else ("lower" if would else "none")
+      if not acting:
+        self._cb_applied = None                                # the kill switch is immediate, not eased
+        return capped
+      a_max = min(self.tune["A_DECEL_MAX"], C.REGEN_A_DECEL)
+      prev = v_cruise if self._cb_applied is None else self._cb_applied
+      self._cb_applied = apply_limits(prev, min(target, v_cruise), v_cruise, dt, a_max, self.tune["A_RELAX"])
+      self._tele_cb["cbCap"] = round(float(self._cb_applied), 2)
+      out = min(capped, self._cb_applied)
+      if out < capped - 0.05:
+        self._tele_curve_win = "brain"
+      return out
+    except Exception as ex:
+      self._cb_applied = None
+      self._note_cb_err(now, ex, "apply")
+      return capped
 
   def _finish(self, capped, v_cruise, v_ego, k_apex, d_apex, v_curve, now):
     active = capped < v_cruise - 0.5
@@ -713,4 +830,9 @@ class VTSCController:
         "visK": round(float(self._tele_vis_k), 5),
         "visD": round(float(self._tele_vis_d), 0),
         "visV": round(float(self._tele_vis_v), 1),
+        # curvebrain2b2pnw: the Tesla VTSC's use of the shared curve brain (null on a car without the capability).
+        # getattr: permissive test stubs build the payload without the state.
+        **{k: getattr(self, "_tele_cb", self._cb_tele_blank()).get(k) for k in ("cbUse", "cbAge", "cbWould", "cbWouldV",
+                                                                                   "vtscPre", "cbCap", "cbMode")},
+        "cbStaleN": int(getattr(self, "_cb_stale_n", 0)), "cbBadN": int(getattr(self, "_cb_bad_n", 0)),
       }
