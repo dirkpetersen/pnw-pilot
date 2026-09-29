@@ -146,6 +146,8 @@ class VTSCController:
     self._cb_err_t = None      # monotonic time of the last logged CurveBrain read/apply failure
     self._cb_err_n = 0
     self._cb_applied = None    # the brain term's own rate-limited cap (m/s); None = not acting
+    self._cb_ign_t = None      # monotonic time of the last logged "entry ignored" line
+    self._cb_ign_n = 0         # entries ignored (stale / bad) since that line
     self._cb_raise_logged = False
     self._tele_cb = self._cb_tele_blank()
     # last decision, for the logged vtscState message (read by the planner)
@@ -666,6 +668,14 @@ class VTSCController:
       self._cb_stale_n += 1
     elif problem == "bad":
       self._cb_bad_n += 1
+    if problem in ("stale", "bad"):
+      # Rule 2: an ignored entry is counted (cbStaleN / cbBadN, cbUse) AND said, once a minute, with the consequence. "absent"
+      # (selfdrived has not published yet) and "noNeed" (a live heartbeat, nothing ahead) are the normal cases and are not.
+      self._cb_ign_n += 1
+      if self._cb_ign_t is None or now - self._cb_ign_t >= TWISTY_ERR_LOG_S:
+        cloudlog.error(f"VTSC: curve brain entry ignored ({problem}, age {age if age is None else round(age, 2)} s) -- the brain " +
+                       f"term is INACTIVE, VTSC runs exactly as before ({self._cb_ign_n} ignored since the last log)")
+        self._cb_ign_t, self._cb_ign_n = now, 0
     self._cb_entry, self._cb_problem, self._cb_age = entry, problem, age
 
   def _apply_brain(self, now, dt, v_cruise, v_ego, capped) -> float:

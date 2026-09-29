@@ -196,6 +196,16 @@ class TestShadow:
     p = run[-1][1]
     assert p["cbUse"] == "bad" and p["cbBadN"] > 100 and p["cbCap"] == pytest.approx(V_SET, abs=0.05)   # acting, not binding
 
+  def test_an_ignored_entry_is_said_once_a_minute_with_the_consequence(self, env, monkeypatch):
+    lines = []
+    monkeypatch.setattr(vc.cloudlog, "error", lambda msg, *a, **k: lines.append(msg))
+    _drive(env, "lower", entry(v=15.0, d=80.0, age=1.5), ticks=400)                  # 20 s of stale entries
+    assert len(lines) == 1 and "ignored (stale" in lines[0] and "INACTIVE" in lines[0]
+    lines.clear()
+    _drive(env, "lower", lambda t: None, ticks=400)                                   # nothing published yet: normal
+    _drive(env, "lower", lambda t: {"ts": t, "seq": 1, "mode": "lower", "v": None}, ticks=400)   # a live heartbeat: normal
+    assert lines == []
+
   def test_an_unreadable_param_is_logged_once_a_minute_and_counted(self, env, monkeypatch):
     lines = []
     monkeypatch.setattr(vc.cloudlog, "exception", lambda msg, *a, **k: lines.append(msg))
