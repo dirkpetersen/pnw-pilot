@@ -128,7 +128,7 @@ class Overrides:
       self._err_t = now
 
   def _failsafe_msg(self):
-    return (f"curve_brain: {self.path} INVALID/MISSING ({self.why}) -- every curve is priced at no more than {FAILSAFE_A} m/s^2 "
+    return (f"curve_brain: {self.path} INVALID/MISSING ({self.why}) -- every curve is priced at no more than {FAILSAFE_A} m/s^2 " +
             "until a valid file is read (the general ceiling is only safe with the per-curve overrides)")
 
   def refresh(self, now: float) -> None:

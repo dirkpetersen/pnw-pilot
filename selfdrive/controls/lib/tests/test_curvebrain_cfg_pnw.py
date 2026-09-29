@@ -351,7 +351,8 @@ def test_a_steering_ceiling_that_cannot_be_read_falls_back_loudly(monkeypatch, l
 
 def test_terwilliger_left_curve_entry_a_target_of_4_0_alone_is_the_speed_that_failed(cfg, schedule):
   """The 09-28 22:35 left curve, DB row k = 0.0040 (R 250 m): (a) 4.0 alone = 70.7 mph, the speed at which the applied
-  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 67.0 mph (the clamp: little help here, the override is what holds this curve)."""
+  angle stalled; (b) with the lataccel schedule clip (evaluated at that speed) 67.4 mph; (c) with the steering ceiling 67.0 mph
+  (the clamp: little help here, the per-curve override is what holds this curve)."""
   cfg(None)
   schedule(dh.DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH)
   k = 0.0040
