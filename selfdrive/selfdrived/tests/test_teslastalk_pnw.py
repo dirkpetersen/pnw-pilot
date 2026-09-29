@@ -135,3 +135,98 @@ def test_selfdrived_takes_the_gas_exemption_from_the_capability_not_a_fingerprin
   src = textwrap.dedent(inspect.getsource(SelfdriveD.__init__))
   assert "self.stalk_off_ignores_gas = bool(veh.stalk_cruise_buttons)" in src
   assert "TESLA" not in src.split("stalk_off_ignores_gas")[1].split("\n")[0]
+
+
+# --- teslastalk2b F2: a stalk push then a quick brake must not ARM steering-only --------------------------------
+
+def _engaged():
+  m = MadsPnw(MADS_ON)
+  for _ in range(3):
+    m.update(True, True, False, True, Events())
+  return m
+
+
+def _cancel_ev():
+  ev = Events()
+  ev.add(EventName.pedalPressed)
+  ev.add(EventName.pcmDisable)
+  return ev
+
+
+def _push_cancel_brake(mads, brake_after: int, push_lead: int = 0):
+  """Frame P: stalk push while engaged. Frame P+push_lead: the car's cancel (op disables). Brake lands `brake_after` frames later."""
+  mads.update(True, True, False, True, Events(), stalk_press=True)
+  for _ in range(push_lead):
+    mads.update(True, True, False, True, Events())
+  mads.update(False, False, brake_after == 0, False, _cancel_ev())
+  for i in range(1, 46):
+    mads.update(False, False, i >= brake_after, False, Events())
+  return mads
+
+
+@pytest.mark.parametrize("brake_after", [0, 5, 30, 44])
+def test_push_then_quick_brake_does_not_arm_steering_only(brake_after):
+  m = _push_cancel_brake(_engaged(), brake_after)
+  assert (m.enabled, m.lateral_only) == (False, False)
+
+
+def test_control_the_same_cancel_without_the_push_still_arms():
+  """The mutation partner: without the stalk push the identical brake sequence arms (today's behaviour)."""
+  m = _engaged()
+  m.update(True, True, False, True, Events())
+  m.update(False, False, True, False, _cancel_ev())
+  assert m.lateral_only
+
+
+def test_a_push_older_than_the_window_does_not_veto():
+  from openpilot.selfdrive.selfdrived.mads_pnw import MADS_BRAKE_PANDA_GRACE_FRAMES
+  m = _engaged()
+  m.update(True, True, False, True, Events(), stalk_press=True)
+  for _ in range(MADS_BRAKE_PANDA_GRACE_FRAMES):
+    m.update(True, True, False, True, Events())
+  m.update(False, False, True, False, _cancel_ev())
+  assert m.lateral_only
+
+
+def test_push_inside_the_window_vetoes_a_later_cancel_too():
+  """A push that did not cancel at once, then a brake-induced cancel inside the window: the push said "off"."""
+  m = _engaged()
+  m.update(True, True, False, True, Events(), stalk_press=True)
+  for _ in range(20):
+    m.update(True, True, False, True, Events())
+  m.update(False, False, True, False, _cancel_ev())
+  assert not m.lateral_only
+
+
+def test_a_car_that_never_passes_stalk_press_is_unchanged():
+  """The Lightning path: selfdrived passes stalk_press only when the stalk capability is set (see the source test)."""
+  m = _engaged()
+  m.update(True, True, False, True, Events(), stalk_press=False)
+  m.update(False, False, True, False, _cancel_ev())
+  assert m.lateral_only
+
+
+def test_selfdrived_passes_stalk_press_only_for_the_stalk_capability():
+  import inspect
+  import textwrap
+  step = textwrap.dedent(inspect.getsource(SelfdriveD.step))
+  upd = textwrap.dedent(inspect.getsource(SelfdriveD.update_events))
+  init = textwrap.dedent(inspect.getsource(SelfdriveD.__init__))
+  assert "stalk_press=self.stalk_press_now" in step
+  assert "self.stalk_press_now = bool(main_press and self.stalk_off_ignores_gas)" in upd    # Lightning: capability False -> never True
+  assert "self.stalk_press_now = False" in init                                              # defined before the first frame
+
+
+def test_selfdrived_step_has_no_undefined_names():
+  """The first version of this wiring named `main_press` (a local of update_events) inside step(): a NameError on the first
+  frame that only a source-substring test could miss. Pyflakes-level check on the two functions."""
+  import subprocess
+  import sys
+  r = subprocess.run([sys.executable, "-m", "ruff", "check", "--select", "F821", "--no-cache",
+                      inspect_file(SelfdriveD)], capture_output=True, text=True)
+  assert r.returncode == 0, r.stdout + r.stderr
+
+
+def inspect_file(cls) -> str:
+  import inspect
+  return inspect.getsourcefile(cls)

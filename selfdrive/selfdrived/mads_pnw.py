@@ -262,6 +262,7 @@ class MadsPnw:
     self._cruise_enabled_prev = False
     # madsbrakerace2pnw: frames left in which a late `brakePressed` may still arm lateral-only.
     self._brake_grace = 0
+    self._stalk_press_left = 0       # teslastalk2b: frames left in which a stalk push vetoes arming from a cancel
     # madsbrake2pnw: frames since the falling edge, and whether the brake has been seen since it.
     self._grace_elapsed = 0
     self._grace_brake_seen = False
@@ -274,7 +275,7 @@ class MadsPnw:
 
   def update(self, op_enabled: bool, op_active: bool, braking: bool, cruise_enabled: bool,
              events: Events, cruise_available: bool = True, off_requested: bool = False,
-             panda_lateral_allowed: bool | None = None) -> None:
+             panda_lateral_allowed: bool | None = None, stalk_press: bool = False) -> None:
     """Run once per frame, AFTER selfdrived's own state machine has already decided op_enabled.
 
     op_enabled/op_active: selfdrived's own engagement, untouched by this module.
@@ -290,7 +291,14 @@ class MadsPnw:
     panda_lateral_allowed: madsbrake2pnw: panda_lateral_view() of a pandaStates sample that arrived
                           THIS frame, or None if none arrived or no panda reports the field. Only
                           consulted in the panda-confirmed tail of the brake window.
+    stalk_press:          teslastalk2b: the driver pushed the Raven's speed stalk (a mainCruise ButtonEvent) THIS frame.
+                          Remembered for MADS_BRAKE_PANDA_GRACE_FRAMES; a cancel that lands inside it never arms steering-only.
+                          Callers on a car without the stalk pass nothing (False), so nothing changes there.
     """
+    # teslastalk2b (Fable F2): a stalk push while fully engaged is not latched (`lateral_only` is False), the car cancels ~10 ms
+    # later, and a brake within the brake window would then ARM steering-only after a cancel the driver meant as "off". The
+    # cruise button is the master (driver rule): remember the push and refuse to arm from a cancel inside the window.
+    self._stalk_press_left = MADS_BRAKE_PANDA_GRACE_FRAMES if stalk_press else max(0, self._stalk_press_left - 1)
     # The panda sets controls_allowed on the RISING edge of stock cruise engaging. If cruise
     # engages and openpilot does NOT engage with it — a NO_ENTRY is standing (calibration
     # incomplete after a car swap, resumeBlocked, distracted, ...) — controlsd then sends
@@ -349,6 +357,9 @@ class MadsPnw:
       # THE falling edge. Lateral survives only a brake press, only when the driver asked for it,
       # and only when nothing else in the frame wants openpilot off.
       may_arm = (not self.disengage_on_brake) and not blocked
+      if may_arm and self._stalk_press_left > 0:
+        may_arm = False
+        cloudlog.warning("teslastalk2b: stalk push within the brake window before this cancel -> steering-only NOT armed, full disengage")
       self.enabled = may_arm and braking
       # madsbrakerace2pnw: the brake can still be IN FLIGHT on this frame (see
       # MADS_BRAKE_GRACE_FRAMES -- measured on the truck, the PCM drops cruise first). Open a

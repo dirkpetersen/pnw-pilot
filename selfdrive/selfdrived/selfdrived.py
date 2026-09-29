@@ -174,6 +174,7 @@ class SelfdriveD:
     # teslastalk2pnw: the Raven's stalk push is a mainCruise ButtonEvent too, but it is a deliberate lever gesture, so
     # the onoffgas2pnw accelerator gate (built for a thumb brushing the wheel's ON/OFF button) does not apply to it.
     self.stalk_off_ignores_gas = False
+    self.stalk_press_now = False    # teslastalk2b: a stalk push this frame (Raven only); vetoes arming steering-only from a cancel
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -338,6 +339,7 @@ class SelfdriveD:
     # the one moment the driver has said they want the system to hold on is the acceleration away from a
     # crossing. The rule itself is unchanged everywhere else.
     main_press = any(be.pressed and be.type == ButtonType.mainCruise for be in CS.buttonEvents)
+    self.stalk_press_now = bool(main_press and self.stalk_off_ignores_gas)   # teslastalk2b: read by mads.update in step()
     if off_request_latches(main_press, self.mads.lateral_only, off_request_gas_input(CS.gasPressed, self.stalk_off_ignores_gas)):
       self.off_request_t = self.sm.frame * DT_CTRL
       if self.stalk_off_ignores_gas:
@@ -796,7 +798,8 @@ class SelfdriveD:
     panda_lat = (panda_lateral_view(self.sm['pandaStates'], IGNORED_SAFETY_MODES)
                  if self.sm.updated['pandaStates'] and self.sm.valid['pandaStates'] else None)
     self.mads.update(self.enabled, self.active, CS.brakePressed or CS.regenBraking,
-                     CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req, panda_lat)
+                     CS.cruiseState.enabled, self.events, CS.cruiseState.available, off_req, panda_lat,
+                     stalk_press=self.stalk_press_now)
     # madsquiet2pnw: decide the engagement chimes from THIS frame's engagement and MADS state. It only
     # ever changes a SOUND -- the state machine has already run and is never consulted or edited here.
     # Any failure falls back to the stock chimes: silence is the thing that must never happen by accident.
