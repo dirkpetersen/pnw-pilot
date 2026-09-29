@@ -2,6 +2,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.icbm_display import IcbmMaxDisplay
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -63,6 +64,7 @@ class HudRenderer(Widget):
     self.is_cruise_set: bool = False
     self.is_cruise_available: bool = True
     self.set_speed: float = SET_SPEED_NA
+    self._icbm_max = IcbmMaxDisplay()   # uimax2pnw
     self.speed: float = 0.0
     self.v_ego_cluster_seen: bool = False
 
@@ -88,6 +90,9 @@ class HudRenderer(Widget):
     self.set_speed = (
       controls_state.vCruiseDEPRECATED if v_cruise_cluster == 0.0 else v_cruise_cluster
     )
+    # uimax2pnw: during an ICBM slowdown the SCREEN keeps the driver's own max (display only)
+    if 0 < self.set_speed < SET_SPEED_NA:
+      self.set_speed = self._icbm_max.choose(self.set_speed, ui_state.icbm_display_ceiling)
     self.is_cruise_set = 0 < self.set_speed < SET_SPEED_NA
     self.is_cruise_available = self.set_speed != -1
 

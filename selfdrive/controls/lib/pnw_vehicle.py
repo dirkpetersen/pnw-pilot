@@ -615,6 +615,10 @@ class PnwVehicle:
     # in the ford carcontroller; 0x083 is TX-allowlisted). Today: the 2025 F-150 Lightning.
     self.stock_acc_buttons: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # uimax2pnw (display only): the comma screen's MAX SPEED shows the driver's own latched ICBM ceiling while a
+    # slowdown lowers the truck's stock set. Exactly the cars whose set speed ICBM steers by button taps.
+    self.icbm_display_ceiling: bool = self.stock_acc_buttons
+
     # speedadjust-exec2pnw: the ONE generic capability that gates the shared stock-ACC button-tap
     # executor (opendbc/car/ford/icbm_pnw.py) — mirrors opendbc/car/pnw_vehicle.py's identically-
     # named field (kept in sync there; opendbc cannot import this openpilot-side module). True

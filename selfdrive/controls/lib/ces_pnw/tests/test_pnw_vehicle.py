@@ -511,3 +511,10 @@ def test_envelope_holds_when_the_baseline_drops_below_the_tight_target():
     out = veh.aggressive_t_follow(AGGRESSIVE, lead=lead, v_ego=20.0, baseline=1.05, dt=DT)
     if out is not None:
       assert 1.05 - 1e-9 <= out <= TIGHT + 1e-9, f"escaped inverted envelope: {out}"
+
+
+def test_icbm_display_ceiling_is_lightning_only_uimax2pnw():
+  assert PnwVehicle(FakeCP(LIGHTNING, "ford")).icbm_display_ceiling
+  assert PnwVehicle(FakeCP(LIGHTNING, "ford", op_long=True)).icbm_display_ceiling   # static per platform
+  assert not PnwVehicle(FakeCP("TESLA_MODEL_S_HW3", "tesla", op_long=True)).icbm_display_ceiling
+  assert not PnwVehicle(None).icbm_display_ceiling
