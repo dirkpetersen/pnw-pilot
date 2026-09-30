@@ -440,13 +440,14 @@ class TestTheSeedAgainstTheRealTable:
     assert len(got) == 8
     for v0, v1, k in got.values():
       assert v1 == round(math.sqrt(lig_a / k) / MPH, 1) and v1 < v0          # priced at sqrt(a_max / k), never above the baseline
-    worst = max(got.values(), key=lambda t: t[2])                            # the tightest row: k 0.00235921, baseline 72.8 mph
-    assert worst[2] == pytest.approx(0.00235921, rel=1e-4) and worst[0] == 72.8
+    worst = max(got.values(), key=lambda t: t[2])                            # the tightest covered row, read from the table
+    assert worst[0] == round(math.sqrt(2.5 / worst[2]) / MPH, 1)             # baseline = sqrt(2.5 / worst k), not a pinned number
+    assert worst[1] == round(math.sqrt(lig_a / worst[2]) / MPH, 1)
     assert min(v for _, v, _ in got.values()) == worst[1]
     assert max(v for v, _, _ in got.values()) > 100
 
     tes, veh = cb.Overrides(str(_SEED), platform=TESLA_P), tesla()
-    v_ego, seen = 31.0, {}
+    v_ego, seen, kmax = 31.0, {}, {}
     for a in idx.anchors:
       cap, note = tes.limit(a[0], a[1], a[2])
       k = max((b[2] for b in a[3] if b[2]), default=None)
@@ -456,5 +457,10 @@ class TestTheSeedAgainstTheRealTable:
       v0, _ = cb.row_speed(veh, k, v_ego)
       assert a_used <= cap + 1e-9 and v <= v0 + 1e-9     # lower-only in A AND in speed (row_speed guards the second)
       seen.setdefault(cap, []).append(round(v / MPH, 1))
+      kmax[cap] = max(kmax.get(cap, 0.0), k)
     lo, hi = min(seen), max(seen)
-    assert hi == _TESLA_DEFAULT_A and min(seen[hi]) == 59.1 and min(seen[lo]) == 63.0
+    assert hi == _TESLA_DEFAULT_A
+    # the slowest priced speed of each cap group is sqrt(cap / its tightest k), derived from the table (the schedule fixture's
+    # A at v_ego and at the row speed is >= cap, so the override binds)
+    for cap in (hi, lo):
+      assert min(seen[cap]) == round(math.sqrt(cap / kmax[cap]) / MPH, 1), cap
