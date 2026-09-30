@@ -14,7 +14,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.coopsteer_pnw import CoopSteer, telemetry_fields as coop_telemetry_fields
-from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, lat_accel_limit, MIN_SPEED
+from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, lat_accel_limit, lat_accel_report_platform, MIN_SPEED
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
@@ -140,6 +140,7 @@ class Controls:
     veh = PnwVehicle(self.CP)
     # latcar2pnw: which per-car entry of lataccel_limits.json clip_curvature uses (None = the shared schedule)
     self._lat_accel_platform = veh.curve_override_platform
+    lat_accel_report_platform(self._lat_accel_platform)   # says once whether this car has its own schedule entry
     # teslayaw2pnw: whether CS.yawRate is a real sensor on this car. Where it is not, the carstate leaves the capnp
     # default 0.0, and kActl/kErr/achLat/peakAchLat publish None instead of a confident "driving straight".
     # Said once, loudly, so a car that silently lost its yaw source is visible in the log.

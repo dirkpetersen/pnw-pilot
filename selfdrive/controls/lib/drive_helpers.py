@@ -156,6 +156,8 @@ class _LatAccelSchedule:
     self._xs: np.ndarray | None = None
     self._ys: np.ndarray | None = None
     self._cars: dict[str, tuple[np.ndarray, np.ndarray]] = {}   # latcar2pnw: platform -> its VALID own (xs, ys)
+    self._load_gen = 0                                  # bumped on every successful load (change-only per-car reporting)
+    self._reported_gen: dict[str, int] = {}             # platform -> the _load_gen its own/shared status was last logged for
     self._file_id: tuple[int, int] | None = None       # (st_mtime_ns, st_size) of the last file we successfully parsed
     self._failed_file_id: tuple[int, int] | None = None  # (st_mtime_ns, st_size) of the last file that FAILED to parse
     self._last_check_mono = 0.0
@@ -186,8 +188,10 @@ class _LatAccelSchedule:
                        "step). Hot-reloaded (~every few seconds)."),
           "breakpoints": DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH,
         }, f, indent=2)
-    except OSError:
-      pass
+    except OSError as e:
+      # Not fatal (flat 3.0 fail-safe applies), but never silent: the driver's default file was NOT seeded.
+      cloudlog.warning(f"drive_helpers: could not seed {LAT_ACCEL_LIMITS_PATH} ({type(e).__name__}: {e}) -- " +
+                       f"staying on the flat {MAX_LATERAL_ACCEL_NO_ROLL} m/s^2 fail-safe")
 
   @staticmethod
   def _sanitize(raw) -> tuple[np.ndarray, np.ndarray] | None:
@@ -250,6 +254,9 @@ class _LatAccelSchedule:
                        "the shared schedule")
       else:
         out[platform] = parsed
+    # A key that no car uses (a typo: "TESLA_MODEL_S ", "TESLA_MODEL_S_HW") validates like any other, so say which keys were
+    # accepted; report_platform() then says, per car, whether ITS key is among them.
+    cloudlog.warning(f"drive_helpers: {LAT_ACCEL_LIMITS_PATH} per-car schedules accepted for: {sorted(out)}")
     return out
 
   def _refresh(self) -> None:
@@ -291,6 +298,7 @@ class _LatAccelSchedule:
         raise ValueError("invalid or out-of-range breakpoints")
       self._xs, self._ys = parsed
       self._cars = self._load_cars(raw)
+      self._load_gen += 1
       self._file_id = file_id
       self._failed_file_id = None
     except Exception as e:
@@ -308,11 +316,27 @@ class _LatAccelSchedule:
       cloudlog.error(f"drive_helpers: failed to load {LAT_ACCEL_LIMITS_PATH}, reverting to flat " +
                      f"{MAX_LATERAL_ACCEL_NO_ROLL} m/s^2 fail-safe ({type(e).__name__}: {e})")
 
+  def report_platform(self, platform: str | None) -> None:
+    """Say, once per successful file load (change-only), whether `platform` uses its own schedule or the shared one, and
+    with a warning when per-car keys are present but none is this car's (a misspelled key otherwise runs the shared schedule
+    silently). No-op for platform None or while no valid file is loaded. Never raises."""
+    if platform is None or self._file_id is None or self._reported_gen.get(platform) == self._load_gen:
+      return
+    self._reported_gen[platform] = self._load_gen
+    if platform in self._cars:
+      cloudlog.info(f"drive_helpers: lataccel: {platform} uses its own schedule")
+    elif self._cars:
+      cloudlog.warning(f"drive_helpers: lataccel: {platform} uses the shared schedule; per-car keys present: " +
+                       f"{sorted(self._cars)} (none matches -- misspelled?)")
+    else:
+      cloudlog.info(f"drive_helpers: lataccel: {platform} uses the shared schedule (no per-car entries)")
+
   def target(self, v_ego: float, platform: str | None = None) -> float:
     """The UNSLEWED cap at this speed: the loaded schedule, or the flat fail-safe. limit() slews toward it.
     curvebrain2pnw: split out of limit() unchanged (same statements, same order) so the curve brain can read the
     schedule without moving the slew state clip_curvature owns."""
     self._refresh()
+    self.report_platform(platform)
 
     try:
       v_ego_f = float(v_ego)
@@ -359,6 +383,13 @@ def lat_accel_limit(v_ego: float, platform: str | None = None) -> float:
   _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf. latcar2pnw: `platform` (PnwVehicle.curve_override_platform)
   selects that car's own "cars" entry in the file when it has a valid one; None or no entry = the shared schedule."""
   return _lat_accel_schedule.limit(v_ego, platform)
+
+
+def lat_accel_report_platform(platform: str | None) -> None:
+  """latcar2pnw: force the first load and log whether `platform` has its own schedule entry (change-only afterwards, on
+  every hot reload, via target()). controlsd calls it at init so the state is in the log before the first drive tick."""
+  _lat_accel_schedule._refresh()
+  _lat_accel_schedule.report_platform(platform)
 
 
 def lat_accel_target(v_ego: float, platform: str | None = None) -> float:
