@@ -86,7 +86,7 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   # the curve speed map AND camera both ask for) / "" (no floored map curve selected);
                   # vtscAgreed = that agreed speed, max(map target, camera target) (m/s, null unless "agreed").
                   "vtscFloor", "vtscFloorWhy", "vtscAgreed",
-                  # vtscFloorSkip: why a floored map curve kept set-10 (novision / unpaired / gpsStale / gpsNoFix / nonfinite / "" = n/a)
+                  # vtscFloorSkip: why a floored map curve kept set-10 (novision / unpaired / nearer / gpsStale / gpsNoFix / nonfinite / "" = n/a)
                   "vtscFloorSkip",
                   # vtscfloor2pnw release-later: why brake/hold -> release was deferred this tick ("" = not): falling/switch/fast
                   "vtscRelDefer")

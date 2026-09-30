@@ -708,8 +708,9 @@ class VTSCController:
       if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
         self._state = "release"                    # only accelerate out once we've actually slowed
 
-    if self._state != "release" or not has_curve:
-      self._rel_defer_t0 = None                    # the curve is over / braking re-armed: a new one gets a fresh bound
+    if self._state != "release":
+      self._rel_defer_t0 = None                    # the curve is over / braking re-armed: a new one gets a fresh bound (a one-cycle
+      #                                              has_curve flicker inside release must NOT refill the budget)
       self._rel_defer_capped = False
       self._rel_latched = False
 

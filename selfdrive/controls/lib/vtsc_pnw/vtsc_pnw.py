@@ -467,6 +467,10 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
             pt_info["skip"] = "nonfinite"                # a NaN / infinite input: logged by the caller, today's floor
           elif not (math.isfinite(v_vis) and v_vis > 0.0 and d_vis >= 0.0):
             pt_info["skip"] = "novision"                 # no camera curve (inf / no apex): normal, today's floor
+          elif d < d_vis:
+            # a paired map node NEARER than the camera's apex would win the fold with a shorter time-to-apex and a target of camera+margin,
+            # sending the machine to hold while the camera keeps falling (Terwilliger 22:32:15, closed loop: +4.8 mph over today): keep set-10
+            pt_info["skip"] = "nearer"
           elif abs(d - d_vis) > agree_pair_m:
             pt_info["skip"] = "unpaired"
           else:

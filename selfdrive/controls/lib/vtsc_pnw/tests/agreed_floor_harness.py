@@ -58,7 +58,7 @@ def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", agreed_f
   return ctrl, clock
 
 
-def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, **kw):
+def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, closed=False, **kw):
   """Replay frames (agreed_floor_frames tuples) -> list of dicts, one per 20 Hz cycle. `apply` keys: t (s since midnight PT),
   v (vEgo), cap (VTSC's cap), state, why (vtscFloorWhy), floor, agreed, win (curveWin), set (m/s)."""
   ctrl, clock = make_controller(monkeypatch, **kw)
@@ -68,6 +68,7 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, **kw):
   ns.orientationNED = [0.0, 0.0, 0.0]
   sm = {"modelV2": object(), "carControl": ns}
   out = []
+  v_sim = None            # closed loop (Opus model): the car follows min(cap, set) at accel in [-1.5, +0.8] m/s^2, P gain 1
   for i in range(len(frames) - 1):
     a, b = frames[i], frames[i + 1]
     ta, tb = secs(a[0]), secs(b[0])
@@ -78,6 +79,9 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, **kw):
       f = j / n
       t = ta + j * dt
       v_ego = a[1] + (b[1] - a[1]) * f
+      if closed:
+        v_sim = v_ego if v_sim is None else v_sim
+        v_ego = v_sim
       v_set = a[2]
       vv = a[3] + (b[3] - a[3]) * f
       vd = a[4] + (b[4] - a[4]) * f
@@ -98,6 +102,8 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, **kw):
       else:
         vis["s"] = (0.0, -1.0, float("inf"))
       cap = ctrl.cap(sm, v_set, v_ego)
+      if closed:
+        v_sim += max(min((min(cap, v_set) - v_sim) / 1.0, 0.8), -1.5) * dt
       out.append(dict(t=t, v=v_ego, cap=cap, state=ctrl._state, why=ctrl._tele_floor_why, floor=ctrl._tele_floor,
                       agreed=ctrl._tele_agreed, win=ctrl._tele_curve_win, set=v_set, vis=vv, msg=dict(ctrl.msg), pay=ctrl.overlay_payload(), ctrl=ctrl))
   return out
