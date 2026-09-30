@@ -94,6 +94,13 @@ class VTSCController:
     self._floor_prev_why = ""
     self._floor_skip_t = None      # ...of the last logged abnormal skip (NaN input / stale GPS)
     self._floor_skip_n = 0
+    # vtscfloor2pnw release-later state / telemetry (vtscRelDefer)
+    self._rel_hist: list = []       # (monotonic t, v_curve) over the last REL_DEFER_WINDOW_S
+    self._rel_prev_win = "none"
+    self._rel_win_t = -1e9          # monotonic time the binding source last switched
+    self._rel_defer_t0 = None       # start of this curve's deferral (bounded by REL_DEFER_MAX_S)
+    self._rel_defer_capped = False
+    self._tele_rel_defer = ""
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
@@ -347,6 +354,59 @@ class VTSCController:
         self._floor_skip_t = now
         self._floor_skip_n = 0
 
+  def _release_defer(self, now, has_curve, tta, at_safe, v_curve, v_ego) -> str:
+    """vtscfloor2pnw release-later: why THIS cycle's move toward `release` must wait ("" = it need not). Always keeps the history
+    (target and winning source) so the fall is seen; only acts on the Raven (PnwVehicle.vtsc_agreed_floor, kill switch included),
+    only with a real curve, and only at the moment the state machine WOULD release (close to the apex and at_safe). Bounded by
+    REL_DEFER_MAX_S per curve; entering/leaving a deferral and hitting the bound are logged (change-only)."""
+    win = self._tele_curve_win
+    if win != self._rel_prev_win:
+      if self._rel_prev_win != "none" and win != "none":
+        self._rel_win_t = now
+      self._rel_prev_win = win
+    vc = float(v_curve) if math.isfinite(v_curve) else float('inf')
+    self._rel_hist = [(t, v) for (t, v) in self._rel_hist if now - t <= C.REL_DEFER_WINDOW_S]
+    self._rel_hist.append((now, vc))
+    if not (self.veh.vtsc_agreed_floor and has_curve and math.isfinite(vc)):
+      return ""
+    if self._state == "release":
+      # RE-FREEZE: already released, but the target is TIGHTENING (fell > eps within the window: a curve EXIT leaves it flat or
+      # rising, so this never holds on the way out) and vEgo is still > 1.10 x the camera's own pre-merge speed -> back to HOLD
+      # (frozen cap, never a new reduction). Same per-curve bound as a deferral.
+      vis = self._tele_vis_v
+      hmax_r = max(v for (_, v) in self._rel_hist if math.isfinite(v))
+      if not (vis > 0.0 and math.isfinite(vis) and v_ego > vis * (1.0 + C.RELEASE_SPEED_MARGIN)
+              and vc < hmax_r - C.REL_DEFER_FALL_EPS):
+        return ""
+      why = "refreeze"
+    elif not (self._state in ("brake", "hold") and tta <= C.APEX_TTA_S):
+      return ""
+    elif not at_safe:
+      return "fast"        # already held by the existing gate (vEgo > 1.10 x the winning target): labelled, no timer
+    else:
+      hmax = max(v for (_, v) in self._rel_hist if math.isfinite(v))
+      why = ""
+      if vc < hmax - C.REL_DEFER_FALL_EPS:
+        why = "falling"
+      elif now - self._rel_win_t < C.REL_DEFER_WINDOW_S:
+        why = "switch"
+      else:
+        vis = self._tele_vis_v
+        fresh = min(vc, vis) if (math.isfinite(vis) and vis > 0.0) else vc
+        if v_ego > fresh * (1.0 + C.RELEASE_SPEED_MARGIN):
+          why = "fast"
+      if not why:
+        return ""
+    if self._rel_defer_t0 is None:
+      self._rel_defer_t0 = now
+      cloudlog.info("VTSC release DEFERRED (%s): target %.1f m/s, vEgo %.1f, tta %.2fs", why, vc, v_ego, tta)
+    if now - self._rel_defer_t0 > C.REL_DEFER_MAX_S:
+      if not self._rel_defer_capped:
+        self._rel_defer_capped = True
+        cloudlog.warning("VTSC release deferral hit its %.1f s bound (%s) -- releasing as before", C.REL_DEFER_MAX_S, why)
+      return ""
+    return why
+
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
     whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
@@ -437,6 +497,7 @@ class VTSCController:
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     self._tele_floor = self._tele_agreed = 0.0      # vtscfloor2pnw: per tick, like the rest
+    self._tele_rel_defer = ""
     self._tele_floor_why = ""
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
@@ -612,6 +673,14 @@ class VTSCController:
     if self._applied is None:
       self._applied = v_cruise
 
+    # vtscfloor2pnw release-later: should this cycle's brake/hold -> release be deferred? ("" = no; else why)
+    defer = self._release_defer(now, has_curve, tta, at_safe, v_curve, v_ego)
+    self._tele_rel_defer = defer
+    if defer:
+      at_safe = False                              # the existing gates then choose HOLD (frozen cap), never release
+      if defer == "refreeze" and self._state == "release":
+        self._state = "hold"                       # back to HOLD: freeze the cap where it is (no new reduction)
+
     # ---- state machine: brake before apex, hold when unsure, release+accelerate at apex ----
     if self._state == "idle":
       target = v_cruise
@@ -638,6 +707,10 @@ class VTSCController:
       target = self._applied                       # freeze: never reduce further, never accelerate yet
       if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
         self._state = "release"                    # only accelerate out once we've actually slowed
+
+    if self._state == "idle" or (self._state == "release" and not has_curve):
+      self._rel_defer_t0 = None                    # the curve is over: a new one gets a fresh bound
+      self._rel_defer_capped = False
 
     if self._state == "release":
       target = v_cruise                            # accelerate back to cruise set speed
@@ -882,6 +955,7 @@ class VTSCController:
         # getattr: permissive test stubs build the payload without the state (like _tele_cb below).
         "vtscFloor": round(float(getattr(self, "_tele_floor", 0.0)), 1) if getattr(self, "_tele_floor_why", "") else None,
         "vtscFloorWhy": str(getattr(self, "_tele_floor_why", "")),
+        "vtscRelDefer": str(getattr(self, "_tele_rel_defer", "")),
         "vtscAgreed": (round(float(getattr(self, "_tele_agreed", 0.0)), 1)
                        if getattr(self, "_tele_floor_why", "") == "agreed" else None),
         "rsnMap": _fin(self._tele_rsn_map, 2),

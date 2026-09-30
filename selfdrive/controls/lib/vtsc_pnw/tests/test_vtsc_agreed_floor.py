@@ -79,27 +79,71 @@ def test_or34_agreed_floor_reaches_the_agreed_target(monkeypatch):
   assert 70.0 <= first["floor"] / MPH <= 74.9
 
 
-def test_or34_cap_is_unchanged_because_release_latched_before_the_camera_agreed(monkeypatch):
-  """PINS A LIMIT, not a goal. The state machine went brake -> hold -> release at 08:10:43.2 (the winner flipped from the map to the
-  camera, whose apex is 16 m away: tta 1.58 -> 0.45 s <= APEX_TTA_S), so target = v_cruise and no floor can bind. The shrunk floor is
-  computed and logged; the cap is byte-identical to today's. If the release-before-apex behaviour is ever fixed, this test SHOULD
-  fail: update it to pin the new (lower) cap."""
+def test_or34_release_is_deferred_so_the_cap_holds_at_75(monkeypatch):
+  """Release-later (owner 2026-09-29, option 2). Today the machine went hold -> release at 08:10:43.2 (the winner flipped map -> camera,
+  apex 56 -> 16 m, tta 1.58 -> 0.45 s <= APEX_TTA_S) and the cap climbed 75 -> 85 while the camera target fell to 63. Now the release is
+  deferred while the target falls / the source just switched: the cap stays frozen at the hold value (no new braking; the documented
+  'never reduce at/after the apex' rule stands). HONEST: the frozen cap is ~75, not the camera's 63-66 -- hold does not follow it down."""
   on = H.replay(monkeypatch, F.OR34_LEFT, agreed_floor=True)
   off = H.replay(monkeypatch, F.OR34_LEFT, agreed_floor=False)
-  assert _caps(on) == _caps(off)
-  assert [r["state"] for r in on] == [r["state"] for r in off]
-  rel = next(r for r in on if r["state"] == "release" and r["t"] > H.secs("08:10:42"))
-  assert rel["msg"]["timeToApex"] < C.APEX_TTA_S                          # the collapse that tripped it
+  win = [(a, b) for a, b in zip(on, off, strict=True) if H.secs("08:10:43") <= a["t"] <= H.secs("08:10:47")]
+  assert max(a["cap"] for a, _ in win) / MPH <= 75.3
+  assert max(b["cap"] for _, b in win) / MPH > 84.0                        # today
+  assert all(a["state"] == "hold" for a, _ in win)
+  assert any(a["pay"]["vtscRelDefer"] in ("falling", "switch") for a, _ in win)
+  assert all(a["cap"] <= b["cap"] + 1e-9 for a, b in zip(on, off, strict=True))   # never a higher cap than today
 
 
-def test_terwilliger_left_agreed_floor_arrives_only_after_release(monkeypatch):
+def test_terwilliger_release_is_deferred_so_the_cap_holds_at_65(monkeypatch):
   on = H.replay(monkeypatch, F.TERWILLIGER_LEFT, agreed_floor=True)
   off = H.replay(monkeypatch, F.TERWILLIGER_LEFT, agreed_floor=False)
-  assert _caps(on) == _caps(off)                                          # same limit as OR-34
+  w = [(a, b) for a, b in zip(on, off, strict=True) if H.secs("22:35:11.7".replace(".7", "")) + 1 <= a["t"] <= H.secs("22:35:14")]
+  assert max(a["cap"] for a, _ in w) / MPH <= 65.1
+  assert max(b["cap"] for _, b in w) / MPH > 68.0
   ag = [r for r in on if r["why"] == "agreed"]
-  assert ag, "the camera agrees (63 -> 56 mph vs map 51) by 22:35:12-13"
-  assert all(r["state"] == "release" for r in ag)
-  assert min(r["floor"] for r in ag) / MPH < 64.9                         # below today's 64.9 floor, but only in release
+  assert ag and min(r["floor"] for r in ag) / MPH < 64.9                    # the shrunk floor is now reachable (state stays hold)
+
+
+def test_release_deferral_is_bounded(monkeypatch):
+  """A camera target that keeps falling forever cannot hold the car forever: the deferral ends after REL_DEFER_MAX_S and the machine
+  releases as before."""
+  fr = []
+  for s in range(20):        # 4 s far away (brake), then the apex is 5 m ahead; the target falls 1.2 m/s each second throughout
+    fr.append((f"10:00:{s:02d}", 25.0, 38.0, 40.0 - 1.2 * s, 200.0 if s < 4 else 5.0, None, "idle", []))
+  rows = H.replay(monkeypatch, fr, agreed_floor=True)
+  first = next(r["t"] for r in rows if r["pay"]["vtscRelDefer"] == "falling")
+  rel = next(r["t"] for r in rows if r["state"] == "release" and r["t"] >= first)
+  assert rel - first <= C.REL_DEFER_MAX_S + 0.3
+  assert rel - first >= C.REL_DEFER_MAX_S - 0.3                              # it did defer for the whole bound
+
+
+def test_a_released_curve_whose_target_then_tightens_is_refrozen_and_a_curve_exit_is_not(monkeypatch):
+  def frames(vis_at):
+    return [(f"10:00:{s:02d}", 30.0, 38.0, vis_at(s), 200.0 if s < 4 else 5.0, None, "idle", []) for s in range(14)]
+  tight = frames(lambda s: 34.0 if s < 6 else 34.0 - 2.0 * (s - 6))          # steady, then the camera tightens fast
+  rows = H.replay(monkeypatch, tight, agreed_floor=True)
+  assert any(r["state"] == "release" for r in rows)                          # today's release happened first ...
+  rf = [r for r in rows if r["pay"]["vtscRelDefer"] == "refreeze"]
+  assert rf and all(r["state"] == "hold" for r in rf)                       # ... then it went back to hold (frozen)
+  assert max(r["cap"] for r in rf) <= rf[0]["cap"] + 0.3
+  off = H.replay(monkeypatch, tight, agreed_floor=False)
+  assert not any(r["state"] == "hold" and r["t"] > rf[0]["t"] for r in off)   # today it keeps releasing
+  exit_ = frames(lambda s: 34.0 if s < 6 else 34.0 + 3.0 * (s - 6))          # a curve exit: the camera target RISES
+  assert not any(r["pay"]["vtscRelDefer"] == "refreeze" for r in H.replay(monkeypatch, exit_, agreed_floor=True))
+
+
+def test_no_curve_and_lightning_and_kill_switch_are_unchanged(monkeypatch):
+  straight = _synthetic(36.0, 38.0, 0.0, -1.0, [])
+  on, off = H.replay(monkeypatch, straight, agreed_floor=True), H.replay(monkeypatch, straight, agreed_floor=False)
+  assert _caps(on) == _caps(off) and all(r["pay"]["vtscRelDefer"] == "" for r in on)
+  lt = H.replay(monkeypatch, F.OR34_LEFT, fp="FORD_F_150_LIGHTNING_MK1", brand="ford")
+  assert all(r["pay"]["vtscRelDefer"] == "" for r in lt)
+  assert any(r["state"] == "release" for r in lt)                            # today's release, untouched
+  ks = H.replay(monkeypatch, F.OR34_LEFT, agreed_floor=False)
+  assert all(r["pay"]["vtscRelDefer"] == "" for r in ks)
+  monkeypatch.setattr(type(lt[0]["ctrl"].veh), "vtsc_agreed_floor", property(lambda self: True))
+  forced = H.replay(monkeypatch, F.OR34_LEFT, fp="FORD_F_150_LIGHTNING_MK1", brand="ford")
+  assert any(r["pay"]["vtscRelDefer"] for r in forced)                       # teeth: the gate alone protects the Lightning
 
 
 def test_olympia_11_map_alone_is_wrong_and_stays_unchanged(monkeypatch):
@@ -204,8 +248,6 @@ def test_stale_gps_falls_back_to_the_old_floor_and_logs(monkeypatch):
   lg = _Log()
   monkeypatch.setattr(VC, "cloudlog", lg)
   on = H.replay(monkeypatch, EARLY, agreed_floor=True, gps_age=30.0)
-  off = H.replay(monkeypatch, EARLY, agreed_floor=False)
-  assert _caps(on) == _caps(off)
   assert not any(r["why"] == "agreed" for r in on)
   errs = [m for m in lg.at("error") if "agreed-floor input unusable (gpsStale)" in m]
   assert len(errs) == 1                                                     # rate limited: once for the whole 8 s, not 160 times

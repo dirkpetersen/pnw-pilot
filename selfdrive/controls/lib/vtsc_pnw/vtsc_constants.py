@@ -52,6 +52,13 @@ RELEASE_SPEED_MARGIN = 0.10  # release/hold only when vEgo <= vCurveSafe*(1+this
 APEX_FINISH_S   = 2.5   # s; reach curve-safe speed this long BEFORE the apex (~the entrance = slowest point)
 CONFIDENCE_CUT  = 0.5   # m/s (~1.1 mph) immediate cap cut the instant a binding curve is detected, so the
                         #   driver immediately feels VTSC engage (per drive #4). Then braking continues.
+# vtscfloor2pnw release-later (owner 2026-09-29, option 2): do not enter RELEASE at the apex while the curve target is still falling
+# (camera curve-safe speed dropped > REL_DEFER_FALL_EPS within REL_DEFER_WINDOW_S), the binding source just switched (map -> camera: the
+# camera's apex is much nearer, which collapses time-to-apex), or vEgo is still > 1.10 x the FRESH camera target. Stay in HOLD (cap
+# frozen, no new braking; the "never reduce at/after the apex" rule stands). Bounded: at most REL_DEFER_MAX_S of extra hold per curve.
+REL_DEFER_WINDOW_S = 0.5
+REL_DEFER_FALL_EPS = 0.5    # m/s
+REL_DEFER_MAX_S    = 5.0    # = 2 x HOLD_TTA_S
 CLEAR_CYCLES    = 5     # cycles with no curve before RELEASE -> IDLE (debounce the exit so we don't re-brake
                         #   on the curve we just left)
 

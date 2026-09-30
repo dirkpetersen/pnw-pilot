@@ -85,7 +85,9 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   # no floored map curve this tick); vtscFloorWhy = "set10" (today's set-10 mph floor) / "agreed" (shrunk to
                   # the curve speed map AND camera both ask for) / "" (no floored map curve selected);
                   # vtscAgreed = that agreed speed, max(map target, camera target) (m/s, null unless "agreed").
-                  "vtscFloor", "vtscFloorWhy", "vtscAgreed")
+                  "vtscFloor", "vtscFloorWhy", "vtscAgreed",
+                  # vtscfloor2pnw release-later: why brake/hold -> release was deferred this tick ("" = not): falling/switch/fast
+                  "vtscRelDefer")
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
