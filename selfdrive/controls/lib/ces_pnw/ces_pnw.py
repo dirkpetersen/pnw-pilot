@@ -80,7 +80,12 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
                   # cap is below VTSC's own (would bind / did bind); cbWouldV = that cap (m/s); vtscPre = VTSC's cap
                   # BEFORE the brain (m/s); cbCap = the cap the brain term applied (m/s, null = not acting);
                   # cbStaleN / cbBadN = entries ignored since start (cumulative); cbMode = VTSC's own live mode.
-                  "cbUse", "cbAge", "cbWould", "cbWouldV", "vtscPre", "cbCap", "cbStaleN", "cbBadN", "cbMode")
+                  "cbUse", "cbAge", "cbWould", "cbWouldV", "vtscPre", "cbCap", "cbStaleN", "cbBadN", "cbMode",
+                  # vtscfloor2pnw: which floor the selected map curve got. vtscFloor = the floored target it got (m/s, null =
+                  # no floored map curve this tick); vtscFloorWhy = "set10" (today's set-10 mph floor) / "agreed" (shrunk to
+                  # the curve speed map AND camera both ask for) / "" (no floored map curve selected);
+                  # vtscAgreed = that agreed speed, max(map target, camera target) (m/s, null unless "agreed").
+                  "vtscFloor", "vtscFloorWhy", "vtscAgreed")
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
@@ -4374,7 +4379,8 @@ class CESController:
       if veh.curve_brain_why.startswith(("INVALID", "default (curve.json")):
         cloudlog.error(f"curve_brain: curve.json tesla section NOT honored -- {veh.curve_brain_why}")
       cloudlog.event("curve_brain_cfg", mode=veh.curve_brain, why=veh.curve_brain_why, lat_a=veh.curve_lat_a_cfg,
-                     clip_margin=pnw_vehicle_module.CURVE_LAT_CLIP_MARGIN, path=pnw_vehicle_module.CURVE_CONFIG_PATH)
+                     clip_margin=pnw_vehicle_module.CURVE_LAT_CLIP_MARGIN, path=pnw_vehicle_module.CURVE_CONFIG_PATH,
+                     vtsc_agreed_floor=veh.vtsc_agreed_floor)
     # curvebrain2b2pnw: the Tesla's need layer -- loads the SAME curve DB file the Lightning uses (read-only index, own
     # thread) and publishes the CurveBrain mem-param VTSC reads. None on any car without the capability.
     self._curve_brain = CurveBrain(veh) if veh.curve_brain_vtsc else None
