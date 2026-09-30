@@ -36,6 +36,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   most_binding_map_curve, twisty_section_cap, required_decel,   # sharpcurve2pnw
   apex_turn_direction)                                          # descentcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
+from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import icbm_passed_points   # vtscpass2pnw: the ONE passed-point geometry
 from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import parse_entry as parse_curve_brain_entry   # curvebrain2b2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
@@ -102,6 +103,10 @@ class VTSCController:
     self._tele_mapk_ahead = True    # measured point in front of us (mapd also publishes nodes behind)
     self._map_targets: list = []
     self._cur_bearing = None
+    # vtscpass2pnw: the passed-point mask's last verdict (change-only log) + its own failure state
+    self._passed_state = None
+    self._passed_err_t = None
+    self._passed_err_n = 0
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._floor_err_t = None   # silentexc3pnw: monotonic time of the last logged MapSpeedLimit/RoadContext read failure
@@ -376,6 +381,34 @@ class VTSCController:
     self._rel_latched = True
     return why
 
+  def _ahead_points(self, v_ego):
+    """vtscpass2pnw: the map path points the car has NOT already driven past -- what the map fold may bind on. mapd publishes its current
+    way from the way's first node, so a curve just driven stays in MapTargetVelocities, and the fold's distance is an unsigned haversine:
+    on the I-5 loop ramp (2026-09-29 22:44:49) a node 165-171 deg BEHIND the car cut the cap 84 -> 42 mph. The passed test is
+    ces_pnw.icbm_passed_points, the geometry ICBM's behind-gate has run on since behindgate2pnw (two independent readings must agree: behind
+    the heading AND before the car along mapd's own path, 5 m tolerance) -- one geometry, not two -- on the position the fold itself uses.
+    When it cannot tell (under 5 m/s, no heading, path not on our road, ...) or fails, every point is returned = today's behaviour; that
+    is logged when the verdict CHANGES, with the reason (Rule 2), an exception loudly (rate limited). Never raises into cap()."""
+    try:
+      mask, why = icbm_passed_points(self._map_targets, self._cur_lat, self._cur_lon, self._cur_bearing, v_ego)
+    except Exception as e:
+      mask, why = None, "error"
+      self._passed_err_n += 1
+      now = time.monotonic()
+      if self._passed_err_t is None or now - self._passed_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: passed-point mask FAILED ({type(e).__name__}) -- map points behind the car are NOT " +
+                           f"excluded while this lasts ({self._passed_err_n} failure(s) since the last log)")
+        self._passed_err_t = now
+        self._passed_err_n = 0
+    state = ("unknown", why) if mask is None else ("passed" if any(mask) else "clear", "ok")
+    if state != self._passed_state:
+      cloudlog.info("VTSC map path passed-point mask: %s (%s)%s", state[0], state[1],
+                    "" if mask is None else f" {sum(mask)}/{len(mask)} points already passed")
+      self._passed_state = state
+    if mask is None:
+      return self._map_targets
+    return [p for p, gone in zip(self._map_targets, mask, strict=True) if not gone]
+
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
     whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
@@ -397,7 +430,7 @@ class VTSCController:
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
-        self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
+        self._ahead_points(v_ego), self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
         C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
         self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0)
     except Exception as e:
