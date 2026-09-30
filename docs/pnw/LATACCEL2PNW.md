@@ -235,7 +235,10 @@ exact value), so controlsd's `clip_curvature` cap is 3.6 there. Alert path (line
 self._lat_accel_platform)` -> `curvature_limited`, passed at :444 to `LaC.update`; `latcontrol_angle.py`:27-34 computes `angle_control_saturated`
 and calls `_check_saturation(..., curvature_limited)`; `latcontrol.py`:22-29 accumulates `sat_time` (needs `vEgo > sat_check_min_speed`, no safety limit,
 no steering press) and sets `lac_log.saturated`; `selfdrived.py`:596-598 adds `steerSaturated` when undershooting + turning + `saturated`
-('Turn Exceeds Steering Limit', `events.py`:729). So the alert fires when the requested curvature reaches the 3.6 clip, not ~0.3 below it.
+('Turn Exceeds Steering Limit', `events.py`:729). The alert fires at the clamp only at >= 80 mph, where the entry is a flat 3.6. Between 70 and 80 mph the per-car schedule interpolates
+4.0 -> 3.6 while the clamp stays 3.5886, so at 74-79 mph the cap sits 0.09-0.25 m/s^2 above the clamp and a request in that band is neither
+clipped nor alerted. Road roll also shifts the clip (`clip_curvature` adds `roll * g` to the cap). The alert is no longer ~0.3 below the
+clamp at >= 80 mph, but it is not exact below that.
 
 **latmargin2pnw:** the curve brain (`PnwVehicle.curve_lat_a`) subtracts `CURVE_LAT_CLIP_MARGIN` (0.3) from the SHARED schedule only.
 A value from a valid per-car entry is used as is (the entry is chosen at the clamp), and the steering ceiling

@@ -258,3 +258,50 @@ def test_priced_speed_at_k_0_0020_and_85_mph(sched):
   a = tesla().curve_lat_a(85 * MPH)
   assert math.sqrt(a / 0.0020) / MPH == pytest.approx(94.75, abs=0.01)
   assert math.sqrt(3.3 / 0.0020) / MPH == pytest.approx(90.86, abs=0.01)
+
+
+@pytest.mark.parametrize("key", ["TESLA_MODEL_S_HW3 ", "TESLA_MODEL_S", "tesla_model_s_hw3"])
+def test_a_misspelled_platform_key_warns_that_the_car_uses_the_shared_schedule(sched, log, key):
+  sched(_doc({key: {"breakpoints": TESLA_BP}}))
+  assert dh.lat_accel_target(85 * MPH, TESLA) == pytest.approx(3.0)
+  msgs = [m for m in log.warnings if "uses the shared schedule" in m]
+  assert len(msgs) == 1 and TESLA in msgs[0] and repr(key) in msgs[0]
+  assert any("accepted for" in m and key in m for m in log.warnings)
+  assert not [m for m in log.infos if "own schedule" in m]
+
+
+def test_a_matching_key_says_info_own_schedule_once_per_load(sched, log):
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  for _ in range(5):
+    dh.lat_accel_target(85 * MPH, TESLA)
+  assert all(TESLA in m for m in log.infos if "own schedule" in m)
+  assert len([m for m in log.infos if "own schedule" in m]) == 1
+  assert not [m for m in log.warnings if "uses the shared schedule" in m]
+
+
+def test_no_cars_section_is_info_shared_not_a_warning(sched, log):
+  sched(_doc())
+  dh.lat_accel_report_platform(TESLA)
+  assert len([m for m in log.infos if "shared schedule" in m]) == 1
+  assert not [m for m in log.warnings if "shared schedule" in m]
+
+
+def test_a_hot_reload_is_reported_again_and_no_platform_is_silent(sched, log):
+  import os
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  dh.lat_accel_report_platform(None)                        # a car without the capability reports nothing
+  assert not log.infos
+  dh.lat_accel_report_platform(TESLA)
+  sched(_doc({"TESLA_MODEL_S": {"breakpoints": TESLA_BP}}))  # the driver mistypes it on the road
+  st = os.stat(dh.LAT_ACCEL_LIMITS_PATH)
+  os.utime(dh.LAT_ACCEL_LIMITS_PATH, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+  dh._lat_accel_schedule._last_check_mono = 0.0
+  dh.lat_accel_target(80 * MPH, TESLA)
+  assert len([m for m in log.warnings if "uses the shared schedule" in m]) == 1
+
+
+def test_the_default_seed_failure_is_logged(tmp_path, monkeypatch, log):
+  monkeypatch.setattr(dh, "LAT_ACCEL_LIMITS_PATH", str(tmp_path / "nodir" / "x" / "l.json"))
+  monkeypatch.setattr(dh.os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(PermissionError("ro")))
+  dh._LatAccelSchedule()._write_default_once()
+  assert len([m for m in log.warnings if "could not seed" in m]) == 1

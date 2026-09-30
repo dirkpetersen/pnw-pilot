@@ -434,14 +434,14 @@ class TestTheSeedAgainstTheRealTable:
       k = max((b[2] for b in a[3] if b[2]), default=None)
       if lig.limit(a[0], a[1], a[2])[0] is None or k is None:
         continue
-      a_row, note = db.row_a(idx, types.SimpleNamespace(lat=a[0], lon=a[1], anchor=i), 2.5)
+      a_row, note = db.row_a(idx, types.SimpleNamespace(lat=a[0], lon=a[1], anchor=i), pv.CURVE_LAT_A_DEFAULT)
       assert a_row == lig_a and note and "OR-34 EB" in note
-      got[round(a[0], 5)] = (round(cl.v_db(2.5, k) / MPH, 1), round(cl.v_db(a_row, k) / MPH, 1), k)
+      got[round(a[0], 5)] = (round(cl.v_db(pv.CURVE_LAT_A_DEFAULT, k) / MPH, 1), round(cl.v_db(a_row, k) / MPH, 1), k)
     assert len(got) == 8
     for v0, v1, k in got.values():
       assert v1 == round(math.sqrt(lig_a / k) / MPH, 1) and v1 < v0          # priced at sqrt(a_max / k), never above the baseline
     worst = max(got.values(), key=lambda t: t[2])                            # the tightest covered row, read from the table
-    assert worst[0] == round(math.sqrt(2.5 / worst[2]) / MPH, 1)             # baseline = sqrt(2.5 / worst k), not a pinned number
+    assert worst[0] == round(math.sqrt(pv.CURVE_LAT_A_DEFAULT / worst[2]) / MPH, 1)             # baseline = sqrt(2.5 / worst k), not a pinned number
     assert worst[1] == round(math.sqrt(lig_a / worst[2]) / MPH, 1)
     assert min(v for _, v, _ in got.values()) == worst[1]
     assert max(v for v, _, _ in got.values()) > 100
