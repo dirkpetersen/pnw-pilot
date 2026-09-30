@@ -367,8 +367,10 @@ CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning'
 # (and flat 3.0 - 0.3 = 2.7 without a valid schedule file); (2) the Tesla vehicle model's steering-angle limit (~14.4
 # deg at 70 mph in the Terwilliger left curve: 2026-09-28 22:35 the applied angle stalled at the model limit, the car
 # drifted wide, "Turn Exceeds Steering Limit"); (3) the EPS torque abort (2.7-3.8 Nm). Nothing here may command a speed
-# that assumes more lateral acceleration than those allow; curve_lat_a()'s min() enforces (1) and (2) (the steering ceiling
-# below is (2) less a margin); (3) is a limit nothing here can see.
+# that assumes more lateral acceleration than those allow -- STRICTLY, only (1) is kept: curve_lat_a()'s min() clips at (1) and at
+# (2) = the model clamp itself (owner 2026-09-29: zero margin, see CURVE_STEER_CEILING_OWNER), so (2) still lets the car reach the
+# angle limit, and on adverse camber that limit delivers only ~3.0; known bad curves are lowered by the per-curve overrides
+# (ces_pnw/curve_brain.py). (3) is a limit nothing here can see.
 TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
 _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
@@ -1019,7 +1021,9 @@ class PnwVehicle:
     >= 80 mph; flat 3.0 without a valid schedule file), so the target always sits below where steering saturates.
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
     min(3.6 owner, MAX_LATERAL_ACCEL 3.5886), zero margin -- see the comment above it), so the owner's requested 4.0 is
-    clipped to 3.59 at speeds up to ~66 mph, then by the schedule (3.5 at 72 mph ... 2.7 from 80 mph). Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
+    clipped to 3.59 while the schedule allows it (with the device schedule [[50,5],[60,5],[70,4],[80,3]]: up to ~71 mph, where
+    schedule - 0.3 = 3.5886), then by the schedule (3.5 at 72 mph ... 2.7 from 80 mph). Without a schedule file the clip is a flat 2.7.
+    Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
     Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
     icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:

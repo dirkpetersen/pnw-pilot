@@ -836,7 +836,7 @@ class TestOverridePricing:
     out = _step(b)
     assert out["a"] == pytest.approx(2.8) and out["v"] == pytest.approx(math.sqrt(2.8 / 0.004), abs=0.01)
     t = b.tele(100.0)
-    assert t["cbOvr"] == "failsafe" and t["cbOvrN"] == 0 and any("MISSING" in e for e in log.errors)
+    assert t["cbOvr"] == "failsafe" and t["cbOvrN"] is None and any("MISSING" in e for e in log.errors)
 
   def test_the_file_appearing_lifts_the_failsafe(self, tmp_path, monkeypatch, cfgpath, schedule, log):
     monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "later.json"))
@@ -882,3 +882,36 @@ class TestTheSeedFileAgainstTheRealTable:
     assert right and all(o.limit(a[0], a[1], a[2])[0] is None for a in right)
     nb = [a for a in idx.anchors if 45.4690 < a[0] < 45.4705 and -122.6910 < a[1] < -122.6880 and (a[2] < 90 or a[2] > 330)]
     assert nb and all(o.limit(a[0], a[1], a[2])[0] is None for a in nb)
+
+
+class TestOverrideFollowUps:
+  def test_failsafe_is_distinguishable_from_a_valid_empty_list_in_telemetry(self, tmp_path, monkeypatch, cfgpath, schedule, log):
+    b = _brain(tmp_path, monkeypatch)                                   # conftest: a valid empty list
+    _step(b)
+    assert b.tele(100.0)["cbOvrN"] == 0
+    monkeypatch.setattr(cb, "OVERRIDES_PATH", str(tmp_path / "gone.json"))
+    b2 = _brain(tmp_path / "b2", monkeypatch)
+    b2.db.index = b.db.index
+    t = b2.tele(100.0)                                                  # no tick at all needed: liveness carries it
+    assert t["cbOvrN"] is None
+
+  def test_a_same_size_edit_with_the_old_mtime_is_still_seen(self, log):
+    import os
+    write_overrides([_ovr_entry(a_max=2.8)])
+    o = cb.Overrides()
+    st = os.stat(cb.OVERRIDES_PATH)
+    write_overrides([_ovr_entry(a_max=2.5)])                            # same size
+    os.utime(cb.OVERRIDES_PATH, ns=(st.st_atime_ns, st.st_mtime_ns))    # ... and the old mtime (touch -r / cp -p)
+    assert os.stat(cb.OVERRIDES_PATH).st_size == st.st_size
+    o.refresh(2.0)
+    assert o.entries[0]["a_max"] == 2.5
+
+  def test_more_than_50_entries_is_invalid_and_failsafe(self, log):
+    assert not _fresh([_ovr_entry() for _ in range(50)]).failsafe
+    o = _fresh([_ovr_entry() for _ in range(51)])
+    assert o.failsafe and any("51 entries" in e for e in log.errors)
+
+  def test_a_seed_length_note_survives_in_full(self):
+    note = "Terwilliger left, adverse camber; Tesla failed 2026-06-16 and 2026-09-28"
+    assert len(note) > 60 and _fresh([_ovr_entry(note=note)]).entries[0]["note"] == note
+    assert len(_fresh([_ovr_entry(note="x" * 500)]).entries[0]["note"]) == cb.NOTE_MAX

@@ -14,11 +14,12 @@ and publishes it as the `CurveBrain` mem-param (a heartbeat with or without a ne
 2026-09-28) -- this file is the Tesla's; the Lightning keeps ICBM's own chain, untouched.
 
 A IS A SPEED TARGET, NOT A STEERING CAPABILITY. A = PnwVehicle.curve_lat_a(v) = min(curve.json tesla.curve_lat_a (4.0),
-lat_accel_target(v) - 0.3, the steering ceiling 2.8). The min() is what keeps a 4.0 target from ever becoming a speed the
-car cannot steer: the lataccel2pnw schedule (5.0 to 60 mph, 4.0 at 70, 3.0 from 80; flat 3.0 without a valid file), and
-the vehicle-model steering-ANGLE clamp (carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 favourable-camber
-allowance, NOT a capability; the applied angle stalled at that clamp on 2026-09-28 22:35, at 70.3 mph, and the car delivered
-3.0-3.1 m/s^2), taken as ISO 3.0 minus a 0.2 margin = 2.8 (see pnw_vehicle.CURVE_STEER_MARGIN).
+lat_accel_target(v) - 0.3, the steering ceiling 3.5886). The min() clips a 4.0 target: the lataccel2pnw schedule (5.0 to
+60 mph, 4.0 at 70, 3.0 from 80; flat 3.0 without a valid file, so a flat 2.7), and the vehicle-model steering-ANGLE clamp
+(carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 favourable-camber allowance). Owner 2026-09-29 set the
+ceiling to that clamp itself, zero margin: the applied angle stalled at exactly it on 2026-09-28 22:35 (70.3 mph) and the car
+delivered only 3.0-3.1 m/s^2 on that adverse camber. That is why KNOWN bad curves carry a per-curve override (Overrides below)
+and why a missing override file drops every row to FAILSAFE_A.
 The EPS torque abort (2.7-3.8 Nm) is a third limit nothing here can see. So the speed for a row is
 priced at the LOWEST A over the speeds involved (the speed now, and the speed the row itself asks for), never above.
 
@@ -76,6 +77,8 @@ TELE_KEYS = ("cbOn", "cbDb", "cbWhy", "cbV", "cbD", "cbSrc", "cbEv", "cbA", "cbK
 OVERRIDES_PATH = "/data/pnw/curve_overrides.json"
 OVERRIDES_MAX_BYTES = 64 * 1024
 OVERRIDES_POLL_S = 1.0
+OVERRIDES_MAX_ENTRIES = 50   # more is treated as invalid (fail-safe): the file is a short list of known bad curves
+NOTE_MAX = 120               # characters of an entry's note kept (it is what cbOvr reports)
 FAILSAFE_A = 2.8            # == pnw_vehicle.CURVE_STEER_FALLBACK (pinned by a test)
 
 
@@ -105,6 +108,8 @@ class Overrides:
   def _validate(doc) -> list[dict]:
     if not isinstance(doc, dict) or not isinstance(doc.get("overrides"), list):
       raise ValueError('expected {"overrides": [...]}')
+    if len(doc["overrides"]) > OVERRIDES_MAX_ENTRIES:
+      raise ValueError(f"{len(doc['overrides'])} entries > {OVERRIDES_MAX_ENTRIES}")
     out = []
     for n, e in enumerate(doc["overrides"]):
       if not isinstance(e, dict):
@@ -118,7 +123,7 @@ class Overrides:
       if not (-90.0 <= v["lat"] <= 90.0 and -180.0 <= v["lon"] <= 180.0 and 0.0 < v["radius_m"] <= 2000.0
               and 0.0 <= v["heading_deg"] <= 360.0 and 0.0 < v["heading_tol_deg"] <= 180.0 and 1.0 <= v["a_max"] <= 5.0):
         raise ValueError(f"entry {n}: a value is out of range")
-      v["note"] = str(e.get("note", ""))[:60]
+      v["note"] = str(e.get("note", ""))[:NOTE_MAX]
       out.append(v)
     return out
 
@@ -139,7 +144,7 @@ class Overrides:
       self._poll = now
       try:
         st = os.stat(self.path)
-        sig = (st.st_mtime_ns, st.st_size)
+        sig = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)   # ctime/inode: an mtime-preserving edit still changes them
       except FileNotFoundError:
         st, sig = None, None
       if sig == self._sig:
@@ -328,7 +333,7 @@ class CurveBrain:
     out = dict.fromkeys(TELE_KEYS)
     out.update(cbOn=self.veh.curve_brain, cbDb=self.db.state, cbErr=self.db.err if self.db.state == "err" else None,
                cbRows=self.db.index.n_rows if self.db.index is not None else 0, cbCfg=self.veh.curve_brain_why,
-               cbOvrN=len(self.overrides.entries) if self.overrides.entries is not None else 0)
+               cbOvrN=len(self.overrides.entries) if self.overrides.entries is not None else None)   # None = FAIL-SAFE (0 = valid, empty)
     if self._last and now - self._last_t <= 2.0 * PUBLISH_S + 0.5:
       L = self._last
       out.update(cbWhy=L["cbWhy"], cbV=L["v"], cbD=L["d"], cbSrc=L["src"], cbEv=L["ev"], cbA=L["a"], cbK=L["k"],
