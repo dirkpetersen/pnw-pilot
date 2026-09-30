@@ -51,7 +51,7 @@ def _make_model(curvature, vx=27.0, n=20):
 def _make_sm(curvature, vx=27.0):
   cc = _NS()
   cc.orientationNED = [0.0, 0.0, 0.0]
-  cc.longActive = True    # vtscpass2pnw: engaged
+  cc.enabled = True    # vtscpass2pnw: engaged
   return {"modelV2": _make_model(curvature, vx), "carControl": cc}
 
 
@@ -131,7 +131,7 @@ def _make_model_signed(curvature, vx=27.0, n=20, apex_from=0):
 def _make_sm2(curvature, vx=27.0, pitch=0.0, apex_from=0):
   cc = _NS()
   cc.orientationNED = [0.0, pitch, 0.0]
-  cc.longActive = True    # vtscpass2pnw: engaged
+  cc.enabled = True    # vtscpass2pnw: engaged
   return {"modelV2": _make_model_signed(curvature, vx, apex_from=apex_from), "carControl": cc}
 
 
@@ -182,7 +182,7 @@ def test_vtsc_left_factor_follows_the_road_on_measured_frames():
       ctrl.veh._curve_cfg = dict(ctrl.veh._curve_cfg, left_factor=lf)
     cc = _NS()
     cc.orientationNED = [0.0, 0.0, 0.0]
-    cc.longActive = True    # vtscpass2pnw: engaged
+    cc.enabled = True    # vtscpass2pnw: engaged
     ctrl.cap({"modelV2": mtf.as_model(fr), "carControl": cc}, 40.0, fr["v_ego"])
     assert ctrl._tele_dir == name
     assert ctrl._tele_pen > 0.0

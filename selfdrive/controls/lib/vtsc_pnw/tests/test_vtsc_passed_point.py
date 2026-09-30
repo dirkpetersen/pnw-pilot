@@ -12,10 +12,10 @@ I-5 on-ramp (22:44:49). The fix reuses ces_pnw.icbm_passed_points (the geometry 
 
 Bug 2 (report 3.5): cap() runs every planner cycle whether or not openpilot is engaged, and a `hold` reached while the owner drove a
 curve by hand froze the cap at 35 mph and applied it the moment the stalk re-engaged him at 54 mph (54 -> 40 mph). Besides the mask above
-(a receding point no longer feeds the latch), every cycle with carControl.longActive False now drops the state machine's latches, so the
-first engaged cycle starts from idle: no cap, no freeze. The last tests pin that: reset when not engaged (cruise off AND accelerator
-override), NO reset while engaged, the release-later freeze state is cleared too, an unreadable longActive is loud and changes nothing,
-and the real re-engage window has no cap from the manual curve.
+(a receding point no longer feeds the latch), every cycle with carControl.enabled False (cruise off; NOT longActive, which a gas
+override clears too) drops the state machine's latches and the brain's slew state, so the first engaged cycle starts from idle: no cap,
+no freeze. The last tests pin that: reset when cruise is off, NO reset while engaged or during a gas override (closed-loop lift-off), the
+release-later freeze is cleared too, an unreadable carControl.enabled is loud and changes nothing, no 20 Hz log, the hold-exit debounce,
 """
 import math
 
@@ -270,7 +270,7 @@ def replay_geo(monkeypatch, ticks, paths, fix=True, dt=DT):
   sm = {"modelV2": object(), "carControl": ns}
   out = []
   for i in range(len(ticks) - 1):
-    ns.longActive = bool(ticks[i][10])                  # selfdriveState.enabled at that tick (stalk / cruise state)
+    ns.enabled = bool(ticks[i][10])                  # selfdriveState.enabled at that tick (stalk / cruise state)
     a, b = ticks[i], ticks[i + 1]
     n = int(round((b[0] - a[0]) / dt))
     for j in range(n):
@@ -325,9 +325,9 @@ def test_the_ramp_cap_never_drops_for_a_point_behind_the_car(monkeypatch):
 
 def test_the_receding_curve_never_latches_hold_in_the_reengage_window(monkeypatch):
   """report 3.5: the manual curve #16 apex passed at 22:49:47 and the receding point held VTSC in `hold` at 34 mph until 22:49:53"""
-  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)      # this test is Bug 1 only: the reset (Bug 2) is off
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self: None)      # this test is Bug 1 only: the reset (Bug 2) is off
   old = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=False)
-  assert sum(1 for r in old if r["state"] == "hold" and r["t"] >= 9.0) < 10                  # with the hold exit; without it: 93 cycles (4.6 s) latched
+  assert sum(1 for r in old if r["state"] == "hold" and r["t"] >= 9.0) < 25                  # with the hold exit; without it: 93 cycles (4.6 s) latched
   new = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=True)
   assert all(_binding_point_is_ahead(r) for r in new)
   assert all(r["state"] != "hold" for r in new if r["t"] >= 9.0)
@@ -342,7 +342,7 @@ def _engaged_cycles(rows):
 
 def test_reengage_window_today_applies_the_manual_curves_cap(monkeypatch):
   """today's code (no mask, no reset) reproduces report 3.5: the engage at 22:49:48.5 lands in `hold` at 34 mph while the car does 54"""
-  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self: None)
   rows = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=False)
   eng = _engaged_cycles(rows)
   assert eng and eng[0]["t"] == pytest.approx(9.0, abs=DT)
@@ -353,7 +353,7 @@ def test_reengage_window_today_applies_the_manual_curves_cap(monkeypatch):
 def test_the_mask_alone_still_leaves_a_stale_cap_on_engage(monkeypatch):
   """Bug 1's filter removes the receding point, but the cap already applied at the moment of the stalk pull (rising slowly out of `release`)
   is still stale: this is why the reset is needed as well"""
-  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self: None)
   rows = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=True)
   first = _engaged_cycles(rows)[0]
   assert first["cap"] / MPH < 45.0 < first["set"] / MPH
@@ -373,7 +373,7 @@ def test_after_the_reengage_there_is_no_cap_from_the_manual_curve(monkeypatch):
 def test_the_ramp_replay_is_unchanged_by_the_reset(monkeypatch):
   """the ramp is an engaged window throughout: the reset must not fire, so the result is exactly the mask-only result"""
   a = replay_geo(monkeypatch, F.RAMP_TICKS, F.RAMP_PATHS, fix=True)
-  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self: None)
   b = replay_geo(monkeypatch, F.RAMP_TICKS, F.RAMP_PATHS, fix=True)
   assert all(x["engaged"] for x in a[20:])
   assert [(x["cap"], x["state"]) for x in a[20:]] == [(x["cap"], x["state"]) for x in b[20:]]
@@ -386,11 +386,11 @@ def _scene(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla"):
   monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis["s"])
   ns = _NS()
   ns.orientationNED = [0.0, 0.0, 0.0]
-  ns.longActive = True
+  ns.enabled = True
   sm = {"modelV2": object(), "carControl": ns}
 
-  def step(n=1, long_active=True, v=30.0, vset=35.0):
-    ns.longActive = long_active
+  def step(n=1, cruise_on=True, v=30.0, vset=35.0):
+    ns.enabled = cruise_on
     cap = None
     for _ in range(n):
       clock[0] += DT
@@ -404,10 +404,10 @@ def test_the_state_machine_is_reset_on_the_engage_edge_and_the_first_engaged_cyc
   ctrl, step, _, _ = _scene(monkeypatch, fp, brand)
   assert step(40) < 35.0 - 0.4                                     # engaged: braking for the curve (cap below the set)
   assert ctrl._state == "brake"
-  step(1, long_active=False)                                       # the driver takes over (cruise off) ...
+  step(1, cruise_on=False)                                       # the driver takes over (cruise off) ...
   assert ctrl._state == "idle" and ctrl._applied == pytest.approx(35.0)
-  assert any("longitudinal not engaged -- dropped state=brake" in m for m in log.lines("info"))
-  assert step(1, long_active=True) == pytest.approx(35.0)          # ... and the very first engaged cycle applies nothing
+  assert any("cruise off -- dropped state=brake" in m for m in log.lines("info"))
+  assert step(1, cruise_on=True) == pytest.approx(35.0)          # ... and the very first engaged cycle applies nothing
 
 
 def test_a_hold_reached_while_driving_by_hand_does_not_survive_the_engage(monkeypatch, log):
@@ -415,30 +415,48 @@ def test_a_hold_reached_while_driving_by_hand_does_not_survive_the_engage(monkey
   step(40)
   ctrl._state, ctrl._applied = "hold", 15.0                       # the report's latch: hold at 35 mph while the driver drives
   for _ in range(60):                                             # the apex recedes for 3 s with cruise off
-    step(1, long_active=False, vset=25.0)
+    step(1, cruise_on=False, vset=25.0)
   assert ctrl._state == "idle" and ctrl._applied == pytest.approx(25.0)
-  assert step(1, long_active=True, v=24.0, vset=25.0) == pytest.approx(25.0)
+  assert step(1, cruise_on=True, v=24.0, vset=25.0) == pytest.approx(25.0)
 
 
 def test_the_release_freeze_state_is_cleared_too(monkeypatch, log):
   ctrl, step, _, _ = _scene(monkeypatch)
   step(5)
   ctrl._rel_latched, ctrl._rel_defer_t0, ctrl._rel_defer_capped = True, 123.0, True
-  step(1, long_active=False)
+  step(1, cruise_on=False)
   assert not ctrl._rel_latched and ctrl._rel_defer_t0 is None and not ctrl._rel_defer_capped
 
 
-def test_a_hold_exits_to_brake_when_the_apex_moves_away_and_stays_while_it_is_close(monkeypatch, log):
+def test_a_hold_exits_to_brake_only_when_the_apex_clearly_moves_away(monkeypatch, log):
   ctrl, step, _, _ = _scene(monkeypatch)
   step(40)
   ctrl._state, ctrl._applied = "hold", 15.0
-  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: (C.A_LAT_TARGET / 225.0, 30.0, 15.0))   # apex 30 m ahead at 30 m/s: tta 1 s
+
+  def vis(d):
+    monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: (C.A_LAT_TARGET / 225.0, d, 15.0))
+  vis(30.0)                                                        # apex 30 m ahead at 30 m/s: tta 1 s
   step(1)
   assert ctrl._state == "hold"                                     # close and still too fast: hold as today
-  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: (C.A_LAT_TARGET / 225.0, 150.0, 15.0))  # apex receded: tta 5 s > HOLD_TTA_S
-  step(1)
+  vis(80.0)                                                        # tta 2.7 s: just above HOLD_TTA_S, inside the margin (Fable F4: hovering apex)
+  step(30)
+  assert ctrl._state == "hold"
+  vis(150.0)                                                       # tta 5 s: clearly receding
+  step(C.HOLD_EXIT_CYCLES - 1)
+  assert ctrl._state == "hold"                                     # debounced
   step(1)
   assert ctrl._state == "brake"
+
+
+def test_a_hover_around_the_hold_edge_never_exits_the_hold(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(40)
+  ctrl._state, ctrl._applied = "hold", 15.0
+  for i in range(60):                                              # alternates far / near every 2 cycles: never HOLD_EXIT_CYCLES in a row
+    d = 150.0 if (i // 2) % 2 == 0 else 60.0
+    monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat, d=d: (C.A_LAT_TARGET / 225.0, d, 15.0))
+    step(1)
+    assert ctrl._state == "hold"
 
 
 def test_no_reset_while_engaged(monkeypatch, log):
@@ -449,29 +467,94 @@ def test_no_reset_while_engaged(monkeypatch, log):
   assert not [m for m in log.lines("info") if "not engaged" in m]
 
 
-def test_the_accelerator_override_counts_as_not_engaged(monkeypatch, log):
-  """carControl.longActive is False while the accelerator overrides openpilot too: same reset, and it comes back cleanly on release"""
-  ctrl, step, _, _ = _scene(monkeypatch)
+def _gas_lift(monkeypatch, t_rel_tta, longactive_is_enabled_and_not_gas=True):
+  """Fable F1, closed loop: set 35, car 30, curve-safe 20, apex 400 m ahead; the driver presses the accelerator at t=3 s (holding 31 m/s)
+  and lifts off t_rel_tta seconds before the apex. carControl.enabled stays True during the override; carControl.longActive is False
+  (controlsd.py:368). Returns (cap at lift-off, car speed at the apex)."""
+  ctrl, clock = make_controller(monkeypatch)
+  vis = {"s": None}
+  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis["s"])
+  ns = _NS()
+  ns.orientationNED = [0.0, 0.0, 0.0]
+  sm = {"modelV2": object(), "carControl": ns}
+  v, d, t, gas, released, cap_rel = 30.0, 400.0, 0.0, False, False, None
+  best = (1e9, v)
+  while d > -50.0 and t < 60.0:
+    tta = d / max(v, 1.0)
+    if not gas and not released and t >= 3.0:
+      gas = True
+    if gas and tta <= t_rel_tta:
+      gas, released = False, True
+    ns.enabled = True
+    ns.longActive = not gas
+    vis["s"] = (C.A_LAT_TARGET / 400.0, d, 20.0) if d >= 0.0 else (0.0, -1.0, float("inf"))
+    clock[0] += DT
+    ctrl._last_read = clock[0]
+    cap = ctrl.cap(sm, 35.0, v)
+    if released and cap_rel is None:
+      cap_rel = cap
+    v += max(min(((31.0 if gas else min(cap, 35.0)) - v) / 1.0, 0.8), -1.5) * DT
+    d -= v * DT
+    t += DT
+    if abs(d) < best[0]:
+      best = (abs(d), v)
+  return cap_rel, best[1]
+
+
+@pytest.mark.parametrize("t_rel", [6.0, 3.0, 2.4, 1.5])
+def test_a_gas_override_lift_off_near_the_apex_keeps_the_cap_that_was_ready(monkeypatch, log, t_rel):
+  """the reset keys on cruise OFF (carControl.enabled), not longActive: a gas-override lift-off must behave exactly as without the reset"""
+  cap_new, v_new = _gas_lift(monkeypatch, t_rel)
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self: None)     # the base behaviour: no reset at all
+  cap_old, v_old = _gas_lift(monkeypatch, t_rel)
+  assert cap_new == pytest.approx(cap_old) and v_new == pytest.approx(v_old)
+  assert cap_new < 35.0 - 1.0                                      # positive control: a cap really was ready at the lift-off
+
+
+def test_the_accelerator_override_does_not_drop_the_state(monkeypatch, log):
+  """carControl.enabled stays True during a gas override (longActive does not): nothing is dropped"""
+  ctrl, step, ns, _ = _scene(monkeypatch)
   step(40)
-  step(1, long_active=False)
-  assert ctrl._state == "idle"
-  step(3, long_active=True)                                        # released the pedal: the curve is still ahead, braking re-arms after the debounce
   assert ctrl._state == "brake"
+  ns.longActive = False
+  step(5)
+  assert ctrl._state == "brake"
+  assert not [m for m in log.lines("info") if "cruise off" in m]
+
+
+def test_the_curve_brain_slew_state_is_cleared_with_cruise_off(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(5)
+  ctrl._cb_applied = 20.0
+  step(1, cruise_on=False)
+  assert ctrl._cb_applied == pytest.approx(35.0)                   # restarted from the set speed (the brain runs after the drop), not the stale 20
+
+
+def test_cruise_off_with_a_twisty_trim_active_does_not_log_every_cycle(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(2, cruise_on=False)
+  n0 = len(log.lines("info"))
+  for i in range(100):                                             # the working cruise (twisty trim) moves every cycle with cruise off
+    step(1, cruise_on=False, vset=35.0 - 0.01 * i)
+  assert len(log.lines("info")) == n0
+  step(40)
+  step(1, cruise_on=False)
+  assert len([m for m in log.lines("info") if "cruise off -- dropped" in m]) == 1     # a real drop still logs once
 
 
 def test_nothing_is_logged_when_there_is_nothing_to_drop(monkeypatch, log):
   ctrl, step, _, _ = _scene(monkeypatch)
-  step(2, long_active=False)                                       # driving by hand from the start, state idle
-  step(2, long_active=False)
+  step(2, cruise_on=False)                                       # driving by hand from the start, state idle
+  step(2, cruise_on=False)
   assert not [m for m in log.lines("info") if "not engaged" in m]
 
 
-def test_an_unreadable_long_active_changes_nothing_and_is_loud(monkeypatch, log):
+def test_an_unreadable_cruise_on_changes_nothing_and_is_loud(monkeypatch, log):
   ctrl, step, ns, sm = _scene(monkeypatch)
   step(40)
-  del ns.longActive
+  del ns.enabled
   for _ in range(5):
     ctrl.cap(sm, 35.0, 30.0)
   assert ctrl._state == "brake"                                    # today's behaviour: treated as engaged, nothing cleared
-  errs = [m for m in log.lines("exception") if "longActive unreadable (AttributeError)" in m]
+  errs = [m for m in log.lines("exception") if "enabled unreadable (AttributeError)" in m]
   assert len(errs) == 1 and "NOT cleared" in errs[0]                # once (rate limited), and it says what it costs

@@ -103,7 +103,7 @@ def _vsm():
   z[16] = VISION_K * V_SET
   model = o(orientationRate=o(z=z, t=[i * 0.25 for i in range(20)]), velocity=o(x=[V_SET] * 20),
             position=o(x=[V_SET * i * 0.25 for i in range(20)]), action=o(shouldStop=False))
-  return {"modelV2": model, "carControl": o(orientationNED=[0.0, 0.0, 0.0], longActive=True)}
+  return {"modelV2": model, "carControl": o(orientationNED=[0.0, 0.0, 0.0], enabled=True)}
 
 
 def _vtsc(fp, brand, params):
@@ -226,7 +226,7 @@ def _ces_run(rain, fp=LIGHTNING, brand="ford", op_long=False, T=14.0):
     model = NS(orientationRate=NS(z=orz, t=ts), velocity=NS(x=vx), position=NS(x=px), action=NS(shouldStop=False),
                meta=NS(laneChangeState="off"))
     sm = {"radarState": NS(leadOne=NS(status=False, vLead=0.0, dRel=0.0, aLeadK=0.0, vLeadK=0.0)),
-          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0], longActive=True)}
+          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0], enabled=True)}
     tgt = next((p for _, k, p in reversed(c.mem_params.puts) if k == "IcbmTarget"), None)
     if tgt and "target" in tgt and i % 30 == 0 and abs(tgt["target"] - st["stock"]) > 0.3:
       st["stock"] += MPH if tgt["target"] > st["stock"] else -MPH

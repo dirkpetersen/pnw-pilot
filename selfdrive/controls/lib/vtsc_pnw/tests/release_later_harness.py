@@ -66,6 +66,7 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, closed=False, **kw):
   monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis["s"])
   ns = _NS()
   ns.orientationNED = [0.0, 0.0, 0.0]
+  ns.enabled = True
   sm = {"modelV2": object(), "carControl": ns}
   out = []
   v_sim = None            # closed loop (Opus model): the car follows min(cap, set) at accel in [-1.5, +0.8] m/s^2, P gain 1

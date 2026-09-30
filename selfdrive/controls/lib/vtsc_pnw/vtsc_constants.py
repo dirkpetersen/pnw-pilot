@@ -47,6 +47,8 @@ A_RELAX         = 1.5   # m/s^2 rate the applied cap eases back UP (apex reached
 # (RELEASE_SPEED_MARGIN) still guards RELEASE, so we only accelerate pre-apex once actually slowed to
 # curve-safe speed -> there's lateral margin at the apex.
 HOLD_TTA_S      = 2.5   # s; reach this far from the apex (~the entrance) at safe speed, then HOLD (stop reducing)
+HOLD_EXIT_MARGIN_S = 0.5  # vtscpass2pnw: a HOLD goes back to BRAKE only when tta > HOLD_TTA_S + this ...
+HOLD_EXIT_CYCLES   = 3    # ... for this many consecutive cycles (no hold<->brake flapping on a hovering apex)
 APEX_TTA_S      = 1.2   # s; begin accelerating out BEFORE the apex (only once at safe speed)
 RELEASE_SPEED_MARGIN = 0.10  # release/hold only when vEgo <= vCurveSafe*(1+this); else keep braking/holding
 APEX_FINISH_S   = 2.5   # s; reach curve-safe speed this long BEFORE the apex (~the entrance = slowest point)
