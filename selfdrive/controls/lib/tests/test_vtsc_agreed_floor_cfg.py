@@ -135,3 +135,10 @@ def test_a_typo_mid_drive_keeps_the_last_good_value(cfg, log):
   assert _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": "flase"}}, t._tesla_cfg_poll + 1.0) is False
   assert t.vtsc_agreed_floor is False                                                  # the last good value, not the default (True)
   assert any("NOT applied" in e for e in log.at("error"))
+
+
+def test_a_rejected_reload_names_the_agreed_floor_in_the_log(cfg, log):
+  cfg({"tesla": {"vtsc_agreed_floor": False}})
+  t = tesla()
+  _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": "flase"}}, t._tesla_cfg_poll + 1.0)
+  assert any("agreed_floor=False" in e for e in log.at("error"))

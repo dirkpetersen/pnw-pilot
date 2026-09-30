@@ -43,7 +43,7 @@ def secs(hms: str) -> float:
   return int(h) * 3600 + int(m) * 60 + int(s)
 
 
-def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", agreed_floor=None, gps_age=None):
+def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", agreed_floor=None, gps_age=1.4):
   """A real VTSCController (Standard mode, map curves ON) on a fake clock; returns (ctrl, clock list)."""
   clock = [1000.0]
   monkeypatch.setattr(VC.time, "monotonic", lambda: clock[0])
@@ -90,7 +90,7 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, **kw):
       ctrl._map_targets = pts
       ctrl._cur_lat, ctrl._cur_lon, ctrl._cur_bearing = LAT0, LON0, 0.0
       ctrl._last_read = clock[0]
-      if getattr(ctrl, "_gps_age_override", None) is not None:
+      if ctrl._gps_age_override is not False:          # False = a position with NO fix_ts
         ctrl._gps_fix_ts = clock[0] - ctrl._gps_age_override
       if vv > 0.0 and vd >= 0.0:
         k = C.A_LAT_TARGET / (vv * vv)

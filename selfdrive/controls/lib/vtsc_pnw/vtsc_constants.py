@@ -124,8 +124,9 @@ AGREED_FLOOR_MARGIN = 1.0   # m/s above the agreed curve speed
 # The camera's apex and the map point are the SAME curve only when they are close: a far map node beside a near camera curve is not
 # an agreement. |map point distance - camera apex distance| must be within this (m; ~3.5 s at 75 mph) or the old floor stays.
 AGREED_FLOOR_PAIR_M = 150.0
-# A map position older than this (s, from LastGPSPosition fix_ts; normal reads are ~1.4 s) is stale -> the old floor.
-AGREED_FLOOR_GPS_MAX_AGE_S = 5.0
+# A map position older than this (s, from LastGPSPosition fix_ts; normal reads are ~1.4 s, 2.5 s ~ 90 m of lag at 80 mph, inside the
+# 150 m pairing window) is stale -> the old floor. A position with NO fix_ts is stale too.
+AGREED_FLOOR_GPS_MAX_AGE_S = 2.5
 
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
 # Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a

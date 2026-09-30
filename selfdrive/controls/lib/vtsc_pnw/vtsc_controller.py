@@ -90,6 +90,7 @@ class VTSCController:
     # vtscfloor2pnw: which floor the selected map curve got (vtscFloor / vtscFloorWhy / vtscAgreed telemetry) + its log state
     self._tele_floor = self._tele_agreed = 0.0
     self._tele_floor_why = ""
+    self._tele_floor_skip = ""
     self._floor_log_t = None       # monotonic time of the last logged "floor -> agreed" transition (None = never)
     self._floor_prev_why = ""
     self._floor_skip_t = None      # ...of the last logged abnormal skip (NaN input / stale GPS)
@@ -345,7 +346,9 @@ class VTSCController:
                     self._tele_floor, self._tele_agreed, C.AGREED_FLOOR_MARGIN)
       self._floor_log_t = now
     self._floor_prev_why = why
-    skip = gate_skip or (str(info.get("skip", "")) if str(info.get("skip", "")) == "nonfinite" else "")
+    self._tele_floor_skip = (gate_skip or str(info.get("skip", ""))) if why == "set10" else ""
+    # only a floored map curve was actually affected (no fix / no map curve at all is normal and stays unlogged)
+    skip = (gate_skip or (str(info.get("skip", "")) if str(info.get("skip", "")) == "nonfinite" else "")) if why else ""
     if skip:
       self._floor_skip_n += 1
       if self._floor_skip_t is None or now - self._floor_skip_t >= TWISTY_ERR_LOG_S:
@@ -430,7 +433,9 @@ class VTSCController:
     agree_margin, gate_skip = -1.0, ""
     if self.veh.vtsc_agreed_floor:
       age = self._tele_gps_age
-      if age is not None and not (0.0 <= age <= C.AGREED_FLOOR_GPS_MAX_AGE_S):
+      if age is None:
+        gate_skip = "gpsNoFix"                     # a position with no fix time cannot be shown fresh: treated as stale
+      elif not (0.0 <= age <= C.AGREED_FLOOR_GPS_MAX_AGE_S):
         gate_skip = "gpsStale"                     # a stale (or future-dated) fix: the map distances are not trustworthy
       else:
         agree_margin = C.AGREED_FLOOR_MARGIN
@@ -497,6 +502,7 @@ class VTSCController:
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     self._tele_floor = self._tele_agreed = 0.0      # vtscfloor2pnw: per tick, like the rest
+    self._tele_floor_skip = ""
     self._tele_rel_defer = ""
     self._tele_floor_why = ""
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
@@ -955,6 +961,7 @@ class VTSCController:
         # getattr: permissive test stubs build the payload without the state (like _tele_cb below).
         "vtscFloor": round(float(getattr(self, "_tele_floor", 0.0)), 1) if getattr(self, "_tele_floor_why", "") else None,
         "vtscFloorWhy": str(getattr(self, "_tele_floor_why", "")),
+        "vtscFloorSkip": str(getattr(self, "_tele_floor_skip", "")),
         "vtscRelDefer": str(getattr(self, "_tele_rel_defer", "")),
         "vtscAgreed": (round(float(getattr(self, "_tele_agreed", 0.0)), 1)
                        if getattr(self, "_tele_floor_why", "") == "agreed" else None),

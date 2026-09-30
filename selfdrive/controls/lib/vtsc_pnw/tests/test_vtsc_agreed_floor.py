@@ -255,6 +255,33 @@ def test_stale_gps_falls_back_to_the_old_floor_and_logs(monkeypatch):
   assert any(r["why"] == "agreed" for r in fresh)
 
 
+def test_a_position_with_no_fix_time_is_treated_as_stale(monkeypatch):
+  lg = _Log()
+  monkeypatch.setattr(VC, "cloudlog", lg)
+  rows = H.replay(monkeypatch, EARLY, agreed_floor=True, gps_age=False)
+  assert not any(r["why"] == "agreed" for r in rows)
+  assert {r["pay"]["vtscFloorSkip"] for r in rows if r["why"] == "set10"} == {"gpsNoFix"}
+  assert any("(gpsNoFix)" in m for m in lg.at("error"))
+
+
+def test_gps_age_limit_is_inside_the_pairing_window(monkeypatch):
+  assert C.AGREED_FLOOR_GPS_MAX_AGE_S * 36.0 < C.AGREED_FLOOR_PAIR_M          # lag in metres at 80 mph
+  monkeypatch.setattr(VC, "cloudlog", _Log())
+  assert any(r["why"] == "agreed" for r in H.replay(monkeypatch, EARLY, agreed_floor=True, gps_age=2.4))
+  rows = H.replay(monkeypatch, EARLY, agreed_floor=True, gps_age=2.6)
+  assert not any(r["why"] == "agreed" for r in rows)
+
+
+def test_floor_skip_telemetry_names_why_set10_stayed(monkeypatch):
+  monkeypatch.setattr(VC, "cloudlog", _Log())
+  none = H.replay(monkeypatch, _synthetic(36.0, 38.0, 0.0, -1.0, [(300.0, 23.0)], 1), agreed_floor=True)
+  assert none[0]["pay"]["vtscFloorSkip"] == "novision"
+  unp = H.replay(monkeypatch, _synthetic(36.0, 38.0, 24.0, 60.0, [(400.0, 23.0)], 1), agreed_floor=True)
+  assert unp[0]["pay"]["vtscFloorSkip"] == "unpaired"
+  ok = H.replay(monkeypatch, _synthetic(36.0, 38.0, 26.0, 280.0, [(300.0, 25.0)], 1), agreed_floor=True)
+  assert ok[0]["pay"]["vtscFloorSkip"] == "" and ok[0]["pay"]["vtscFloorWhy"] == "agreed"
+
+
 def test_future_dated_gps_fix_is_stale(monkeypatch):
   monkeypatch.setattr(VC, "cloudlog", _Log())
   rows = H.replay(monkeypatch, EARLY, agreed_floor=True, gps_age=-3.0)
@@ -272,6 +299,7 @@ def test_nan_camera_input_falls_back_and_logs(monkeypatch):
   ctrl._cur_lat, ctrl._cur_lon, ctrl._cur_bearing = H.LAT0, H.LON0, 0.0
   for _ in range(5):
     clock[0] += DT
+    ctrl._gps_fix_ts = clock[0] - 1.4
     ctrl._last_read = clock[0]
     cap = ctrl.cap({"modelV2": object(), "carControl": ns}, 38.0, 36.0)
     assert math.isfinite(cap)

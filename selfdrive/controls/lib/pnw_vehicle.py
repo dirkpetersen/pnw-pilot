@@ -512,9 +512,9 @@ def _load_tesla_curve_config() -> dict:
       else:
         cfg["curve_brain"] = mode
     if "vtsc_agreed_floor" in tesla:
-      # vtscfloor2pnw kill switch: true / false (0 / 1 accepted). Anything else is a `bad` key like any other: the section is not
-      # honoured (mid-drive: the last good config is kept; at start: curve_brain falls to CURVE_BRAIN_CORRUPT), and the smarter
-      # floor is OFF (today's set-10 floor) until the file is valid.
+      # vtscfloor2pnw kill switch: true / false (0 / 1 accepted). Anything else is a `bad` key like any other: at START the section
+      # is not honoured (curve_brain falls to CURVE_BRAIN_CORRUPT) and the smarter floor is OFF (today's set-10 floor); MID-DRIVE the
+      # reload is rejected and the LAST GOOD config (including this switch) is kept -- see refresh_curve_brain_cfg.
       raw = tesla["vtsc_agreed_floor"]
       if isinstance(raw, bool):
         cfg["agreed_floor"] = raw
@@ -1090,7 +1090,8 @@ class PnwVehicle:
       new = _load_tesla_curve_config()
       if not _tesla_cfg_is_honored(new) and self._tesla_cfg_good:
         cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
-                       f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']}")
+                       f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} " +
+                       f"agreed_floor={old['agreed_floor']}")
         self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
         return False
       self._tesla_curve_cfg = new
@@ -1121,7 +1122,7 @@ class PnwVehicle:
   def vtsc_agreed_floor(self) -> bool:
     """vtscfloor2pnw: may VTSC shrink its set-10 map floor to the curve speed both the map and the camera ask for? The Raven
     (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_agreed_floor is not switched off; False on every other car,
-    so the Lightning's VTSC is byte-unchanged."""
+    so the Lightning's VTSC is byte-unchanged. The same switch also gates VTSC's release-later deferral (vtscRelDefer)."""
     return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["agreed_floor"])
 
   @property
