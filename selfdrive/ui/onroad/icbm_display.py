@@ -129,11 +129,12 @@ class IcbmMaxDisplay:
     st = self._st if isinstance(self._st, dict) else {}
     phase = st.get("icbmPhase")
     t = _num(st.get("icbmT"))
-    if phase in ("cap", "gas") and t is not None:
+    if phase == "cap" and t is not None:      # NOT gas: a target forwarded during gas is never tapped by the executor
       self._ref_target = t if self._ref_target is None else min(self._ref_target, t)   # lowest target this episode
-    elif phase in ("idle", None):
-      self._ref_target = None                   # episode over
-      self._held = None
+    elif phase in ("idle", None, "restore"):  # restore -> cap is always a NEW episode in ces_pnw (reset() clears its min)
+      self._ref_target = None
+      if phase != "restore":
+        self._held = None
     value, reason = max_speed_display(cluster_kph, self._st, self._wall(), capable, self._ref_target)
     now = self._clock()
     if reason is None and value != cluster_kph:

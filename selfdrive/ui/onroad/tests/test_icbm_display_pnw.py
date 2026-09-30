@@ -357,3 +357,32 @@ def test_held_gas_value_is_forgotten_at_idle():
   t[0] += 0.3
   mem.st = status("gas", t=None)
   assert m.choose(52 * KPH_PER_MPH, True) == pytest.approx(52 * KPH_PER_MPH)   # no stale 60 resurrected
+
+
+class TestReferenceScope:
+  def _mk(self):
+    mem, t = FakeMem(None), [0.0]
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+
+    def feed(phase, c, tgt, cluster_mph):
+      mem.st = {"icbmPhase": phase, "icbmC": c * MPH if c else None, "ts": NOW,
+                "icbmT": tgt * MPH if tgt else None, "icbmRCap": 0.0}
+      t[0] += 0.3
+      return m.choose(cluster_mph * KPH_PER_MPH, True) / KPH_PER_MPH
+    return feed
+
+  def test_a_target_forwarded_during_gas_is_not_the_reference(self):
+    feed = self._mk()
+    assert feed("cap", 60, 50, 50) == pytest.approx(60)      # ICBM taps the set to 50
+    feed("gas", 60, 40, 55)                                  # forwarded 40 while the pedal is down
+    assert feed("cap", 60, 50, 50) == pytest.approx(60)      # lifted: set back at 50, still ICBM's
+    assert feed("cap", 60, 50, 45) == pytest.approx(45)      # driver SET- to 45 -> fall back
+
+  def test_restore_then_a_new_cap_starts_a_new_episode(self):
+    feed = self._mk()
+    assert feed("cap", 60, 40, 40) == pytest.approx(60)      # episode 1 bottoms at 40
+    feed("restore", 60, None, 50)
+    feed("restore", 60, None, 55)
+    assert feed("cap", 55, 50, 55) == pytest.approx(55)      # re-latch C=55
+    assert feed("cap", 55, 50, 50) == pytest.approx(55)      # tapped to 50
+    assert feed("cap", 55, 50, 45) == pytest.approx(45)      # driver sets 45 -> fall back, not 55
