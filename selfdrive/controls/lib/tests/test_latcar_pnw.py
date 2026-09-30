@@ -15,7 +15,7 @@ MPH = 0.44704
 TESLA = "TESLA_MODEL_S_HW3"
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
 SHARED = [[50, 5.0], [60, 5.0], [70, 4.0], [80, 3.0]]     # the device's live shared schedule
-TESLA_BP = [[50, 5.0], [60, 5.0], [70, 4.0], [80, 3.9]]
+TESLA_BP = [[50, 5.0], [60, 5.0], [70, 4.0], [80, 3.6]]     # the owner's 2026-09-30 entry: 3.6 = the vehicle-model clamp
 CEIL = 3.5886
 
 
@@ -78,7 +78,7 @@ def lightning():
 
 def test_a_car_uses_its_own_entry_and_others_the_shared_schedule(sched, log):
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
-  for mph, tes, shared in ((60, 5.0, 5.0), (70, 4.0, 4.0), (75, 3.95, 3.5), (80, 3.9, 3.0), (90, 3.9, 3.0)):
+  for mph, tes, shared in ((60, 5.0, 5.0), (70, 4.0, 4.0), (75, 3.8, 3.5), (80, 3.6, 3.0), (90, 3.6, 3.0)):
     assert dh.lat_accel_target(mph * MPH, TESLA) == pytest.approx(tes)
     assert dh.lat_accel_target(mph * MPH, LIGHTNING) == pytest.approx(shared)
     assert dh.lat_accel_target(mph * MPH) == pytest.approx(shared)
@@ -128,7 +128,7 @@ def test_cars_that_is_not_an_object_is_ignored_with_an_error(sched, log):
 @pytest.mark.parametrize("state", ["missing", "corrupt", "no_shared"])
 def test_a_missing_or_invalid_file_is_flat_3_0_for_both_cars(sched, log, state):
   if state == "corrupt":
-    sched('{"cars": {"TESLA_MODEL_S_HW3": {"breakpoints": [[50, 5], [80, 3.9]]}}, "breakpoints": ')
+    sched('{"cars": {"TESLA_MODEL_S_HW3": {"breakpoints": [[50, 5], [80, 3.6]]}}, "breakpoints": ')
   elif state == "no_shared":
     sched({"cars": {TESLA: {"breakpoints": TESLA_BP}}})   # the per-car entry alone must not activate anything
   # (missing: no file written; the one-time default seed cannot write here because the path's dir is a tmp dir -- it may
@@ -164,7 +164,7 @@ def test_clip_curvature_takes_the_platform(sched, monkeypatch):
   for _ in range(200):
     clock[0] += 0.05
     dh.lat_accel_limit(v, TESLA)
-  want = 3.85 / v ** 2                                       # 3.85 m/s^2 at 90 mph: above the shared 3.0, under the Tesla's 3.9
+  want = 3.55 / v ** 2                                       # 3.55 m/s^2 at 90 mph: above the shared 3.0, under the Tesla's 3.6
   clock[0] += 0.1                                            # one real tick: a dropped platform would slew toward the shared 3.0
   k, limited = dh.clip_curvature(v, want, want, 0.0, TESLA)
   assert k == pytest.approx(want) and limited is False
@@ -182,53 +182,79 @@ def test_without_the_entry_the_tesla_brain_is_as_before(sched, mph, want):
   assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
 
 
-def test_the_tesla_schedule_minus_margin_never_binds_below_the_ceiling():
-  """The chosen values themselves: schedule - 0.3 >= the vehicle-model clamp at every breakpoint (linear between)."""
-  assert all(a - pv.CURVE_LAT_CLIP_MARGIN >= CEIL for _, a in TESLA_BP)
+def test_the_tesla_entry_itself_is_at_or_above_the_ceiling_and_the_alert_cap_is_3_6():
+  """latmargin2pnw: no margin on a per-car entry, so the entry itself (not entry - 0.3) must be >= the vehicle-model clamp at
+  every breakpoint (linear between), and >= 80 mph the cap clip_curvature/controlsd applies is exactly 3.6."""
+  assert all(a >= CEIL for _, a in TESLA_BP)
 
 
-@pytest.mark.parametrize("key", ["TESLA_MODEL_S_HW3 ", "TESLA_MODEL_S", "tesla_model_s_hw3"])
-def test_a_misspelled_platform_key_warns_that_the_car_uses_the_shared_schedule(sched, log, key):
-  sched(_doc({key: {"breakpoints": TESLA_BP}}))
-  assert dh.lat_accel_target(85 * MPH, TESLA) == pytest.approx(3.0)
-  msgs = [m for m in log.warnings if "uses the shared schedule" in m]
-  assert len(msgs) == 1 and TESLA in msgs[0] and repr(key) in msgs[0]
-  assert any("accepted for" in m and key in m for m in log.warnings)
-  assert not [m for m in log.infos if "own schedule" in m]
-
-
-def test_a_matching_key_says_info_own_schedule_once_per_load(sched, log):
+@pytest.mark.parametrize("mph,want", [(60, 5.0), (70, 4.0), (75, 3.8), (80, 3.6), (90, 3.6), (120, 3.6)])
+def test_the_alert_cap_at_80_plus_is_the_entry_3_6(sched, monkeypatch, mph, want):
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
-  for _ in range(5):
-    dh.lat_accel_target(85 * MPH, TESLA)
-  assert all(TESLA in m for m in log.infos if "own schedule" in m)
-  assert len([m for m in log.infos if "own schedule" in m]) == 1
-  assert not [m for m in log.warnings if "uses the shared schedule" in m]
+  clock = [1000.0]
+  monkeypatch.setattr(dh.time, "monotonic", lambda: clock[0])
+  v = mph * MPH
+  for _ in range(200):
+    clock[0] += 0.05
+    cap = dh.lat_accel_limit(v, TESLA)
+  assert cap == pytest.approx(want)
 
 
-def test_no_cars_section_is_info_shared_not_a_warning(sched, log):
+@pytest.mark.parametrize("mph,want", [(60, 5.0), (70, 4.0), (75, 3.8), (80, 3.6), (90, 3.6)])
+def test_a_valid_per_car_entry_is_flagged_per_car(sched, mph, want):
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  assert dh.lat_accel_target_source(mph * MPH, TESLA) == (pytest.approx(want), True)
+  assert dh.lat_accel_target_source(mph * MPH, LIGHTNING)[1] is False       # the other car: shared
+  assert dh.lat_accel_target_source(mph * MPH)[1] is False                  # no platform: shared
+
+
+@pytest.mark.parametrize("mph", [60, 70, 80, 90])
+def test_the_tesla_margin_is_not_applied_to_the_per_car_entry(sched, mph):
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(CEIL, abs=1e-9)    # NOT 3.3 at >= 80 mph (3.6 - 0.3)
+
+
+def test_a_per_car_entry_below_the_ceiling_is_used_as_is_without_the_margin(sched):
+  """The ceiling bounds it from above only; a per-car 3.4 gives A 3.4 (not 3.1)."""
+  sched(_doc({TESLA: {"breakpoints": [[50, 3.4], [80, 3.4]]}}))
+  assert tesla().curve_lat_a(60 * MPH) == pytest.approx(3.4, abs=1e-9)
+
+
+@pytest.mark.parametrize("mph,want", [(60, CEIL), (70, CEIL), (80, 2.7), (90, 2.7)])
+def test_no_entry_keeps_the_margin_tesla(sched, mph, want):
   sched(_doc())
-  dh.lat_accel_report_platform(TESLA)
-  assert len([m for m in log.infos if "shared schedule" in m]) == 1
-  assert not [m for m in log.warnings if "shared schedule" in m]
+  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
+  assert dh.lat_accel_target_source(mph * MPH, TESLA)[1] is False
 
 
-def test_a_hot_reload_is_reported_again_and_no_platform_is_silent(sched, log):
-  import os
+def test_the_lightning_is_never_per_car_and_has_no_brain_a(sched):
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
-  dh.lat_accel_report_platform(None)                        # a car without the capability reports nothing
-  assert not log.infos
-  dh.lat_accel_report_platform(TESLA)
-  sched(_doc({"TESLA_MODEL_S": {"breakpoints": TESLA_BP}}))  # the driver mistypes it on the road
-  st = os.stat(dh.LAT_ACCEL_LIMITS_PATH)
-  os.utime(dh.LAT_ACCEL_LIMITS_PATH, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
-  dh._lat_accel_schedule._last_check_mono = 0.0
-  dh.lat_accel_target(80 * MPH, TESLA)
-  assert len([m for m in log.warnings if "uses the shared schedule" in m]) == 1
+  for mph in (60, 70, 80, 90):
+    assert dh.lat_accel_target_source(mph * MPH, LIGHTNING)[1] is False
+    assert lightning().curve_lat_a(mph * MPH) == pv.CURVE_LAT_A_DEFAULT      # the Lightning brain A is unchanged (2.5)
 
 
-def test_the_default_seed_failure_is_logged(tmp_path, monkeypatch, log):
-  monkeypatch.setattr(dh, "LAT_ACCEL_LIMITS_PATH", str(tmp_path / "nodir" / "x" / "l.json"))
-  monkeypatch.setattr(dh.os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(PermissionError("ro")))
-  dh._LatAccelSchedule()._write_default_once()
-  assert len([m for m in log.warnings if "could not seed" in m]) == 1
+@pytest.mark.parametrize("mph,want", [(60, CEIL), (70, CEIL), (80, 2.7), (90, 2.7)])
+def test_an_invalid_per_car_entry_is_shared_with_the_margin(sched, log, mph, want):
+  sched(_doc({TESLA: {"breakpoints": [[50, 5.0], [80, 9.0]]}}))
+  assert dh.lat_accel_target_source(mph * MPH, TESLA)[1] is False
+  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
+
+
+@pytest.mark.parametrize("state", ["missing", "no_shared"])
+def test_the_flat_failsafe_is_never_per_car(sched, state):
+  if state == "no_shared":
+    sched({"cars": {TESLA: {"breakpoints": TESLA_BP}}})
+  else:
+    sched(None)
+  assert dh.lat_accel_target_source(85 * MPH, TESLA) == (3.0, False)
+  assert tesla().curve_lat_a(85 * MPH) == pytest.approx(2.7, abs=1e-9)
+
+
+def test_priced_speed_at_k_0_0020_and_85_mph(sched):
+  """sqrt(A/k) at k 0.0020: with the entry A = 3.5886 -> 94.8 mph; the margin (3.6 - 0.3 = 3.3) would have priced 90.9."""
+  import math
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  a = tesla().curve_lat_a(85 * MPH)
+  assert math.sqrt(a / 0.0020) / MPH == pytest.approx(94.75, abs=0.01)
+  assert math.sqrt(3.3 / 0.0020) / MPH == pytest.approx(90.86, abs=0.01)

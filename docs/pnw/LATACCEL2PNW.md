@@ -229,6 +229,17 @@ adjacent finding made while reading `toggles.py` for the lane-centering hot-relo
 the top-level `breakpoints`. A car (`PnwVehicle.curve_override_platform`) uses its own entry when present and valid, else the
 shared `breakpoints` (the Lightning has no entry: unchanged). An invalid entry is dropped with a `cloudlog.error` and that car
 uses the SHARED schedule; a missing/invalid file is flat 3.0 for every car. The shared `breakpoints` are still required.
-The Tesla entry `[[50,5.0],[60,5.0],[70,4.0],[80,3.9]]` keeps `schedule - 0.3 >= 3.5886` (the vehicle-model angle clamp,
-opendbc `lateral.py` `apply_steer_angle_limits_vm`, panda-enforced), so the clamp is the binding limit on the Tesla at every
-speed. The file is never seeded with this entry (`_write_default_once` is unchanged): it is installed by hand.
+The Tesla entry (owner 2026-09-30) is `"cars": {"TESLA_MODEL_S_HW3": {"breakpoints": [[50,5.0],[60,5.0],[70,4.0],[80,3.6]]}}`:
+3.6 at >= 80 mph is the vehicle-model angle clamp (opendbc `lateral.py` `apply_steer_angle_limits_vm`, panda-enforced; 3.5886 is its
+exact value), so controlsd's `clip_curvature` cap is 3.6 there. Alert path (line numbers at latmargin2pnw): `controlsd.py`:437 `clip_curvature(...,
+self._lat_accel_platform)` -> `curvature_limited`, passed at :444 to `LaC.update`; `latcontrol_angle.py`:27-34 computes `angle_control_saturated`
+and calls `_check_saturation(..., curvature_limited)`; `latcontrol.py`:22-29 accumulates `sat_time` (needs `vEgo > sat_check_min_speed`, no safety limit,
+no steering press) and sets `lac_log.saturated`; `selfdrived.py`:596-598 adds `steerSaturated` when undershooting + turning + `saturated`
+('Turn Exceeds Steering Limit', `events.py`:729). So the alert fires when the requested curvature reaches the 3.6 clip, not ~0.3 below it.
+
+**latmargin2pnw:** the curve brain (`PnwVehicle.curve_lat_a`) subtracts `CURVE_LAT_CLIP_MARGIN` (0.3) from the SHARED schedule only.
+A value from a valid per-car entry is used as is (the entry is chosen at the clamp), and the steering ceiling
+(min(3.6, 3.5886) = 3.5886) still bounds it: A = min(cfg 4.0, per-car schedule, 3.5886) = 3.5886 at every speed (60/70 mph: entry 5.0/4.0;
+75 mph: 3.8; >= 80 mph: 3.6, all >= 3.5886). With no or an invalid per-car entry, the Lightning and other cars keep the margin
+(shared 3.0 at >= 80 mph -> A 2.7). `drive_helpers.lat_accel_target_source()` returns `(target, per_car)`.
+The file is never seeded with this entry (`_write_default_once` is unchanged): it is installed by hand.

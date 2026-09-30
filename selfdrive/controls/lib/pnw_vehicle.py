@@ -17,7 +17,7 @@ import time
 from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
 from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
 from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import MODES as SHAPE_MODES   # curveshape2pnw
-from openpilot.selfdrive.controls.lib.drive_helpers import lat_accel_target   # curvebrain2pnw: curve_lat_a's clip
+from openpilot.selfdrive.controls.lib.drive_helpers import lat_accel_target_source   # curvebrain2pnw: curve_lat_a's clip
 
 # curveslow-lightning: mph<->m/s (no numpy — a plain float; numpy leaked into a capnp setter and
 # crash-looped card, 2026-07-11).
@@ -364,9 +364,10 @@ CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning'
 # 4.0"; a human reached 5.16, openpilot-steered 3.61 verified). THIS IS A SPEED TARGET, NOT A STEERING CAPABILITY. Steering
 # stays bounded elsewhere and a higher target can run into those limits: (1) the lataccel2pnw lateral cap, which
 # curve_lat_a() keeps as min(target, lat_accel_target(v) - 0.3), so on the SHARED schedule 4.0 is EFFECTIVELY 3.7 at 70 mph
-# and 2.7 at >= 80 mph (and flat 3.0 - 0.3 = 2.7 without a valid schedule file). latcar2pnw: the Tesla has its own "cars"
-# entry in lataccel_limits.json ([[50,5],[60,5],[70,4],[80,3.9]]: schedule - 0.3 >= 3.5886 everywhere), so with it (1) never
-# binds; (2) the Tesla vehicle model's steering-angle limit (~14.4
+# and 2.7 at >= 80 mph (and flat 3.0 - 0.3 = 2.7 without a valid schedule file). latcar2pnw/latmargin2pnw: the Tesla has its
+# own "cars" entry in lataccel_limits.json ([[50,5],[60,5],[70,4],[80,3.6]]); a value from a valid per-car entry is NOT reduced
+# by the 0.3 margin (the entry is chosen at the clamp), so with it (1) never binds below the steering clamp;
+# (2) the Tesla vehicle model's steering-angle limit (~14.4
 # deg at 70 mph in the Terwilliger left curve: 2026-09-28 22:35 the applied angle stalled at the model limit, the car
 # drifted wide, "Turn Exceeds Steering Limit"); (3) the EPS torque abort (2.7-3.8 Nm). Nothing here may command a speed
 # that assumes more lateral acceleration than those allow -- STRICTLY, only (1) is kept: curve_lat_a()'s min() clips at (1) and at
@@ -375,7 +376,8 @@ CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning'
 # (ces_pnw/curve_brain.py). (3) is a limit nothing here can see.
 TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
 _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
-CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own lateral clip (lat_accel_target)
+CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own SHARED lateral clip (lat_accel_target);
+#                                    not applied to a valid per-car entry (latmargin2pnw)
 CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
 # curvebrain2b2pnw: the Tesla's DEFAULT mode is ACTING -- "lower" (T2: lower-only against VTSC's own cap, at rows of the curve DB
 # with authority). Owner, 2026-09-28: "i don't want shadow, make the tesla use the curve db". This overrides the design's
@@ -1054,21 +1056,24 @@ class PnwVehicle:
     """The lateral accel (m/s^2) the shared curve brain prices a curve at on this car (design s3.4).
 
     Tesla (curve_brain_vtsc): curve.json tesla.curve_lat_a (default 4.0, bounds [2.0, 4.5]), capped at openpilot's own
-    lateral clip at this speed minus CURVE_LAT_CLIP_MARGIN -- the UNSLEWED lataccel2pnw schedule (the Tesla's own "cars"
-    entry when the file has a valid one, latcar2pnw: 3.9 at >= 80 mph, so this term is >= 3.6 and never binds; else the
-    shared 4.0 at 70 mph, 3.0 at >= 80 mph; flat 3.0 without a valid schedule file), so the target sits below where
-    the clip saturates.
+    lateral clip at this speed -- the UNSLEWED lataccel2pnw schedule -- and at the steering ceiling. Two cases for the clip:
+    the Tesla's own valid "cars" entry in lataccel_limits.json (latcar2pnw; owner 2026-09-30: [[50,5],[60,5],[70,4],[80,3.6]],
+    3.6 = the vehicle-model clamp, so controlsd's clip_curvature -- and the 'Turn Exceeds Steering Limit' alert -- act at the
+    car's real limit) is used AS IS, no margin (latmargin2pnw: the value is chosen at the clamp; the ceiling below still
+    bounds it); the shared schedule (no/invalid per-car entry, the Lightning, other cars) keeps the margin exactly as before:
+    lat_accel_target(v) - CURVE_LAT_CLIP_MARGIN (shared 4.0 at 70 mph, 3.0 at >= 80 mph; flat 3.0 without a valid file).
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
     min(3.6 owner, MAX_LATERAL_ACCEL 3.5886), zero margin -- see the comment above it), so the owner's requested 4.0 is
-    clipped to 3.59 while the schedule allows it: with the Tesla's per-car entry [[50,5],[60,5],[70,4],[80,3.9]] that is at
-    EVERY speed (A = 3.5886). Without that entry (shared device schedule [[50,5],[60,5],[70,4],[80,3]]) up to ~71 mph, then
+    clipped to 3.59 while the schedule allows it: with the Tesla's per-car entry that is at EVERY speed (A = 3.5886).
+    Without that entry (shared device schedule [[50,5],[60,5],[70,4],[80,3]]) up to ~71 mph, then
     3.5 at 72 mph ... 2.7 from 80 mph; without a schedule file the clip is a flat 2.7.
     Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
     Lightning it is for the brain's future need layer only: ICBM keeps its own knobs (VTSC_A_LAT, curvedb_v2_lat_a,
     icbm_shape_lat_a(_70), the restore-hold bars)."""
     if not self.curve_brain_vtsc:
       return CURVE_LAT_A_DEFAULT
-    return min(self._tesla_curve_cfg["curve_lat_a"], lat_accel_target(v_ego, self.curve_override_platform) - CURVE_LAT_CLIP_MARGIN,
+    clip, per_car = lat_accel_target_source(v_ego, self.curve_override_platform)
+    return min(self._tesla_curve_cfg["curve_lat_a"], clip if per_car else clip - CURVE_LAT_CLIP_MARGIN,
                _tesla_steer_lat_ceiling())
 
   def refresh_curve_brain_cfg(self, now: float | None = None) -> bool:

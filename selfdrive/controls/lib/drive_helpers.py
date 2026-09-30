@@ -335,6 +335,11 @@ class _LatAccelSchedule:
     """The UNSLEWED cap at this speed: the loaded schedule, or the flat fail-safe. limit() slews toward it.
     curvebrain2pnw: split out of limit() unchanged (same statements, same order) so the curve brain can read the
     schedule without moving the slew state clip_curvature owns."""
+    return self.target_and_source(v_ego, platform)[0]
+
+  def target_and_source(self, v_ego: float, platform: str | None = None) -> tuple[float, bool]:
+    """(target, per_car): target as target() returns it; per_car is True only when it was read from `platform`'s OWN valid
+    "cars" entry (never for the shared schedule, the flat fail-safe, or an unusable v_ego). latmargin2pnw."""
     self._refresh()
     self.report_platform(platform)
 
@@ -343,14 +348,17 @@ class _LatAccelSchedule:
     except (TypeError, ValueError):
       v_ego_f = float("nan")
 
+    per_car = False
     if self._xs is None or not math.isfinite(v_ego_f):
       target = MAX_LATERAL_ACCEL_NO_ROLL
     else:
-      xs, ys = self._cars.get(platform, (self._xs, self._ys)) if platform is not None else (self._xs, self._ys)
+      per_car = platform is not None and platform in self._cars
+      xs, ys = self._cars[platform] if per_car else (self._xs, self._ys)
       target = float(np.interp(v_ego_f, xs, ys))
       if not math.isfinite(target):
         target = MAX_LATERAL_ACCEL_NO_ROLL
-    return float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP))
+        per_car = False
+    return float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP)), per_car
 
   def limit(self, v_ego: float, platform: str | None = None) -> float:
     """Returns the slewed effective cap. LAT_ACCEL_SLEW_RATE-limits the move toward the freshly
@@ -398,6 +406,12 @@ def lat_accel_target(v_ego: float, platform: str | None = None) -> float:
   same one-time default seed, as limit()). Same fail-safe (flat MAX_LATERAL_ACCEL_NO_ROLL without a valid file), same
   clamp, never raises. curvebrain2pnw: PnwVehicle.curve_lat_a."""
   return _lat_accel_schedule.target(v_ego, platform)
+
+
+def lat_accel_target_source(v_ego: float, platform: str | None = None) -> tuple[float, bool]:
+  """latmargin2pnw: (lat_accel_target(v_ego, platform), True iff that value came from `platform`'s own valid "cars" entry).
+  PnwVehicle.curve_lat_a uses the flag to skip CURVE_LAT_CLIP_MARGIN: a per-car value is chosen AT the car's clamp."""
+  return _lat_accel_schedule.target_and_source(v_ego, platform)
 
 
 def clamp(val, min_val, max_val):
