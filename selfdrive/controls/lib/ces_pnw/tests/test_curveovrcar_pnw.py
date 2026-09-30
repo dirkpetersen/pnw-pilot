@@ -351,6 +351,15 @@ _SEED = pathlib.Path(os.path.expanduser("~/gh/comma/workdir/data/curve_overrides
 _TABLE = pathlib.Path(os.path.expanduser("~/gh/comma/workdir/data/curvedb_v2"))
 _OR34_WB = (44.5604, -123.1210)
 _OR34_EB = (44.5606, -123.1217)
+# The Lightning OR-34 EB right: 2.2 was measured to sit INSIDE the PSCM limit band (achLat 2.37-2.46 at k 0.00256 -> ~2.39), so the
+# seed must stay strictly BELOW 2.2 (and, lower-only, at or under the curve-DB A of 2.5). The exact private value is read from the seed.
+_LIGHT_KNOWN_BAD_A = 2.2
+_TESLA_DEFAULT_A = 2.8
+
+
+def _seed_a(plat):
+  """The a_max values the private seed holds for one platform, in file order (read, never hard-coded)."""
+  return [e["cars"][plat]["a_max"] for e in json.loads(_SEED.read_text())["overrides"] if plat in e["cars"]]
 
 
 @pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists() and _seed_is_v2()), reason=_SEED_SKIP)
@@ -368,18 +377,26 @@ class TestTheSeedAgainstTheRealTable:
     assert all(0.0 < e["heading_tol_deg"] <= 60.0 and set(e["cars"]) <= set(pv.CURVE_OVERRIDE_PLATFORMS) for e in doc["overrides"])
     t, li = cb.Overrides(str(_SEED), platform=TESLA_P), cb.Overrides(str(_SEED), platform=LIGHT_P)
     assert not t.failsafe and not li.failsafe and log.errors == [] and log.warnings == []
-    assert [x["a_max"] for x in t.entries] == [2.8, 1.9] and [x["a_max"] for x in li.entries] == [2.2]
+    assert [x["a_max"] for x in t.entries] == _seed_a(TESLA_P) and len(t.entries) == 2
+    assert [x["a_max"] for x in li.entries] == _seed_a(LIGHT_P) and len(li.entries) == 1
+
+  def test_the_lightning_a_max_is_below_the_known_bad_value_and_every_entry_is_lower_only(self):
+    (a_l,) = _seed_a(LIGHT_P)
+    assert 0.0 < a_l < _LIGHT_KNOWN_BAD_A          # 2.2 ~ 2.39 m/s2 at the measured k: inside the PSCM limit band
+    assert all(0.0 < a <= _TESLA_DEFAULT_A for a in _seed_a(TESLA_P))
+    assert any(a < _TESLA_DEFAULT_A for a in _seed_a(TESLA_P))
 
   def test_no_row_is_limited_for_both_cars_and_each_car_has_its_own_rows(self, idx):
     tes, lig = set(), set()
+    tes_a, (lig_a,) = set(_seed_a(TESLA_P)), _seed_a(LIGHT_P)
     for i, a in enumerate(idx.anchors):
       t, li = self._lim(TESLA_P, a)[0], self._lim(LIGHT_P, a)[0]
       assert t is None or li is None, (a[0], a[1], a[2])
       if t is not None:
-        assert t in (2.8, 1.9)
+        assert t in tes_a
         tes.add(i)
       if li is not None:
-        assert li == 2.2
+        assert li == lig_a
         lig.add(i)
     assert len(tes) == 19 and len(lig) == 9           # 11 Terwilliger + 8 OR-34 WB (Tesla); the 9 OR-34 EB rows (Lightning)
 
@@ -406,8 +423,10 @@ class TestTheSeedAgainstTheRealTable:
 
   @pytest.mark.usefixtures("cfgpath", "schedule")
   def test_priced_speeds_per_car(self, idx):
-    """The speed each car is priced at, per matched row: the Lightning at its curve-DB A 2.5 lowered to 2.2 (sqrt(A/k)), the
-    Tesla at min(its A, the entry's a_max) through row_speed (the same call the brain makes)."""
+    """The speed each car is priced at, per matched row: the Lightning at its curve-DB A 2.5 lowered to the seed's a_max
+    (sqrt(A/k), the expected speed computed from the a_max READ from the seed), the Tesla at min(its A, the entry's a_max)
+    through row_speed (the same call the brain makes)."""
+    (lig_a,) = _seed_a(LIGHT_P)
     lig = cb.Overrides(str(_SEED), platform=LIGHT_P)
     db = cl.CurveDbLive(True, start=False, overrides=lig)
     got = {}
@@ -416,10 +435,15 @@ class TestTheSeedAgainstTheRealTable:
       if lig.limit(a[0], a[1], a[2])[0] is None or k is None:
         continue
       a_row, note = db.row_a(idx, types.SimpleNamespace(lat=a[0], lon=a[1], anchor=i), 2.5)
-      assert a_row == 2.2 and note and "OR-34 EB" in note
-      got[round(a[0], 5)] = (round(cl.v_db(2.5, k) / MPH, 1), round(cl.v_db(a_row, k) / MPH, 1))
-    assert len(got) == 8 and min(v for _, v in got.values()) == 68.3     # worst row k 0.00235921: 72.8 -> 68.3 mph
-    assert max(v for v, _ in got.values()) - 0 > 100 and got[round(44.56094, 5)] == (72.8, 68.3)
+      assert a_row == lig_a and note and "OR-34 EB" in note
+      got[round(a[0], 5)] = (round(cl.v_db(2.5, k) / MPH, 1), round(cl.v_db(a_row, k) / MPH, 1), k)
+    assert len(got) == 8
+    for v0, v1, k in got.values():
+      assert v1 == round(math.sqrt(lig_a / k) / MPH, 1) and v1 < v0          # priced at sqrt(a_max / k), never above the baseline
+    worst = max(got.values(), key=lambda t: t[2])                            # the tightest row: k 0.00235921, baseline 72.8 mph
+    assert worst[2] == pytest.approx(0.00235921, rel=1e-4) and worst[0] == 72.8
+    assert min(v for _, v, _ in got.values()) == worst[1]
+    assert max(v for v, _, _ in got.values()) > 100
 
     tes, veh = cb.Overrides(str(_SEED), platform=TESLA_P), tesla()
     v_ego, seen = 31.0, {}
@@ -432,4 +456,5 @@ class TestTheSeedAgainstTheRealTable:
       v0, _ = cb.row_speed(veh, k, v_ego)
       assert a_used <= cap + 1e-9 and v <= v0 + 1e-9     # lower-only in A AND in speed (row_speed guards the second)
       seen.setdefault(cap, []).append(round(v / MPH, 1))
-    assert min(seen[2.8]) == 59.1 and min(seen[1.9]) == 63.0
+    lo, hi = min(seen), max(seen)
+    assert hi == _TESLA_DEFAULT_A and min(seen[hi]) == 59.1 and min(seen[lo]) == 63.0
