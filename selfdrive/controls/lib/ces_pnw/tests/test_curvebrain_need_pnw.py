@@ -868,9 +868,12 @@ class TestTheSeedFileAgainstTheRealTable:
     idx, _ = cl.load_rows(str(_TABLE))
     return idx
 
-  def test_the_seed_is_valid_and_has_the_one_entry(self):
+  def test_the_seed_is_valid_and_has_the_two_entries(self):
     o = cb.Overrides(str(_SEED))
-    assert not o.failsafe and len(o.entries) == 1 and o.entries[0]["a_max"] == 2.8 and "Terwilliger left" in o.entries[0]["note"]
+    assert not o.failsafe and len(o.entries) == 2
+    terw, or34 = o.entries
+    assert terw["a_max"] == 2.8 and "Terwilliger left" in terw["note"]
+    assert or34["a_max"] == 1.9 and "OR-34 WB left" in or34["note"]
 
   def test_left_tight_rows_are_covered_right_curve_and_northbound_are_not(self):
     o, idx = cb.Overrides(str(_SEED)), self._rows()
@@ -882,6 +885,87 @@ class TestTheSeedFileAgainstTheRealTable:
     assert right and all(o.limit(a[0], a[1], a[2])[0] is None for a in right)
     nb = [a for a in idx.anchors if 45.4690 < a[0] < 45.4705 and -122.6910 < a[1] < -122.6880 and (a[2] < 90 or a[2] > 330)]
     assert nb and all(o.limit(a[0], a[1], a[2])[0] is None for a in nb)
+
+
+_OR34 = (44.5604, -123.1210)
+
+
+class TestTheOr34SeedEntryAgainstTheRealTable:
+  """The OR-34 westbound-left entry (owner 2026-09-29, Tesla ran wide after Albany, adverse camber): it covers the westbound
+  rows of that curve, not the eastbound rows, not the neighbouring westbound rows 600 m+ east (the 'steep right' curve the
+  car took well), does not overlap the Terwilliger entry, and only ever lowers a speed."""
+
+  def _rows(self):
+    idx, _ = cl.load_rows(str(_TABLE))
+    return idx
+
+  def _or34(self, o, a):
+    return o.limit(a[0], a[1], a[2])[0]
+
+  def _near(self, idx, box=(44.5595, 44.5610, -123.1227, -123.1190)):
+    return [a for a in idx.anchors if box[0] <= a[0] <= box[1] and box[2] <= a[1] <= box[3]]
+
+  def test_westbound_rows_are_covered_and_only_those(self):
+    o, idx = cb.Overrides(str(_SEED)), self._rows()
+    near = self._near(idx)
+    west = [a for a in near if 270 <= a[2] <= 320]
+    east = [a for a in near if 90 <= a[2] <= 140]
+    assert len(west) == 7 and len(east) >= 6, (len(west), len(east))
+    assert all(self._or34(o, a) == 1.9 for a in west), [(a[0], a[1], a[2]) for a in west]
+    assert all(self._or34(o, a) is None for a in east), [(a[0], a[1], a[2]) for a in east]
+    # everything the entry covers in the whole table is westbound, inside the circle: 7 priced rows + the row-less one at 194 m
+    covered = [a for a in idx.anchors if cb._dist_m(a[0], a[1], *_OR34) < 500 and self._or34(o, a) == 1.9]
+    assert len(covered) == 8
+    assert all(abs((a[2] - 297 + 180) % 360 - 180) <= 35 and cb._dist_m(a[0], a[1], *_OR34) <= 200 for a in covered)
+    assert sum(1 for a in covered if any(b[2] for b in a[3])) == 7
+
+  def test_the_heading_window_excludes_the_eastbound_reciprocal(self):
+    o = cb.Overrides(str(_SEED))
+    e = o.entries[1]
+    assert e["heading_deg"] == 297 and e["heading_tol_deg"] == 35
+    for h in (117 - 35, 117, 117 + 35, 90, 135):
+      assert o.limit(_OR34[0], _OR34[1], h) == (None, None), h
+    assert o.limit(_OR34[0], _OR34[1], 297)[0] == 1.9
+
+  def test_the_westbound_curve_600m_east_is_not_covered(self):
+    o, idx = cb.Overrides(str(_SEED)), self._rows()
+    far = [a for a in idx.anchors if 400 < cb._dist_m(a[0], a[1], *_OR34) < 1200 and any(b[2] and b[2] > 0.0015 for b in a[3])]
+    assert len(far) >= 10 and any(270 <= a[2] <= 305 for a in far)       # the westbound rows ARE there, so the test can fail
+    assert all(self._or34(o, a) is None for a in far), [(a[0], a[1], a[2]) for a in far if self._or34(o, a)]
+
+  def test_the_two_entries_do_not_overlap(self):
+    o, idx = cb.Overrides(str(_SEED)), self._rows()
+    terw, or34 = o.entries
+    assert cb._dist_m(terw["lat"], terw["lon"], or34["lat"], or34["lon"]) > terw["radius_m"] + or34["radius_m"]
+    by = {"terw": 0, "or34": 0}
+    for a in idx.anchors:
+      got = o.limit(a[0], a[1], a[2])[0]
+      if got == 2.8:
+        by["terw"] += 1
+      elif got == 1.9:
+        by["or34"] += 1
+      else:
+        assert got is None, got
+    assert by["terw"] >= 3 and by["or34"] == 8
+
+  def test_prices_of_every_covered_row_at_the_brains_effective_a(self, cfgpath, schedule):
+    o, idx, veh = cb.Overrides(str(_SEED)), self._rows(), tesla()
+    v_ego = 31.0                                                          # ~70 mph
+    a_eff = veh.curve_lat_a(v_ego)
+    assert a_eff > 1.9                                                    # the override binds (it does not raise anything)
+    got = {}
+    for a in self._near(idx):
+      cap = self._or34(o, a)
+      k = max((b[2] for b in a[3] if b[2]), default=None)
+      if cap is None or k is None:
+        continue
+      v, a_used = cb.row_speed(veh, k, v_ego, cap)
+      v0, _ = cb.row_speed(veh, k, v_ego)
+      assert a_used == pytest.approx(1.9) and v <= v0 + 1e-9 and v < v0    # only lowers, and here it does lower
+      got[round(a[0], 5)] = (round(v / 0.44704), round(v0 / 0.44704))
+    assert got == {44.55966: (65, 78), 44.55994: (63, 75), 44.56026: (63, 75), 44.5605: (63, 75), 44.5607: (63, 75),
+                   44.56084: (66, 79), 44.56096: (72, 86)}, got
+    assert min(v for v, _ in got.values()) == 63
 
 
 class TestOverrideFollowUps:
