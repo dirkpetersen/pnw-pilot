@@ -87,14 +87,6 @@ class VTSCController:
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
-    # vtscfloor2pnw: which floor the selected map curve got (vtscFloor / vtscFloorWhy / vtscAgreed telemetry) + its log state
-    self._tele_floor = self._tele_agreed = 0.0
-    self._tele_floor_why = ""
-    self._tele_floor_skip = ""
-    self._floor_log_t = None       # monotonic time of the last logged "floor -> agreed" transition (None = never)
-    self._floor_prev_why = ""
-    self._floor_skip_t = None      # ...of the last logged abnormal skip (NaN input / stale GPS)
-    self._floor_skip_n = 0
     # vtscfloor2pnw release-later state / telemetry (vtscRelDefer)
     self._rel_hist: list = []       # (monotonic t, v_curve, camera speed or inf) over the last REL_DEFER_WINDOW_S
     self._rel_prev_win = "none"
@@ -332,32 +324,6 @@ class VTSCController:
         self._gps_err_t = now
         self._gps_err_n = 0
 
-  def _note_floor(self, info: dict, gate_skip: str) -> None:
-    """vtscfloor2pnw: telemetry (vtscFloor / vtscFloorWhy / vtscAgreed) + the change-only Rule 2 log for the map floor.
-    Every fallback to today's set-10 floor is either normal (no camera curve, an unpaired curve: silent) or abnormal (a NaN input,
-    a stale GPS fix: logged, first at once then at most one line per TWISTY_ERR_LOG_S). Entering "agreed" is logged at most once
-    per 5 s. Never raises into cap()."""
-    why = str(info.get("why", ""))
-    self._tele_floor_why = why
-    self._tele_floor = float(info.get("floor", 0.0)) if why else 0.0
-    self._tele_agreed = float(info.get("agreed", 0.0)) if why == "agreed" else 0.0
-    now = time.monotonic()
-    if why == "agreed" and self._floor_prev_why != "agreed" and (self._floor_log_t is None or now - self._floor_log_t >= 5.0):
-      cloudlog.info("VTSC floor: set-10 floor SHRUNK to %.1f m/s (agreed map+camera %.1f m/s + %.1f margin)",
-                    self._tele_floor, self._tele_agreed, C.AGREED_FLOOR_MARGIN)
-      self._floor_log_t = now
-    self._floor_prev_why = why
-    self._tele_floor_skip = (gate_skip or str(info.get("skip", ""))) if why == "set10" else ""
-    # only a floored map curve was actually affected (no fix / no map curve at all is normal and stays unlogged)
-    skip = (gate_skip or (str(info.get("skip", "")) if str(info.get("skip", "")) == "nonfinite" else "")) if why else ""
-    if skip:
-      self._floor_skip_n += 1
-      if self._floor_skip_t is None or now - self._floor_skip_t >= TWISTY_ERR_LOG_S:
-        cloudlog.error(f"VTSC floor: agreed-floor input unusable ({skip}) -- using today's set-10 floor " +
-                       f"({self._floor_skip_n} time(s) since the last log)")
-        self._floor_skip_t = now
-        self._floor_skip_n = 0
-
   def _rel_note(self, now, v_curve) -> None:
     """vtscfloor2pnw release-later: keep the winning-source and target history every cycle (a fall is only visible over time)."""
     win = self._tele_curve_win
@@ -374,14 +340,14 @@ class VTSCController:
     """vtscfloor2pnw release-later: called ONLY while the state machine is in `release`. Returns why the cap must stay FROZEN this
     cycle instead of climbing back to cruise ("" = climb as today). The state machine itself is untouched -- every transition, in
     particular the re-arm to BRAKE for a new curve, runs exactly as today -- so the cap can never be higher than today's: a frozen
-    cap is <= the climbing one, and apply_limits() is monotone in the applied cap. Raven only (PnwVehicle.vtsc_agreed_floor).
+    cap is <= the climbing one, and apply_limits() is monotone in the applied cap. Raven only (PnwVehicle.vtsc_release_later).
       starts:   the target that binds (< 1.3 x vEgo; a near-straight camera target is noise) fell > REL_DEFER_FALL_EPS within
                 REL_DEFER_WINDOW_S ("falling"), or the binding source just switched ("switch": the apex distance collapses).
                 A curve EXIT (flat / rising target) never starts it.
       continues while falling / switched / vEgo > 1.10 x the fresh camera speed ("fast"), so the label is never blank while held.
       bounded:  REL_DEFER_MAX_S per curve (the whole freeze), then it climbs as today; logged."""
     vc = float(v_curve) if math.isfinite(v_curve) else float('inf')
-    if not (self.veh.vtsc_agreed_floor and has_curve and math.isfinite(vc) and vc < 1.3 * v_ego):
+    if not (self.veh.vtsc_release_later and has_curve and math.isfinite(vc) and vc < 1.3 * v_ego):
       self._rel_latched = False
       return ""
     vis = self._tele_vis_v
@@ -429,23 +395,11 @@ class VTSCController:
     # so every vision-authored cap logged "none", which is the overwhelmingly common case and exactly
     # the case the field exists to name. The caller sets "vis" before calling; only a map win overrides.
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
-    # vtscfloor2pnw: the agreed floor needs the capability (Raven, kill switch on) AND a fresh map position; else margin -1 = OFF
-    agree_margin, gate_skip = -1.0, ""
-    if self.veh.vtsc_agreed_floor:
-      age = self._tele_gps_age
-      if age is None:
-        gate_skip = "gpsNoFix"                     # a position with no fix time cannot be shown fresh: treated as stale
-      elif not (0.0 <= age <= C.AGREED_FLOOR_GPS_MAX_AGE_S):
-        gate_skip = "gpsStale"                     # a stale (or future-dated) fix: the map distances are not trustworthy
-      else:
-        agree_margin = C.AGREED_FLOOR_MARGIN
-    floor_info: dict = {}
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
         self._map_targets, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
         C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
-        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0,
-        vision_v=v_curve, vision_d=d_apex, agree_margin=agree_margin, info=floor_info)
+        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0)
     except Exception as e:
       # foldlog2pnw (Rule 2): this was a bare `except Exception: return`, so a failure silently switched map-curve
       # anticipation off and left only the vision cap. The fallback is unchanged -- no map curve, vision's picture
@@ -466,7 +420,6 @@ class VTSCController:
       return k_apex, d_apex, v_curve, False
     self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
     self._tele_map_floored = bool(floored)
-    self._note_floor(floor_info, gate_skip)
     # curvefloor2pnw: the minimum-slowdown floor is applied PER-POINT inside most_binding_map_curve,
     # before the decel envelope -- doing it here, after selection, was provably suppressed by ordinary
     # multi-point map data (a gentle near node clamps to the set speed, ties on envelope, wins on
@@ -501,10 +454,7 @@ class VTSCController:
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
-    self._tele_floor = self._tele_agreed = 0.0      # vtscfloor2pnw: per tick, like the rest
-    self._tele_floor_skip = ""
-    self._tele_rel_defer = ""
-    self._tele_floor_why = ""
+    self._tele_rel_defer = ""       # vtscfloor2pnw release-later: per tick, like the rest
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
     # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
@@ -958,14 +908,9 @@ class VTSCController:
         # vtscgpsage2pnw: seconds since the fix time of the position the map fold used this tick, 0.1 s; null = no such
         # position (see cap()). Measurement only -- the evidence for a future freshness check.
         "gpsAge": round(self._tele_gps_age, 1) if self._tele_gps_age is not None else None,
-        # vtscfloor2pnw: the floor the selected map curve got. null / "" when no floored map curve was selected this tick.
-        # getattr: permissive test stubs build the payload without the state (like _tele_cb below).
-        "vtscFloor": round(float(getattr(self, "_tele_floor", 0.0)), 1) if getattr(self, "_tele_floor_why", "") else None,
-        "vtscFloorWhy": str(getattr(self, "_tele_floor_why", "")),
-        "vtscFloorSkip": str(getattr(self, "_tele_floor_skip", "")),
+        # vtscfloor2pnw release-later: why the cap is frozen instead of climbing ("" = not). getattr: permissive test stubs build
+        # the payload without the state (like _tele_cb below).
         "vtscRelDefer": str(getattr(self, "_tele_rel_defer", "")),
-        "vtscAgreed": (round(float(getattr(self, "_tele_agreed", 0.0)), 1)
-                       if getattr(self, "_tele_floor_why", "") == "agreed" else None),
         "rsnMap": _fin(self._tele_rsn_map, 2),
         "rsnVis": _fin(self._tele_rsn_vis, 2),
         "apexCurvature": _fin(self.msg.get("apexCurvature", 0.0), 5),

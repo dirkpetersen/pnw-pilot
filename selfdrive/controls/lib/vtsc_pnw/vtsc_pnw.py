@@ -370,10 +370,7 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
                            sharp_v: float = C.SHARP_CURVE_V, speed_scale: float = 1.0,
                            v_cruise_cap: float = float('inf'),
                            min_slowdown: float = C.MAP_MIN_SLOWDOWN,
-                           floor_limit: float = 0.0, floor_depth: float = C.MAP_FLOOR_DEPTH,
-                           vision_v: float = float('inf'), vision_d: float = -1.0,
-                           agree_margin: float = -1.0, agree_pair_m: float = C.AGREED_FLOOR_PAIR_M,
-                           info: dict | None = None):
+                           floor_limit: float = 0.0, floor_depth: float = C.MAP_FLOOR_DEPTH):
   """sharpcurve2pnw: scan pfeiferj map path points {latitude,longitude,velocity} within horizon_m and
   return (v_target, dist, is_sharp) of the curve whose decel-limited brake cap is the LOWEST right now
   — i.e. the one to start slowing for first. This is the distance-based lookahead: a far sharp curve
@@ -384,16 +381,7 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   Returns (v_target, dist, is_sharp, v_raw, floored): v_target is the effective (scaled+clamped, and
   possibly floored -- see below) target, v_raw is the UNSCALED mapd target for that same curve, and
   floored says the curvefloor2pnw minimum-slowdown floor was applied to at least one candidate.
-  (0.0, inf, False, 0.0, False) if no point / no data. Pure.
-
-  vtscfloor2pnw: with agree_margin >= 0 (Raven only; the default -1 = OFF, byte-unchanged) a FLOORED point's floor shrinks from
-  set-10 to max(V_MIN, max(its raw target, vision_v) + agree_margin) when vision_v (the camera's curve-safe speed) and
-  vision_d (its apex distance) describe the same curve (|d - vision_d| <= agree_pair_m) and both are finite. Lower-only: never
-  above the set-10 notch, never below floor_limit. Any missing/NaN/unpaired input keeps set-10. If `info` is a dict it receives
-  the SELECTED point's {"why": "set10"|"agreed"|"", "floor": m/s|0, "agreed": m/s|0, "skip": "" | reason the agreed floor was not
-  applied to a floored selected point}."""
-  if info is not None:
-    info.update(why="", floor=0.0, agreed=0.0, skip="")
+  (0.0, inf, False, 0.0, False) if no point / no data. Pure."""
   if not points or cur_lat is None or cur_lon is None:
     return 0.0, float('inf'), False, 0.0, False
   best_cap = float('inf')
@@ -402,7 +390,6 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   best_sharp = False
   best_raw = 0.0
   best_floored = False
-  best_info = {"why": "", "floor": 0.0, "agreed": 0.0, "skip": ""}
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
@@ -430,7 +417,6 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     # the selection so the SELECTED curve matches the value used downstream.
     floored_pt = False
     shallow_floor = False
-    pt_info = {"why": "", "floor": 0.0, "agreed": 0.0, "skip": ""}
     if math.isfinite(v_cruise_cap):
       notch = v_cruise_cap - min_slowdown
       if tv < notch <= tv_eff:               # raw says slow down, scaled says don't
@@ -456,32 +442,6 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
         # target while denying it the authority to reach it, which is worse than not deepening at
         # all. (A raw target of 25-29 m/s is both "sharp" and floorable, so this is reachable.)
         shallow_floor = tv_eff >= notch - 1e-6
-        pt_info = {"why": "set10", "floor": tv_eff, "agreed": 0.0, "skip": ""}
-        if agree_margin >= 0.0:
-          # vtscfloor2pnw: shrink the floor only when the camera independently agrees this curve is much tighter than set-10.
-          try:
-            v_vis, d_vis = float(vision_v), float(vision_d)
-          except (TypeError, ValueError):
-            v_vis = d_vis = float('nan')
-          if not math.isfinite(tv) or math.isnan(v_vis) or not math.isfinite(d_vis):
-            pt_info["skip"] = "nonfinite"                # a NaN / infinite input: logged by the caller, today's floor
-          elif not (math.isfinite(v_vis) and v_vis > 0.0 and d_vis >= 0.0):
-            pt_info["skip"] = "novision"                 # no camera curve (inf / no apex): normal, today's floor
-          elif d < d_vis:
-            # a paired map node NEARER than the camera's apex would win the fold with a shorter time-to-apex and a target of camera+margin,
-            # sending the machine to hold while the camera keeps falling (Terwilliger 22:32:15, closed loop: +4.8 mph over today): keep set-10
-            pt_info["skip"] = "nearer"
-          elif abs(d - d_vis) > agree_pair_m:
-            pt_info["skip"] = "unpaired"
-          else:
-            agreed = max(tv, v_vis)
-            tv_agr = max(agreed + agree_margin, C.V_MIN)
-            if floor_limit > 0.0:
-              tv_agr = max(tv_agr, floor_limit)          # never below the posted-limit floor either
-            if tv_agr < tv_eff - 1e-6:
-              tv_eff = tv_agr
-              shallow_floor = False                      # a real, agreed slowdown keeps its firm-braking flag
-              pt_info = {"why": "agreed", "floor": tv_agr, "agreed": agreed, "skip": ""}
     if tv_eff <= 0.0:
       continue
     cap = brake_cap_for_apex(tv_eff, d, v_ego, a_decel, finish_s)
@@ -498,9 +458,6 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
       # accumulator would mislabel the telemetry whenever a non-selected point happened to be floored.
       best_floored = floored_pt
       best_raw = tv                            # UNSCALED mapd target for the chosen curve
-      best_info = pt_info
-  if info is not None:
-    info.update(best_info)
   return best_v, best_d, best_sharp, best_raw, best_floored
 
 

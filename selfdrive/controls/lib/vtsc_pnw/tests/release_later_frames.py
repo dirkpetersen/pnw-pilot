@@ -1,5 +1,5 @@
 # ruff: noqa: E501
-"""Real recorded inputs for the vtscfloor2pnw replay tests (test_vtsc_agreed_floor.py).
+"""Real recorded inputs for the vtscfloor2pnw replay tests (test_vtsc_release_later.py).
 
 One tuple per 1 Hz ces_events tick (PT clock string, vEgo m/s, set m/s, camera curve speed visV m/s, camera apex distance visD m,
 recorded VTSC cap m/s or None, recorded state, map points [(distance ahead m, raw mapd target m/s)]). Distances were rebuilt from the

@@ -1,5 +1,6 @@
-"""vtscfloor2pnw replay harness: feed recorded 1 Hz frames to the REAL VTSCController.cap() at 20 Hz (open loop: vEgo, the camera
-curve and the map points follow the recording; the controller's own state machine, fold, rate limits and floors are the real code).
+"""vtscfloor2pnw release-later replay harness: feed recorded 1 Hz frames to the REAL VTSCController.cap() at 20 Hz. Open loop: vEgo,
+the camera curve and the map points follow the recording. closed=True: the car follows min(cap, set) at accel in [-1.5, +0.8] m/s^2.
+The controller's own state machine, fold, rate limits and floors are the real code.
 
 Only two inputs are stubbed, both read from the model rather than from anything the fix touches: model_curve_state (returns the
 recorded camera curve speed / apex distance) and apex_turn_direction (telemetry). Time is a fake monotonic clock."""
@@ -43,24 +44,23 @@ def secs(hms: str) -> float:
   return int(h) * 3600 + int(m) * 60 + int(s)
 
 
-def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", agreed_floor=None, gps_age=1.4):
+def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_later=None):
   """A real VTSCController (Standard mode, map curves ON) on a fake clock; returns (ctrl, clock list)."""
   clock = [1000.0]
   monkeypatch.setattr(VC.time, "monotonic", lambda: clock[0])
   monkeypatch.setattr(VC, "apex_turn_direction", lambda model: 0)
   ctrl = VC.VTSCController(FakeCP(fp, brand), params=FakeParams())
   ctrl.mem_params = FakeMem()
-  if agreed_floor is not None and ctrl.veh.curve_brain_vtsc:
-    ctrl.veh._tesla_curve_cfg["agreed_floor"] = agreed_floor
+  if release_later is not None and ctrl.veh.curve_brain_vtsc:
+    ctrl.veh._tesla_curve_cfg["release_later"] = release_later
   ctrl._read_enabled(clock[0])
   assert ctrl._enabled and ctrl._map_curves
-  ctrl._gps_age_override = gps_age
   return ctrl, clock
 
 
 def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, closed=False, **kw):
-  """Replay frames (agreed_floor_frames tuples) -> list of dicts, one per 20 Hz cycle. `apply` keys: t (s since midnight PT),
-  v (vEgo), cap (VTSC's cap), state, why (vtscFloorWhy), floor, agreed, win (curveWin), set (m/s)."""
+  """Replay frames (release_later_frames tuples) -> list of dicts, one per 20 Hz cycle. `apply` keys: t (s since midnight PT),
+  v (vEgo), cap (VTSC's cap), state, win (curveWin), set (m/s), vis (camera speed), msg, pay (the VTSCStatus payload), ctrl."""
   ctrl, clock = make_controller(monkeypatch, **kw)
   vis = {}
   monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis["s"])
@@ -94,8 +94,7 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, closed=False, **kw):
       ctrl._map_targets = pts
       ctrl._cur_lat, ctrl._cur_lon, ctrl._cur_bearing = LAT0, LON0, 0.0
       ctrl._last_read = clock[0]
-      if ctrl._gps_age_override is not False:          # False = a position with NO fix_ts
-        ctrl._gps_fix_ts = clock[0] - ctrl._gps_age_override
+      ctrl._gps_fix_ts = clock[0] - 1.4
       if vv > 0.0 and vd >= 0.0:
         k = C.A_LAT_TARGET / (vv * vv)
         vis["s"] = (k, vd, vv)
@@ -104,12 +103,6 @@ def replay(monkeypatch, frames, t0=None, t1=None, dt=0.05, closed=False, **kw):
       cap = ctrl.cap(sm, v_set, v_ego)
       if closed:
         v_sim += max(min((min(cap, v_set) - v_sim) / 1.0, 0.8), -1.5) * dt
-      out.append(dict(t=t, v=v_ego, cap=cap, state=ctrl._state, why=ctrl._tele_floor_why, floor=ctrl._tele_floor,
-                      agreed=ctrl._tele_agreed, win=ctrl._tele_curve_win, set=v_set, vis=vv, msg=dict(ctrl.msg), pay=ctrl.overlay_payload(), ctrl=ctrl))
+      out.append(dict(t=t, v=v_ego, cap=cap, state=ctrl._state,
+                      win=ctrl._tele_curve_win, set=v_set, vis=vv, msg=dict(ctrl.msg), pay=ctrl.overlay_payload(), ctrl=ctrl))
   return out
-
-
-def summarize(rows, t0, t1):
-  """(min cap mph, cap at the last cycle of the window mph, min floor mph over 'agreed' cycles or None)."""
-  w = [r for r in rows if t0 <= r["t"] <= t1]
-  return w

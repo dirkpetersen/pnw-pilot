@@ -388,10 +388,10 @@ CURVE_BRAIN_DEFAULT = "lower"
 # change nothing) with the cloudlog.error and `why`. Only a MISSING file or MISSING section gets the acting default. A file DELETED
 # mid-drive reverts to the acting default (event curve_brain_cfg_reload file=absent) -- a documented footgun.
 CURVE_BRAIN_CORRUPT = "shadow"
-# vtscfloor2pnw (owner 2026-09-29, "smarter is mostly better"): the Raven VTSC's set-10 mph map floor shrinks toward the curve
-# speed BOTH the map and the camera ask for. DEFAULT ON. Kill switch: {"tesla": {"vtsc_agreed_floor": false}} in curve.json (hot-
-# reloaded with the rest of the tesla section). A present-but-unreadable file / unusable value turns it OFF (today's floor).
-VTSC_AGREED_FLOOR_DEFAULT = True
+# vtscfloor2pnw release-later (owner 2026-09-29): on the Raven, VTSC keeps its cap frozen instead of climbing while the curve target is
+# still tightening after the state machine released. DEFAULT ON. Kill switch: {"tesla": {"vtsc_release_later": false}} in curve.json
+# (hot-reloaded with the rest of the tesla section). A present-but-unreadable file at start turns it OFF (today's behaviour).
+VTSC_RELEASE_LATER_DEFAULT = True
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
 # curvebrain2b2pnw A2..A5: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
@@ -457,7 +457,7 @@ def _load_tesla_curve_config() -> dict:
   `why` says where the values came from ("default", "curve.json", or "INVALID ..." -- CESController logs that as an
   error at start too)."""
   cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT, "why": "default",
-         "agreed_floor": VTSC_AGREED_FLOOR_DEFAULT}
+         "release_later": VTSC_RELEASE_LATER_DEFAULT}
   path = CURVE_CONFIG_PATH
   try:
     st = os.stat(path)
@@ -466,7 +466,7 @@ def _load_tesla_curve_config() -> dict:
                      f"{_CURVE_CONFIG_MAX_BYTES} B) -- the curve brain uses its defaults")
       cfg["why"] = "default (curve.json unusable)"
       cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
-      cfg["agreed_floor"] = False   # vtscfloor2pnw: unreadable file -> today's floor
+      cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
       return cfg
     with open(path) as f:
       data = json.load(f)
@@ -477,7 +477,7 @@ def _load_tesla_curve_config() -> dict:
                    "section uses its defaults")
     cfg["why"] = f"default (curve.json unreadable: {type(e).__name__})"
     cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
-    cfg["agreed_floor"] = False   # vtscfloor2pnw: unreadable file -> today's floor
+    cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
     return cfg
   # The key parse is guarded like the read above (Fable F1): json.load turns a 309+ digit literal into an int that
   # math.isfinite / float() cannot convert (OverflowError), and a raise here would take down EVERY process that builds
@@ -491,7 +491,7 @@ def _load_tesla_curve_config() -> dict:
                      "the curve brain uses its defaults")
       cfg["why"] = f"INVALID curve.json tesla section ({type(tesla).__name__}) -> defaults"
       cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
-      cfg["agreed_floor"] = False   # vtscfloor2pnw: unreadable file -> today's floor
+      cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
       return cfg
     bad, clamped = [], []
     if "curve_lat_a" in tesla:
@@ -511,18 +511,18 @@ def _load_tesla_curve_config() -> dict:
         cfg["curve_brain"] = CURVE_BRAIN_CORRUPT
       else:
         cfg["curve_brain"] = mode
-    if "vtsc_agreed_floor" in tesla:
+    if "vtsc_release_later" in tesla:
       # vtscfloor2pnw kill switch: true / false (0 / 1 accepted). Anything else is a `bad` key like any other: at START the section
-      # is not honoured (curve_brain falls to CURVE_BRAIN_CORRUPT) and the smarter floor is OFF (today's set-10 floor); MID-DRIVE the
-      # reload is rejected and the LAST GOOD config (including this switch) is kept -- see refresh_curve_brain_cfg.
-      raw = tesla["vtsc_agreed_floor"]
+      # is not honoured (curve_brain falls to CURVE_BRAIN_CORRUPT) and release-later is OFF; MID-DRIVE the reload is rejected and the
+      # LAST GOOD config (including this switch) is kept -- see refresh_curve_brain_cfg.
+      raw = tesla["vtsc_release_later"]
       if isinstance(raw, bool):
-        cfg["agreed_floor"] = raw
+        cfg["release_later"] = raw
       elif isinstance(raw, (int, float)) and raw in (0, 1):
-        cfg["agreed_floor"] = bool(raw)
+        cfg["release_later"] = bool(raw)
       else:
-        cfg["agreed_floor"] = False
-        bad.append(f"vtsc_agreed_floor {raw!r:.24} is not true/false -> OFF (today's floor)")
+        cfg["release_later"] = False
+        bad.append(f"vtsc_release_later {raw!r:.24} is not true/false -> OFF")
     if clamped:
       cloudlog.warning(f"pnw_vehicle: {path}: tesla value(s) clamped into bounds: {', '.join(clamped)}")
     if bad:
@@ -534,7 +534,7 @@ def _load_tesla_curve_config() -> dict:
       cfg["why"] = "curve.json"
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
-    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT, "agreed_floor": False,
+    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT, "release_later": False,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
 
@@ -1091,16 +1091,16 @@ class PnwVehicle:
       if not _tesla_cfg_is_honored(new) and self._tesla_cfg_good:
         cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
                        f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} " +
-                       f"agreed_floor={old['agreed_floor']}")
+                       f"release_later={old['release_later']}")
         self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
         return False
       self._tesla_curve_cfg = new
       self._tesla_cfg_good = _tesla_cfg_is_honored(new)
-      changed = ((new["curve_brain"], new["curve_lat_a"], new["agreed_floor"])
-                 != (old["curve_brain"], old["curve_lat_a"], old["agreed_floor"]))
+      changed = ((new["curve_brain"], new["curve_lat_a"], new["release_later"])
+                 != (old["curve_brain"], old["curve_lat_a"], old["release_later"]))
       cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
                      prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
-                     agreed_floor=new["agreed_floor"], prev_agreed_floor=old["agreed_floor"],
+                     release_later=new["release_later"], prev_release_later=old["release_later"],
                      file="absent" if sig is None else "present")
       return changed
     except Exception as e:
@@ -1119,11 +1119,11 @@ class PnwVehicle:
     return self._tesla_curve_cfg["curve_brain"] if self.curve_brain_vtsc else "off"
 
   @property
-  def vtsc_agreed_floor(self) -> bool:
-    """vtscfloor2pnw: may VTSC shrink its set-10 map floor to the curve speed both the map and the camera ask for? The Raven
-    (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_agreed_floor is not switched off; False on every other car,
-    so the Lightning's VTSC is byte-unchanged. The same switch also gates VTSC's release-later deferral (vtscRelDefer)."""
-    return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["agreed_floor"])
+  def vtsc_release_later(self) -> bool:
+    """vtscfloor2pnw: may VTSC freeze its cap instead of climbing while the curve target is still tightening (release-later,
+    vtscRelDefer)? The Raven (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_release_later is not switched off; False
+    on every other car, so the Lightning's VTSC is byte-unchanged."""
+    return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["release_later"])
 
   @property
   def curve_brain_why(self) -> str:

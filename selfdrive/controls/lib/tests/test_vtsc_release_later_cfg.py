@@ -1,8 +1,8 @@
-"""vtscfloor2pnw -- the kill switch and the capability gate for VTSC's agreed floor.
+"""vtscfloor2pnw -- the kill switch and the capability gate for VTSC's release-later.
 
-PnwVehicle.vtsc_agreed_floor: True on the Raven while curve.json's tesla.vtsc_agreed_floor is not switched off (default ON, owner
-2026-09-29); False on every other car (the Lightning's VTSC is unchanged); an unreadable/invalid file turns it OFF (today's set-10
-floor) and says so (Rule 2); a mid-drive typo keeps the last good config like every other tesla key.
+PnwVehicle.vtsc_release_later: True on the Raven while curve.json's tesla.vtsc_release_later is not switched off (default ON, owner
+2026-09-29); False on every other car (the Lightning's VTSC is unchanged); an unreadable/invalid file turns it OFF (today's
+behaviour) and says so (Rule 2); a mid-drive typo keeps the last good config like every other tesla key.
 """
 import json
 import os
@@ -67,33 +67,33 @@ def tesla():
 
 def test_default_is_on_for_the_raven_and_off_for_everyone_else(cfg):
   cfg(None)
-  assert tesla().vtsc_agreed_floor is True
-  assert pv.PnwVehicle(CP(LIGHTNING, "ford", False)).vtsc_agreed_floor is False
-  assert pv.PnwVehicle(CP(LIGHTNING, "ford", True)).vtsc_agreed_floor is False        # Lightning op-long: still no
-  assert pv.PnwVehicle(CP("MOCK", "mock", False)).vtsc_agreed_floor is False
+  assert tesla().vtsc_release_later is True
+  assert pv.PnwVehicle(CP(LIGHTNING, "ford", False)).vtsc_release_later is False
+  assert pv.PnwVehicle(CP(LIGHTNING, "ford", True)).vtsc_release_later is False        # Lightning op-long: still no
+  assert pv.PnwVehicle(CP("MOCK", "mock", False)).vtsc_release_later is False
 
 
 @pytest.mark.parametrize("val,expect", [(True, True), (False, False), (1, True), (0, False)])
 def test_the_kill_switch_key(cfg, log, val, expect):
-  cfg({"tesla": {"vtsc_agreed_floor": val}})
+  cfg({"tesla": {"vtsc_release_later": val}})
   t = tesla()
-  assert t.vtsc_agreed_floor is expect and t.curve_brain_why == "curve.json"
+  assert t.vtsc_release_later is expect and t.curve_brain_why == "curve.json"
   assert log.at("error") == []
 
 
 @pytest.mark.parametrize("val", ["no", 2, None, [False], 0.5])
 def test_an_unusable_value_is_off_and_says_so(cfg, log, val):
-  cfg({"tesla": {"vtsc_agreed_floor": val}})
+  cfg({"tesla": {"vtsc_release_later": val}})
   t = tesla()
-  assert t.vtsc_agreed_floor is False
-  assert any("vtsc_agreed_floor" in e for e in log.at("error"))
+  assert t.vtsc_release_later is False
+  assert any("vtsc_release_later" in e for e in log.at("error"))
   assert t.curve_brain_why.startswith("INVALID")
 
 
 @pytest.mark.parametrize("doc", ["not json", '{"tesla": ', '{"tesla": [1]}'])
 def test_a_corrupt_file_or_section_turns_it_off_and_says_so(cfg, log, doc):
   cfg(doc)
-  assert tesla().vtsc_agreed_floor is False
+  assert tesla().vtsc_release_later is False
   assert log.at("error")
 
 
@@ -101,13 +101,13 @@ def test_a_directory_in_place_of_the_file_turns_it_off(cfg, tmp_path, monkeypatc
   d = tmp_path / "dir.json"
   d.mkdir()
   monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(d))
-  assert tesla().vtsc_agreed_floor is False
+  assert tesla().vtsc_release_later is False
   assert log.at("error")
 
 
 def test_the_tesla_section_never_touches_the_lightning(cfg):
-  cfg({"tesla": {"vtsc_agreed_floor": True}})
-  assert pv.PnwVehicle(CP(LIGHTNING, "ford", True)).vtsc_agreed_floor is False
+  cfg({"tesla": {"vtsc_release_later": True}})
+  assert pv.PnwVehicle(CP(LIGHTNING, "ford", True)).vtsc_release_later is False
 
 
 def _reload(t, cfg_writer, doc, now):
@@ -120,25 +120,25 @@ def _reload(t, cfg_writer, doc, now):
 def test_hot_reload_flips_it_within_the_poll_interval(cfg, log):
   cfg(None)
   t = tesla()
-  assert t.vtsc_agreed_floor is True
-  assert _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": False}}, t._tesla_cfg_poll + 1.0) is True
-  assert t.vtsc_agreed_floor is False
+  assert t.vtsc_release_later is True
+  assert _reload(t, cfg, {"tesla": {"vtsc_release_later": False}}, t._tesla_cfg_poll + 1.0) is True
+  assert t.vtsc_release_later is False
   ev = [m for lvl, m in log.lines if lvl == "event"]
   assert "curve_brain_cfg_reload" in ev
-  assert _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": True}}, t._tesla_cfg_poll + 1.0) is True
-  assert t.vtsc_agreed_floor is True
+  assert _reload(t, cfg, {"tesla": {"vtsc_release_later": True}}, t._tesla_cfg_poll + 1.0) is True
+  assert t.vtsc_release_later is True
 
 
 def test_a_typo_mid_drive_keeps_the_last_good_value(cfg, log):
-  cfg({"tesla": {"vtsc_agreed_floor": False}})
+  cfg({"tesla": {"vtsc_release_later": False}})
   t = tesla()
-  assert _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": "flase"}}, t._tesla_cfg_poll + 1.0) is False
-  assert t.vtsc_agreed_floor is False                                                  # the last good value, not the default (True)
+  assert _reload(t, cfg, {"tesla": {"vtsc_release_later": "flase"}}, t._tesla_cfg_poll + 1.0) is False
+  assert t.vtsc_release_later is False                                                  # the last good value, not the default (True)
   assert any("NOT applied" in e for e in log.at("error"))
 
 
-def test_a_rejected_reload_names_the_agreed_floor_in_the_log(cfg, log):
-  cfg({"tesla": {"vtsc_agreed_floor": False}})
+def test_a_rejected_reload_names_the_release_later_in_the_log(cfg, log):
+  cfg({"tesla": {"vtsc_release_later": False}})
   t = tesla()
-  _reload(t, cfg, {"tesla": {"vtsc_agreed_floor": "flase"}}, t._tesla_cfg_poll + 1.0)
-  assert any("agreed_floor=False" in e for e in log.at("error"))
+  _reload(t, cfg, {"tesla": {"vtsc_release_later": "flase"}}, t._tesla_cfg_poll + 1.0)
+  assert any("release_later=False" in e for e in log.at("error"))

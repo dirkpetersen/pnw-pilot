@@ -110,24 +110,6 @@ MAP_MIN_SLOWDOWN  = 4.5   # m/s; only fold a map curve whose (scaled) target is 
 #   1.0          70 mph                51 mph                70 mph
 MAP_FLOOR_DEPTH   = 0.0
 
-# vtscfloor2pnw (owner 2026-09-29, "a smaller allowance when the map or camera asks for much less"): the set-10 floor above is
-# shrunk ONLY when BOTH independent sources (this map point's raw target AND the camera's curve-safe speed for the same curve)
-# ask for less: floor = max(V_MIN, min(set-10 mph, max(map_raw, camera) + AGREED_FLOOR_MARGIN)). Raven only
-# (PnwVehicle.vtsc_agreed_floor); kill switch curve.json tesla.vtsc_agreed_floor. A lone map value (Olympia #11: map 50, road fine at
-# 78) never cuts deeper, because the camera then says "fine" and max() takes it.
-#   margin: 1.0 m/s (2.2 mph). OR-34 08:10:44-46 (map 65 mph, camera 70 -> 66 -> 63): floor 72.5 / 68.0 / 66.9 mph (brief: ~66-68).
-#   Terwilliger 22:35:13 (map 51, camera 56): 57.9. Over the three drives' ces ticks (selected point's raw vs camera) a 1.0 margin
-#   would have lowered 0 of 165 Olympia floored ticks (#11 unchanged), 14 of 122 OR-34, 55 of 182 Terwilliger. LIMIT: the camera only
-#   agrees in the last ~1.5 s, after the state machine has released, so on OR-34 / Terwilliger the cap itself does not change
-#   (tests/test_vtsc_agreed_floor.py); it acts where both sources agree early.
-AGREED_FLOOR_MARGIN = 1.0   # m/s above the agreed curve speed
-# The camera's apex and the map point are the SAME curve only when they are close: a far map node beside a near camera curve is not
-# an agreement. |map point distance - camera apex distance| must be within this (m; ~3.5 s at 75 mph) or the old floor stays.
-AGREED_FLOOR_PAIR_M = 150.0
-# A map position older than this (s, from LastGPSPosition fix_ts) is stale -> the old floor. Measured gpsAge on the Raven: p50 1.5-1.7 s,
-# p99 <= 2.5 s, max 2.6 s; 3.0 s is ~107 m of lag at 80 mph, inside the 150 m pairing window. A position with NO fix_ts is stale too.
-AGREED_FLOOR_GPS_MAX_AGE_S = 3.0
-
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
 # Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a
 # FIXED 500 m path horizon (MIN_WAY_DIST in mapd/settings/const.go), but VTSC only scanned
