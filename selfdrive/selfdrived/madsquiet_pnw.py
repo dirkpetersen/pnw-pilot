@@ -50,7 +50,7 @@ class MadsQuiet:
 
     enabled:          selfdrived's own engagement this frame
     lateral_only:     MadsPnw.lateral_only this frame (MADS is steering on its own)
-    mads_available:   MadsPnw.available (the panda-honoured capability; False on the Tesla)
+    mads_available:   MadsPnw.available (the panda-honoured capability: the Lightning and, since teslamads2pnw, the Raven)
     brake_grace_open: MadsPnw is inside its brake-race window, i.e. may still arm on a later frame
     """
     enabled, lateral_only = bool(enabled), bool(lateral_only)

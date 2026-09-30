@@ -322,3 +322,111 @@ def _safe_alerts(events, types):
         alert.event_type = et
         out.append(alert)
   return out
+
+
+# ---- madsquiet2pnw / Raven (owner 2026-09-29: "one chime when I brake into steering-only, one when I pull the stalk") ----
+# The Raven has had the MADS capability since teslamads2pnw, so MadsQuiet applies to it through the same
+# `mads.available` gate as the Lightning. These pin that with the Raven's own shape: pcmCruise=True, the brake frame lands
+# 19-51 ms BEFORE DI_cruiseState drops (drives/2026-09-28/tesla-brake-census), and the stalk pull goes STANDBY -> OVERRIDE
+# -> ENABLED. Driven through the REAL StateMachine + Events + AlertManager, not through hand-fed engaged flags.
+
+class TestTheRavenSequence:
+  @staticmethod
+  def _drive(frames):
+    """frames: (cruise_enabled, brake, extra_event_names, off_requested). Returns (sounds, banner_frames)."""
+    from openpilot.selfdrive.selfdrived.alertmanager import AlertManager
+    from openpilot.selfdrive.selfdrived.events import EventNamePnw
+    from openpilot.selfdrive.selfdrived.state import StateMachine
+    from openpilot.selfdrive.selfdrived.mads_pnw import MADS_BRAKE_PANDA_GRACE_FRAMES
+    sm, mads, quiet, am = StateMachine(), MadsPnw(MADS_ON), MadsQuiet(MADS_BRAKE_PANDA_GRACE_FRAMES), AlertManager()
+    cruise_prev = brake_prev = False
+    last, sounds, banner = AudibleAlert.none, [], 0
+    for i, (cruise, brake, extra, off) in enumerate(frames):
+      names = list(extra)
+      if cruise and not cruise_prev:
+        names.append(EventName.pcmEnable)
+      elif not cruise:
+        names.append(EventName.pcmDisable)                      # car_specific re-raises it EVERY frame cruise is off
+      if brake and not brake_prev:
+        names.append(EventName.pedalPressed)
+      cruise_prev, brake_prev = cruise, brake
+      e = ev(*names)
+      enabled, active = sm.update(e)
+      mads.update(enabled, active, brake, cruise, e, True, off)
+      d = quiet.step(enabled, mads.lateral_only, mads.available, mads.brake_grace_open)
+      if mads.lateral_only:
+        e.add(EventNamePnw.madsLateralOnly)                     # selfdrived.step adds this after mads.update
+      am.add_many(i, apply_chime_decision(_safe_alerts(e, sm.current_alert_types), d))
+      am.process_alerts(i, set())
+      snd = am.current_alert.audible_alert
+      if snd != last and snd != AudibleAlert.none:
+        sounds.append((i, snd))
+      last = snd
+      if mads.lateral_only and am.current_alert.alert_text_1 == "Steering only":
+        banner += 1
+    return sounds, banner
+
+  def test_brake_into_steering_only_and_the_stalk_pull_back_are_both_silent_but_the_banner_stays(self):
+    frames = ([(False, False, (), False)] * 5 +
+              [(True, False, (), False)] * 20 +                 # first engage from fully off (stock chime, checked below)
+              [(True, True, (), False)] * 4 +                   # brake lands first, cruise still ENABLED
+              [(False, True, (), False)] * 100 +                # DI_cruiseState -> STANDBY, steering-only
+              [(False, False, (), False)] * 200 +               # brake released, still steering-only
+              [(True, False, (), False)] * 40)                  # stalk pull: STANDBY -> OVERRIDE -> ENABLED
+    sounds, banner = self._drive(frames)
+    assert sounds == [(5, AudibleAlert.engage)], f"only the first engage from off may sound: {sounds}"
+    assert banner >= 270, f"the 'Steering only' banner must stay up through steering-only (frames shown: {banner} of ~304)"
+
+  def test_the_first_engage_from_fully_off_still_chimes(self):
+    sounds, _ = self._drive([(False, False, (), False)] * 5 + [(True, False, (), False)] * 10)
+    assert sounds == [(5, AudibleAlert.engage)]
+
+  def test_a_stalk_push_out_of_steering_only_is_a_full_disengage_and_chimes_once(self):
+    frames = ([(True, False, (), False)] * 10 + [(True, True, (), False)] * 4 + [(False, True, (), False)] * 50 +
+              [(False, False, (), True)] * 5 + [(False, False, (), False)] * 100)   # FWD push -> off request
+    sounds, _ = self._drive(frames)
+    assert [s for _, s in sounds][1:] == [AudibleAlert.disengage], f"steering ended with no/extra sound: {sounds}"
+
+  def test_disengage_on_brake_setting_keeps_the_raven_chime(self):
+    t = Truck(alt=MADS_DISENGAGE)
+    t.engaged()
+    assert t.frame(False, braking=True, events=(EventName.pedalPressed, EventName.pcmDisable)) == ChimeDecision()
+
+
+class TestEverySafetyAlertKeepsItsSound:
+  """The decision may only ever touch the four named engagement alerts. Sweep the WHOLE events table under both
+  quiet flags: every other (event, type) alert must come out with its sound unchanged -- faults, steerTempUnavailable,
+  steerSaturated/takeControl, driver monitoring, commIssue, immediate/soft disable, the Lightning's pcm/button alerts."""
+
+  QUIET = {("pedalPressed", ET.USER_DISABLE), ("pcmDisable", ET.USER_DISABLE),
+           ("pcmEnable", ET.ENABLE), ("buttonEnable", ET.ENABLE)}
+
+  def test_no_other_alert_in_the_table_loses_its_sound(self):
+    from openpilot.selfdrive.selfdrived.events import Alert, EVENT_NAME
+    decision = ChimeDecision(quiet_disengage=True, quiet_engage=True)
+    checked = audible = 0
+    for e, types in EVENTS.items():
+      for et, alert in types.items():
+        if not isinstance(alert, Alert):
+          continue                                              # callables need live callback args; none is an engagement alert
+        alert = copy.copy(alert)
+        alert.alert_type, alert.event_type = f"{EVENT_NAME[e]}/{et}", et
+        out = apply_chime_decision([alert], decision)[0]
+        checked += 1
+        if (EVENT_NAME[e], et) in self.QUIET:
+          assert out.audible_alert == AudibleAlert.none
+        else:
+          assert out.audible_alert == alert.audible_alert, f"{EVENT_NAME[e]}/{et} lost its sound"
+          audible += alert.audible_alert != AudibleAlert.none
+    assert checked > 100 and audible > 60, f"the sweep scanned too little to mean anything: {checked} alerts, {audible} audible"
+
+  def test_the_named_safety_alerts_are_in_the_sweep_and_audible(self):
+    from openpilot.selfdrive.selfdrived.events import Alert
+    for name, et in (("steerTempUnavailable", ET.SOFT_DISABLE), ("steerUnavailable", ET.IMMEDIATE_DISABLE),
+                     ("commIssue", ET.SOFT_DISABLE), ("controlsMismatch", ET.IMMEDIATE_DISABLE),
+                     ("promptDriverDistracted", ET.PERMANENT), ("steerSaturated", ET.WARNING), ("buttonCancel", ET.USER_DISABLE),
+                     ("steerDisengage", ET.USER_DISABLE), ("wrongCarMode", ET.USER_DISABLE)):
+      a = EVENTS[getattr(EventName, name)].get(et)
+      assert a is not None, f"{name}/{et} vanished from the table -- the sweep no longer covers it"
+      if isinstance(a, Alert):
+        assert a.audible_alert != AudibleAlert.none, f"{name}/{et} is silent"
