@@ -47,7 +47,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_shadow import CurveDBShado
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import CurveDbLive, TELE_KEYS as ROADDB_TELE_KEYS
 from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import ShapeStage, TELE_KEYS as SHAPE_TELE_KEYS
 # curvebrain2b2pnw: the Tesla's need layer (curve DB -> the CurveBrain mem-param VTSC reads). No ces_pnw import inside it.
-from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, PUBLISH_S as CURVE_BRAIN_PUBLISH_S,
+from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, Overrides, PUBLISH_S as CURVE_BRAIN_PUBLISH_S,
                                                                   TELE_KEYS as CURVE_BRAIN_TELE_KEYS)
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VTSC_C
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
@@ -4339,7 +4339,11 @@ class CESController:
     self._veh = veh                        # curveslow-lightning: per-car curve-speed penalty (ICBM apex)
     # curvedblive2pnw: the learned curve database, LIVE on ICBM's curve target (curvedb_live.py). Loads in its
     # own thread; OFF (and saying why in every record) on any car without the capability or with the kill switch.
-    self._roaddb = CurveDbLive(veh.curvedb_v2_live, a_override=veh.curvedb_v2_lat_a)
+    # ovrcar2pnw: the per-curve A limits (curve_brain.Overrides), for the platform the capability names; a car without it never
+    # opens /data/pnw/curve_overrides.json.
+    self._roaddb = CurveDbLive(veh.curvedb_v2_live, a_override=veh.curvedb_v2_lat_a,
+                               overrides=(Overrides(platform=veh.curve_override_platform)
+                                          if veh.curvedb_v2_live and veh.curve_override_platform else None))
     if veh.lightning_curve_slow:
       cloudlog.event("curvedb_v2_cfg", live=veh.curvedb_v2_live, switch=veh._curve_cfg["curvedb_v2_live"],
                      lat_a=veh.curvedb_v2_lat_a if veh.curvedb_v2_lat_a is not None else "mapd",

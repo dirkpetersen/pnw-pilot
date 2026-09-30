@@ -77,6 +77,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pv
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as C
+from openpilot.selfdrive.controls.lib.ces_pnw import curve_brain as cb
 from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_live as cl
 from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_shadow as cds
 
@@ -88,6 +89,9 @@ TICKS_CACHE = os.path.join(WB, "drives/2026-09-24/curveshape-replay/ticks.jsonl"
 PNWLOGS = os.path.join(OUT, "pnwlogs")          # `aws --profile dipeit s3 sync` of the device's pnwlogs (read-only)
 FIXTURE = os.environ.get("CURVEDB_V2_REPLAY_FIXTURE",
                          os.path.join(WB, "_scratch/curvedb-v2/live/replay_fixture.json.gz"))
+# ovrcar2pnw: the per-curve override file the Lightning's controller reads. None = an EMPTY valid v2 file (no overrides, and no
+# fail-safe error line in the replay); `check --overrides PATH` runs the replay with a real file (e.g. the private seed).
+OVERRIDES_FILE = None
 DB_DIR = os.path.join(WB, "_scratch/curvedb-v2/live-20260924")   # the table deployed 2026-09-24 (19,924 rows)
 CORPUS2_SINCE = datetime(2026, 9, 24, tzinfo=PT).timestamp()
 LIGHTNING = "FORD_F_150_LIGHTNING_MK1"
@@ -363,6 +367,12 @@ class Env:
       p(mod, "time", self.clock)
     p(pv, "CURVE_CONFIG_PATH", os.path.join(self.tmp, "absent-curve.json"))
     p(pv, "RAIN_CONFIG_PATH", os.path.join(self.tmp, "absent-rain.json"))
+    ovr = OVERRIDES_FILE
+    if ovr is None:
+      ovr = os.path.join(self.tmp, "curve_overrides.json")
+      with open(ovr, "w") as fh:
+        fh.write('{"version": 2, "overrides": []}')
+    p(cb, "OVERRIDES_PATH", ovr)
     p(m, "CES_EVENT_LOG", os.path.join(self.tmp, "ces_events.jsonl"))
     p(cl, "BACKGROUND", [False])                 # load + read A in the constructor: no thread, no race
     p(cl, "A_MAX_AGE_S", float("inf"))           # the device's poll thread keeps A fresh; there is no thread here
@@ -1315,7 +1325,11 @@ def main(argv=None) -> int:
   c.add_argument("--corpus", action="append", default=[])
   c.add_argument("--exclude", action="append", default=[], help="a rec/st key a later stage adds (by name)")
   c.add_argument("--mutate", action="append", default=[], help="NAME=DELTA, e.g. ICBM_MARGIN_M=1e-9")
+  c.add_argument("--overrides", default=None, help="a per-curve override file for the replay (default: an empty valid one)")
   args = ap.parse_args(argv)
+  if getattr(args, "overrides", None):
+    global OVERRIDES_FILE
+    OVERRIDES_FILE = os.path.abspath(args.overrides)
   try:
     return cmd_record(args) if args.cmd == "record" else cmd_check(args)
   except MissingInput as e:

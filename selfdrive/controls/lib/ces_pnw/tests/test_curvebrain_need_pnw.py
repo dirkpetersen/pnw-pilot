@@ -859,7 +859,19 @@ _SEED = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curve_overrides.js
 _TABLE = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curvedb_v2"))
 
 
-@pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists()), reason="private data (the seed override file + the curve DB) not present")
+def _seed_is_v2() -> bool:
+  """ovrcar2pnw: these real-table tests describe the v2 seed (per-car entries). The seed is a PRIVATE working file (positions;
+  this repo is public), so when it is absent or still the legacy v1 form the tests SKIP with that reason rather than fail."""
+  try:
+    return json.loads(_SEED.read_text()).get("version") == 2
+  except (OSError, ValueError, AttributeError):
+    return False
+
+
+_SEED_SKIP = "private data (the v2 seed override file + the curve DB) not present, or the seed is not schema v2"
+
+
+@pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists() and _seed_is_v2()), reason=_SEED_SKIP)
 class TestTheSeedFileAgainstTheRealTable:
   """The private seed file and the deployed table: the Terwilliger LEFT tight rows are covered, the RIGHT curve and the
   northbound rows are not (owner: no override on the right curve)."""
@@ -872,7 +884,7 @@ class TestTheSeedFileAgainstTheRealTable:
     o = cb.Overrides(str(_SEED))
     assert not o.failsafe and len(o.entries) == 2
     terw, or34 = o.entries
-    assert terw["a_max"] == 2.8 and "Terwilliger left" in terw["note"]
+    assert terw["a_max"] == 2.8 and "Terwilliger SB left" in terw["note"]
     assert or34["a_max"] == 1.9 and "OR-34 WB left" in or34["note"]
 
   def test_left_tight_rows_are_covered_right_curve_and_northbound_are_not(self):
@@ -890,6 +902,7 @@ class TestTheSeedFileAgainstTheRealTable:
 _OR34 = (44.5604, -123.1210)
 
 
+@pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists() and _seed_is_v2()), reason=_SEED_SKIP)
 class TestTheOr34SeedEntryAgainstTheRealTable:
   """The OR-34 westbound-left entry (owner 2026-09-29, Tesla ran wide after Albany, adverse camber): it covers the westbound
   rows of that curve, not the eastbound rows, not the neighbouring westbound rows 600 m+ east (the 'steep right' curve the

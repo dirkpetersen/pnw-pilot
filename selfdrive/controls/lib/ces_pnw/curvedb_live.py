@@ -106,7 +106,7 @@ UNKNOWN_CLASSES = ("", "unknown", "None", "none")
 # silently-null column -- that happened four times in ces_pnw.py's history.
 TELE_KEYS = ("cdb2On", "cdb2Err", "cdb2Rows", "cdb2A", "cdb2ASrc", "cdb2N", "cdb2NR", "cdb2NL",
              "cdb2Why", "cdb2Dir", "cdb2Src", "cdb2Base", "cdb2Tgt", "cdb2Row", "cdb2K", "cdb2VDb",
-             "cdb2D", "cdb2Lat", "cdb2Lon", "cdb2WayHold")
+             "cdb2D", "cdb2Lat", "cdb2Lon", "cdb2WayHold", "cdb2Ovr", "cdb2OvrN")
 
 
 class CurveDbFileError(Exception):
@@ -484,11 +484,15 @@ def parse_a(settings_raw, personality_raw) -> tuple[float | None, str | None, st
 
 class CurveDbLive:
   def __init__(self, enabled: bool, data_dir: str | None = None, read_params=None, start: bool = True,
-               a_override: float | None = None):
+               a_override: float | None = None, overrides=None):
     """a_override: curve.json's curvedb_v2_lat_a (PnwVehicle.curvedb_v2_lat_a) -- a number means the DB uses it
-    instead of mapd's A (source "curve.json"); None means mapd's A, read live."""
+    instead of mapd's A (source "curve.json"); None means mapd's A, read live.
+    overrides: ovrcar2pnw -- this car's curve_brain.Overrides (per-curve A limits), or None for a car without the
+    capability (PnwVehicle.curve_override_platform). Duck-typed (refresh / limit / failsafe / entries): curve_brain imports
+    this module, so it cannot be imported here. Only ever LOWERS a row's A; in fail-safe it applies nothing (it has said so)."""
     self.enabled = bool(enabled)
     self.a_override = a_override
+    self.overrides = overrides
     self.data_dir = data_dir if data_dir is not None else DATA_DIR       # looked up at call time (tests redirect it)
     self._read_params = read_params or READ_PARAMS[0]
     self.state = "off" if not self.enabled else "loading"
@@ -579,6 +583,17 @@ class CurveDbLive:
       return None, name, f"A reading stale ({time.monotonic() - t:.0f} s)"
     return a, name, why
 
+  def row_a(self, idx: RowIndex, m, a_lat: float) -> tuple[float, str | None]:
+    """(A for this row, the override note when it bound). min(a_lat, the car's per-curve limit): lower-only, never raises A.
+    Without overrides, or with them in fail-safe (no valid list), the A is a_lat unchanged -- the Lightning is not lowered
+    globally (its 2.5 already sits below the Tesla's fail-safe 2.8; see curve_brain.py)."""
+    if self.overrides is None:
+      return a_lat, None
+    lim, note = self.overrides.limit(m.lat, m.lon, idx.anchors[m.anchor][2])
+    if lim is not None and lim < a_lat - 1e-9:
+      return lim, note
+    return a_lat, None
+
   def polyline(self, points) -> Polyline:
     if points is not self._poly_src:          # mapd's list is replaced ~1 Hz; rebuild only then
       self._poly_src, self._poly = points, Polyline(points)
@@ -658,6 +673,8 @@ class CurveDbLive:
     -- or any value when ICBM has no target at all -- is used exactly."""
     self.n += 1
     self._last_t = time.monotonic()
+    if self.overrides is not None:
+      self.overrides.refresh(self._last_t)             # 1 s stat poll; never raises; says so itself when the file is bad
     way_sel, way_hold = self.way_sel_held(way_sel, self._last_t)
     rec = {"cdb2Src": src, "cdb2Base": _r(today, 2), "cdb2Tgt": _r(today, 2), "cdb2Dir": "none",
            "cdb2Row": None, "cdb2K": None, "cdb2VDb": None, "cdb2D": None, "cdb2Lat": None, "cdb2Lon": None,
@@ -686,7 +703,7 @@ class CurveDbLive:
       m.s_q = s_q
       if m.why != "ok":
         return value, dist, m, "none"
-      v, d = db_target(value, m.k, a_lat, ref, posted)
+      v, d = db_target(value, m.k, self.row_a(idx, m, a_lat)[0], ref, posted)
       return (None if v >= ref - min_drop else v), dist, m, d
 
     base = {s: c for s, c in cands.items() if c is not None}   # the pipeline, no DB
@@ -719,7 +736,8 @@ class CurveDbLive:
         pool.append((value, dist, s, m, d))
     for m in scan_ahead(idx, poly, s_ego, horizon_m):
       dist = max(m.s_anchor - idx.back - s_ego, 0.0)
-      v = v_db(a_lat, m.k) if today is None else db_target(today, m.k, a_lat, ref, posted)[0]
+      a_row = self.row_a(idx, m, a_lat)[0]
+      v = v_db(a_row, m.k) if today is None else db_target(today, m.k, a_row, ref, posted)[0]
       b = bind_fn(v, dist)
       if b is not None:
         pool.append((b, dist, "add", m, "add"))
@@ -756,7 +774,8 @@ class CurveDbLive:
       rec.update(cdb2Row=rep_m.row_id, cdb2Lat=round(rep_m.lat, 5), cdb2Lon=round(rep_m.lon, 5),
                  cdb2D=_r(max(rep_m.s_anchor - s_ego, 0.0), 0))
       if rep_m.k is not None:
-        rec.update(cdb2K=round(rep_m.k, 6), cdb2VDb=_r(v_db(a_lat, rep_m.k), 2))
+        a_row, ovr = self.row_a(idx, rep_m, a_lat)
+        rec.update(cdb2K=round(rep_m.k, 6), cdb2VDb=_r(v_db(a_row, rep_m.k), 2), cdb2Ovr=ovr)
     rec["cdb2Tgt"] = _r(out[0], 2)
     self._last = rec
     return out
@@ -766,7 +785,9 @@ class CurveDbLive:
     a, name, why = self.a_lat() if self.enabled else (None, None, "off")
     out = dict.fromkeys(TELE_KEYS)
     out.update(cdb2On=self.state, cdb2Err=self.err, cdb2Rows=self.index.n_rows if self.index is not None else 0,
-               cdb2A=a, cdb2ASrc=name, cdb2N=self.n, cdb2NR=self.n_raise, cdb2NL=self.n_lower)
+               cdb2A=a, cdb2ASrc=name, cdb2N=self.n, cdb2NR=self.n_raise, cdb2NL=self.n_lower,
+               # ovrcar2pnw: entries loaded for THIS car; None = no overrides object (not the capability) OR fail-safe
+               cdb2OvrN=(len(self.overrides.entries) if self.overrides is not None and self.overrides.entries is not None else None))
     if self._last and time.monotonic() - self._last_t <= DECISION_FRESH_S:
       out.update(self._last)
     else:                                  # ICBM idle (Chill, CES off, no data): no stale decision beside icbmT=None

@@ -405,6 +405,14 @@ CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (o
 CURVE_STEER_CEILING_OWNER = 3.6
 CURVE_STEER_FALLBACK = 2.8
 _STEER_LAT_CEILING_FALLBACK = CURVE_STEER_FALLBACK
+
+# ovrcar2pnw (OWNER DECISION 2026-09-29): the per-curve override file /data/pnw/curve_overrides.json (schema v2, curve_brain.Overrides)
+# holds PER-CAR limits and is used ONLY by these two cars, named by their opendbc platform ("according to the car database":
+# opendbc.car.tesla.values.CAR.TESLA_MODEL_S_HW3, opendbc.car.ford.values.CAR.FORD_F_150_LIGHTNING_MK1 -- a test pins both against
+# opendbc). An entry naming any other platform is invalid; a car not in this tuple never opens the file (curve_override_platform
+# is None). This tuple is the ONLY place the names are listed: feature code reads PnwVehicle.curve_override_platform.
+CURVE_OVERRIDE_PLATFORMS = ("TESLA_MODEL_S_HW3", "FORD_F_150_LIGHTNING_MK1")
+CURVE_OVERRIDE_V1_PLATFORM = CURVE_OVERRIDE_PLATFORMS[0]   # a schema-v1 entry (top-level a_max, no `cars`) is read as Tesla-only
 _steer_lat_ceiling_cache: float | None = None
 
 
@@ -806,6 +814,9 @@ class PnwVehicle:
     # HW3 only: its lateral target was measured on this car (design s5.4), and curve.json's "tesla" section is read
     # ONLY here, so on every other car -- the Lightning above all -- it is never even opened.
     self.curve_brain_vtsc: bool = fp == "TESLA_MODEL_S_HW3"
+    # ovrcar2pnw: the platform key this car's per-curve overrides are filed under (curve_brain.Overrides), or None = this car
+    # never reads /data/pnw/curve_overrides.json (owner 2026-09-29: only the Tesla and the Lightning use it).
+    self.curve_override_platform: str | None = fp if fp in CURVE_OVERRIDE_PLATFORMS else None
     self._tesla_cfg_sig = _curve_file_sig() if self.curve_brain_vtsc else None   # curvebrain2b2pnw: hot-reload state
     self._tesla_curve_cfg = _load_tesla_curve_config() if self.curve_brain_vtsc else None
     self._tesla_cfg_good = bool(self.curve_brain_vtsc and _tesla_cfg_is_honored(self._tesla_curve_cfg))

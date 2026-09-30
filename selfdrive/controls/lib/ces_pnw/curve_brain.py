@@ -48,6 +48,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ces_pnw import curvedb_live as cl
 from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import (
   CurveDbLive, RAMP_CLASSES, UNKNOWN_CLASSES, scan_ahead)
+from openpilot.selfdrive.controls.lib.pnw_vehicle import CURVE_OVERRIDE_PLATFORMS, CURVE_OVERRIDE_V1_PLATFORM
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VC
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import brake_cap_for_apex
 
@@ -67,18 +68,35 @@ TELE_KEYS = ("cbOn", "cbDb", "cbWhy", "cbV", "cbD", "cbSrc", "cbEv", "cbA", "cbK
 
 # curvebrain2b2pnw A5 (owner 2026-09-29): the general steering ceiling is the vehicle-model clamp itself (3.6), which is acceptable
 # only because KNOWN bad curves carry their own lower limit. The DB rows store only k, so the limits are a small separate PRIVATE
-# file, shipped like the curve DB (source: ~/gh/comma/workdir/data/curve_overrides.json -> /data/pnw/curve_overrides.json):
-#   {"overrides": [{"lat", "lon", "radius_m", "heading_deg", "heading_tol_deg", "a_max", "note"}, ...]}
-# A row whose ANCHOR lies within radius_m of (lat, lon) and whose approach heading is within heading_tol_deg of heading_deg is priced
-# at A_row = min(A, a_max): it can only LOWER a speed. FAIL-SAFE (Rule 2): a file that is missing, unreadable, corrupt or holds an
-# invalid entry means the safety data cannot be trusted, so EVERY row is priced at no more than FAILSAFE_A (loudly, once a minute)
-# until a valid file is read. `{"overrides": []}` is valid and means no overrides. Hot-reloaded on the curve.json cadence; a bad
-# edit mid-drive keeps the last valid list (error logged); a file that DISAPPEARS mid-drive is fail-safe.
+# file, shipped like the curve DB (source: ~/gh/comma/workdir/data/curve_overrides.json -> /data/pnw/curve_overrides.json).
+#
+# ovrcar2pnw SCHEMA v2 (owner 2026-09-29: PER-CAR values, ONLY the Tesla and the Lightning, DIRECTION mandatory):
+#   {"version": 2, "overrides": [{"lat", "lon", "radius_m", "heading_deg", "heading_tol_deg",
+#                                 "cars": {"<opendbc platform>": {"a_max": <m/s^2>}, ...}, "note"}, ...]}
+# * platform keys are pnw_vehicle.CURVE_OVERRIDE_PLATFORMS (exactly the two cars); any other key makes the entry INVALID.
+# * an entry applies to a car ONLY if that car's platform is a key of `cars`; each car's Overrides instance filters on its own.
+# * heading_deg + heading_tol_deg are REQUIRED and 0 < heading_tol_deg <= HEADING_TOL_MAX (60): no entry can be omnidirectional.
+# * A row whose ANCHOR lies within radius_m of (lat, lon) and whose approach heading is within heading_tol_deg of heading_deg is
+#   priced at A_row = min(A, a_max): it can only LOWER a speed.
+# * SCHEMA v1 COMPATIBILITY: a file with no "version" whose entries carry a top-level `a_max` and no `cars` (what shipped before
+#   ovrcar2pnw) is read with every such entry as Tesla-only, with a cloudlog.warning "v1 entry: Tesla only". This is so a deploy
+#   that lands the code before the v2 file does not drop the Tesla into fail-safe. Once the v2 file is installed it is never used.
+#   A v2 entry (or a file with "version": 2) without `cars` is invalid; an entry with both `a_max` and `cars` is invalid.
+# FAIL-SAFE (Rule 2) DIFFERS PER CAR, deliberately: a file that is missing, unreadable, corrupt or holds an invalid entry means the
+# safety data cannot be trusted.
+#   * TESLA: its general ceiling (3.6) is only safe WITH the overrides, so EVERY row is priced at no more than FAILSAFE_A until a
+#     valid file is read.
+#   * LIGHTNING: NO overrides are applied (and the error is logged). The Lightning is NOT lowered globally: its curve-DB A
+#     (curve.json curvedb_v2_lat_a, default 2.5) already sits below the Tesla's fail-safe 2.8, so the general ceiling never
+#     relied on this file; lowering it further would only slow a car whose own default is the conservative one.
+# `{"overrides": []}` is valid and means no overrides. Hot-reloaded on the curve.json cadence; a bad edit mid-drive keeps the last
+# valid list (error logged) on both cars; a file that DISAPPEARS mid-drive is fail-safe (Tesla) / no overrides (Lightning).
 OVERRIDES_PATH = "/data/pnw/curve_overrides.json"
 OVERRIDES_MAX_BYTES = 64 * 1024
 OVERRIDES_POLL_S = 1.0
 OVERRIDES_MAX_ENTRIES = 50   # more is treated as invalid (fail-safe): the file is a short list of known bad curves
 NOTE_MAX = 120               # characters of an entry's note kept (it is what cbOvr reports)
+HEADING_TOL_MAX = 60.0       # ovrcar2pnw: the widest direction window an entry may have (owner: some curves are one-direction problems)
 FAILSAFE_A = 2.8            # == pnw_vehicle.CURVE_STEER_FALLBACK (pinned by a test)
 
 
@@ -87,11 +105,17 @@ def _dist_m(lat1, lon1, lat2, lon2) -> float:
 
 
 class Overrides:
-  """The per-curve lateral-acceleration limits. Never raises. `entries` is None until a valid file has been read (= fail-safe)."""
+  """The per-curve, per-car lateral-acceleration limits. Never raises. `entries` is None until a valid file has been read (=
+  fail-safe). `platform` = the car this instance serves (pnw_vehicle.PnwVehicle.curve_override_platform); `entries` holds ONLY
+  that car's limits, each as a flat {lat, lon, radius_m, heading_deg, heading_tol_deg, a_max, note}. The whole file is validated
+  whichever car reads it, so a bad entry for the other car is still an error (the file is one safety document)."""
 
-  _FIELDS = ("lat", "lon", "radius_m", "heading_deg", "heading_tol_deg", "a_max")
+  _GEOM = ("lat", "lon", "radius_m", "heading_deg", "heading_tol_deg")
 
-  def __init__(self, path: str | None = None):
+  def __init__(self, path: str | None = None, platform: str = CURVE_OVERRIDE_V1_PLATFORM):
+    if platform not in CURVE_OVERRIDE_PLATFORMS:
+      raise ValueError(f"Overrides: platform {platform!r} is not one of {CURVE_OVERRIDE_PLATFORMS}")
+    self.platform = platform
     self.path = path if path is not None else OVERRIDES_PATH        # looked up at construction (tests redirect the module path)
     self.entries: list[dict] | None = None
     self.why = "not read yet"
@@ -105,26 +129,59 @@ class Overrides:
     return self.entries is None
 
   @staticmethod
-  def _validate(doc) -> list[dict]:
+  def _num(e, n, k):
+    x = e.get(k)
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+      raise ValueError(f"entry {n}: {k} is not a finite number")
+    return float(x)
+
+  def _validate(self, doc) -> list[dict]:
+    """The whole document -> this car's entries (flat). Raises ValueError on anything invalid."""
     if not isinstance(doc, dict) or not isinstance(doc.get("overrides"), list):
-      raise ValueError('expected {"overrides": [...]}')
+      raise ValueError('expected {"version": 2, "overrides": [...]}')
+    ver = doc.get("version", 1)
+    if isinstance(ver, bool) or ver not in (1, 2):
+      raise ValueError(f"unknown schema version {ver!r} (expected 2, or 1 = the legacy Tesla-only form)")
     if len(doc["overrides"]) > OVERRIDES_MAX_ENTRIES:
       raise ValueError(f"{len(doc['overrides'])} entries > {OVERRIDES_MAX_ENTRIES}")
     out = []
     for n, e in enumerate(doc["overrides"]):
       if not isinstance(e, dict):
         raise ValueError(f"entry {n} is not an object")
-      v = {}
-      for k in Overrides._FIELDS:
-        x = e.get(k)
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
-          raise ValueError(f"entry {n}: {k} is not a finite number")
-        v[k] = float(x)
-      if not (-90.0 <= v["lat"] <= 90.0 and -180.0 <= v["lon"] <= 180.0 and 0.0 < v["radius_m"] <= 2000.0
-              and 0.0 <= v["heading_deg"] <= 360.0 and 0.0 < v["heading_tol_deg"] <= 180.0 and 1.0 <= v["a_max"] <= 5.0):
+      g = {k: self._num(e, n, k) for k in self._GEOM}     # heading_deg / heading_tol_deg are REQUIRED numbers (direction mandatory)
+      if not (-90.0 <= g["lat"] <= 90.0 and -180.0 <= g["lon"] <= 180.0 and 0.0 < g["radius_m"] <= 2000.0
+              and 0.0 <= g["heading_deg"] <= 360.0):
         raise ValueError(f"entry {n}: a value is out of range")
-      v["note"] = str(e.get("note", ""))[:NOTE_MAX]
-      out.append(v)
+      if not 0.0 < g["heading_tol_deg"] <= HEADING_TOL_MAX:
+        raise ValueError(f"entry {n}: heading_tol_deg {g['heading_tol_deg']} not in (0, {HEADING_TOL_MAX}] -- every entry is one direction")
+      note = str(e.get("note", ""))[:NOTE_MAX]
+      if "cars" in e:
+        if "a_max" in e:
+          raise ValueError(f"entry {n}: has both a top-level a_max and cars")
+        if ver != 2:
+          raise ValueError(f"entry {n}: `cars` needs \"version\": 2")
+        cars = e["cars"]
+        if not isinstance(cars, dict) or not cars:
+          raise ValueError(f"entry {n}: cars must be a non-empty object")
+        for plat, spec in cars.items():
+          if plat not in CURVE_OVERRIDE_PLATFORMS:
+            raise ValueError(f"entry {n}: platform {plat!r} is not one of {CURVE_OVERRIDE_PLATFORMS}")
+          if not isinstance(spec, dict):
+            raise ValueError(f"entry {n}: cars.{plat} is not an object")
+          a = self._num(spec, n, "a_max")
+          if not 1.0 <= a <= 5.0:
+            raise ValueError(f"entry {n}: cars.{plat}.a_max {a} out of range [1, 5]")
+          if plat == self.platform:
+            out.append({**g, "a_max": a, "note": note})
+      else:
+        if ver != 1:
+          raise ValueError(f"entry {n}: a version-2 entry needs `cars`")
+        a = self._num(e, n, "a_max")
+        if not 1.0 <= a <= 5.0:
+          raise ValueError(f"entry {n}: a_max {a} out of range [1, 5]")
+        cloudlog.warning(f"curve_brain: {self.path} entry {n}: v1 entry: Tesla only (legacy schema, no `cars`; install the v2 file)")
+        if self.platform == CURVE_OVERRIDE_V1_PLATFORM:
+          out.append({**g, "a_max": a, "note": note})
     return out
 
   def _say(self, now, msg, force=False):
@@ -133,8 +190,11 @@ class Overrides:
       self._err_t = now
 
   def _failsafe_msg(self):
-    return (f"curve_brain: {self.path} INVALID/MISSING ({self.why}) -- every curve is priced at no more than {FAILSAFE_A} m/s^2 " +
-            "until a valid file is read (the general ceiling is only safe with the per-curve overrides)")
+    if self.platform == CURVE_OVERRIDE_V1_PLATFORM:
+      return (f"curve_brain: {self.path} INVALID/MISSING ({self.why}) -- every curve is priced at no more than {FAILSAFE_A} m/s^2 " +
+              "until a valid file is read (the general ceiling is only safe with the per-curve overrides)")
+    return (f"curve_brain: {self.path} INVALID/MISSING ({self.why}) -- NO per-curve overrides are applied for {self.platform} " +
+            "until a valid file is read (its curve-DB A is not raised, and is not lowered globally either)")
 
   def refresh(self, now: float) -> None:
     """Re-read the file when its (mtime, size) changed, polled at most every OVERRIDES_POLL_S. Never raises."""
@@ -197,6 +257,17 @@ def row_speed(veh, k: float, v_ego: float, a_cap: float | None = None) -> tuple[
   the speed the second asks for. curve_lat_a never rises with speed on the shipped schedules, so the first is normally
   the smallest; taking the minimum makes the result safe for a schedule that is not monotonic. `a_cap` (a per-curve override or
   the fail-safe) only ever LOWERS A. Pure given `veh`."""
+  base = _price(veh, k, v_ego, None)
+  if a_cap is None or base[0] is None:
+    return base
+  capped = _price(veh, k, v_ego, float(a_cap))
+  # ovrcar2pnw: LOWER-ONLY must hold in SPEED, not just in A. The 2-round fixed point below can stop short of convergence on a
+  # non-monotonic schedule, so a cap ABOVE the natural A converges further and prices a row up to ~1.4 mph FASTER than no cap
+  # (found on the real table: the Terwilliger k 0.0023 row, cap 2.8 -> 78.0 vs 76.5 mph). An override may never do that.
+  return capped if capped[0] is not None and capped[0] <= base[0] else base
+
+
+def _price(veh, k: float, v_ego: float, a_cap: float | None) -> tuple[float | None, float | None]:
   if not (math.isfinite(k) and k > 0.0 and math.isfinite(v_ego)):
     return None, None
   cap = float("inf") if a_cap is None else float(a_cap)
@@ -253,7 +324,9 @@ class CurveBrain:
     self._err_t = None
     self._err_n = 0
     self.err = None
-    self.overrides = Overrides()
+    if veh.curve_override_platform is None:              # the brain is Tesla-only; a car without the capability must not build one
+      raise ValueError("CurveBrain built for a car without curve_override_platform")
+    self.overrides = Overrides(platform=veh.curve_override_platform)
     if db is None and start:
       if cl.BACKGROUND[0]:
         threading.Thread(target=self.db.load, name="curvebrain_db", daemon=True).start()
