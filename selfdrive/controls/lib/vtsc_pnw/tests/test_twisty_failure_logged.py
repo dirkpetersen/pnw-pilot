@@ -70,6 +70,7 @@ def _sm():
   m.action.shouldStop = False
   cc = _NS()
   cc.orientationNED = [0.0, DESCENT, 0.0]
+  cc.longActive = True    # vtscpass2pnw: engaged
   return {"modelV2": m, "carControl": cc}
 
 

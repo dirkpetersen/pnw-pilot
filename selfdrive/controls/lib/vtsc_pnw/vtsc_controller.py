@@ -107,6 +107,9 @@ class VTSCController:
     self._passed_state = None
     self._passed_err_t = None
     self._passed_err_n = 0
+    # vtscpass2pnw: carControl.longActive read failures (own rate-limited log state)
+    self._la_err_t = None
+    self._la_err_n = 0
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
     self._floor_err_t = None   # silentexc3pnw: monotonic time of the last logged MapSpeedLimit/RoadContext read failure
@@ -380,6 +383,41 @@ class VTSCController:
       return ""
     self._rel_latched = True
     return why
+
+  def _long_active(self, sm, now) -> bool:
+    """vtscpass2pnw: is openpilot's longitudinal control engaged (carControl.longActive -- False with cruise off AND while the driver's
+    accelerator overrides it)? An unreadable value is treated as ENGAGED, i.e. today's behaviour (nothing is cleared), and logged
+    loudly (rate limited): the stale-latch guard below is then OFF and the log says so."""
+    try:
+      return bool(sm['carControl'].longActive)
+    except Exception as e:
+      self._la_err_n += 1
+      if self._la_err_t is None or now - self._la_err_t >= TWISTY_ERR_LOG_S:
+        cloudlog.exception(f"VTSC: carControl.longActive unreadable ({type(e).__name__}) -- assuming longitudinal IS engaged, so a cap " +
+                           f"latched while the driver drove is NOT cleared on re-engage ({self._la_err_n} failure(s) since the last log)")
+        self._la_err_t = now
+        self._la_err_n = 0
+      return True
+
+  def _drop_latched(self, v_cruise_set) -> None:
+    """vtscpass2pnw: openpilot is not driving the speed (cruise off, or the accelerator overriding), so nothing VTSC latched may survive
+    to apply on the next engage. cap() runs every planner cycle whether or not openpilot is engaged, and a `hold` reached while the
+    owner drove a curve by hand froze `_applied` at 35 mph and applied it the moment the stalk re-engaged him at 54 mph (2026-09-29
+    22:49:48, 54 -> 40 mph). Called every not-engaged cycle, so the first engaged cycle always starts from idle, no cap and no freeze --
+    which IS the engage-edge reset. Only the state machine's own latches are cleared (the release-later freeze with them, see below): the
+    brain term follows the DB need and keeps its state, the release history is only observation. Logged when it drops something that
+    would have applied (change-only by nature: once cleared there is nothing more to drop)."""
+    stale = (self._state != "idle" or self._rel_latched or self._rel_defer_t0 is not None
+             or (self._applied is not None and self._applied < v_cruise_set - 0.5))
+    if stale:
+      cloudlog.info("VTSC: openpilot longitudinal not engaged -- dropped state=%s applied=%s (it must not apply after re-engage)",
+                    self._state, "none" if self._applied is None else f"{self._applied:.1f} m/s")
+    self._state = "idle"
+    self._applied = None
+    self._below = 0
+    self._clear = 0
+    # the release-later freeze (_rel_defer_t0 / _rel_defer_capped / _rel_latched) needs no line here: cap() clears it on every cycle whose
+    # state is not `release`, and the state is idle from here (test_the_release_freeze_state_is_cleared_too pins the outcome)
 
   def _ahead_points(self, v_ego):
     """vtscpass2pnw: the map path points the car has NOT already driven past -- what the map fold may bind on. mapd publishes its current
@@ -659,6 +697,9 @@ class VTSCController:
     # braking while still materially too fast, and never accelerates out of a curve before reaching safe.
     at_safe = (not has_curve) or v_curve <= 0.0 or v_ego <= v_curve * (1.0 + C.RELEASE_SPEED_MARGIN)
 
+    if not self._long_active(sm, now):
+      self._drop_latched(v_cruise_set)              # vtscpass2pnw: nothing latched while the driver drove may apply on re-engage
+
     if self._applied is None:
       self._applied = v_cruise
 
@@ -690,6 +731,8 @@ class VTSCController:
       target = self._applied                       # freeze: never reduce further, never accelerate yet
       if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
         self._state = "release"                    # only accelerate out once we've actually slowed
+      elif tta > C.HOLD_TTA_S:
+        self._state = "brake"                      # vtscpass2pnw: the apex is moving AWAY (or was never close): a hold cannot latch on it
 
     if self._state != "release":
       self._rel_defer_t0 = None                    # the curve is over / braking re-armed: a new one gets a fresh bound (a one-cycle

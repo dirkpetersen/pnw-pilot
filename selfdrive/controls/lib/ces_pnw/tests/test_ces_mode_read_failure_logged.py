@@ -242,7 +242,7 @@ def _vsm():
   z[16] = VISION_K * V_SET
   model = o(orientationRate=o(z=z, t=[i * 0.25 for i in range(20)]), velocity=o(x=[V_SET] * 20),
             position=o(x=[V_SET * i * 0.25 for i in range(20)]), action=o(shouldStop=False))
-  return {"modelV2": model, "carControl": o(orientationNED=[0.0, 0.0, 0.0])}
+  return {"modelV2": model, "carControl": o(orientationNED=[0.0, 0.0, 0.0], longActive=True)}
 
 
 def _vtsc_drive(clock, fp, brand, mode, ticks=200):
@@ -328,7 +328,7 @@ def _ces_run(clock, fp, brand, op_long, mode, lead, curve0, v0, T=12.0):
     # (correctly) reports as a broken accumulator, failing the "no errors" identity assertions.
     sm = {"radarState": NS(leadOne=NS(status=has, vLead=lead[1] if has else 0.0, dRel=lead[0] if has else 0.0,
                                       aLeadK=0.0, vLeadK=lead[1] if has else 0.0)),
-          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0]),
+          "modelV2": model, "carControl": NS(orientationNED=[0.0, 0.0, 0.0], longActive=True),
           "livePose": NS(angularVelocityDevice=NS(x=0.0, y=0.0, z=0.0, valid=True)),
           "controlsState": NS(desiredCurvature=0.0,
                               lateralControlState=NS(which=lambda: "angleState",

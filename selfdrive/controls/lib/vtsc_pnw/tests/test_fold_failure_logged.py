@@ -84,6 +84,7 @@ def _sm(pitch=FLAT, vision_k=0.0):
   m.action.shouldStop = False
   cc = _NS()
   cc.orientationNED = [0.0, pitch, 0.0]
+  cc.longActive = True    # vtscpass2pnw: engaged
   return {"modelV2": m, "carControl": cc}
 
 

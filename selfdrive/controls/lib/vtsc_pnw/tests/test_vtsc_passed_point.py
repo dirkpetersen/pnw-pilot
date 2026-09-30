@@ -9,6 +9,13 @@ I-5 on-ramp (22:44:49). The fix reuses ces_pnw.icbm_passed_points (the geometry 
     loop whose later leg lies behind the heading but AHEAD along the path still binds / cannot-tell (slow, no heading, error) = today's
     behaviour, and the change-only log that says so (Rule 2),
   * the two REAL cases replayed through the real VTSCController.cap() (passed_point_frames.py: real geometry, local metres).
+
+Bug 2 (report 3.5): cap() runs every planner cycle whether or not openpilot is engaged, and a `hold` reached while the owner drove a
+curve by hand froze the cap at 35 mph and applied it the moment the stalk re-engaged him at 54 mph (54 -> 40 mph). Besides the mask above
+(a receding point no longer feeds the latch), every cycle with carControl.longActive False now drops the state machine's latches, so the
+first engaged cycle starts from idle: no cap, no freeze. The last tests pin that: reset when not engaged (cruise off AND accelerator
+override), NO reset while engaged, the release-later freeze state is cleared too, an unreadable longActive is loud and changes nothing,
+and the real re-engage window has no cap from the manual curve.
 """
 import math
 
@@ -318,9 +325,153 @@ def test_the_ramp_cap_never_drops_for_a_point_behind_the_car(monkeypatch):
 
 def test_the_receding_curve_never_latches_hold_in_the_reengage_window(monkeypatch):
   """report 3.5: the manual curve #16 apex passed at 22:49:47 and the receding point held VTSC in `hold` at 34 mph until 22:49:53"""
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)      # this test is Bug 1 only: the reset (Bug 2) is off
   old = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=False)
-  assert sum(1 for r in old if r["state"] == "hold" and r["t"] >= 9.0) > 80                  # today: hold latched ~4.6 s after the apex
+  assert sum(1 for r in old if r["state"] == "hold" and r["t"] >= 9.0) < 10                  # with the hold exit; without it: 93 cycles (4.6 s) latched
   new = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=True)
   assert all(_binding_point_is_ahead(r) for r in new)
   assert all(r["state"] != "hold" for r in new if r["t"] >= 9.0)
   assert all(r["cap"] >= o["cap"] - 1e-9 for r, o in zip(new, old, strict=True) if r["t"] >= 8.0)   # never lower than today after the apex
+
+
+# ---------------------------------------------------------------- Bug 2: nothing latched while the driver drove applies on re-engage
+
+def _engaged_cycles(rows):
+  return [r for r in rows if r["engaged"]]
+
+
+def test_reengage_window_today_applies_the_manual_curves_cap(monkeypatch):
+  """today's code (no mask, no reset) reproduces report 3.5: the engage at 22:49:48.5 lands in `hold` at 34 mph while the car does 54"""
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  rows = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=False)
+  eng = _engaged_cycles(rows)
+  assert eng and eng[0]["t"] == pytest.approx(9.0, abs=DT)
+  assert eng[0]["cap"] / MPH < 36.0 and eng[0]["state"] == "hold"                 # recorded: 35 mph hold applied on the stalk pull
+  assert max(r["v"] for r in eng[:20]) / MPH > 53.0                               # ...at 54 mph
+
+
+def test_the_mask_alone_still_leaves_a_stale_cap_on_engage(monkeypatch):
+  """Bug 1's filter removes the receding point, but the cap already applied at the moment of the stalk pull (rising slowly out of `release`)
+  is still stale: this is why the reset is needed as well"""
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  rows = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=True)
+  first = _engaged_cycles(rows)[0]
+  assert first["cap"] / MPH < 45.0 < first["set"] / MPH
+
+
+def test_after_the_reengage_there_is_no_cap_from_the_manual_curve(monkeypatch):
+  rows = replay_geo(monkeypatch, F.REENGAGE_TICKS, F.REENGAGE_PATHS, fix=True)
+  eng = _engaged_cycles(rows)
+  # the whole engaged part: cap == the 55 mph set. The one exception is the curve BRAIN's own rate-limited term (win == "brain"), which
+  # eases up toward a set speed that jumped ~5 mph at the stalk pull (cruise off, the Tesla's set follows the car): <= 1.3 mph for a moment
+  assert eng and all(r["cap"] == pytest.approx(r["set"]) or (r["win"] == "brain" and r["cap"] >= r["set"] - 0.6) for r in eng)
+  assert all(r["state"] == "idle" and r["win"] != "map" for r in eng)
+  assert all(r["state"] != "hold" for r in rows)
+  assert all(r["state"] == "idle" for r in rows if not r["engaged"])               # cruise off: nothing is latched from the first cycle on
+
+
+def test_the_ramp_replay_is_unchanged_by_the_reset(monkeypatch):
+  """the ramp is an engaged window throughout: the reset must not fire, so the result is exactly the mask-only result"""
+  a = replay_geo(monkeypatch, F.RAMP_TICKS, F.RAMP_PATHS, fix=True)
+  monkeypatch.setattr(VC.VTSCController, "_drop_latched", lambda self, v: None)
+  b = replay_geo(monkeypatch, F.RAMP_TICKS, F.RAMP_PATHS, fix=True)
+  assert all(x["engaged"] for x in a[20:])
+  assert [(x["cap"], x["state"]) for x in a[20:]] == [(x["cap"], x["state"]) for x in b[20:]]
+
+
+def _scene(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla"):
+  """a constant camera curve ahead (15 m/s apex 150 m ahead, car 30 m/s, set 35): braking from the third cycle on"""
+  ctrl, clock = make_controller(monkeypatch, fp=fp, brand=brand)
+  vis = {"s": (C.A_LAT_TARGET / (15.0 * 15.0), 150.0, 15.0)}
+  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis["s"])
+  ns = _NS()
+  ns.orientationNED = [0.0, 0.0, 0.0]
+  ns.longActive = True
+  sm = {"modelV2": object(), "carControl": ns}
+
+  def step(n=1, long_active=True, v=30.0, vset=35.0):
+    ns.longActive = long_active
+    cap = None
+    for _ in range(n):
+      clock[0] += DT
+      cap = ctrl.cap(sm, vset, v)
+    return cap
+  return ctrl, step, ns, sm
+
+
+@pytest.mark.parametrize("fp,brand", [("TESLA_MODEL_S_HW3", "tesla"), ("FORD_F_150_LIGHTNING_MK1", "ford")])
+def test_the_state_machine_is_reset_on_the_engage_edge_and_the_first_engaged_cycle_has_no_cap(monkeypatch, log, fp, brand):
+  ctrl, step, _, _ = _scene(monkeypatch, fp, brand)
+  assert step(40) < 35.0 - 0.4                                     # engaged: braking for the curve (cap below the set)
+  assert ctrl._state == "brake"
+  step(1, long_active=False)                                       # the driver takes over (cruise off) ...
+  assert ctrl._state == "idle" and ctrl._applied == pytest.approx(35.0)
+  assert any("longitudinal not engaged -- dropped state=brake" in m for m in log.lines("info"))
+  assert step(1, long_active=True) == pytest.approx(35.0)          # ... and the very first engaged cycle applies nothing
+
+
+def test_a_hold_reached_while_driving_by_hand_does_not_survive_the_engage(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(40)
+  ctrl._state, ctrl._applied = "hold", 15.0                       # the report's latch: hold at 35 mph while the driver drives
+  for _ in range(60):                                             # the apex recedes for 3 s with cruise off
+    step(1, long_active=False, vset=25.0)
+  assert ctrl._state == "idle" and ctrl._applied == pytest.approx(25.0)
+  assert step(1, long_active=True, v=24.0, vset=25.0) == pytest.approx(25.0)
+
+
+def test_the_release_freeze_state_is_cleared_too(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(5)
+  ctrl._rel_latched, ctrl._rel_defer_t0, ctrl._rel_defer_capped = True, 123.0, True
+  step(1, long_active=False)
+  assert not ctrl._rel_latched and ctrl._rel_defer_t0 is None and not ctrl._rel_defer_capped
+
+
+def test_a_hold_exits_to_brake_when_the_apex_moves_away_and_stays_while_it_is_close(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(40)
+  ctrl._state, ctrl._applied = "hold", 15.0
+  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: (C.A_LAT_TARGET / 225.0, 30.0, 15.0))   # apex 30 m ahead at 30 m/s: tta 1 s
+  step(1)
+  assert ctrl._state == "hold"                                     # close and still too fast: hold as today
+  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: (C.A_LAT_TARGET / 225.0, 150.0, 15.0))  # apex receded: tta 5 s > HOLD_TTA_S
+  step(1)
+  step(1)
+  assert ctrl._state == "brake"
+
+
+def test_no_reset_while_engaged(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  caps = [step(1) for _ in range(120)]                             # 6 s engaged, the curve stays ahead
+  assert ctrl._state == "brake" and caps[-1] < 35.0 - 0.4
+  assert caps[-1] <= caps[10]                                      # keeps braking / holding down: never reset back up
+  assert not [m for m in log.lines("info") if "not engaged" in m]
+
+
+def test_the_accelerator_override_counts_as_not_engaged(monkeypatch, log):
+  """carControl.longActive is False while the accelerator overrides openpilot too: same reset, and it comes back cleanly on release"""
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(40)
+  step(1, long_active=False)
+  assert ctrl._state == "idle"
+  step(3, long_active=True)                                        # released the pedal: the curve is still ahead, braking re-arms after the debounce
+  assert ctrl._state == "brake"
+
+
+def test_nothing_is_logged_when_there_is_nothing_to_drop(monkeypatch, log):
+  ctrl, step, _, _ = _scene(monkeypatch)
+  step(2, long_active=False)                                       # driving by hand from the start, state idle
+  step(2, long_active=False)
+  assert not [m for m in log.lines("info") if "not engaged" in m]
+
+
+def test_an_unreadable_long_active_changes_nothing_and_is_loud(monkeypatch, log):
+  ctrl, step, ns, sm = _scene(monkeypatch)
+  step(40)
+  del ns.longActive
+  for _ in range(5):
+    ctrl.cap(sm, 35.0, 30.0)
+  assert ctrl._state == "brake"                                    # today's behaviour: treated as engaged, nothing cleared
+  errs = [m for m in log.lines("exception") if "longActive unreadable (AttributeError)" in m]
+  assert len(errs) == 1 and "NOT cleared" in errs[0]                # once (rate limited), and it says what it costs
