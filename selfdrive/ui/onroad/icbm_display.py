@@ -24,7 +24,9 @@ from openpilot.common.swaglog import cloudlog
 
 MS_TO_KPH = 3.6
 STALE_S = 4.0            # s: CESStatus `ts` older than this => publisher silent; never trust a stale ceiling
-SET_TAP_TOL_KPH = 2.0    # kph: cap phase -- a cluster set this far BELOW icbmT was lowered by the driver, not ICBM
+# Mirror of ces_pnw.ICBM_DRIVER_LOWER_TOL (1.7 executor taps). NOT imported: ces_pnw is the whole controller and the UI
+# process must not load it; test_driver_lower_tol_matches_ces_pnw pins the two together.
+DRIVER_LOWER_TOL_MS = 1.7 * 0.44704   # cap phase -- a cluster set this far BELOW the lowest icbmT was lowered by the driver
 GAS_HOLD_S = 2.0         # s: a gas phase shorter than this does not flip the shown max (60->40->60 flicker / mici flash)
 CLUSTER_TOL_KPH = 2.0    # kph: cluster set is a rounded display value; a ceiling this far BELOW it is a stale latch
 POLL_S = 0.2             # s: CESStatus is published at 5 Hz
@@ -66,16 +68,17 @@ def max_speed_display(cluster_kph: float, ces_status, now: float, capable: bool,
     ceil_ms = rcap_ms                            # limit dropped mid-episode: the driver-effective max is the bound
   ceil_kph = ceil_ms * MS_TO_KPH
   if phase == "cap":
-    tgt_ms = _num(ces_status.get("icbmT"))
-    if tgt_ms is None:
-      tgt_ms = ref_target_ms
+    # The published target can RISE during a cap (lead pace, floor, source switch) but the executor only taps DOWN,
+    # so the truck set sits at the LOWEST target reached: compare against the minimum, never the latest.
+    cands = [t for t in (_num(ces_status.get("icbmT")), ref_target_ms) if t is not None]
+    tgt_ms = min(cands) if cands else None
     if tgt_ms is None:
       return cluster_kph, "episode cap but no ICBM target seen (icbmT None) -- cannot tell ICBM's set from the driver's"
-    if cluster_kph < tgt_ms * MS_TO_KPH - SET_TAP_TOL_KPH:
+    if cluster_kph < tgt_ms * MS_TO_KPH - DRIVER_LOWER_TOL_MS * MS_TO_KPH:
       return cluster_kph, (f"episode cap but cluster set {cluster_kph:.1f} kph is below ICBM's target "  # noqa: ISC002
                            f"{tgt_ms * MS_TO_KPH:.1f} -- driver lowered the set")
   if ceil_kph < cluster_kph - CLUSTER_TOL_KPH:
-    return cluster_kph, f"episode {phase} but ceiling {ceil_kph:.1f} kph is below the cluster set {cluster_kph:.1f}"
+    return cluster_kph, None                     # normal (a zone cap below the set, a SET+ past the latch): not log noise
   return ceil_kph, None
 
 
@@ -126,10 +129,11 @@ class IcbmMaxDisplay:
     st = self._st if isinstance(self._st, dict) else {}
     phase = st.get("icbmPhase")
     t = _num(st.get("icbmT"))
-    if phase == "cap" and t is not None:
-      self._ref_target = t
+    if phase in ("cap", "gas") and t is not None:
+      self._ref_target = t if self._ref_target is None else min(self._ref_target, t)   # lowest target this episode
     elif phase in ("idle", None):
       self._ref_target = None                   # episode over
+      self._held = None
     value, reason = max_speed_display(cluster_kph, self._st, self._wall(), capable, self._ref_target)
     now = self._clock()
     if reason is None and value != cluster_kph:

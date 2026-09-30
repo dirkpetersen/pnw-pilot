@@ -49,9 +49,9 @@ class TestChooser:
     v, why = show(40, status(c=c))
     assert v == pytest.approx(40) and why
 
-  def test_ceiling_below_the_set_falls_back_with_a_reason(self):
-    v, why = show(65, status(c=60 * MPH))       # driver raised the set past a stale latch
-    assert v == pytest.approx(65) and why
+  def test_ceiling_below_the_set_shows_the_set_without_log_noise(self):
+    v, why = show(65, status(c=60 * MPH))       # zone cap below the set / SET+ past the latch: normal
+    assert v == pytest.approx(65) and why is None
 
   def test_ceiling_within_rounding_of_the_set_is_shown(self):
     v, why = show(60.5, status(c=60 * MPH))
@@ -228,7 +228,7 @@ class TestSetChangeDuringCap:
 
   def test_set_plus_above_the_ceiling_mid_cap_shows_the_higher_cluster(self):
     v, why = show(70, status(t=40 * MPH))          # never a max lower than the set the driver just asked for
-    assert v == pytest.approx(70) and why
+    assert v == pytest.approx(70) and why is None    # normal, not log noise
 
   def test_set_plus_below_the_ceiling_mid_cap_keeps_the_ceiling(self):
     assert show(55, status(t=40 * MPH))[0] == pytest.approx(60)
@@ -298,7 +298,7 @@ class TestRealPublisherFeedsTheChooser:
   def _published(self, phase, ceiling, target):
     import time
     from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_icbmcurv import TestOverlayFeed
-    ep = NS(phase=phase)
+    ep = NS(phase=phase, ceiling=ceiling)
     st = TestOverlayFeed._status(_icbm_ep=ep, _icbm_ceiling=ceiling, _icbm_last_target=target)
     return st, time.time()  # noqa: TID251 -- the publisher stamps ts with wall clock
 
@@ -312,3 +312,48 @@ class TestRealPublisherFeedsTheChooser:
     st, now = self._published("idle", None, None)
     v, why = max_speed_display(40 * KPH_PER_MPH, st, now, True)
     assert why is None and v == pytest.approx(40 * KPH_PER_MPH)
+
+
+def test_driver_lower_tol_matches_ces_pnw():
+  from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import ICBM_DRIVER_LOWER_TOL
+  assert D.DRIVER_LOWER_TOL_MS == pytest.approx(ICBM_DRIVER_LOWER_TOL)
+
+
+class TestRisingTarget:
+  """F1: the target can rise during a cap while the truck set stays at the lowest target reached."""
+
+  def _run(self, ep_steps):
+    """Drive the real IcbmEpisode; feed each published (target, stock set) to the poller."""
+    from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import IcbmEpisode
+    ep, t = IcbmEpisode(), [0.0]
+    mem = FakeMem(None)
+    m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+    out = []
+    for target, stock in ep_steps:
+      pub, _ = ep.step(100.0 + t[0], target, stock, stock, True, False)
+      mem.st = {"icbmPhase": ep.phase, "icbmC": ep.ceiling, "ts": NOW, "icbmT": pub, "icbmRCap": 0.0}
+      out.append(m.choose(stock / MPH * KPH_PER_MPH, True) / KPH_PER_MPH)
+      t[0] += 0.3
+    return out
+
+  def test_target_down_then_up_driver_does_nothing_keeps_the_ceiling(self):
+    # set 60 -> tapped to 41 toward target 40.9; target then rises to 51 (source switch); set stays 41
+    out = self._run([(40.9 * MPH, 60 * MPH), (40.9 * MPH, 41 * MPH), (51 * MPH, 41 * MPH), (51 * MPH, 41 * MPH)])
+    assert all(v == pytest.approx(60) for v in out), out
+
+  def test_real_driver_set_minus_after_the_rise_shows_the_cluster(self):
+    out = self._run([(40.9 * MPH, 60 * MPH), (40.9 * MPH, 41 * MPH), (51 * MPH, 41 * MPH), (51 * MPH, 35 * MPH)])
+    assert out[2] == pytest.approx(60) and out[3] == pytest.approx(35)
+
+
+def test_held_gas_value_is_forgotten_at_idle():
+  mem = FakeMem(status(t=40 * MPH))
+  t = [0.0]
+  m = IcbmMaxDisplay(mem=mem, clock=lambda: t[0], wall=lambda: NOW)
+  m.choose(40 * KPH_PER_MPH, True)
+  t[0] += 0.3
+  mem.st = status("idle", c=None, t=None)
+  m.choose(40 * KPH_PER_MPH, True)
+  t[0] += 0.3
+  mem.st = status("gas", t=None)
+  assert m.choose(52 * KPH_PER_MPH, True) == pytest.approx(52 * KPH_PER_MPH)   # no stale 60 resurrected
