@@ -96,11 +96,12 @@ class VTSCController:
     self._floor_skip_t = None      # ...of the last logged abnormal skip (NaN input / stale GPS)
     self._floor_skip_n = 0
     # vtscfloor2pnw release-later state / telemetry (vtscRelDefer)
-    self._rel_hist: list = []       # (monotonic t, v_curve) over the last REL_DEFER_WINDOW_S
+    self._rel_hist: list = []       # (monotonic t, v_curve, camera speed or inf) over the last REL_DEFER_WINDOW_S
     self._rel_prev_win = "none"
     self._rel_win_t = -1e9          # monotonic time the binding source last switched
     self._rel_defer_t0 = None       # start of this curve's deferral (bounded by REL_DEFER_MAX_S)
     self._rel_defer_capped = False
+    self._rel_latched = False
     self._tele_rel_defer = ""
     # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
     self._tele_mapk = self._tele_mapk_d = 0.0
@@ -357,57 +358,56 @@ class VTSCController:
         self._floor_skip_t = now
         self._floor_skip_n = 0
 
-  def _release_defer(self, now, has_curve, tta, at_safe, v_curve, v_ego) -> str:
-    """vtscfloor2pnw release-later: why THIS cycle's move toward `release` must wait ("" = it need not). Always keeps the history
-    (target and winning source) so the fall is seen; only acts on the Raven (PnwVehicle.vtsc_agreed_floor, kill switch included),
-    only with a real curve, and only at the moment the state machine WOULD release (close to the apex and at_safe). Bounded by
-    REL_DEFER_MAX_S per curve; entering/leaving a deferral and hitting the bound are logged (change-only)."""
+  def _rel_note(self, now, v_curve) -> None:
+    """vtscfloor2pnw release-later: keep the winning-source and target history every cycle (a fall is only visible over time)."""
     win = self._tele_curve_win
     if win != self._rel_prev_win:
       if self._rel_prev_win != "none" and win != "none":
         self._rel_win_t = now
       self._rel_prev_win = win
     vc = float(v_curve) if math.isfinite(v_curve) else float('inf')
-    self._rel_hist = [(t, v) for (t, v) in self._rel_hist if now - t <= C.REL_DEFER_WINDOW_S]
-    self._rel_hist.append((now, vc))
-    if not (self.veh.vtsc_agreed_floor and has_curve and math.isfinite(vc)):
+    self._rel_hist = [h for h in self._rel_hist if now - h[0] <= C.REL_DEFER_WINDOW_S]
+    vis = float(self._tele_vis_v) if math.isfinite(self._tele_vis_v) else 0.0
+    self._rel_hist.append((now, vc, vis if vis > 0.0 else float('inf')))
+
+  def _release_freeze(self, now, has_curve, v_curve, v_ego) -> str:
+    """vtscfloor2pnw release-later: called ONLY while the state machine is in `release`. Returns why the cap must stay FROZEN this
+    cycle instead of climbing back to cruise ("" = climb as today). The state machine itself is untouched -- every transition, in
+    particular the re-arm to BRAKE for a new curve, runs exactly as today -- so the cap can never be higher than today's: a frozen
+    cap is <= the climbing one, and apply_limits() is monotone in the applied cap. Raven only (PnwVehicle.vtsc_agreed_floor).
+      starts:   the target that binds (< 1.3 x vEgo; a near-straight camera target is noise) fell > REL_DEFER_FALL_EPS within
+                REL_DEFER_WINDOW_S ("falling"), or the binding source just switched ("switch": the apex distance collapses).
+                A curve EXIT (flat / rising target) never starts it.
+      continues while falling / switched / vEgo > 1.10 x the fresh camera speed ("fast"), so the label is never blank while held.
+      bounded:  REL_DEFER_MAX_S per curve (the whole freeze), then it climbs as today; logged."""
+    vc = float(v_curve) if math.isfinite(v_curve) else float('inf')
+    if not (self.veh.vtsc_agreed_floor and has_curve and math.isfinite(vc) and vc < 1.3 * v_ego):
+      self._rel_latched = False
       return ""
-    if self._state == "release":
-      # RE-FREEZE: already released, but the target is TIGHTENING (fell > eps within the window: a curve EXIT leaves it flat or
-      # rising, so this never holds on the way out) and vEgo is still > 1.10 x the camera's own pre-merge speed -> back to HOLD
-      # (frozen cap, never a new reduction). Same per-curve bound as a deferral.
-      vis = self._tele_vis_v
-      hmax_r = max(v for (_, v) in self._rel_hist if math.isfinite(v))
-      if not (vis > 0.0 and math.isfinite(vis) and v_ego > vis * (1.0 + C.RELEASE_SPEED_MARGIN)
-              and vc < hmax_r - C.REL_DEFER_FALL_EPS):
-        return ""
-      why = "refreeze"
-    elif not (self._state in ("brake", "hold") and tta <= C.APEX_TTA_S):
+    vis = self._tele_vis_v
+    vis_ok = math.isfinite(vis) and vis > 0.0
+    fresh = min(vc, vis) if vis_ok else vc
+    # the CAMERA's own target is what must be tightening (Olympia 20:32:50: the map floor sat at 75 while the camera rose 81 -> 120)
+    vmax = max(h[2] for h in self._rel_hist if math.isfinite(h[2])) if vis_ok else float('inf')
+    vmin = min(h[2] for h in self._rel_hist)
+    falling = vis_ok and math.isfinite(vmax) and vis < vmax - C.REL_DEFER_FALL_EPS
+    rising = vis_ok and vis > vmin + C.REL_DEFER_FALL_EPS
+    switched = now - self._rel_win_t < C.REL_DEFER_WINDOW_S and vis_ok and not rising and vis < 1.1 * v_ego
+    fast = v_ego > fresh * (1.0 + C.RELEASE_SPEED_MARGIN)
+    why = "falling" if falling else ("switch" if switched else ("fast" if (self._rel_latched and fast and not rising) else ""))
+    if not why:
+      self._rel_latched = False
       return ""
-    elif not at_safe:
-      return "fast"        # already held by the existing gate (vEgo > 1.10 x the winning target): labelled, no timer
-    else:
-      hmax = max(v for (_, v) in self._rel_hist if math.isfinite(v))
-      why = ""
-      if vc < hmax - C.REL_DEFER_FALL_EPS:
-        why = "falling"
-      elif now - self._rel_win_t < C.REL_DEFER_WINDOW_S:
-        why = "switch"
-      else:
-        vis = self._tele_vis_v
-        fresh = min(vc, vis) if (math.isfinite(vis) and vis > 0.0) else vc
-        if v_ego > fresh * (1.0 + C.RELEASE_SPEED_MARGIN):
-          why = "fast"
-      if not why:
-        return ""
     if self._rel_defer_t0 is None:
       self._rel_defer_t0 = now
-      cloudlog.info("VTSC release DEFERRED (%s): target %.1f m/s, vEgo %.1f, tta %.2fs", why, vc, v_ego, tta)
+      cloudlog.info("VTSC release DEFERRED (%s): target %.1f m/s, vEgo %.1f", why, vc, v_ego)
     if now - self._rel_defer_t0 > C.REL_DEFER_MAX_S:
       if not self._rel_defer_capped:
         self._rel_defer_capped = True
-        cloudlog.warning("VTSC release deferral hit its %.1f s bound (%s) -- releasing as before", C.REL_DEFER_MAX_S, why)
+        cloudlog.warning("VTSC release deferral hit its %.1f s bound (%s) -- climbing as before", C.REL_DEFER_MAX_S, why)
+      self._rel_latched = False
       return ""
+    self._rel_latched = True
     return why
 
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
@@ -679,13 +679,7 @@ class VTSCController:
     if self._applied is None:
       self._applied = v_cruise
 
-    # vtscfloor2pnw release-later: should this cycle's brake/hold -> release be deferred? ("" = no; else why)
-    defer = self._release_defer(now, has_curve, tta, at_safe, v_curve, v_ego)
-    self._tele_rel_defer = defer
-    if defer:
-      at_safe = False                              # the existing gates then choose HOLD (frozen cap), never release
-      if defer == "refreeze" and self._state == "release":
-        self._state = "hold"                       # back to HOLD: freeze the cap where it is (no new reduction)
+    self._rel_note(now, v_curve)                    # vtscfloor2pnw release-later history (every cycle)
 
     # ---- state machine: brake before apex, hold when unsure, release+accelerate at apex ----
     if self._state == "idle":
@@ -714,9 +708,10 @@ class VTSCController:
       if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
         self._state = "release"                    # only accelerate out once we've actually slowed
 
-    if self._state == "idle" or (self._state == "release" and not has_curve):
-      self._rel_defer_t0 = None                    # the curve is over: a new one gets a fresh bound
+    if self._state != "release" or not has_curve:
+      self._rel_defer_t0 = None                    # the curve is over / braking re-armed: a new one gets a fresh bound
       self._rel_defer_capped = False
+      self._rel_latched = False
 
     if self._state == "release":
       target = v_cruise                            # accelerate back to cruise set speed
@@ -730,6 +725,11 @@ class VTSCController:
       elif self._clear >= C.CLEAR_CYCLES:
         self._state = "idle"
         self._below = 0
+      if self._state == "release":
+        # vtscfloor2pnw release-later: hold the cap where it is instead of accelerating while the target is still tightening
+        self._tele_rel_defer = self._release_freeze(now, has_curve, v_curve, v_ego)
+        if self._tele_rel_defer:
+          target = self._applied
 
     # safety rate-limit (bounded decel down to A_DECEL_MAX, ease up at A_RELAX). HOLD target==applied -> no move.
     self._applied = apply_limits(self._applied, target, v_cruise, dt, self._a_decel_max, self.tune['A_RELAX'])

@@ -52,10 +52,10 @@ RELEASE_SPEED_MARGIN = 0.10  # release/hold only when vEgo <= vCurveSafe*(1+this
 APEX_FINISH_S   = 2.5   # s; reach curve-safe speed this long BEFORE the apex (~the entrance = slowest point)
 CONFIDENCE_CUT  = 0.5   # m/s (~1.1 mph) immediate cap cut the instant a binding curve is detected, so the
                         #   driver immediately feels VTSC engage (per drive #4). Then braking continues.
-# vtscfloor2pnw release-later (owner 2026-09-29, option 2): do not enter RELEASE at the apex while the curve target is still falling
-# (camera curve-safe speed dropped > REL_DEFER_FALL_EPS within REL_DEFER_WINDOW_S), the binding source just switched (map -> camera: the
-# camera's apex is much nearer, which collapses time-to-apex), or vEgo is still > 1.10 x the FRESH camera target. Stay in HOLD (cap
-# frozen, no new braking; the "never reduce at/after the apex" rule stands). Bounded: at most REL_DEFER_MAX_S of extra hold per curve.
+# vtscfloor2pnw release-later (owner 2026-09-29, option 2): once the state machine is in RELEASE, keep the cap FROZEN instead of climbing
+# while the binding target (< 1.3 x vEgo) is still falling (> REL_DEFER_FALL_EPS within REL_DEFER_WINDOW_S) or the binding source just
+# switched (map -> camera collapses the apex distance); then while vEgo > 1.10 x the fresh camera speed. The state machine is untouched
+# (re-arm to BRAKE for a new curve runs as today), so the cap is never higher than today's. Bounded: REL_DEFER_MAX_S per curve.
 REL_DEFER_WINDOW_S = 0.5
 REL_DEFER_FALL_EPS = 0.5    # m/s
 REL_DEFER_MAX_S    = 5.0    # = 2 x HOLD_TTA_S
@@ -124,9 +124,9 @@ AGREED_FLOOR_MARGIN = 1.0   # m/s above the agreed curve speed
 # The camera's apex and the map point are the SAME curve only when they are close: a far map node beside a near camera curve is not
 # an agreement. |map point distance - camera apex distance| must be within this (m; ~3.5 s at 75 mph) or the old floor stays.
 AGREED_FLOOR_PAIR_M = 150.0
-# A map position older than this (s, from LastGPSPosition fix_ts; normal reads are ~1.4 s, 2.5 s ~ 90 m of lag at 80 mph, inside the
-# 150 m pairing window) is stale -> the old floor. A position with NO fix_ts is stale too.
-AGREED_FLOOR_GPS_MAX_AGE_S = 2.5
+# A map position older than this (s, from LastGPSPosition fix_ts) is stale -> the old floor. Measured gpsAge on the Raven: p50 1.5-1.7 s,
+# p99 <= 2.5 s, max 2.6 s; 3.0 s is ~107 m of lag at 80 mph, inside the 150 m pairing window. A position with NO fix_ts is stale too.
+AGREED_FLOOR_GPS_MAX_AGE_S = 3.0
 
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
 # Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a
