@@ -83,6 +83,15 @@ MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 
 LAT_ACCEL_LIMITS_PATH = "/data/pnw/lataccel_limits.json"
 
+# latcar2pnw: OPTIONAL per-car override of the schedule, in the SAME file:
+#   "cars": {"<opendbc platform>": {"breakpoints": [[mph, m/s^2], ...]}}
+# validated exactly like the top-level "breakpoints". A car (PnwVehicle.curve_override_platform, passed by the caller --
+# no fingerprint names here) uses its own entry when present and valid, else the shared breakpoints (unchanged
+# behaviour). An INVALID entry is dropped with a cloudlog.error at load time and that car uses the SHARED schedule
+# (never a looser one); the rest of the file stays valid. A missing/invalid file is still flat 3.0 for every car.
+# The Tesla's entry exists because its real steering limit is the vehicle-model angle clamp (3.5886 m/s^2,
+# opendbc lateral.py apply_steer_angle_limits_vm, panda-enforced), above the shared schedule's 3.0 at >= 80 mph.
+
 # Control-loop hygiene limit only (keeps a 100 Hz caller from doing disk I/O 100x/sec) -- not a safety
 # limit. A stale-by-a-few-seconds schedule is harmless; a 100 Hz stat() storm is not.
 _LAT_ACCEL_RELOAD_INTERVAL_S = 5.0
@@ -146,6 +155,7 @@ class _LatAccelSchedule:
   def __init__(self) -> None:
     self._xs: np.ndarray | None = None
     self._ys: np.ndarray | None = None
+    self._cars: dict[str, tuple[np.ndarray, np.ndarray]] = {}   # latcar2pnw: platform -> its VALID own (xs, ys)
     self._file_id: tuple[int, int] | None = None       # (st_mtime_ns, st_size) of the last file we successfully parsed
     self._failed_file_id: tuple[int, int] | None = None  # (st_mtime_ns, st_size) of the last file that FAILED to parse
     self._last_check_mono = 0.0
@@ -220,6 +230,28 @@ class _LatAccelSchedule:
       return None  # duplicate or non-increasing speed breakpoints
     return xs, ys
 
+  @classmethod
+  def _load_cars(cls, raw: dict) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """latcar2pnw: raw["cars"] -> {platform: (xs, ys)} for the entries that validate. Never raises. A malformed "cars"
+    section or entry is dropped with a cloudlog.error (that car then uses the shared schedule); it never invalidates the
+    shared schedule or another car's entry. Runs once per successful file load, so it logs once, not per tick."""
+    if "cars" not in raw:
+      return {}
+    cars = raw["cars"]
+    if not isinstance(cars, dict):
+      cloudlog.error(f"drive_helpers: {LAT_ACCEL_LIMITS_PATH} 'cars' is not an object -- ignored, every car uses the " +
+                     "shared schedule")
+      return {}
+    out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for platform, entry in cars.items():
+      parsed = cls._sanitize(entry)
+      if parsed is None:
+        cloudlog.error(f"drive_helpers: {LAT_ACCEL_LIMITS_PATH} cars[{platform!r}] is invalid -- ignored, that car uses " +
+                       "the shared schedule")
+      else:
+        out[platform] = parsed
+    return out
+
   def _refresh(self) -> None:
     """Reload self._xs/self._ys from disk if enough wall-clock time has passed AND the file's
     identity (mtime_ns, size) changed since our last successful parse. Never raises. On ANY
@@ -238,6 +270,7 @@ class _LatAccelSchedule:
       # fail-safe (in case a previously-valid file was just deleted), try to seed the default once so
       # a driver has something to edit, then move on.
       self._xs = self._ys = None
+      self._cars = {}
       self._file_id = None
       self._failed_file_id = None
       self._write_default_once()
@@ -257,6 +290,7 @@ class _LatAccelSchedule:
       if parsed is None:
         raise ValueError("invalid or out-of-range breakpoints")
       self._xs, self._ys = parsed
+      self._cars = self._load_cars(raw)
       self._file_id = file_id
       self._failed_file_id = None
     except Exception as e:
@@ -268,12 +302,13 @@ class _LatAccelSchedule:
       # message string, so two different bad edits in a row are BOTH logged -- a driver must not be
       # able to conclude a second bad edit "took" just because the message happened to repeat.
       self._xs = self._ys = None
+      self._cars = {}
       self._file_id = None
       self._failed_file_id = file_id
       cloudlog.error(f"drive_helpers: failed to load {LAT_ACCEL_LIMITS_PATH}, reverting to flat " +
                      f"{MAX_LATERAL_ACCEL_NO_ROLL} m/s^2 fail-safe ({type(e).__name__}: {e})")
 
-  def target(self, v_ego: float) -> float:
+  def target(self, v_ego: float, platform: str | None = None) -> float:
     """The UNSLEWED cap at this speed: the loaded schedule, or the flat fail-safe. limit() slews toward it.
     curvebrain2pnw: split out of limit() unchanged (same statements, same order) so the curve brain can read the
     schedule without moving the slew state clip_curvature owns."""
@@ -287,16 +322,17 @@ class _LatAccelSchedule:
     if self._xs is None or not math.isfinite(v_ego_f):
       target = MAX_LATERAL_ACCEL_NO_ROLL
     else:
-      target = float(np.interp(v_ego_f, self._xs, self._ys))
+      xs, ys = self._cars.get(platform, (self._xs, self._ys)) if platform is not None else (self._xs, self._ys)
+      target = float(np.interp(v_ego_f, xs, ys))
       if not math.isfinite(target):
         target = MAX_LATERAL_ACCEL_NO_ROLL
     return float(np.clip(target, *_LAT_ACCEL_CAP_CLAMP))
 
-  def limit(self, v_ego: float) -> float:
+  def limit(self, v_ego: float, platform: str | None = None) -> float:
     """Returns the slewed effective cap. LAT_ACCEL_SLEW_RATE-limits the move toward the freshly
     computed target so a schedule swap (hot-reload, or the fail-safe revert to flat 3.0) is a gentle
     ramp rather than a single-tick step in the curvature clamp; the target itself is unslewed."""
-    target = self.target(v_ego)
+    target = self.target(v_ego, platform)
 
     now = time.monotonic()
     dt = 0.0 if self._last_limit_mono is None else float(np.clip(now - self._last_limit_mono, 0.0, 0.1))
@@ -313,23 +349,24 @@ class _LatAccelSchedule:
 _lat_accel_schedule = _LatAccelSchedule()
 
 
-def lat_accel_limit(v_ego: float) -> float:
+def lat_accel_limit(v_ego: float, platform: str | None = None) -> float:
   """Speed-scheduled maximum lateral acceleration (m/s^2), used by clip_curvature() in place of the
   fixed MAX_LATERAL_ACCEL_NO_ROLL constant. Hot-reloaded from LAT_ACCEL_LIMITS_PATH when a valid file
   is present; falls back to flat MAX_LATERAL_ACCEL_NO_ROLL (not the 6/5/4/3-by-80 schedule) otherwise -- see
   the lataccel2pnw module docstring above and docs/pnw/LATACCEL2PNW.md for the schedule and rationale.
   The return value is additionally slew-rate-limited (LAT_ACCEL_SLEW_RATE) so a schedule swap or the
   fail-safe revert can never step in a single call. Always returns a finite float in
-  _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf."""
-  return _lat_accel_schedule.limit(v_ego)
+  _LAT_ACCEL_CAP_CLAMP -- never raises, never returns NaN/Inf. latcar2pnw: `platform` (PnwVehicle.curve_override_platform)
+  selects that car's own "cars" entry in the file when it has a valid one; None or no entry = the shared schedule."""
+  return _lat_accel_schedule.limit(v_ego, platform)
 
 
-def lat_accel_target(v_ego: float) -> float:
+def lat_accel_target(v_ego: float, platform: str | None = None) -> float:
   """The UNSLEWED speed-scheduled lateral cap (m/s^2): what lat_accel_limit() converges to at this speed. It never
   moves the slew state clip_curvature relies on (it shares only the file cache: the same _refresh() re-read, and the
   same one-time default seed, as limit()). Same fail-safe (flat MAX_LATERAL_ACCEL_NO_ROLL without a valid file), same
   clamp, never raises. curvebrain2pnw: PnwVehicle.curve_lat_a."""
-  return _lat_accel_schedule.target(v_ego)
+  return _lat_accel_schedule.target(v_ego, platform)
 
 
 def clamp(val, min_val, max_val):
@@ -340,7 +377,7 @@ def smooth_value(val, prev_val, tau, dt=DT_MDL):
   alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
   return alpha * val + (1 - alpha) * prev_val
 
-def clip_curvature(v_ego, prev_curvature, new_curvature, roll) -> tuple[float, bool]:
+def clip_curvature(v_ego, prev_curvature, new_curvature, roll, platform: str | None = None) -> tuple[float, bool]:
   # This function respects ISO lateral jerk and acceleration limits + a max curvature
   v_ego = max(v_ego, MIN_SPEED)
   max_curvature_rate = MAX_LATERAL_JERK / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
@@ -350,7 +387,7 @@ def clip_curvature(v_ego, prev_curvature, new_curvature, roll) -> tuple[float, b
 
   roll_compensation = roll * ACCELERATION_DUE_TO_GRAVITY
   # lataccel2pnw: speed-scheduled + JSON-tunable cap in place of the fixed MAX_LATERAL_ACCEL_NO_ROLL.
-  lat_accel_cap = lat_accel_limit(v_ego)
+  lat_accel_cap = lat_accel_limit(v_ego, platform)
   max_lat_accel = lat_accel_cap + roll_compensation
   min_lat_accel = -lat_accel_cap + roll_compensation
   new_curvature, limited_accel = clamp(new_curvature, min_lat_accel / v_ego ** 2, max_lat_accel / v_ego ** 2)

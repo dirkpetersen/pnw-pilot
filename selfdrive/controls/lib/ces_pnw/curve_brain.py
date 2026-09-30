@@ -14,8 +14,10 @@ and publishes it as the `CurveBrain` mem-param (a heartbeat with or without a ne
 2026-09-28) -- this file is the Tesla's; the Lightning keeps ICBM's own chain, untouched.
 
 A IS A SPEED TARGET, NOT A STEERING CAPABILITY. A = PnwVehicle.curve_lat_a(v) = min(curve.json tesla.curve_lat_a (4.0),
-lat_accel_target(v) - 0.3, the steering ceiling 3.5886). The min() clips a 4.0 target: the lataccel2pnw schedule (5.0 to
-60 mph, 4.0 at 70, 3.0 from 80; flat 3.0 without a valid file, so a flat 2.7), and the vehicle-model steering-ANGLE clamp
+lat_accel_target(v, tesla) - 0.3, the steering ceiling 3.5886). The min() clips a 4.0 target: the lataccel2pnw schedule
+(latcar2pnw: the Tesla has its OWN "cars" entry in lataccel_limits.json, [[50,5],[60,5],[70,4],[80,3.9]], so the schedule
+never binds and A is 3.5886 at every speed; with no valid per-car entry it falls to the shared 5.0 to 60 mph, 4.0 at 70, 3.0
+from 80; flat 3.0 without a valid file, so a flat 2.7), and the vehicle-model steering-ANGLE clamp
 (carcontroller / panda: MAX_LATERAL_ACCEL 3.5886 = ISO 3.0 + a 0.6 favourable-camber allowance). Owner 2026-09-29 set the
 ceiling to that clamp itself, zero margin: the applied angle stalled at exactly it on 2026-09-28 22:35 (70.3 mph) and the car
 delivered only 3.0-3.1 m/s^2 on that adverse camber. That is why KNOWN bad curves carry a per-curve override (Overrides below)

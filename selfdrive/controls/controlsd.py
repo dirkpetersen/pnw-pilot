@@ -138,6 +138,8 @@ class Controls:
     # shadow log); its offset reaches actuators.steeringAngleDeg unless the DisableCoopSteer toggle is on
     # (opt-out, default off = nudge ON; read at ~1 Hz; unreadable = no nudge) -- see _coop_apply.
     veh = PnwVehicle(self.CP)
+    # latcar2pnw: which per-car entry of lataccel_limits.json clip_curvature uses (None = the shared schedule)
+    self._lat_accel_platform = veh.curve_override_platform
     # teslayaw2pnw: whether CS.yawRate is a real sensor on this car. Where it is not, the carstate leaves the capnp
     # default 0.0, and kActl/kErr/achLat/peakAchLat publish None instead of a confident "driving straight".
     # Said once, loudly, so a car that silently lost its yaw source is visible in the log.
@@ -431,7 +433,8 @@ class Controls:
       except Exception:
         pass
 
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
+                                                               self._lat_accel_platform)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
@@ -534,7 +537,7 @@ class Controls:
         # the live SPEED-SCHEDULED cap this tick (lataccel2pnw's lat_accel_limit(), not the fixed ISO
         # constant), which also varies with road roll. Must track what clip_curvature actually applies
         # or this telemetry silently drifts from the real steer-limit envelope.
-        lat_accel_max = lat_accel_limit(CS.vEgo) + lp.roll * ACCELERATION_DUE_TO_GRAVITY
+        lat_accel_max = lat_accel_limit(CS.vEgo, self._lat_accel_platform) + lp.roll * ACCELERATION_DUE_TO_GRAVITY
         # Pre-clip demand (new_desired_curvature, not the post-clip self.desired_curvature): using the
         # post-clip value here would make this field redundant with latAccelMax whenever curvLimited is
         # True, since clip_curvature pins the result to the ceiling — the pre-clip value is what shows

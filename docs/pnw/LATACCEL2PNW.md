@@ -222,3 +222,13 @@ positive-sense `FordAngleLateral` directly, and `system/manager/manager.py` re-d
 a stray/stale mirror value that otherwise shows up as a "STEER: STOCK" red mismatch on the sidebar).
 This is documentation-only — no behavior change — bundled into this commit because it's a small,
 adjacent finding made while reading `toggles.py` for the lane-centering hot-reload reference pattern.
+
+## latcar2pnw: optional per-car schedule ("cars")
+
+`lataccel_limits.json` may carry `"cars": {"<opendbc platform>": {"breakpoints": [[mph, m/s^2], ...]}}`, validated exactly like
+the top-level `breakpoints`. A car (`PnwVehicle.curve_override_platform`) uses its own entry when present and valid, else the
+shared `breakpoints` (the Lightning has no entry: unchanged). An invalid entry is dropped with a `cloudlog.error` and that car
+uses the SHARED schedule; a missing/invalid file is flat 3.0 for every car. The shared `breakpoints` are still required.
+The Tesla entry `[[50,5.0],[60,5.0],[70,4.0],[80,3.9]]` keeps `schedule - 0.3 >= 3.5886` (the vehicle-model angle clamp,
+opendbc `lateral.py` `apply_steer_angle_limits_vm`, panda-enforced), so the clamp is the binding limit on the Tesla at every
+speed. The file is never seeded with this entry (`_write_default_once` is unchanged): it is installed by hand.
