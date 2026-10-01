@@ -2,7 +2,7 @@
 
 Continues [`CHANGELOG-2026-09-28.md`](CHANGELOG-2026-09-28.md) (there is no separate 09-29 file; its ships are section 1 here). All times PT.
 
-**Channel tip:** `origin/3devpnw` = `1afb551fa6`, **GREEN**, 5708 passed. **Installed on the device:** the tip as of the evening installs (~19:15 PT, and a reboot at 21:27 PT); `848d115fed` was the 09-29 ~22:00 PT reboot. Sections 2-3 were pushed during the day and are part of that evening install (`83c152e33f` ... `c0b4bd4499` are ancestors of the tip); sections 5-8 shipped the same evening.
+**Channel tip:** `origin/3devpnw` = `a037278713`, **GREEN**, 5814 passed (sections 9-11 pushed 23:16 PT 09-30 to 00:24 PT 10-01; at `1afb551fa6` the tip was green with 5708). **Installed on the device:** the tip as of the evening installs (~19:15 PT, and a reboot at 21:27 PT); `848d115fed` was the 09-29 ~22:00 PT reboot. Sections 2-3 were pushed during the day and are part of that evening install (`83c152e33f` ... `c0b4bd4499` are ancestors of the tip); sections 5-8 shipped the same evening.
 
 ## 1. Installed 2026-09-29 (`848d115fed`)
 
@@ -55,3 +55,34 @@ the process always runs and is inert while OFF.
 
 The Lightning VIN is redacted to its first 13 characters plus `XXXX` in the openpilot skill doc (`53e72e5b33`) and in the pnw-opendbc tests and comments
 (`c602973cd7`; pin bump `1afb551fa6`). No behaviour change. Channel tip after the pin bump: green, 5708 passed.
+
+## 9. `mapsl2pnw`: a dead mapd no longer leaves a stuck speed limit (`de1197706d`, `e359070711`, `124426db5b`)
+
+When mapd is silent for 5 s, `MapSpeedLimit`, the conditional limit, `RoadContext`, `MapOneWay` and `MapLanes` are cleared (before: the last limit stayed forever),
+the UI speed-limit sign expires, and the driver-monitoring road identity is cleared too, so DM goes **strict** (not relaxed) with no road information.
+`location_servicesd` keeps the last `RoadContext` verdict (`RoadCtxHold`) so the police banner never loses its freeway/surface answer when the param is cleared.
+Opus review findings: (1) BLOCK, police never-miss: clearing `RoadContext` would have changed the police banner's road class; fixed by `RoadCtxHold`
+(`124426db5b`); (2) DM must go strict when the road identity is gone (`e359070711`); (3) UI session reset, clear order, test and comment fixes. Known
+limits (work-pending): `RoadCtxHold` is memory-only; a Tesla in a reduced-speed zone returns to the set speed ~12 s after mapd dies until it is relaunched.
+Installed state: staged, takes effect at the next reboot.
+
+## 10. `upcgate2pnw`: the upcoming-curve scan drops points the car has passed (`f6b14f5cce`)
+
+Evidence: 2026-09-30 22:36 PT, OR-34 to I-5 loop ramp. A map point bound *behind* the car was read as an upcoming curve and flipped the Tesla CES to
+experimental for 8 ticks. The Tesla CES `upcoming_curve` scan now ignores passed points, and the ICBM curve-DB pool masks both sources (the Lightning's
+cross-source gap is closed). New change-only log event `ces_passed_mask` (slot, why). Opus review: the mask direction was verified on ~140k positions; the
+extra work is 99% cache hits (no perf cost). The Lightning golden replay differs from the old set only by the added `ces_passed_mask` log events
+(re-recorded; private data). Not changed (logged only): Lightning fail-open edge cases; `ces_passed_mask` has no dwell hysteresis.
+
+## 11. `vtscnotch2pnw`: Tesla VTSC measures the map-curve notch from the car's speed (`6a5e4fa014`, `fd2d8cd8d5`, `a037278713`)
+
+The minimum-slowdown notch for a map curve is measured from `min(set speed, vEgo)` held for the episode, in two tiers: never shallower than today's value, and a deeper
+notch only beyond the hold horizon (`HOLD_TTA_S`). Kill switch: `curve.json` `tesla.vtsc_notch_vego`, default ON. New `mapRef` field on the VTSC tick record.
+Replay: bend B (OR-34 left bend) 85 to 80 mph and 4.53 to 4.03 m/s^2, so **improved, not fixed**; fleet 756 same / 31 deeper / 1 shallower. Opus review: the first
+version could carry up to +10.6 mph into a vision curve through the hold latch; fixed by the horizon gate (`a037278713`). An older, separate bug in today's
+code (the hold latch can freeze the cap while a vision curve approaches) remains open. Staged, takes effect at the next reboot.
+
+## 12. Coding policy note
+
+From the evening of 09-30 the code for these three ships was written by Sonnet coders and reviewed by Opus reviewers. The channel tip was tested after the last
+push (green, 5814 passed at `a037278713`).
