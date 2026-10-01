@@ -464,7 +464,7 @@ def test_no_reset_while_engaged(monkeypatch, log):
   caps = [step(1) for _ in range(120)]                             # 6 s engaged, the curve stays ahead
   assert ctrl._state == "brake" and caps[-1] < 35.0 - 0.4
   assert caps[-1] <= caps[10]                                      # keeps braking / holding down: never reset back up
-  assert not [m for m in log.lines("info") if "not engaged" in m]
+  assert not [m for m in log.lines("info") if "cruise off" in m]
 
 
 def _gas_lift(monkeypatch, t_rel_tta, longactive_is_enabled_and_not_gas=True):
@@ -546,7 +546,7 @@ def test_nothing_is_logged_when_there_is_nothing_to_drop(monkeypatch, log):
   ctrl, step, _, _ = _scene(monkeypatch)
   step(2, cruise_on=False)                                       # driving by hand from the start, state idle
   step(2, cruise_on=False)
-  assert not [m for m in log.lines("info") if "not engaged" in m]
+  assert not [m for m in log.lines("info") if "cruise off" in m]
 
 
 def test_an_unreadable_cruise_on_changes_nothing_and_is_loud(monkeypatch, log):
