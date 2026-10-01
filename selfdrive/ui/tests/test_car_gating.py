@@ -27,6 +27,7 @@ OPERABLE_ON = {
   "NoFordAngleSteering": {"lightning"},
   "DisableFordSignSpeedLimit": {"lightning"},
   "DisableEverDrive": {"lightning"},
+  "DisableFordConvenience": {"lightning"},
   "NudgeForLaneChange": {"lightning", "tesla"},
   "DisengageOnBrake": {"lightning", "tesla"},
 }
@@ -94,24 +95,26 @@ def run_update(monkeypatch, car, stored=None):
 
 @pytest.mark.parametrize("car", ["tesla", "lightning"])
 def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
-  stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "FordAngleLateral": False}
+  stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableFordConvenience": True,
+            "FordAngleLateral": False}
   me, params = run_update(monkeypatch, car, dict(stored))
   for param, cars in OPERABLE_ON.items():
     assert param in me._toggles, "greyed means present, never removed"
-    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit"):
+    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience"):
       assert me._toggles[param].enabled == (car in cars), param
     assert (me._grey_reason[param] is None) == (car in cars), param
     if car not in cars:
       assert "only" in me._grey_reason[param]
   assert params.writes == [], "greying is display only: the stored params are never written"
-  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit"):
+  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience"):
     assert params.vals[k] is True
 
 
 @pytest.mark.parametrize("car", ["none", "mock", "empty"])
 def test_unknown_car_leaves_everything_enabled_and_unforced(monkeypatch, car):
   me, params = run_update(monkeypatch, car)
-  for param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "NoFordAngleSteering", "NudgeForLaneChange"):
+  for param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience", "NoFordAngleSteering",
+                "NudgeForLaneChange"):
     assert me._toggles[param].enabled is True, param
   assert me._toggles["NoFordAngleSteering"].state is False, "an unknown car must not paint 'no angle steering' ON"
   assert me._toggles["NudgeForLaneChange"].state is False
@@ -130,3 +133,16 @@ def test_grey_reason_reaches_the_description():
   me = SimpleNamespace(_grey_reason={"DisableCoopSteer": "Tesla Model S HW3 only"})
   assert "Tesla Model S HW3 only" in T.TogglesLayout._grey_suffix(me, "DisableCoopSteer")
   assert T.TogglesLayout._grey_suffix(me, "DisableEverDrive") == ""
+
+
+def test_ford_convenience_toggle_is_defined_opt_out_and_default_off():
+  """toggles2pnw phase 3: title, description (lists exactly what it gates NOW), no restart, default 0."""
+  import inspect
+  from openpilot.common.params import Params
+  assert Params().get("DisableFordConvenience", return_default=True) is False
+  d = T.DESCRIPTIONS["DisableFordConvenience"]
+  assert "Pro Power" in d and "nothing" in d.lower() and "troubleshooting" in d and "Lightning only" in d
+  init = inspect.getsource(T.TogglesLayout.__init__)
+  i = init.index('"DisableFordConvenience": (')
+  block = init[i:init.index("\n      ),", i)]
+  assert "Disable Ford Convenience Features" in block and block.rstrip().rstrip(",").endswith("False")  # no restart

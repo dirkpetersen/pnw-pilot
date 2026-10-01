@@ -49,7 +49,7 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
 - **`needs_restart` toggles** request an onroad cycle; avoid for troubleshooting toggles where possible.
 - **Convenience CAN TX rule (Ford).** Anything the comma **writes** to the Ford over CAN that is not driving control
   (Pro Power re-arm today; any future chime, tailgate or body-comfort write) must be gated by
-  `DisableFordConvenience`. Description and inventory: phase 3 of `toggles2pnw` (below once shipped).
+  `DisableFordConvenience`. Details and the inventory: "Disable Ford Convenience Features" below.
 - The multi-button selectors (`CESMode`, `RainMode`, `AutoSpeedReduce`, `DmMode`, `LongitudinalPersonality`) are INT
   params, not bool toggles; the polarity rule does not apply to them.
 
@@ -67,6 +67,38 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
   `None` (never fingerprinted), the fingerprint is empty or the brand is `mock`; then **every row is enabled and no
   display is forced**, so troubleshooting toggles (for example Disable Ford Convenience Features) can always be set.
   A *known* car without the capability (a third car) is greyed.
+
+## Disable Ford Convenience Features (`DisableFordConvenience`)
+
+A troubleshooting switch (default OFF, no restart): ON = the comma transmits **nothing** on the Ford CAN bus that is not
+driving control. Greyed on the Tesla (`CAR_GATED`).
+
+**Inventory of non-driving CAN writes the comma makes on the Ford (2026-10-01, pin `c602973c`):**
+
+| What | Where | Gated now |
+|---|---|---|
+| **Pro Power Onboard re-arm**: the `0x455` "ON" press, at a standstill, once per ignition and again every 15 min, verified, at most 3 presses per window; payload and `!vehicle_moving` also pinned in the panda | `opendbc/car/ford/carcontroller.py` -> `lightning_extra_pnw.ProPowerArmer` | **yes** |
+
+That is the complete list. Searched: the Ford carcontroller, `lightning_extra_pnw.py`, `everdrive_pnw.py` (read only, no TX),
+every `sendcan` publisher in the tree. **There is no tailgate or chime CAN write today**: the tailgate/fob chime and the
+ajar chime are As-Built (FORScan) configuration, not comma TX (see the separate CANbus effort's notes); the comma's own
+chimes (engagement sounds, `madsquiet`) are on-device audio, not CAN. The manual UDS diagnostic tools in the CANbus effort
+(As-Built reads) are run by hand with openpilot stopped and are not a background write.
+
+**Not gated, on purpose (driving control, never behind this toggle):** steering/lateral (LKA/LMC frames), ACC and
+longitudinal, cruise-button taps (ICBM SET+/-, auto-resume), MADS, and the HUD/alt-experience frames (LKAS-UI, ACC-UI).
+
+**How the flag reaches opendbc:** the persistent param `DisableFordConvenience`, read by `ConvenienceGate`
+(`lightning_extra_pnw.py`) at about 1 Hz with `Params().get_bool` (same runtime-guarded `openpilot.common.params` import the
+other Ford pnw features use). **Takes effect within about a second, no reboot.** ON: the armer is not constructed (or is
+dropped), so nothing is sent and nothing is armed; OFF again: a fresh armer. **Rule 2:** the first time the toggle is seen ON
+the controller logs once `Ford convenience features are DISABLED`; a failed read keeps today's behaviour (the features
+run) and logs `DisableFordConvenience unreadable ... keep RUNNING` (first failure, then at most once per minute); a gate that
+cannot be built logs and leaves the features running.
+
+**Rule for the future:** ANY new convenience write to the Ford over CAN (a chime, a tailgate or body-comfort write, a keep-alive)
+MUST be gated by `ConvenienceGate` and listed in the table above. A new convenience TX that ignores this toggle defeats its
+purpose, which is to rule the comma out when something odd happens on the truck. Never put driving CAN behind it.
 
 ## Audit (2026-10-01, `origin/3devpnw` at `788010a427`)
 
@@ -92,6 +124,7 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `EvIncludeLevel2` | 0 | both | yes | opt-in sub-option |
 | `DisableEverDrive` | 0 | **Lightning only, but NOT greyed on the Tesla before phase 2** | yes | greying added in phase 2 (`PnwVehicle.everdrive`, display only) |
 | `DeferHDVideoUpload` | 0 | both | yes | opt-in |
+| `DisableFordConvenience` (new, phase 3) | 0 | Lightning only (greyed) | yes | troubleshooting switch, see below |
 
 ### Stock openpilot toggles (stock semantics, NOT changed)
 
@@ -105,4 +138,3 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `RecordAudio` | unset |
 | `IsMetric` | unset |
 
-Phase 3 adds `DisableFordConvenience` (default 0, Lightning only).

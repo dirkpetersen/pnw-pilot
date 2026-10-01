@@ -847,6 +847,10 @@ class PnwVehicle:
     # that case (the owner must be able to set troubleshooting toggles while parked at home with no last-known car).
     self.car_known: bool = bool(fp) and brand != 'mock'
 
+    # toggles2pnw: the Lightning is the car whose non-driving CAN writes (Pro Power re-arm) the "Disable Ford Convenience Features"
+    # toggle gates. Mirrors opendbc/car/pnw_vehicle.py's pro_power_onboard; used by the settings UI to grey the toggle elsewhere.
+    self.ford_convenience: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+
     # toggles2pnw (DISPLAY ONLY): the Lightning has an EverDrive charger box whose status the UI can show. Nothing actuates on it.
     self.everdrive: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 

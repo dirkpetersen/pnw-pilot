@@ -214,6 +214,15 @@ DESCRIPTIONS = {
     "sending data, so it never shows on the Tesla or on a truck without one. Display-only — never " +
     "affects steering or speed. Turn this ON to hide it."
   ),
+  # toggles2pnw: troubleshooting switch for everything the comma WRITES to the Ford over CAN that is not driving control.
+  "DisableFordConvenience": tr_noop(
+    "For troubleshooting. By default the comma does a few convenience things on the F-150 Lightning over its CAN bus, none " +
+    "of them driving: today it re-arms Pro Power Onboard (the keep-on-when-the-truck-is-off setting) at a standstill, once " +
+    "per ignition and again every 15 minutes. Turn this ON and the comma transmits NOTHING of that kind: Pro Power goes back to " +
+    "the truck's own behaviour. Takes effect within about a second, no restart. Steering, cruise and buttons are not affected. " +
+    "Chimes and tailgate settings are not written by the comma (they are As-Built settings), so there is nothing to turn off " +
+    "for them. F-150 Lightning only."
+  ),
   "DeferHDVideoUpload": tr_noop(
     "Hold back the large HD video files (road/wide camera) from uploading while ON; " +
     "logs (qlog/rlog) and low-res video keep uploading. Held files upload normally once " +
@@ -231,6 +240,7 @@ CAR_GATED = {
   "NoFordAngleSteering": (lambda v: v.stock_acc_buttons, tr_noop("Ford F-150 Lightning only")),
   "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
   "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
+  "DisableFordConvenience": (lambda v: v.ford_convenience, tr_noop("Ford F-150 Lightning only")),
   "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla Model S and Ford F-150 Lightning only")),
   "DisengageOnBrake": (lambda v: v.mads_lateral, tr_noop("Ford F-150 Lightning and Tesla Model S only")),
 }
@@ -429,6 +439,13 @@ class TogglesLayout(Widget):
         lambda: tr("Disable EverDrive Display"),
         DESCRIPTIONS["DisableEverDrive"],
         "speed_limit.png",
+        False,
+      ),
+      # toggles2pnw: opt-OUT, no restart (opendbc re-reads it at ~1 Hz). Greyed on the Tesla (CAR_GATED).
+      "DisableFordConvenience": (
+        lambda: tr("Disable Ford Convenience Features"),
+        DESCRIPTIONS["DisableFordConvenience"],
+        "warning.png",
         False,
       ),
       # connect2pnw: hold HD video uploads on precious "unmetered" connections; logs keep flowing
@@ -684,7 +701,7 @@ class TogglesLayout(Widget):
     car_ok = {}
     for param in CAR_GATED:
       car_ok[param], self._grey_reason[param] = car_gate(veh, param)
-    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive"):
+    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableFordConvenience"):
       if param in self._toggles:
         self._toggles[param].action_item.set_enabled(car_ok[param])
 

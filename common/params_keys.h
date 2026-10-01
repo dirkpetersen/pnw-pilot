@@ -283,6 +283,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // whenever there IS EverDrive data. No migration entry: this key is new, it has no positive-sense
     // predecessor on any device, so TogglesInvertedMigrated does not apply to it.
     {"DisableEverDrive", {PERSISTENT, BOOL, "0"}},
+    // toggles2pnw: opt-OUT troubleshooting switch. ON = the comma transmits NOTHING on the Ford CAN bus that is not driving control
+    // (today: the Pro Power Onboard re-arm, opendbc ford carcontroller via lightning_extra_pnw.ConvenienceGate). Default 0 = the
+    // features run as before. Read by opendbc at ~1 Hz, no restart. Any future convenience TX (chime, tailgate, body comfort) MUST honour it.
+    {"DisableFordConvenience", {PERSISTENT, BOOL, "0"}},
     // location2pnw: "Happening Ahead" display-only overlay (police/rest/EV). Never touches panda/safety/control.
     {"LocationServicesEnabled", {PERSISTENT, BOOL, "1"}},  // LEGACY (toggles-invert2pnw): superseded by DisableLocationServices below. Kept registered only so manager_init()'s one-time migration can read an existing device's prior value; no code reads this key anymore.
     // toggles-invert2pnw: opt-out sibling of LocationServicesEnabled -- default OFF = NOT disabled,
