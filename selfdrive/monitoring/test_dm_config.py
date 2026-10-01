@@ -208,7 +208,7 @@ class TestLoadDmTimeouts:
 
 @pytest.mark.skipif(not HELPERS_AVAILABLE, reason="openpilot helpers deps unavailable")
 class TestHelpersTierWiring:
-  """_apply_dm_timeouts: strict stock with nothing configured; DmMode regimes use dm_config values;
+  """_apply_dm_timeouts: Default (strict) timeouts with nothing configured; DmMode regimes use dm_config values;
   the JSON tier takes precedence, with its highway variant road-gated."""
 
   def setup_method(self):

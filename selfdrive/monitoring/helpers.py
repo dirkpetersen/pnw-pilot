@@ -222,8 +222,8 @@ class DriverMonitoring:
     # dmroad2pnw: 3-way driver-monitoring timeout selector (param DmMode). _apply_dm_timeouts() derives
     # the pose/phone decay steps + pre/prompt thresholds from the effective timeout; only the ACTIVE
     # dual-counter path consumes them, so passive wheel-touch and every GLARE knob are left untouched.
-    #   0=Off      -> stock strict timeouts everywhere (_DISTRACTED_TIME)
-    #   1=Highway  -> highway tier timeouts on freeway|divided-2-lane, stock strict elsewhere (90 s hold)
+    #   0=Off      -> Default: standard timeouts everywhere (fork recovery rules still apply) (_DISTRACTED_TIME)
+    #   1=Highway  -> highway tier timeouts on freeway|divided-2-lane, Default timeouts elsewhere (90 s hold)
     #   2=Relaxed  -> relaxed tier timeouts everywhere
     # The tier timeout MAGNITUDES are not in this source: strict defaults live in dm_config.py and
     # personal values come only from the device-local /data/pnw/dm.json (dm-variable).
@@ -355,7 +355,7 @@ class DriverMonitoring:
     # Effective (pose_t, phone_t): the tier values come from dm_config (strict defaults unless the
     # device-local dm.json says otherwise). The JSON 'mode' tier takes precedence over DmMode; its
     # highway variant is road-gated exactly like DmMode=1 (freeway|divided-2-lane, 90 s hold), and
-    # off a qualifying road it falls to stock strict — never through to a looser DmMode regime.
+    # off a qualifying road it falls to the Default timeouts — never through to a looser DmMode regime.
     tier_t = None
     if self._dm_tier is not None:                         # dm-variable: explicit JSON tier opt-in
       name, pose_j, phone_j = self._dm_tier
@@ -370,7 +370,7 @@ class DriverMonitoring:
       # lead times capped so short timeouts keep a sane green/orange progression (pre <= t/2, prompt <= t/4)
       pose_pre,  pose_prompt  = min(pose_pre,  pose_t / 2.),  min(pose_prompt,  pose_t / 4.)
       phone_pre, phone_prompt = min(phone_pre, phone_t / 2.), min(phone_prompt, phone_t / 4.)
-    else:                                                 # Off / off a qualifying road -> stock strict
+    else:                                                 # Off / off a qualifying road -> Default timeouts
       pose_t = phone_t = s._DISTRACTED_TIME
       pose_pre = phone_pre = s._DISTRACTED_PRE_TIME_TILL_TERMINAL
       pose_prompt = phone_prompt = s._DISTRACTED_PROMPT_TIME_TILL_TERMINAL

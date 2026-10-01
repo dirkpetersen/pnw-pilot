@@ -24,7 +24,7 @@ and a source-purity unit test pins that the old long constants can never return.
 
 | Tier | Pose | Phone | Where the values live |
 |---|---|---|---|
-| **default** | stock strict (`_DISTRACTED_TIME` = 11 s) | same | hardcoded in `helpers.py` — the fallback, fully independent of the JSON |
+| **default** | openpilot-standard timeouts (`_DISTRACTED_TIME` = 11 s) plus the fork recovery rules (not stock behaviour; see `test_monitoring.py` header) | same | hardcoded in `helpers.py` — the fallback, fully independent of the JSON |
 | **highway** | **30 s** strict default | **60 s** strict default | `selfdrive/monitoring/dm_config.py`; personal values only via `dm.json` |
 | **relaxed** | **60 s** strict default | **120 s** strict default | same — values beyond the defaults require `relaxed.enabled == true` |
 
@@ -64,7 +64,7 @@ One read at dmonitoringd start (`dm_config.load_dm_timeouts()`) resolves:
   - `highway` tier: **road-gated to freeways** using the *exact same gate* as `DmMode=1` —
     `_refresh_dm_mode()` reads the mapd bridge mem-params (`RoadContext == "freeway"` OR
     `MapOneWay && MapLanes >= 2`, with the 90 s hold over map dropouts). Off a qualifying road the
-    tier is inert and DM falls to **stock strict** (never through to a looser `DmMode` regime).
+    tier is inert and DM falls to the **Default timeouts** (never through to a looser `DmMode` regime).
   - `relaxed` tier: everywhere (requires `relaxed.enabled`).
 - **`highway` / `relaxed` value pairs** — consumed by the `DmMode` param regimes too: `DmMode=1`
   (Highway, road-gated) uses the highway values, `DmMode=2` (Relaxed) uses the relaxed values.

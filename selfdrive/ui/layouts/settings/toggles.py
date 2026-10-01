@@ -46,9 +46,12 @@ DESCRIPTIONS = {
   # dm-variable: numbers below are pulled from the dm_config SOURCE constants so the help text can
   # never drift from the code. Only Default and Highway are described (driver directive 2026-07-11).
   "DmMode": tr_noop(
-    "How long you may look away before openpilot alerts. Default = standard openpilot monitoring, "
-    "everywhere. Highway = only while a highway is detected, monitoring loosens slightly "
-    f"(attention {_DM_HWY_POSE_S:.0f} s, phone {_DM_HWY_PHONE_S:.0f} s); on all other roads it stays "
+    "How long you may look away before openpilot alerts. Default = openpilot's standard alert timeouts " +
+    "everywhere, with this fork's easier recovery: 2 s of looking at the road clears an orange or red " +
+    "alert and restarts the countdown, touching the wheel or pedal clears alerts, a stopped car shows no " +
+    "alert until you drive off, and there is a 30 s grace after the camera loses your face. " +
+    "Highway = only while a highway is detected, timeouts loosen further " +
+    f"(attention {_DM_HWY_POSE_S:.0f} s, phone {_DM_HWY_PHONE_S:.0f} s); on all other roads it stays " +
     "at Default. Monitoring is never disabled and your attention is required at all times."
   ),
   # rain2pnw: driver-selected wet-weather curve margin. Numbers pulled from the source defaults above.
@@ -512,8 +515,8 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
-    # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Default stock
-    # strict, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
+    # dmroad2pnw: Driver Monitoring timeout selector backed by the INT param DmMode (0=Default: standard
+    # timeouts + fork recovery, 1=Highway relaxed on freeway/divided-2-lane only, 2=Relaxed everywhere). Inserted after
     # the Always-On DM toggle below. Not longitudinal-gated — always available. ("Default", not "Off" —
     # monitoring is never off; 0 just means no relaxation.)
     # dm-variable UI gate (driver directive 2026-07-11): the Relaxed option is INVISIBLE unless the
@@ -793,7 +796,7 @@ class TogglesLayout(Widget):
     self._params.put("AutoSpeedReduce", button_index)
 
   def _set_dm_mode(self, button_index: int):
-    # dmroad2pnw: 0=Off (stock strict), 1=Highway (relaxed on freeway/divided-2-lane), 2=Relaxed (everywhere).
+    # dmroad2pnw: 0=Off (Default: standard timeouts + fork recovery), 1=Highway (relaxed on freeway/divided-2-lane), 2=Relaxed (everywhere).
     # Read live by selfdrive/monitoring/helpers.py; no restart needed (picked up ~1 Hz).
     self._params.put("DmMode", button_index)
 

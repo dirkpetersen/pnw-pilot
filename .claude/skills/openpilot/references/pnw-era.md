@@ -51,7 +51,7 @@ panda-flash / matched-set cautions are in the **pnw-pilot-deploy skill**.
   - Top-right button: 3-state cycle CES→Exp→Chill; in CES state the icon is LIVE (bleached
     experimental in temporary chill, orange when CES switches). `HideCESDebug` toggles the
     bottom-right debug box (shows by default).
-- **DM road-gating** (`DmMode`, `docs/DMROAD2PNW.md`): Default(stock-strict) / Highway(relaxed only
+- **DM road-gating** (`DmMode`, `docs/DMROAD2PNW.md`): Default(standard timeouts + fork recovery, not stock) / Highway(relaxed only
   on freeway or oneWay+lanes≥2, 90 s hold, via mapd mem-param bridge) / Relaxed(3 h/1 h). Driver
   runs Highway. Glare Layer-C knobs are independent and always active.
 - **Location services** (`system/location_services/`, display-only NON_ESSENTIAL): police (Waze

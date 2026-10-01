@@ -21,12 +21,12 @@ Supersedes the "the relaxation is UNGATED — no toggle exists" statement in `DM
 
 | Mode | UI label | Pose timeout | Phone timeout | Where |
 |---|---|---|---|---|
-| `0` | **Off** (default) | `_DISTRACTED_TIME` = **11 s** | 11 s | everywhere (stock openpilot strict) |
-| `1` | **Highway** | **900 s** (15 min) | **1800 s** (30 min) | **freeway OR divided-2-lane only**; stock-strict elsewhere |
+| `0` | **Off** (default) | `_DISTRACTED_TIME` = **11 s** | 11 s | everywhere (openpilot-standard timeouts; the fork recovery rules still apply, so NOT identical to stock) |
+| `1` | **Highway** | **900 s** (15 min) | **1800 s** (30 min) | **freeway OR divided-2-lane only**; Default timeouts elsewhere |
 | `2` | **Relaxed** | **10800 s** (3 h) | **3600 s** (1 h) | everywhere (the prior ungated behavior) |
 
 > ⚠️ **Behavior change on deploy:** today the device runs the equivalent of **Relaxed** unconditionally.
-> After this deploys, `DmMode` defaults to **Off (stock strict)** until the driver picks Highway or
+> After this deploys, `DmMode` defaults to **Off (Default timeouts)** until the driver picks Highway or
 > Relaxed in Settings. This is intentional per the spec ("disabled by default").
 
 ## Road detection (Highway mode only)

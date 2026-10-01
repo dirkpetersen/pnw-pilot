@@ -20,8 +20,8 @@ are superseded in part** by dm-variable). When in doubt, trust this file and the
 
 | Tier | Pose / phone timeout | Gate |
 |---|---|---|
-| **default** | stock strict (`_DISTRACTED_TIME` = 11 s) | none — the fallback, independent of any JSON |
-| **highway** (`DmMode=1` or JSON `mode:"highway"`) | **30 s / 60 s** strict defaults | **road-gated to freeways** (mapd bridge: `RoadContext=="freeway"` OR `MapOneWay && MapLanes>=2`, 90 s hold); off a qualifying road → stock strict, never a looser regime |
+| **default** | openpilot-standard timeouts (`_DISTRACTED_TIME` = 11 s) with the fork recovery rules (2 s snap-back from orange/red, wheel/pedal clears alerts, standstill freeze at green, 30 s face-loss grace; NOT stock behaviour, see `test_monitoring.py` header) | none — the fallback, independent of any JSON |
+| **highway** (`DmMode=1` or JSON `mode:"highway"`) | **30 s / 60 s** strict defaults | **road-gated to freeways** (mapd bridge: `RoadContext=="freeway"` OR `MapOneWay && MapLanes>=2`, 90 s hold); off a qualifying road → Default timeouts, never a looser regime |
 | **relaxed** (`DmMode=2` or JSON `mode:"relaxed"`) | **60 s / 120 s** strict defaults | **opt-in only**: `relaxed.enabled == true` (literal JSON boolean) in `dm.json`; without it, relaxed runs the strict 60/120 defaults and JSON `mode:"relaxed"` falls back to default |
 
 - JSON-supplied timeouts clamped to **[10 s, 14400 s]** (4 h ceiling — long personal values are
@@ -63,7 +63,7 @@ bundle's 0.11.1 DM model (`LEBOWSKI2PNW.md`); Layer A via the upstream2pnw Tier-
 ## History (how we got here — don't act on these)
 
 1. **Ungated 3 h / 1 h** (dmon2pnw era, ≤2026-07-07) — no toggle at all. Superseded.
-2. **`DmMode` selector, road-gated** (`DMROAD2PNW.md`, deployed 2026-07-08) — 0=stock /
+2. **`DmMode` selector, road-gated** (`DMROAD2PNW.md`, deployed 2026-07-08) — 0=Default (standard timeouts + fork recovery) /
    1=Highway 900/1800 s / 2=Relaxed 3 h/1 h. The selector + road gate survive; **the long
    magnitudes were deleted from source by dm-variable** (2026-07-12).
 3. **dm-variable** (this doc's current state).
