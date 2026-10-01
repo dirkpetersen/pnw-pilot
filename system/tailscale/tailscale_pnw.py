@@ -60,6 +60,7 @@ class TailscaleDaemon:
                proc_dir: str | None = None):
     self._sleep = sleep
     self.proc_dir = proc_dir or PROC_DIR
+    self._scan_err = ""
     self._logged: set[str] = set()   # error lines already written during this stop episode (change-only logging)
     self.stuck = False         # a tailscaled we failed to stop is still running while the toggle is OFF
     self.params = params
@@ -340,21 +341,24 @@ class TailscaleDaemon:
     try:
       entries = os.listdir(self.proc_dir)
     except OSError as e:
-      self.log_error_once(f"tailscale: cannot scan {self.proc_dir} for a leftover tailscaled: {e}")
+      msg = f"tailscale: cannot scan {self.proc_dir} for a leftover tailscaled: {e}"
+      self._scan_err = msg
+      self.log_error_once(msg)
       return None
+    self._logged.discard(self._scan_err)  # scan works again: a recurrence must log again
     pids = []
     for name in entries:
       if not name.isdigit():
         continue
       try:
-        with open(os.path.join(self.proc_dir, name, "comm")) as f:
+        with open(os.path.join(self.proc_dir, name, "comm"), "rb") as f:  # binary: a non-UTF-8 name must not raise
           comm = f.read().strip()
       except (FileNotFoundError, ProcessLookupError):
         continue  # the process exited while we scanned
       except OSError as e:
         self.log_error_once(f"tailscale: cannot read {self.proc_dir}/{name}/comm: {e}")
         return None
-      if comm == "tailscaled":
+      if comm == b"tailscaled":
         pids.append(int(name))
     return pids
 

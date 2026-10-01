@@ -31,7 +31,8 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
 - `tailscaled` is started with `--no-logs-no-support` (no log upload to Tailscale).
 - Toggle OFF (any time): `tailscale down`, then `tailscaled` is stopped **and verified gone** (never reports `off` while it
   could still be reached). The `tailscale_pnw` process always runs but is inert while OFF (one `/proc` scan every 30 s; no
-  subprocess, network or log) and stops a leftover `tailscaled` if it finds one. Node state is kept, so turning it back ON
+  subprocess, network or log) and stops a leftover `tailscaled` if it finds one. With the toggle OFF it stops **any** process
+  named `tailscaled` every 30 s (none other exists on the 3X). Node state is kept, so turning it back ON
   reconnects as the same device without a new key.
 - No periodic network use of ours. Tailscale's own keepalive/netmap traffic: **idle MB/day is UNMEASURED** (estimate
   2-10 MB/day; measure `/proc/net/dev` over a day before relying on it on LTE).

@@ -724,6 +724,8 @@ def test_off_steady_state_costs_nothing_over_two_hours(world, tmp_path):
   (h.procdir / "1000" / "comm").write_text("tailscale\n")   # similar name is not tailscaled
   (h.procdir / "1001").mkdir()
   (h.procdir / "1001" / "comm").write_text("tailscaled-x\n")
+  (h.procdir / "1002").mkdir()
+  (h.procdir / "1002" / "comm").write_bytes(b"x\xff\xfey\n")   # non-UTF-8 name: must not crash the OFF branch
   simulate(h, 120)
   assert h.calls == [] and h.procs == [] and world.logs == [] and world.installs == []
 
@@ -735,3 +737,23 @@ def test_off_unreadable_proc_is_an_error_logged_once_never_off(world, tmp_path):
   assert h.params.statuses == ["error cannot check for a leftover tailscaled (/proc unreadable)"]
   assert len([m for _, m in world.logs if "cannot scan" in m]) == 1
   assert h.calls == []
+
+
+def test_off_scan_error_logs_again_after_it_recovers(world, tmp_path):
+  h = Harness(tmp_path, enabled=False)
+  good = h.d.proc_dir
+  for _ in range(3):
+    h.d.proc_dir = str(tmp_path / "gone")
+    h.d.tick()
+    h.d.tick()
+    h.d.proc_dir = good
+    h.d.tick()
+  assert len([m for _, m in world.logs if "cannot scan" in m]) == 3
+
+
+def test_tailscale_pnw_is_non_essential_in_selfdrived():
+  """A dead remote-SSH daemon must never raise processNotRunning (a driving alert)."""
+  import pathlib
+  src = (pathlib.Path(tp.__file__).resolve().parents[2] / "selfdrive" / "selfdrived" / "selfdrived.py").read_text()  # source, not import:
+  line = next(ln for ln in src.splitlines() if "NON_ESSENTIAL_PROCS = {" in ln)
+  assert '"tailscale_pnw"' in line
