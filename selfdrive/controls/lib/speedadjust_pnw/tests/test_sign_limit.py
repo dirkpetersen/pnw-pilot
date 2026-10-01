@@ -631,8 +631,8 @@ class TestToggleRegistration:
   def test_ui_toggle_is_defined_and_capability_gated_display_only(self):
     from pathlib import Path
     src = (Path(sa.__file__).resolve().parents[4] / "selfdrive/ui/layouts/settings/toggles.py").read_text()
-    assert src.count('"DisableFordSignSpeedLimit": (') == 1 and src.count('"DisableFordSignSpeedLimit": tr_noop(') == 1
-    assert 'self._toggles["DisableFordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)' in src
+    assert src.count('"DisableFordSignSpeedLimit": (\n') == 1 and src.count('"DisableFordSignSpeedLimit": tr_noop(') == 1
+    assert '"DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit' in src      # the CAR_GATED row (test_car_gating.py)
     assert 'put_bool("DisableFordSignSpeedLimit"' not in src, "display-only gate: never rewrite the driver's setting"
     assert "Disable Ford Camera Speed Limit" in src and "BC / km/h countries turn this ON" in src
     assert '"FordSignSpeedLimit"' not in src

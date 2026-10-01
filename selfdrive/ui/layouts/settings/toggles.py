@@ -221,6 +221,29 @@ DESCRIPTIONS = {
   ),
 }
 
+# toggles2pnw: car-specific pnw toggles. param -> (capability predicate on PnwVehicle, reason shown when greyed).
+# Greyed = disabled and the reason appended to the description; NEVER hidden, and display only (the stored param is
+# never written by this table). By capability, not fingerprint. An UNKNOWN car (car_known False: no last-known
+# CarParams) leaves every row enabled -- see car_gate(). Rows with extra panda/forcing logic (DisengageOnBrake) keep it
+# in _update_toggles but take their car half from here.
+CAR_GATED = {
+  "DisableCoopSteer": (lambda v: v.coop_steer, tr_noop("Tesla Model S HW3 only")),
+  "NoFordAngleSteering": (lambda v: v.stock_acc_buttons, tr_noop("Ford F-150 Lightning only")),
+  "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
+  "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
+  "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla Model S and Ford F-150 Lightning only")),
+  "DisengageOnBrake": (lambda v: v.mads_lateral, tr_noop("Ford F-150 Lightning and Tesla Model S only")),
+}
+
+
+def car_gate(veh, param: str) -> tuple[bool, str | None]:
+  """(operable, reason it is greyed or None) for a car-gated toggle. Unknown car -> operable (troubleshooting toggles must be
+  settable while parked at home). A param not in the table is operable."""
+  if param not in CAR_GATED or not veh.car_known:
+    return True, None
+  pred, reason = CAR_GATED[param]
+  return (True, None) if pred(veh) else (False, reason)
+
 
 class TogglesLayout(Widget):
   def __init__(self):
@@ -228,6 +251,7 @@ class TogglesLayout(Widget):
     self._params = Params()
     self._ts_read_at = -1e9  # tailscale2pnw: throttle for the status line
     self._ts_text = ts_status.DISABLED_TEXT
+    self._grey_reason: dict[str, str | None] = {}   # toggles2pnw: param -> why it is greyed on this car (None = operable)
     self._is_release = self._params.get_bool("IsReleaseBranch")
 
     # param, title, desc, icon, needs_restart
@@ -543,7 +567,8 @@ class TogglesLayout(Widget):
       additional_desc = ""
       if needs_restart and not locked:
         additional_desc = tr("Changing this setting will restart openpilot if the car is powered on.")
-      toggle.set_description(lambda og_desc=toggle.description, add_desc=additional_desc: tr(og_desc) + (" " + tr(add_desc) if add_desc else ""))
+      toggle.set_description(lambda og_desc=toggle.description, add_desc=additional_desc, p=param:
+                             tr(og_desc) + (" " + tr(add_desc) if add_desc else "") + self._grey_suffix(p))
 
       # tailscale2pnw: live status line under the toggle (and, via the title, next to it)
       if param == "DisableTailscale":
@@ -574,6 +599,10 @@ class TogglesLayout(Widget):
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
 
     ui_state.add_engaged_transition_callback(self._update_toggles)
+
+  def _grey_suffix(self, param: str) -> str:
+    reason = self._grey_reason.get(param)
+    return "\n\n" + tr("Greyed out: ") + tr(reason) + "." if reason else ""
 
   def _tailscale_text(self) -> str:
     """Status shown for the Tailscale toggle, re-read from params at most every 2 s (render calls this per frame)."""
@@ -646,14 +675,18 @@ class TogglesLayout(Widget):
     # fordtsr2pnw: operable only on a car whose camera reports the limit (PnwVehicle.camera_speed_limit). DISPLAY ONLY --
     # no put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Tesla this
     # greys it, and the driver's Lightning setting is left exactly as he set it.
-    if "DisableFordSignSpeedLimit" in self._toggles:
-      self._toggles["DisableFordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)
-
-    # coopsteer2pnw: operable only on a car with the coop_steer capability (the Raven). DISPLAY ONLY -- no
-    # put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Lightning
-    # this grays it and the driver's Tesla setting is left exactly as he set it (controlsd never reads it there).
-    if "DisableCoopSteer" in self._toggles:
-      self._toggles["DisableCoopSteer"].action_item.set_enabled(veh.coop_steer)
+    # toggles2pnw: every car-specific pnw toggle is greyed (never hidden) through ONE table, CAR_GATED, with a reason in its
+    # description. DISPLAY ONLY -- no put_bool, for the shared-device reason spelled out under the angle-steering clamp
+    # below: ONE device moves between the Tesla and the Lightning, so on the other car this greys the row and the
+    # setting is left exactly as the driver set it. Unknown car: all enabled (car_gate). The rows with no extra logic
+    # (coop steer, camera speed limit, EverDrive) are fully handled here; Nudge / Brake / Angle take their car half from
+    # the same table below and keep their own forcing.
+    car_ok = {}
+    for param in CAR_GATED:
+      car_ok[param], self._grey_reason[param] = car_gate(veh, param)
+    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive"):
+      if param in self._toggles:
+        self._toggles[param].action_item.set_enabled(car_ok[param])
 
     if "RefreshLocationMap" in self._toggles:
       covered = self._params.get_bool("MapForLocationCovered")
@@ -662,7 +695,7 @@ class TogglesLayout(Widget):
     # auto2pnw / toggles-invert2pnw: Nudge for Lane Change support comes from the capability view —
     # grey out (and force ON, i.e. "nudge required") elsewhere, since nudgeless is impossible there.
     # No Disengage on Braking is unsupported here on every car — always greyed off.
-    nudgeless_ok = veh.nudgeless
+    nudgeless_ok = car_ok["NudgeForLaneChange"]
     if "NudgeForLaneChange" in self._toggles:
       self._toggles["NudgeForLaneChange"].action_item.set_enabled(nudgeless_ok)
       if not nudgeless_ok:
@@ -679,7 +712,7 @@ class TogglesLayout(Widget):
     # change the driver's Lightning setting. The REAL forcing lives in card.py, which sends
     # alternativeExperience=0 whenever either condition fails.
     if "DisengageOnBrake" in self._toggles:
-      mads_ok = veh.mads_lateral and self._params.get_bool("PandaMadsSafety")
+      mads_ok = car_ok["DisengageOnBrake"] and self._params.get_bool("PandaMadsSafety")
       self._toggles["DisengageOnBrake"].action_item.set_enabled(mads_ok)
       if not mads_ok:
         self._toggles["DisengageOnBrake"].action_item.set_state(True)  # stock: disengage on brake
@@ -704,7 +737,7 @@ class TogglesLayout(Widget):
     # stray state. Clearing the inert legacy FordAngleLateral key here is still fine (harmless/inert
     # on a non-capable car, and the manager re-sync overwrites it on the next boot anyway).
     if "NoFordAngleSteering" in self._toggles:
-      angle_ok = veh.stock_acc_buttons
+      angle_ok = car_ok["NoFordAngleSteering"]
       self._toggles["NoFordAngleSteering"].action_item.set_enabled(angle_ok)
       if not angle_ok:
         self._toggles["NoFordAngleSteering"].action_item.set_state(True)

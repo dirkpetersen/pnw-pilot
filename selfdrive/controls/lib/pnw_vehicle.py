@@ -842,6 +842,14 @@ class PnwVehicle:
     # either way -- the Ford carcontroller consumes actuators.curvature, never steeringAngleDeg).
     self.coop_steer: bool = fp == "TESLA_MODEL_S_HW3"
 
+    # toggles2pnw: does the capability view know what car this is? False when nothing was ever fingerprinted (CP None), the
+    # fingerprint is empty, or it is the MOCK brand. The settings UI uses it to leave EVERY car-gated toggle enabled in
+    # that case (the owner must be able to set troubleshooting toggles while parked at home with no last-known car).
+    self.car_known: bool = bool(fp) and brand != 'mock'
+
+    # toggles2pnw (DISPLAY ONLY): the Lightning has an EverDrive charger box whose status the UI can show. Nothing actuates on it.
+    self.everdrive: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+
     # curveslow-lightning: the Lightning's EPS is physically weaker than the Tesla's and washes out of
     # curves the Tesla holds, so it must enter curves SLOWER. This is a steering-authority FACT, not a
     # config choice, so it applies in BOTH op-long (VTSC) and stock-ACC (ICBM) — both produce a curve

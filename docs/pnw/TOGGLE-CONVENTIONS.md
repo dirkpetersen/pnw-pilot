@@ -53,12 +53,20 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
 - The multi-button selectors (`CESMode`, `RainMode`, `AutoSpeedReduce`, `DmMode`, `LongitudinalPersonality`) are INT
   params, not bool toggles; the polarity rule does not apply to them.
 
-## Unknown car
+## Car graying and the unknown car (implemented)
 
-`ui_state.CP` is read from the persistent `CarParamsPersistent` param (not the onroad-cleared `CarParams`), so it holds
-the **last-fingerprinted** car, also while parked and offroad. It is `None` only on a device that has never
-fingerprinted. In that case (and for a `mock`/empty fingerprint) the car-graying table enables every row.
-A known car that lacks the capability greys the row with its reason.
+- One table, `CAR_GATED` in `selfdrive/ui/layouts/settings/toggles.py`: `param -> (capability predicate on PnwVehicle,
+  reason)`. `car_gate(veh, param)` is the pure function behind it; `_update_toggles` applies it. Rows today:
+  `DisableCoopSteer` (Tesla), `NoFordAngleSteering`, `DisableFordSignSpeedLimit`, `DisableEverDrive` (Lightning),
+  `NudgeForLaneChange` (both cars), `DisengageOnBrake` (both cars, plus its MADS-panda condition). The reason is
+  appended to the description (`Greyed out: Ford F-150 Lightning only.`).
+- Greying is **display only**. The stored param is never written by it. Two older forced *displays* are kept as they were
+  (the angle-steering row paints ON, and clears the inert `FordAngleLateral` mirror, on a known non-Lightning car).
+- **Unknown car**: `ui_state.CP` comes from the persistent `CarParamsPersistent` param (not the onroad-cleared
+  `CarParams`), so while parked at home it is the **last-fingerprinted** car. `PnwVehicle.car_known` is False when it is
+  `None` (never fingerprinted), the fingerprint is empty or the brand is `mock`; then **every row is enabled and no
+  display is forced**, so troubleshooting toggles (for example Disable Ford Convenience Features) can always be set.
+  A *known* car without the capability (a third car) is greyed.
 
 ## Audit (2026-10-01, `origin/3devpnw` at `788010a427`)
 
@@ -82,7 +90,7 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `RefreshLocationMap` | 0 | both | yes | momentary action, greyed when no map here |
 | `DisableLocationServices` | 0 | both | yes | |
 | `EvIncludeLevel2` | 0 | both | yes | opt-in sub-option |
-| `DisableEverDrive` | 0 | **Lightning only, but NOT greyed on the Tesla today** | yes | graying added in phase 2 |
+| `DisableEverDrive` | 0 | **Lightning only, but NOT greyed on the Tesla before phase 2** | yes | greying added in phase 2 (`PnwVehicle.everdrive`, display only) |
 | `DeferHDVideoUpload` | 0 | both | yes | opt-in |
 
 ### Stock openpilot toggles (stock semantics, NOT changed)

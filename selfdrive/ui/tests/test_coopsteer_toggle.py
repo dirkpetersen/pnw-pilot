@@ -31,11 +31,11 @@ def test_toggle_def_needs_no_restart():
 
 
 def test_grayed_by_capability_and_display_only():
-  """Mutation: set_enabled(True), or a put_bool/set_state on CoopSteer in _update_toggles."""
+  """Mutation: a put_bool/set_state on DisableCoopSteer in _update_toggles, or the table row changed. The gating itself
+  is behaviour-tested in test_car_gating.py (toggles2pnw moved every car-specific row into T.CAR_GATED)."""
+  assert "DisableCoopSteer" in T.CAR_GATED
   tree = ast.parse(_update_src())
   calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
            and "DisableCoopSteer" in ast.unparse(n.func.value)]
-  assert [ast.unparse(c) for c in calls if c.func.attr == "set_enabled"] == \
-         ["self._toggles['DisableCoopSteer'].action_item.set_enabled(veh.coop_steer)"]
   assert not [c for c in calls if c.func.attr in ("set_state", "put_bool")]
   assert "put_bool(\"DisableCoopSteer\"" not in inspect.getsource(T) and "put_bool('DisableCoopSteer'" not in inspect.getsource(T)
