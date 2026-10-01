@@ -1,3 +1,5 @@
+import time
+
 from cereal import log
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.system.ui.widgets import Widget
@@ -6,6 +8,7 @@ from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+from openpilot.system.tailscale import status as ts_status
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -64,6 +67,12 @@ DESCRIPTIONS = {
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
+  # tailscale2pnw: default OFF. The live status line is appended in TogglesLayout._tailscale_text().
+  "TailscaleEnabled": tr_noop(
+    "Reach this device by SSH from anywhere through your own Tailscale network. Needs a one-time setup: put your " +
+    "Tailscale auth key on the device (see docs/pnw/TAILSCALE.md). Once a key is in place it downloads about 36 MB " +
+    "(never while driving), so set it up on Wi-Fi. Only runs while this is ON; your SSH keys still decide who can log in."
+  ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
   # mapdstate2pnw: repurposed from the old "Get map for this location" on-demand-download toggle.
   # Coverage is now automatic (mapd_configd downloads the state/nation you're currently in as soon as
@@ -210,6 +219,8 @@ class TogglesLayout(Widget):
   def __init__(self):
     super().__init__()
     self._params = Params()
+    self._ts_read_at = -1e9  # tailscale2pnw: throttle for the status line
+    self._ts_text = ts_status.OFF
     self._is_release = self._params.get_bool("IsReleaseBranch")
 
     # param, title, desc, icon, needs_restart
@@ -330,6 +341,14 @@ class TogglesLayout(Widget):
         lambda: tr("Use Metric System"),
         DESCRIPTIONS["IsMetric"],
         "metric.png",
+        False,
+      ),
+      # tailscale2pnw: no restart (the tailscale_pnw manager process follows the param). The title carries the live
+      # status too, so an error is visible without opening the description.
+      "TailscaleEnabled": (
+        lambda: tr("Remote SSH (Tailscale)") + self._tailscale_title_suffix(),
+        DESCRIPTIONS["TailscaleEnabled"],
+        "warning.png",
         False,
       ),
       # mapd2pnw / toggles-invert2pnw: OSM speed-limit display + lower-limit warning ON by default
@@ -517,6 +536,10 @@ class TogglesLayout(Widget):
         additional_desc = tr("Changing this setting will restart openpilot if the car is powered on.")
       toggle.set_description(lambda og_desc=toggle.description, add_desc=additional_desc: tr(og_desc) + (" " + tr(add_desc) if add_desc else ""))
 
+      # tailscale2pnw: live status line under the toggle (and, via the title, next to it)
+      if param == "TailscaleEnabled":
+        toggle.set_description(lambda: tr(DESCRIPTIONS["TailscaleEnabled"]) + "\n\nStatus: " + self._tailscale_text())
+
       # track for engaged state updates
       if locked:
         self._locked_toggles.add(param)
@@ -542,6 +565,23 @@ class TogglesLayout(Widget):
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
 
     ui_state.add_engaged_transition_callback(self._update_toggles)
+
+  def _tailscale_text(self) -> str:
+    """Status shown for the Tailscale toggle, re-read from params at most every 2 s (render calls this per frame)."""
+    now = time.monotonic()
+    if now - self._ts_read_at > 2.0:
+      self._ts_read_at = now
+      try:
+        raw = self._params.get("TailscaleStatus")
+        raw = raw.decode() if isinstance(raw, bytes) else (raw or "")
+        self._ts_text = ts_status.ui_text(self._params.get_bool("TailscaleEnabled"), raw)
+      except UnknownKeyName as e:
+        self._ts_text = f"error status unavailable ({e})"
+    return self._ts_text
+
+  def _tailscale_title_suffix(self) -> str:
+    text = self._tailscale_text()
+    return "" if text == ts_status.OFF else f" - {text}"
 
   def _update_state(self):
     if ui_state.sm.updated["selfdriveState"]:

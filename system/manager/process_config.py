@@ -63,6 +63,11 @@ def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
 def mapd_running(started: bool, params: Params, CP: car.CarParams) -> bool:
   return os.path.exists(MAPD_BINARY)
 
+# tailscale2pnw: runs only while the (default-OFF) toggle is on, parked or driving -- it is a remote-access
+# daemon, so it is deliberately not tied to IsOnroad or gear.
+def tailscale_on(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return params.get_bool("TailscaleEnabled")
+
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
 
@@ -140,6 +145,9 @@ procs = [
   # where before this feature a crash left mapd on its own subscription, untouched. Non-control daemon,
   # same reasoning as `ui`/`card` above.
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI, restart_if_crash=True),
+  # tailscale2pnw: restart_if_crash -- non-control daemon; a crash would otherwise leave remote access dead until
+  # reboot while the toggle still reads ON (the daemon also publishes the crash to TailscaleStatus).
+  PythonProcess("tailscale_pnw", "system.tailscale.tailscale_pnw", tailscale_on, enabled=TICI, restart_if_crash=True),
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   # update2pnw: run the updater onroad too (stock is only_offroad) — downloads/finalize only STAGE
