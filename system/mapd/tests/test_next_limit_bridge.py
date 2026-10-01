@@ -35,7 +35,8 @@ def test_a_silent_mapd_stops_the_writes_so_the_stamp_goes_stale(monkeypatch):
   steps = [(round(k * 0.05, 2), [msg]) for k in range(20)] + [(round(1.0 + k * 0.5, 2), []) for k in range(1, 20)]
   res = R.run(monkeypatch, steps)
   nxt = _writes(res, "NextMapSpeedLimit")
-  assert nxt and [t for t, _ in nxt] == [t for t, _ in _writes(res, "MapSpeedLimit")]
+  # mapsl2pnw: the dead-mapd branch now also writes MapSpeedLimit "0.0" (the clear); the LIVE writes are the ones with a value
+  assert nxt and [t for t, _ in nxt] == [t for t, v in _writes(res, "MapSpeedLimit") if v != "0.0"]
   last_t, last = nxt[-1]
   assert last["ts"] == last_t and last_t < 3.0, f"still writing at {last_t} s with mapd silent since 0.95 s"
 

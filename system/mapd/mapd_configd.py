@@ -842,6 +842,25 @@ def main():
           # make a later bad target look well-sourced.
           mem.put_nonblocking("MapWaySel", "")
           mem.put_nonblocking("MapWayOffset", "")
+          # mapsl2pnw: the LAST posted limit must not outlive mapd either (mapd has restart_if_crash=False, so it
+          # would otherwise stay until reboot and keep driving speedadjust rules 1/1b + police +5, the CES zone
+          # rules and the freeway floor on a road that no longer has that limit). "0.0" is exactly what mapd itself
+          # publishes for "no limit" (m/s; 0 = none), which every reader already treats as unknown. Fires once per
+          # silent episode (== 5 above, reset by the alive branch); a mapd that comes back re-publishes through the
+          # normal path on its first message, so nothing stays cleared. NextMapSpeedLimit is NOT written: its ts goes
+          # stale on its own (speedadjust LA_INPUT_STALE_S), and a fresh-stamped "none" would read as mapd alive.
+          try:
+            prev = mem.get("MapSpeedLimit", return_default=True)
+            prev = prev.decode() if isinstance(prev, bytes) else prev
+            had = prev not in (None, "", "0.0")
+            mem.put_nonblocking("MapSpeedLimit", "0.0")
+            mem.put_nonblocking("MapConditionalSpeedLimit", "")
+            if had:
+              cloudlog.warning(f"mapd_configd: mapdOut silent for {mapd_out_down} loops -- MapSpeedLimit {prev} m/s " +
+                               "cleared to unknown (0.0) so a dead mapd cannot keep a stale limit in force")
+          except Exception:
+            cloudlog.exception("mapd_configd: could not clear MapSpeedLimit with mapd silent -- the last posted " +
+                               "limit STAYS in force for every consumer")
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point

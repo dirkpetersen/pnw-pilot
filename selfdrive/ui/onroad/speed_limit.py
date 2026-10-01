@@ -20,6 +20,7 @@ import time
 import pyray as rl
 
 from openpilot.common.constants import CV
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.onroad.hud_renderer import UI_CONFIG
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -35,6 +36,9 @@ STALE_AFTER_S = 10.0       # s: if the limit was UNKNOWN longer than this (mapd 
                            #   loss, stalled stream), the remembered limit is stale — re-acquiring
                            #   a limit is a fresh fix, NOT a "drop", so no warning. Short flickers
                            #   at a genuine road transition (< this) still warn normally.
+MAPD_SILENT_S = 5.0        # mapsl2pnw: s without a mapdOut before the shown limit is dropped (mapd has
+                           #   restart_if_crash=False, so a dead mapd would otherwise leave its last limit
+                           #   on screen until reboot). Matches mapd_configd's ~5-loop debounce.
 DROP_CONFIRM_S = 2.0       # s a lower limit must PERSIST before the banner fires. mapd re-matches
                            #   position after a restart / GPS re-acquire and can briefly land on a
                            #   parallel surface street: that put a 25 mph banner on I-5 at 70 mph
@@ -64,6 +68,7 @@ class SpeedLimitRenderer(Widget):
     self.road_name = ""
     self.speed = 0.0                # current vehicle speed, display units
     self._v_ego_cluster_seen = False
+    self._mapd_t = 0.0              # mapsl2pnw: monotonic stamp of the last mapdOut
 
     self._shown_limit = 0.0         # last limit we actually displayed (for drop detection)
     self._shown_limit_t = 0.0       # monotonic stamp of the last VALID limit (staleness gate)
@@ -93,7 +98,10 @@ class SpeedLimitRenderer(Widget):
 
     # mapd2pnw: read the official mapd output (mapdOut). speedLimit/nextSpeedLimit are 0 when
     # unknown, so validity is just "> 0" (the renderer already gates on MIN_VALID_KPH too).
+    if not sm.updated["mapdOut"]:
+      self._expire_silent_mapd(time.monotonic())
     if sm.updated["mapdOut"]:
+      self._mapd_t = time.monotonic()
       mo = sm["mapdOut"]
       conv = self._conv
       new_limit = mo.speedLimit * conv
@@ -105,6 +113,16 @@ class SpeedLimitRenderer(Widget):
 
       self._maybe_trigger_warning(new_limit)
       self.speed_limit = new_limit
+
+  def _expire_silent_mapd(self, now: float) -> None:
+    """mapsl2pnw: no mapdOut for MAPD_SILENT_S -> the shown limit is unknown, not the last one. Logged once (the
+    limit is invalid afterwards, so this cannot fire again until mapd has published a limit again)."""
+    if self.speed_limit_valid and now - self._mapd_t > MAPD_SILENT_S:
+      cloudlog.warning(f"speed_limit UI: mapdOut silent for {now - self._mapd_t:.0f} s -- the displayed limit "
+                       "is cleared to unknown")
+      self.speed_limit_valid = False
+      self.speed_limit_ahead_valid = False
+      self.speed_limit = 0.0
 
   def _overspeeding(self, limit: float) -> bool:
     """True if current speed is more than OVERSPEED_RATIO above the given limit."""
