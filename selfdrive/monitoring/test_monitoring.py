@@ -1,4 +1,4 @@
-import numpy as np
+import pytest
 
 from cereal import log
 from openpilot.common.realtime import DT_DMON
@@ -49,6 +49,17 @@ always_distracted = [msg_DISTRACTED] * int(TEST_TIMESPAN / DT_DMON)
 always_true = [True] * int(TEST_TIMESPAN / DT_DMON)
 always_false = [False] * int(TEST_TIMESPAN / DT_DMON)
 
+# PNW FORK CONTRACT (dmon2pnw eecc900e11 + glare2pnw/glare round 2): the ACTIVE-mode path is BluePilot's dual-counter
+# logic, not stock's single awareness counter, even with DmMode=0 (the _run_seq below never calls _refresh_dm_mode, so
+# it always runs the strict 11 s tier). Versus upstream it deliberately: (1) decays on the raw per-frame distraction
+# flag (no 0.25 s filter lag, so green lands ~0.3 s sooner); (2) snaps a counter back to 1.0 after 2 s of
+# non-distraction -- INCLUDING from orange/red, and a lost face counts as "not distracted"; (3) clears on any wheel
+# touch/gas in active mode, attentive or not; (4) freezes the counter at the GREEN threshold at standstill (stock
+# freezes at orange, so stock shows green); (5) gives a 30 s face-loss grace before falling to passive wheel-touch.
+# test_normal_driver, test_biggest_comma_fan, test_sometimes_transparent_commuter and
+# test_long_traffic_light_victim were upstream tests asserting the stock behaviour; they failed from dmon2pnw
+# (2026-06-22) on and were never run (not in check-channel-tip TEST_PATHS). They now pin the fork behaviour so a
+# change to it is a visible decision. Items (2) and (3) are weaker than stock -- see the work-pending item.
 class TestMonitoring:
   def _run_seq(self, msgs, interaction, engaged, standstill):
     DM = DriverMonitoring()
@@ -97,7 +108,8 @@ class TestMonitoring:
                       ((TEST_TIMESPAN-10-d_status.settings._AWARENESS_TIME)/2))/DT_DMON)].names[0] == EventName.driverUnresponsive
 
   # engaged, down to orange, driver pays attention, back to normal; then down to orange, driver touches wheel
-  #  - should have short orange recovery time and no green afterwards; wheel touch only recovers when paying attention
+  #  - FORK: green lands at 3.0 s (no filter lag); attention snaps back after 2 s (no orange recovery tail);
+  #    a wheel touch clears active-mode alerts even though the driver is still distracted (upstream: only when attentive)
   def test_normal_driver(self):
     ds_vector = [msg_DISTRACTED] * int(DISTRACTED_SECONDS_TO_ORANGE/DT_DMON) + \
                 [msg_ATTENTIVE] * int(DISTRACTED_SECONDS_TO_ORANGE/DT_DMON) + \
@@ -106,16 +118,18 @@ class TestMonitoring:
     interaction_vector = [car_interaction_NOT_DETECTED] * int(DISTRACTED_SECONDS_TO_ORANGE*3/DT_DMON) + \
                          [car_interaction_DETECTED] * (int(TEST_TIMESPAN/DT_DMON)-int(DISTRACTED_SECONDS_TO_ORANGE*3/DT_DMON))
     events, _ = self._run_seq(ds_vector, interaction_vector, always_true, always_false)
-    assert len(events[int(DISTRACTED_SECONDS_TO_ORANGE*0.5/DT_DMON)]) == 0
+    assert len(events[int((DISTRACTED_SECONDS_TO_ORANGE*0.5-0.1)/DT_DMON)]) == 0
+    assert events[int((DISTRACTED_SECONDS_TO_ORANGE*0.5+0.1)/DT_DMON)].names[0] == EventName.preDriverDistracted
     assert events[int((DISTRACTED_SECONDS_TO_ORANGE-0.1)/DT_DMON)].names[0] == EventName.promptDriverDistracted
     assert len(events[int(DISTRACTED_SECONDS_TO_ORANGE*1.5/DT_DMON)]) == 0
     assert events[int((DISTRACTED_SECONDS_TO_ORANGE*3-0.1)/DT_DMON)].names[0] == EventName.promptDriverDistracted
-    assert events[int((DISTRACTED_SECONDS_TO_ORANGE*3+0.1)/DT_DMON)].names[0] == EventName.promptDriverDistracted
+    # wheel touch at DISTRACTED_SECONDS_TO_ORANGE*3 while still distracted: cleared at once (fork), not held (upstream)
+    assert len(events[int((DISTRACTED_SECONDS_TO_ORANGE*3+0.1)/DT_DMON)]) == 0
     assert len(events[int((DISTRACTED_SECONDS_TO_ORANGE*3+2.5)/DT_DMON)]) == 0
 
-  # engaged, down to orange, driver dodges camera, then comes back still distracted, down to red, \
-  #                          driver dodges, and then touches wheel to no avail, disengages and reengages
-  #  - orange/red alert should remain after disappearance, and only disengaging clears red
+  # engaged, down to orange, driver dodges camera, then comes back still distracted, ...
+  #  - FORK: 2 s without a visible distraction snaps the counter back to 1.0, so a 2 s camera dodge CLEARS orange
+  #    and the countdown restarts from green (upstream: orange/red remain after disappearance). Flagged as weaker than stock.
   def test_biggest_comma_fan(self):
     _invisible_time = 2  # seconds
     ds_vector = always_distracted[:]
@@ -125,20 +139,31 @@ class TestMonitoring:
                                                         = [msg_NO_FACE_DETECTED] * int(_invisible_time/DT_DMON)
     ds_vector[int((DISTRACTED_SECONDS_TO_RED+_invisible_time)/DT_DMON):int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time)/DT_DMON)] \
                                                         = [msg_NO_FACE_DETECTED] * int(_invisible_time/DT_DMON)
-    interaction_vector[int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+0.5)/DT_DMON):int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+1.5)/DT_DMON)] \
-                                                        = [True] * int(1/DT_DMON)
-    op_vector[int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+2.5)/DT_DMON):int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+3)/DT_DMON)] \
-                                                        = [False] * int(0.5/DT_DMON)
     events, _ = self._run_seq(ds_vector, interaction_vector, op_vector, always_false)
+    # orange before the first dodge ...
     assert events[int((DISTRACTED_SECONDS_TO_ORANGE+0.5*_invisible_time)/DT_DMON)].names[0] == EventName.promptDriverDistracted
-    assert events[int((DISTRACTED_SECONDS_TO_RED+1.5*_invisible_time)/DT_DMON)].names[0] == EventName.driverDistracted
-    assert events[int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+1.5)/DT_DMON)].names[0] == EventName.driverDistracted
-    assert len(events[int((DISTRACTED_SECONDS_TO_RED+2*_invisible_time+3.5)/DT_DMON)]) == 0
+    # ... gone once the dodge has lasted 2 s (stock would still show orange here) ...
+    assert len(events[int((DISTRACTED_SECONDS_TO_ORANGE+_invisible_time+0.5)/DT_DMON)]) == 0
+    # ... and the countdown has to climb from green again: orange (not red) where the uninterrupted run would be red
+    assert events[int((DISTRACTED_SECONDS_TO_RED+1.5*_invisible_time)/DT_DMON)].names[0] == EventName.promptDriverDistracted
+
+  # engaged, driver distracted down to RED (terminal), then looks at the road for 2 s
+  #  - FORK: the red alert clears itself after 2 s of attention (upstream: only a disengage clears red). The terminal
+  #    alert is still counted toward the lockout (_MAX_TERMINAL_ALERTS). Pinned so that changing it is a decision.
+  def test_red_clears_after_two_seconds_of_attention(self):
+    ds_vector = always_distracted[:]
+    ds_vector[int((DISTRACTED_SECONDS_TO_RED+10)/DT_DMON):int((DISTRACTED_SECONDS_TO_RED+13)/DT_DMON)] = [msg_ATTENTIVE] * int(3/DT_DMON)
+    events, d_status = self._run_seq(ds_vector, always_false, always_true, always_false)
+    assert events[int((DISTRACTED_SECONDS_TO_RED+9)/DT_DMON)].names[0] == EventName.driverDistracted
+    assert len(events[int((DISTRACTED_SECONDS_TO_RED+12.5)/DT_DMON)]) == 0
+    assert d_status.terminal_alert_cnt >= 1
 
   # engaged, invisible driver, down to orange, driver touches wheel; then down to orange again, driver appears
-  #  - both actions should clear the alert, but momentary appearance should not
-  def test_sometimes_transparent_commuter(self):
-    _visible_time = np.random.choice([0.5, 10])
+  #  - both actions should clear the alert (a 10 s appearance does). FORK: even a momentary 0.5 s appearance clears it,
+  #    and the 30 s face-loss grace (glare round 2) then keeps DM quiet instead of resuming the wheel-touch countdown.
+  #    Both appearance lengths run every time (upstream picked one at random, np.random.choice).
+  @pytest.mark.parametrize("_visible_time", [0.5, 10])
+  def test_sometimes_transparent_commuter(self, _visible_time):
     ds_vector = always_no_face[:]*2
     interaction_vector = always_false[:]*2
     ds_vector[int((2*INVISIBLE_SECONDS_TO_ORANGE+1)/DT_DMON):int((2*INVISIBLE_SECONDS_TO_ORANGE+1+_visible_time)/DT_DMON)] = \
@@ -148,12 +173,9 @@ class TestMonitoring:
     assert len(events[int(INVISIBLE_SECONDS_TO_ORANGE*0.5/DT_DMON)]) == 0
     assert events[int((INVISIBLE_SECONDS_TO_ORANGE-0.1)/DT_DMON)].names[0] == EventName.promptDriverUnresponsive
     assert len(events[int((INVISIBLE_SECONDS_TO_ORANGE+0.1)/DT_DMON)]) == 0
-    if _visible_time == 0.5:
-      assert events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1-0.1)/DT_DMON)].names[0] == EventName.promptDriverUnresponsive
-      assert events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1+0.1+_visible_time)/DT_DMON)].names[0] == EventName.preDriverUnresponsive
-    elif _visible_time == 10:
-      assert events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1-0.1)/DT_DMON)].names[0] == EventName.promptDriverUnresponsive
-      assert len(events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1+0.1+_visible_time)/DT_DMON)]) == 0
+    assert events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1-0.1)/DT_DMON)].names[0] == EventName.promptDriverUnresponsive
+    # both a 0.5 s and a 10 s appearance clear the alert (upstream: only the 10 s one; the 0.5 s one left green)
+    assert len(events[int((INVISIBLE_SECONDS_TO_ORANGE*2+1+0.1+_visible_time)/DT_DMON)]) == 0
 
   # engaged, invisible driver, down to red, driver appears and then touches wheel, then disengages/reengages
   #  - only disengage will clear the alert
@@ -179,17 +201,18 @@ class TestMonitoring:
     events, _ = self._run_seq(always_distracted, always_false, always_false, always_false)
     assert sum(len(event) for event in events) == 0
 
-  # engaged, car stops at traffic light, down to orange, no action, then car starts moving
-  #  - should only reach green when stopped, but continues counting down on launch
+  # engaged, car stops at traffic light, no action, then car starts moving
+  #  - FORK: the counter freezes at the GREEN threshold at standstill, so no alert at all while stopped (upstream shows
+  #    green, freezing at orange); it continues counting down on launch
   def test_long_traffic_light_victim(self):
     _redlight_time = 60  # seconds
     standstill_vector = always_true[:]
     standstill_vector[int(_redlight_time/DT_DMON):] = [False] * int((TEST_TIMESPAN-_redlight_time)/DT_DMON)
     events, d_status = self._run_seq(always_distracted, always_false, always_true, standstill_vector)
-    assert events[int((d_status.settings._DISTRACTED_TIME-d_status.settings._DISTRACTED_PRE_TIME_TILL_TERMINAL+1)/DT_DMON)].names[0] == \
-                                                                                                                    EventName.preDriverDistracted
-    assert events[int((_redlight_time-0.1)/DT_DMON)].names[0] == EventName.preDriverDistracted
-    assert events[int((_redlight_time+0.5)/DT_DMON)].names[0] == EventName.promptDriverDistracted
+    assert len(events[int((d_status.settings._DISTRACTED_TIME-d_status.settings._DISTRACTED_PRE_TIME_TILL_TERMINAL+1)/DT_DMON)]) == 0
+    assert len(events[int((_redlight_time-0.1)/DT_DMON)]) == 0
+    assert events[int((_redlight_time+0.5)/DT_DMON)].names[0] == EventName.preDriverDistracted
+    assert events[int((_redlight_time+3)/DT_DMON)].names[0] == EventName.promptDriverDistracted
 
   # engaged, model is somehow uncertain and driver is distracted
   #  - should fall back to wheel touch after uncertain alert
