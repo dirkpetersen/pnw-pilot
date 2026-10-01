@@ -2,6 +2,8 @@
 
 Continues [`CHANGELOG-2026-09-28.md`](CHANGELOG-2026-09-28.md) (there is no separate 09-29 file; its ships are section 1 here). All times PT.
 
+**Update 2026-10-01:** sections 12-14 shipped after this; the channel tip is `4c48ef4075`, **GREEN**, 5870 passed; the device runs `acc42b5a9f` and has `4c48ef4075` staged for the next reboot.
+
 **Channel tip:** `origin/3devpnw` = `a037278713`, **GREEN**, 5814 passed (sections 9-11 pushed 23:16 PT 09-30 to 00:24 PT 10-01; at `1afb551fa6` the tip was green with 5708). **Installed on the device:** the tip as of the evening installs (~19:15 PT, and a reboot at 21:27 PT); `848d115fed` was the 09-29 ~22:00 PT reboot. Sections 2-3 were pushed during the day and are part of that evening install (`83c152e33f` ... `c0b4bd4499` are ancestors of the tip); sections 5-8 shipped the same evening.
 
 ## 1. Installed 2026-09-29 (`848d115fed`)
@@ -80,9 +82,34 @@ The minimum-slowdown notch for a map curve is measured from `min(set speed, vEgo
 notch only beyond the hold horizon (`HOLD_TTA_S`). Kill switch: `curve.json` `tesla.vtsc_notch_vego`, default ON. New `mapRef` field on the VTSC tick record.
 Replay: bend B (OR-34 left bend) 85 to 80 mph and 4.53 to 4.03 m/s^2, so **improved, not fixed**; fleet 756 same / 31 deeper / 1 shallower. Opus review: the first
 version could carry up to +10.6 mph into a vision curve through the hold latch; fixed by the horizon gate (`a037278713`). An older, separate bug in today's
-code (the hold latch can freeze the cap while a vision curve approaches) remains open. Staged, takes effect at the next reboot.
+code (the hold latch can freeze the cap while a vision curve approaches) was open here and is fixed in section 14. Staged, takes effect at the next reboot.
 
-## 12. Coding policy note
+## 12. `madsquiet2pnw`: the Raven's silent MADS transitions are pinned by tests (`acc42b5a9f`)
 
-From the evening of 09-30 the code for these three ships was written by Sonnet coders and reviewed by Opus reviewers. The channel tip was tested after the last
+Test-only plus a docstring fix in `madsquiet_pnw.py`. Pins the Raven's brake-to-steering-only and stalk-pull transitions as chime-free, so a change that makes them
+audible fails a test. Shipped by owner decision 2026-10-01. Tip GREEN, 5820 passed. Installed on the device at the next reboot (no behaviour change).
+
+## 13. `dmtests2pnw`: the four stale driver-monitoring tests now pin the fork's contract (`23fdf366ba`)
+
+Test-only; no product code changed. `selfdrive/monitoring/test_monitoring.py` (12 tests) failed 4 tests on the channel base. Root cause: `dmon2pnw` (`eecc900e11`, 2026-06-22)
+brought in the BluePilot dual-counter logic in `DriverMonitoring._update_events`; the tests still asserted stock single-counter behaviour and were never in `TEST_PATHS`, so
+the channel check never saw them. They passed 10/10 at the upstream state and are not environmental. The tests now pin the fork's contract (the header comment lists each
+deviation) and `test_monitoring.py|10` is in `TEST_PATHS`. Tip GREEN, 5832 passed.
+**Open (owner decision, work-pending):** the deviations show the fork's DM is **weaker than stock even at `DmMode=0`** (a 2 s camera dodge snaps the counter back from orange/red;
+wheel touch or gas clears alerts while still distracted; standstill freezes at the green threshold; 30 s face-loss grace). Whether to restore stock recovery semantics is not decided.
+
+## 14. `vtschold2pnw`: the VTSC apex hold no longer freezes the cap above what a curve needs (`4c48ef4075`)
+
+Tesla (Raven) only. The VTSC `hold` latch could keep the cap frozen above the brake envelope while a curve approached; the hold now only ever LOWERS the held value to the envelope
+(never below the brake envelope), never raises it. Kill switch: `curve.json` `tesla.vtsc_hold_envelope`, default ON (OFF is bit-identical to the old behaviour). New VTSC tick field
+`vtscHoldEnv` (`''`, `'env'`, `'speed'`). This closes the bug recorded in section 11 as open.
+Evidence: replay of 134 engaged stretches 09-27 to 09-30 had 534 hold episodes; in 7 stretches the old car was more than 0.3 m/s faster than the new rule, in 2 more than 2 m/s,
+worst 5.13 m/s at 12 m/s (09-30 21:43 PT): about one overspeed per 55 engaged minutes. Closed-loop fuzz: worst faster-than-ideal +4.47 to +1.02 m/s (22 to 1 of 1000 scenarios over 0.9 m/s);
+fleet lateral acceleration never worse. The residual +1.02 m/s is the existing 10%-over-safe-speed hold margin. Opus review: SHIP (lower-only proven; switch OFF bit-identical; 12 of 12 mutants killed).
+Tip GREEN, 5870. Staged on the device; takes effect at the next reboot. Known limits (work-pending): a car below its set speed that detects a curve can still accelerate under the cap;
+a misspelled kill-switch key in `curve.json` is silently ignored.
+
+## 15. Coding policy note
+
+From the evening of 09-30 the code for the ships above was written by Sonnet coders and reviewed by Opus reviewers. The channel tip was tested after the last
 push (green, 5814 passed at `a037278713`).
