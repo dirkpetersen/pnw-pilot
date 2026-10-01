@@ -311,3 +311,57 @@ def test_a_non_finite_vego_falls_back_to_the_set_speed_and_says_so_once(monkeypa
   for _ in range(3):
     assert c._notch_ref(40.0, float("nan")) == 40.0
   assert len(errs) == 1 and "non-finite vEgo" in errs[0]
+
+
+# ---------------------------------------------------------------- closed loop: the hold-latch regression the fold-level fuzz cannot see
+
+def _closed_arrival(monkeypatch, notch_vego, v_set=30.5, v0=24.3, node=(49.0, 21.3), vis=(145.0, 21.6), seconds=14.0, gps_lag=1.0):
+  """Car (below set, free to speed up) follows min(cap, set) with a first-order lag; one near map node and a vision curve further on, both fixed
+  in position. Returns the car's speed on reaching the vision apex."""
+  from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_controller as VC
+  ctrl, clock = H.make_controller(monkeypatch, notch_vego=notch_vego)
+  vis_now = {}
+  monkeypatch.setattr(VC, "model_curve_state", lambda model, v_cruise, a_lat: vis_now["s"])
+  ns = H._NS()
+  ns.orientationNED = [0.0, 0.0, 0.0]
+  ns.enabled = True
+  sm = {"modelV2": object(), "carControl": ns}
+  s, v = 0.0, v0
+  for _ in range(int(seconds / 0.05)):
+    clock[0] += 0.05
+    s_seen = s - v * gps_lag      # the map fold works from a fix ~1 s old (measured on the 09-30 ticks)
+    ctrl._map_targets = [{"latitude": LAT0 + (node[0] - s_seen) / M_PER_DEG, "longitude": LON0, "velocity": node[1]}] if node[0] - s_seen > 0 else []
+    ctrl._cur_lat, ctrl._cur_lon, ctrl._cur_bearing = LAT0, LON0, 0.0
+    ctrl._last_read = clock[0]
+    ctrl._gps_fix_ts = clock[0] - 1.4
+    d = vis[0] - s
+    vis_now["s"] = (C.A_LAT_TARGET / (vis[1] ** 2), max(d, 0.0), vis[1]) if d > -20.0 else (0.0, -1.0, float("inf"))
+    cap = ctrl.cap(sm, v_set, v)
+    v = max(v + max(min((min(cap, v_set) - v) / 1.0, 0.8), -2.0) * 0.05, 0.0)
+    s += v * 0.05
+    if s >= vis[0]:
+      return v
+  raise AssertionError("never reached the vision curve")
+
+
+def test_a_near_map_node_cannot_make_the_car_faster_into_a_vision_curve_than_today(monkeypatch):
+  """One near node (49 m, raw 21.3) and a vision curve at 145 m (21.6 m/s), car at 24.3 below set 30.5 and speeding up. Without the hold-horizon
+  gate the held reference rises with the car, the near node's floor drops to ~raw, the map wins with its apex ~1 s away, the machine goes
+  brake -> HOLD, freezes the cap and never brakes for the vision curve: the car arrives ~3 m/s faster than today."""
+  today = _closed_arrival(monkeypatch, notch_vego=False)
+  new = _closed_arrival(monkeypatch, notch_vego=True)
+  assert new <= today + 0.1, (new, today)
+
+
+def test_the_harness_default_is_the_production_default(monkeypatch):
+  """make_controller() with no arguments must exercise the change ON (a default of False hid production behaviour from every fixture)."""
+  assert H.make_controller(monkeypatch)[0].veh.vtsc_notch_from_vego is True
+
+
+def test_the_deeper_notch_applies_only_beyond_the_hold_horizon():
+  """Inside HOLD_TTA_S of travel (38 m/s * 2.5 s = 95 m) a point keeps today's set-relative floor; beyond it the car-relative notch applies."""
+  horizon = 38.0 * C.HOLD_TTA_S
+  for d, want in ((horizon - 5.0, SET - C.MAP_MIN_SLOWDOWN), (horizon + 5.0, 38.0 - C.MAP_MIN_SLOWDOWN)):
+    args = (_pts((d, 30.4)), LAT0, LON0, 38.0, 500.0, C.A_DECEL, C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, SET,
+            C.MAP_MIN_SLOWDOWN, 0.0)
+    assert VP.most_binding_map_curve(*args, notch_ref=38.0)[0] == pytest.approx(want), d

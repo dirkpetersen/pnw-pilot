@@ -436,7 +436,11 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     floored_pt = False
     shallow_floor = False
     if math.isfinite(v_cruise_cap):
-      notch = (v_cruise_cap if notch_ref is None else notch_ref) - min_slowdown
+      # The deeper car-relative notch applies only BEYOND the hold horizon (HOLD_TTA_S of travel). For a point inside it the state machine
+      # would go brake -> hold on a map apex ~1 s away and freeze the cap, hiding a vision curve a few seconds further on (replay: +4.7 m/s
+      # faster than today into that curve), so near points keep today's set-relative floor.
+      ref = v_cruise_cap if (notch_ref is None or d <= max(v_ego, 1.0) * C.HOLD_TTA_S) else notch_ref
+      notch = ref - min_slowdown
       if not (tv < notch <= tv_eff):
         # two tiers: where the car-relative notch does not floor this point, today's set-relative floor still applies, so the
         # change is never SHALLOWER than today (it only adds the deeper car-relative notch where that one applies)
