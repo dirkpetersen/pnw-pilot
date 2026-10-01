@@ -517,14 +517,17 @@ class TestClosedLoopThroughTheFordExecutor:
 # ---------------------------------------------------------------------------------------------------------
 class TestTheTeslaIsUntouched:
   """End to end through CESController.experimental_request, with a mapd path whose curve is behind the car: the Tesla
-  (op-long, no ICBM) never calls the gate, and its decisions and overlay feed are identical with the gate poisoned.
-  The Lightning run is the control that shows the spy can see a call."""
+  (op-long, no ICBM) never runs ICBM's gate (`_icbm_passed_gate`), and its decisions and overlay feed are identical with
+  that gate poisoned. The Lightning run is the control that shows the spy can see a call.
+  upcgate2pnw: the Tesla's CES curve scan now filters passed points itself (icbm_passed_points, via
+  _curve_passed_filter) -- its own tests are test_upcgate2pnw.py -- so only the ICBM gate is poisoned here."""
 
   @staticmethod
-  def _run(monkeypatch, fp, brand, op_long, poison):
+  def _run(monkeypatch, fp, brand, op_long, poison, road=None):
     NS = types.SimpleNamespace
     la, lo = _ll(0.0, 0.0)
-    path = [{"latitude": p["latitude"], "longitude": p["longitude"], "velocity": p["velocity"]} for p in _road()]
+    path = [{"latitude": p["latitude"], "longitude": p["longitude"], "velocity": p["velocity"]}
+            for p in (road if road is not None else _road())]
     blob = json.dumps({"latitude": la, "longitude": lo, "bearing": 0.0, "src": "car", "fix_ts": 7000.0 - m.ICBM_GPS_LAG_KEEP_S})
 
     class P:
@@ -549,10 +552,8 @@ class TestTheTeslaIsUntouched:
     if poison:
       def boom(*a, **k):
         raise AssertionError("behindgate helper called")
-      monkeypatch.setattr(m, "icbm_passed_points", boom)
       monkeypatch.setattr(m, "_icbm_passed_gate", boom)
-    else:
-      monkeypatch.setattr(m, "icbm_passed_points", lambda *a, **k: (calls.__setitem__("gate", calls["gate"] + 1), real(*a, **k))[1])
+    monkeypatch.setattr(m, "icbm_passed_points", lambda *a, **k: (calls.__setitem__("gate", calls["gate"] + 1), real(*a, **k))[1])
     clock = [7000.0]
     monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
     from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import FakeCP
@@ -577,7 +578,6 @@ class TestTheTeslaIsUntouched:
   def test_tesla_decisions_and_overlay_are_identical_with_the_gate_poisoned(self, monkeypatch):
     d_real, puts_real, calls = self._run(monkeypatch, "TESLA_MODEL_S_HW3", "tesla", True, poison=False)
     d_poison, puts_poison, _ = self._run(monkeypatch, "TESLA_MODEL_S_HW3", "tesla", True, poison=True)
-    assert calls == {"gate": 0}, f"the Tesla ran the gate: {calls}"
     assert not any(k == "IcbmTarget" for k, _ in puts_real)
     assert d_real == d_poison and puts_real == puts_poison
 

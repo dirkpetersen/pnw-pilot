@@ -1922,6 +1922,51 @@ def _icbm_passed_log(ctl, state, **kw) -> None:
     cloudlog.event("ces_icbm_passed", state=state, **kw)
 
 
+def _passed_why_log(ctl, slot, why, **kw) -> None:
+  """upcgate2pnw (Rule 2): change-only log of the passed-point mask's verdict for the callers that have no gate of their
+  own -- the Tesla's CES curve scan (slot "ces") and the curve-DB candidate pool (slot "roaddb"). `why` is
+  icbm_passed_points' reason ("ok" or the reason it could not tell, in which case the points are NOT filtered). Its own
+  state per slot, so it never collides with _icbm_passed_gate's key. The starting state is "ok": a working mask logs
+  nothing at boot, only its first failure and its recovery."""
+  attr = f"_passed_why_{slot}"
+  if getattr(ctl, attr, "ok") != why:
+    setattr(ctl, attr, why)
+    cloudlog.event("ces_passed_mask", slot=slot, why=why, **kw)
+
+
+def _curve_passed_filter(ctl, points, lat, lon, v_ego):
+  """upcgate2pnw: `points` without the ones the truck has already driven past (icbm_passed_points -- the SAME geometry
+  as behindgate2pnw, no second mask), for a scan that has no gate of its own: the Tesla's CES curve trip. mapd
+  publishes its current way from the way's first node, so the just-driven stretch stays in the list and the scanners'
+  unsigned distance can bind to it (Tesla 2026-09-30 22:36:18-23, a loop ramp: Experimental/"curve" on a 21 mph node
+  160-170 deg behind, 223 -> 289 m and receding).
+
+  Cannot tell (no heading, under ICBM_PASSED_MIN_V, off/reversed path, too many points) -> `points` unchanged, the
+  decision is exactly today's, and the reason is logged when it changes. A bug here costs the filter, never the
+  decision: any exception returns `points` unchanged and is logged (throttled). Nothing passed -> the SAME list."""
+  if not points or lat is None or lon is None:
+    return points                 # nothing to filter and no candidate either; not a failure
+  try:
+    # This runs every control cycle (100 Hz) but its inputs change at the ~1 Hz GPS/map refresh (_read_map), and the
+    # mask is ~0.8 ms for a long way off-device: reuse the last answer while list, fix, heading and the speed floor
+    # are the same objects/values. The list is HELD in the key, so an id() can never be recycled into a false hit.
+    key = (lat, lon, getattr(ctl, "_cur_bearing", None), v_ego >= ICBM_PASSED_MIN_V)
+    hit = getattr(ctl, "_passed_cache", None)
+    if hit is not None and hit[0] is points and hit[1] == key:
+      return hit[2]
+    mask, why = icbm_passed_points(points, lat, lon, getattr(ctl, "_cur_bearing", None), v_ego)
+    _passed_why_log(ctl, "ces", why)
+    out = points if mask is None or not any(mask) else [p for p, gone in zip(points, mask, strict=True) if not gone]
+    ctl._passed_cache = (points, key, out)
+    return out
+  except Exception:
+    now = time.monotonic()
+    if now - (getattr(ctl, "_passed_err_t", None) or -1e9) > ICBM_ERR_LOG_S:
+      ctl._passed_err_t = now
+      cloudlog.exception("upcgate2pnw: passed-point filter FAILED -- the CES curve scan runs WITHOUT it (a curve just driven can trip Experimental)")
+    return points
+
+
 def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis, ceiling=None, running=False):
   """behindgate2pnw: the passed-point gate. Called whenever a map/far candidate would bind. Returns
   (target, sig, far_v, far_dist, far_raw), updating ctl._icbm_src / _icbm_gate. icbmslow2pnw carries
@@ -4904,7 +4949,11 @@ class CESController:
       lead = sm['radarState'].leadOne
       model = sm['modelV2']
       v_ego = float(car_state.vEgo)
-      mtv, mtd = upcoming_curve(self._map_targets, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
+      # upcgate2pnw: a car with no ICBM gate (the Tesla) drops the points it has driven past before the curve scan. The
+      # ICBM car (veh.ces_shadow) keeps the raw list: _icbm_passed_gate owns that decision and its log, byte for byte.
+      scan_pts = self._map_targets if self._shadow else _curve_passed_filter(
+        self, self._map_targets, self._cur_lat, self._cur_lon, v_ego)
+      mtv, mtd = upcoming_curve(scan_pts, self._cur_lat, self._cur_lon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
       # gentle profile: VTSC handles curve speed (smooth, decel-limited), so CES does NOT trip
       # Experimental for curves on the truck — removes the chill<->experimental planner-mode flapping.
       toggles = {**self._toggles, "curves": False} if self._gentle else self._toggles
@@ -6047,24 +6096,36 @@ class CESController:
                                  map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
                                  far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn)[0]
 
+      # points the truck has already passed never re-enter as a re-derived candidate (behindgate2pnw's own test)
+      mask, _why = icbm_passed_points(self._map_targets, plat, plon, getattr(self, "_cur_bearing", None), v_ego)
+      if self._map_targets:
+        _passed_why_log(self, "roaddb", _why)     # upcgate2pnw (Rule 2): cannot tell -> the pool below is unfiltered
+      passed = {id(p) for p, gone in zip(self._map_targets, mask, strict=True) if gone} if mask is not None else set()
+
       def cands_fn():
         vis = (vis_v, vis_dist)
         if starting and not icbm_vision_may_start(vis_dist, ttc, icbm_map_reach(self._map_targets, plat, plon)):
           vis = (0.0, inf)                  # the MAP-FIRST start rule, as _icbm_step applies it
-        md = sig.get("map_target_dist", inf)
-        pre = {"map": (one(map_v=sig.get("map_target_v", 0.0), map_dist=md), md),
-               "far": (one(v_far=far_v, d_far=far_dist), far_dist),
+        m_v, md, f_v, f_d, f_r = sig.get("map_target_v", 0.0), sig.get("map_target_dist", inf), far_v, far_dist, far_raw
+        sig_c = sig
+        if passed:
+          # upcgate2pnw: BOTH sources are re-derived on the points still ahead. _icbm_passed_gate re-derives only the
+          # source that bound, so with src=map and the gate clear the far candidate (or the reverse) reached the DB pool
+          # unfiltered and a row at a passed node could lower it. Where the gate already re-derived, this is the same value.
+          ahead = [p for p in self._map_targets if id(p) not in passed]
+          m_v, md = upcoming_curve(ahead, plat, plon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
+          f_v, f_d, f_r = icbm_far_map_candidate(ahead, plat, plon, v_ego, ref, icbm_map_eff_scale,
+                                                 veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
+          sig_c = {**sig, "map_target_v": m_v, "map_target_dist": md}
+        pre = {"map": (one(map_v=m_v, map_dist=md), md),
+               "far": (one(v_far=f_v, d_far=f_d), f_d),
                "vis": (one(v_vis=vis[0], d_vis=vis[1]), vis[1])}
         cands = {s: None if a is None else
-                 (icbm_penalise(veh, self._map_targets, a, s, sig, plat, plon, far_dist, far_raw, pricer=eff_fn)[0], d)
+                 (icbm_penalise(veh, self._map_targets, a, s, sig_c, plat, plon, f_d, f_r, pricer=eff_fn)[0], d)
                  for s, (a, d) in pre.items()}
         pts = {"map": map_candidate_point(self._map_targets, plat, plon, md),
-               "far": map_candidate_point(self._map_targets, plat, plon, far_dist)}
+               "far": map_candidate_point(self._map_targets, plat, plon, f_d)}
         return cands, pts
-
-      # points the truck has already passed never re-enter as a re-derived candidate (behindgate2pnw's own test)
-      mask, _why = icbm_passed_points(self._map_targets, plat, plon, getattr(self, "_cur_bearing", None), v_ego)
-      passed = {id(p) for p, gone in zip(self._map_targets, mask, strict=True) if gone} if mask is not None else set()
 
       def recand_fn(s, pts):
         # the map/far candidate re-derived on a subset of mapd's points (a raised curve's stretch removed)
