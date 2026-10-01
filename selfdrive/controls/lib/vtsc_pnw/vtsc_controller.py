@@ -111,6 +111,8 @@ class VTSCController:
     # vtscpass2pnw: carControl.longActive read failures (own rate-limited log state)
     self._la_err_t = None
     self._la_err_n = 0
+    self._tele_hold_env = ""   # vtschold2pnw: "" / env / speed -- how the apex hold lowered its frozen cap this tick (see cap())
+    self._hold_env_logged = False  # vtschold2pnw: the change-only log line of this hold episode was written
     self._hold_away = 0        # vtscpass2pnw: consecutive cycles the apex has been clearly moving away while in hold
     self._speed_limit = 0.0    # m/s posted limit (mapd bridge); the VTSC cap is FLOORED here on a highway
     self._is_freeway = False   # RoadContext == 'freeway' — only floor-at-limit on highways (driver rule 2026-07-01)
@@ -556,6 +558,7 @@ class VTSCController:
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
     self._tele_rel_defer = ""       # vtscfloor2pnw release-later: per tick, like the rest
+    self._tele_hold_env = ""        # vtschold2pnw: per tick, like the rest (set only inside the hold branch)
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
     # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
@@ -759,6 +762,23 @@ class VTSCController:
 
     if self._state == "hold":
       target = self._applied                       # freeze: never reduce further, never accelerate yet
+      # vtschold2pnw (Raven, curve.json tesla.vtsc_hold_envelope): the freeze must not hold the cap ABOVE what a curve needs. Today a hold
+      # entered for a near apex (or on a harmless map node, with the cap far above the car) keeps applied frozen while a deeper curve
+      # approaches; the exit needs tta > HOLD_TTA_S + margin for 3 cycles, and the rate-limited brake ramp then starts late and
+      # arrives up to ~4 m/s too fast (closed-loop fuzz). So while the binding curve is still AHEAD of the apex window (tta > APEX_TTA_S:
+      # never a fresh brake AT the apex, as before): above its safe speed (not at_safe) the held cap follows the brake envelope exactly
+      # as the brake state would; at safe speed it is lowered only to the car's own speed, so the hold never brakes the car (it still
+      # may not re-accelerate it) but the cap stops trailing far above it. min(): the held cap only ever goes DOWN -- never above today's.
+      if self.veh.vtsc_hold_envelope and has_curve and tta > C.APEX_TTA_S:
+        env = max(min(brake_cap_for_apex(v_curve, d_apex, v_ego, self._a_decel), v_cruise - C.CONFIDENCE_CUT), C.V_MIN)
+        held = max(env, v_ego) if at_safe else env
+        if held <= target:                         # binding (or just reached): label it; a cap already below `held` is left alone
+          self._tele_hold_env = "speed" if (at_safe and env < v_ego) else "env"
+          if held < target and not self._hold_env_logged:
+            self._hold_env_logged = True
+            cloudlog.info("VTSC hold lowers its cap (%s): applied %.1f -> %.1f m/s, vEgo %.1f, curve %.1f m/s at %.0f m (tta %.1f s)",
+                          self._tele_hold_env, self._applied, held, v_ego, v_curve, d_apex, tta)
+          target = held
       if not has_curve or (tta <= C.APEX_TTA_S and at_safe):
         self._state = "release"                    # only accelerate out once we've actually slowed
       elif tta > C.HOLD_TTA_S + C.HOLD_EXIT_MARGIN_S:
@@ -771,6 +791,8 @@ class VTSCController:
         self._hold_away = 0
     if self._state != "hold":
       self._hold_away = 0
+      self._tele_hold_env = ""
+      self._hold_env_logged = False
 
     if self._state != "release":
       self._rel_defer_t0 = None                    # the curve is over / braking re-armed: a new one gets a fresh bound (a one-cycle
@@ -1026,6 +1048,9 @@ class VTSCController:
         # vtscfloor2pnw release-later: why the cap is frozen instead of climbing ("" = not). getattr: permissive test stubs build
         # the payload without the state (like _tele_cb below).
         "vtscRelDefer": str(getattr(self, "_tele_rel_defer", "")),
+        # vtschold2pnw: how the apex hold lowered its frozen cap this tick ("" = frozen as before; env = followed the brake envelope;
+        # speed = lowered to the car's own speed). getattr for the same reason as above.
+        "vtscHoldEnv": str(getattr(self, "_tele_hold_env", "")),
         "rsnMap": _fin(self._tele_rsn_map, 2),
         "rsnVis": _fin(self._tele_rsn_vis, 2),
         "apexCurvature": _fin(self.msg.get("apexCurvature", 0.0), 5),

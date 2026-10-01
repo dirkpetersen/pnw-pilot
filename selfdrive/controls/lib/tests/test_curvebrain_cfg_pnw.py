@@ -469,7 +469,7 @@ def test_the_tesla_logs_its_curve_brain_config_at_start(cfg, monkeypatch):
   path = cfg({"tesla": {"curve_lat_a": 3.0, "curve_brain": "shadow"}})
   ev, errs = _controller(TESLA, "tesla", True, monkeypatch)
   assert ev == [{"mode": "shadow", "why": "curve.json", "lat_a": 3.0, "clip_margin": 0.3, "path": path,
-                   "vtsc_release_later": True, "vtsc_notch_vego": True}]
+                   "vtsc_release_later": True, "vtsc_notch_vego": True, "vtsc_hold_envelope": True}]
   assert errs == []
 
 
