@@ -11,7 +11,7 @@ from openpilot.system.mapd.tests import configd_replay as R
 
 MPH = 0.44704
 LIM = str(float(struct.unpack("f", struct.pack("f", 60 * MPH))[0]))   # capnp stores float32
-LIVE = ("mapdOut", {"speedLimit": 60 * MPH, "nextSpeedLimit": 0.0, "nextSpeedLimitDistance": 0.0,
+LIVE = ("mapdOut", {"roadContext": "freeway", "oneWay": True, "lanes": 3, "speedLimit": 60 * MPH, "nextSpeedLimit": 0.0, "nextSpeedLimitDistance": 0.0,
                     "conditionalSpeedLimit": "45 @ (Mo-Fr 07:00-09:00)"})
 
 
@@ -49,6 +49,8 @@ def test_mapd_dies_clears_once_after_the_debounce_with_one_log(monkeypatch):
   assert t_clear == 5.15, f"cleared at {t_clear}: the existing 5-loop debounce, not the first silent poll"
   assert res.mem.store["MapSpeedLimit"] == "0.0"
   assert res.mem.store["MapConditionalSpeedLimit"] == ""
+  # the road identity the DM relaxation reads is unknown too, not latched ("freeway" / one-way 2+ lanes)
+  assert (res.mem.store["RoadContext"], res.mem.store["MapOneWay"], res.mem.store["MapLanes"]) == ("", "0", "0")
   w = _warns(res)
   assert len(w) == 1 and "cleared to unknown" in w[0]
 
@@ -114,3 +116,23 @@ def test_a_failing_clear_is_logged_not_swallowed(monkeypatch):
   monkeypatch.setattr(R.FakeParams, "put_nonblocking", boom)
   res = R.run(monkeypatch, _live(0.0) + _silent(0.15, 8))
   assert any("could not clear MapSpeedLimit" in kw.get("msg", "") for _, kw in res.log.events)
+
+
+def test_the_limit_clear_comes_first_so_a_failing_later_put_cannot_skip_it(monkeypatch):
+  orig = R.FakeParams.put
+
+  def boom(self, key, value):
+    if key in ("MapHighwayClass", "MapWaySel", "MapWayOffset", "MapHighwayClassTs"):
+      raise OSError("shm full")
+    return orig(self, key, value)
+
+  monkeypatch.setattr(R.FakeParams, "put", boom)
+  monkeypatch.setattr(R.FakeParams, "put_nonblocking", boom)
+  res = R.run(monkeypatch, _live(0.0) + _silent(0.15, 8))
+  # (the live path writes those keys too, so the live phase may log failures; the point is the clear still landed)
+  assert res.mem.store["MapSpeedLimit"] == "0.0" and res.mem.store["RoadContext"] == ""
+
+
+def test_a_stuck_road_context_alone_is_cleared_and_logged(monkeypatch):
+  res = R.run(monkeypatch, _silent(0.0, 8), mem={"MapSpeedLimit": "0.0", "RoadContext": "freeway"})
+  assert res.mem.store["RoadContext"] == "" and len(_warns(res)) == 1

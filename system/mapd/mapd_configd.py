@@ -836,15 +836,11 @@ def main():
         # the ts alone still sees "" promptly rather than waiting out the staleness window too).
         mapd_out_down += 1
         if mapd_out_down == 5:
-          mem.put_nonblocking("MapHighwayClass", "")
-          mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
-          # waysel2pnw: clear these too, so a dead mapd cannot leave a stale "current" in the log and
-          # make a later bad target look well-sourced.
-          mem.put_nonblocking("MapWaySel", "")
-          mem.put_nonblocking("MapWayOffset", "")
-          # mapsl2pnw: the LAST posted limit must not outlive mapd either (mapd has restart_if_crash=False, so it
-          # would otherwise stay until reboot and keep driving speedadjust rules 1/1b + police +5, the CES zone
-          # rules and the freeway floor on a road that no longer has that limit). "0.0" is exactly what mapd itself
+          # mapsl2pnw: the LAST posted limit must not outlive mapd either (mapd has restart_if_crash=False; the
+          # mapdheal2pnw relaunch takes ~45 loops, and a frozen process / missing binary never recovers, so it would
+          # otherwise stay and keep driving speedadjust rules 1/1b + police +5, the CES zone rules and the freeway
+          # floor on a road that no longer has that limit). FIRST in this branch, so an exception in a later put
+          # cannot skip it. "0.0" is exactly what mapd itself
           # publishes for "no limit" (m/s; 0 = none), which every reader already treats as unknown. Fires once per
           # silent episode (== 5 above, reset by the alive branch); a mapd that comes back re-publishes through the
           # normal path on its first message, so nothing stays cleared. NextMapSpeedLimit is NOT written: its ts goes
@@ -852,15 +848,31 @@ def main():
           try:
             prev = mem.get("MapSpeedLimit", return_default=True)
             prev = prev.decode() if isinstance(prev, bytes) else prev
-            had = prev not in (None, "", "0.0")
+            ctx = mem.get("RoadContext", return_default=True)
+            ctx = ctx.decode() if isinstance(ctx, bytes) else ctx
+            had = prev not in (None, "", "0.0") or ctx not in (None, "", "unknown")
             mem.put_nonblocking("MapSpeedLimit", "0.0")
             mem.put_nonblocking("MapConditionalSpeedLimit", "")
+            # mapsl2pnw: the road identity the driver-monitoring relaxation reads (selfdrive/monitoring/helpers.py:
+            # RoadContext "freeway" / one-way + 2 lanes keep the relaxed Highway DM timeouts on) must not stay stuck
+            # either. "" / "0" are what helpers.py reads as an unknown road: it holds the last verdict <= 90 s, then
+            # falls STRICT -- the path that never fired while these stayed latched.
+            mem.put_nonblocking("RoadContext", "")
+            mem.put_nonblocking("MapOneWay", "0")
+            mem.put_nonblocking("MapLanes", "0")
             if had:
-              cloudlog.warning(f"mapd_configd: mapdOut silent for {mapd_out_down} loops -- MapSpeedLimit {prev} m/s " +
-                               "cleared to unknown (0.0) so a dead mapd cannot keep a stale limit in force")
+              cloudlog.warning(f"mapd_configd: mapdOut silent for {mapd_out_down} loops -- MapSpeedLimit " +
+                               f"{prev} m/s, RoadContext {ctx!r} cleared to unknown (0.0 / empty; MapOneWay/MapLanes too), so a dead " +
+                               "mapd cannot keep a stale limit or a stale relaxed-DM road in force")
           except Exception:
             cloudlog.exception("mapd_configd: could not clear MapSpeedLimit with mapd silent -- the last posted " +
                                "limit STAYS in force for every consumer")
+          mem.put_nonblocking("MapHighwayClass", "")
+          mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
+          # waysel2pnw: clear these too, so a dead mapd cannot leave a stale "current" in the log and
+          # make a later bad target look well-sourced.
+          mem.put_nonblocking("MapWaySel", "")
+          mem.put_nonblocking("MapWayOffset", "")
       if sm.alive['mapdExtendedOut']:
         # mapdExtendedOut.path = List(MapdPathPoint{latitude, longitude, curvature, targetVelocity});
         # CES's upcoming_curve() wants a list of {latitude, longitude, velocity} (m/s). Drop any point

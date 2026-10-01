@@ -99,7 +99,13 @@ class SpeedLimitRenderer(Widget):
     # mapd2pnw: read the official mapd output (mapdOut). speedLimit/nextSpeedLimit are 0 when
     # unknown, so validity is just "> 0" (the renderer already gates on MIN_VALID_KPH too).
     if not sm.updated["mapdOut"]:
-      self._expire_silent_mapd(time.monotonic())
+      if sm.recv_frame["mapdOut"] < ui_state.started_frame:
+        # no mapdOut yet THIS onroad session: whatever limit is still held is from the last drive. Forget it silently
+        # -- silence from before ignition is not a mapd death, and must not log a bogus "silent for <offroad> s".
+        self.speed_limit_valid = self.speed_limit_ahead_valid = False
+        self.speed_limit = 0.0
+      else:
+        self._expire_silent_mapd(time.monotonic())
     if sm.updated["mapdOut"]:
       self._mapd_t = time.monotonic()
       mo = sm["mapdOut"]
@@ -118,8 +124,8 @@ class SpeedLimitRenderer(Widget):
     """mapsl2pnw: no mapdOut for MAPD_SILENT_S -> the shown limit is unknown, not the last one. Logged once (the
     limit is invalid afterwards, so this cannot fire again until mapd has published a limit again)."""
     if self.speed_limit_valid and now - self._mapd_t > MAPD_SILENT_S:
-      cloudlog.warning(f"speed_limit UI: mapdOut silent for {now - self._mapd_t:.0f} s -- the displayed limit "
-                       "is cleared to unknown")
+      cloudlog.warning(f"speed_limit UI: mapdOut silent for {now - self._mapd_t:.0f} s -- the displayed " +
+                       "limit is cleared to unknown")
       self.speed_limit_valid = False
       self.speed_limit_ahead_valid = False
       self.speed_limit = 0.0

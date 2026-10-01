@@ -297,7 +297,8 @@ class TestNoMap:
 
   @pytest.mark.parametrize("toggle", [True, False])
   def test_dead_mapd_with_a_latched_limit_counts_as_no_map(self, monkeypatch, toggle):
-    """mapd_configd never clears MapSpeedLimit when mapd dies; its liveness is NextMapSpeedLimit's timestamp."""
+    """mapd_configd clears MapSpeedLimit only after ~5 s of silence (mapsl2pnw), so inside that window
+    it is latched; liveness is NextMapSpeedLimit's timestamp."""
     r = Rig(monkeypatch, sign_on=toggle)
     r.run(10.0, map_mph=60, cam=60)
     r.mem.mapd_alive = False

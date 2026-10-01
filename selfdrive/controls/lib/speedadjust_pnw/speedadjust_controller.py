@@ -516,7 +516,8 @@ class SpeedAdjustController:
   def _select_sign(self, map_sl: float) -> float:
     """fordtsr2pnw: the raw limit after weighing the camera against the map (SignLimitSelector). Inputs: the
     FordSignSpeedLimit toggle, the camera from sm['carState'], the lower limit mapd announces ahead (option 2's basis)
-    and whether mapd is publishing at all (a dead mapd leaves MapSpeedLimit at its last value)."""
+    and whether mapd is publishing at all (mapd_configd clears MapSpeedLimit after ~5 s of silence, mapsl2pnw; until then
+    a dead mapd leaves it at its last value)."""
     now = time.monotonic()
     try:
       v = self.params.get("FordSignSpeedLimit", return_default=True)

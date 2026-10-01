@@ -91,9 +91,10 @@ def test_speedadjust_unknown_after_the_hold_and_no_error(monkeypatch, logs):
   assert [r for r in logs.records if "unreadable" in str(r.msg)] == [], "'0.0' is a normal value, not a read failure"
 
 
-def test_speedadjust_rules_stop_on_unknown_and_run_on_a_live_limit(monkeypatch):
-  """Rule 1 (limit cap): with the limit live a SpeedAdjustTarget below the 75 mph cruise is published; once the map
-  says unknown (after the hold) the cap is released back to the cruise -- no slowdown, not a clamp to 0, not a crash."""
+def test_speedadjust_police_cap_stops_on_unknown_and_runs_on_a_live_limit(monkeypatch):
+  """The police cap (a 'confirmed' alert is in LocationServices) needs a posted limit: with a live 45 mph limit a
+  SpeedAdjustTarget below the 75 mph cruise is published; once the map says unknown (after the hold) the cap is released
+  back to the cruise speed -- not a clamp to 0, not a crash, and not 'nothing published'."""
   c = _ctrl(monkeypatch, str(45 * MPH))
   puts = []
   c.mem_params.put_nonblocking = lambda k, v: puts.append((k, v)) if k == "SpeedAdjustTarget" else None
@@ -113,8 +114,8 @@ def test_speedadjust_rules_stop_on_unknown_and_run_on_a_live_limit(monkeypatch):
   c.mem_params.sl = "0.0"
   puts.clear()
   after = run(80)                                # > SL_HOLD_S of unknown
-  assert after in (None, {}) or after.get("target", V75) >= V75 - 0.01, \
-    f"unknown limit must release the cap (restore to the 75 mph cruise), got {after}"
+  assert after is not None, "the release must be PUBLISHED (an 'inc' back to the cruise), not silence"
+  assert after["target"] == pytest.approx(V75, abs=0.01) and after.get("dir") == "inc", after
 
 
 def _ces(clock_t=5000.0):
