@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-05          # git-derived; bump when you edit this file
+updated: 2026-09-30          # git-derived; bump when you edit this file
 status: current        # current | drifted | superseded | unreviewed
 ---
 
@@ -9,9 +9,14 @@ status: current        # current | drifted | superseded | unreviewed
 engagement state machine) and `madsheartbeat2pnw` (the lateral watchdog + the health-packet field)
 in `dirkpetersen/pnw-pilot`; `mads2pnw` + `madsheartbeat2pnw` in `dirkpetersen/pnw-opendbc`;
 `madsheartbeat2pnw` in `dirkpetersen/pnw-panda`.
-**Status: BUILT, REVIEWED, INERT. All three pre-flash blockers are now closed in code.** It does
-nothing on the car until the panda is reflashed. **Do not merge to `3devpnw`/`3testpnw`** — merging
-IS the flash, see the flash-procedure section.
+**Status (updated 2026-09-30): MERGED TO `3devpnw` AND LIVE.** The text below was written 2026-09-05, when this
+was built-but-inert pending a panda flash; the "do not merge", "pre-flash blocker" and flash-procedure sections
+are history. Evidence: `madsheartbeat2pnw` merged to `3devpnw` as `b1a1a8fc90` (2026-09-06), `madsresume2pnw`
+`7569781e31` (09-06), `madsbrake2pnw` `3c7592b616`/`668607cab5` (09-24); `PandaMadsSafety` is a key in
+`common/params_keys.h` and `card.py` sets the MADS bits for cars with the `mads_lateral` capability (Lightning, and
+the Tesla Raven since `teslamads2pnw` `c53bae6ed8`, 2026-09-28; tested by `test_mads_alternative_experience.py`).
+On-car: the workbench `DEVICE-STATE.md` (not in this repo) records `alternativeExperience` 1024 verified after the
+09-24 install and the Raven's internal panda reflashed 09-28; not re-verified by this edit.
 
 ## The problem
 

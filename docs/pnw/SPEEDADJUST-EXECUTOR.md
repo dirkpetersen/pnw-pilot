@@ -1,13 +1,19 @@
 ---
-updated: 2026-08-11          # git-derived; bump when you edit this file
-status: unreviewed     # current | drifted | superseded | unreviewed
+updated: 2026-09-30          # git-derived; bump when you edit this file
+status: drifted        # current | drifted | superseded | unreviewed
 ---
 
 # SPEEDADJUST-EXECUTOR — unified stock-ACC button management (icbm2pnw + speedadjust2pnw)
 
-**Status: BUILT, NOT YET DEPLOYED / NOT ROAD-TESTED.** Written 2026-08-11 on branches
-`speedadjust-pilot2pnw` (pnw-pilot) + `speedadjust-exec2pnw` (pnw-opendbc). Do not ship without a
-Gemini adversarial review pass and an on-road A/B, per this branch's own safety posture below.
+**Status (updated 2026-09-30): SHIPPED on `3devpnw`.** Written 2026-08-11 on branches
+`speedadjust-pilot2pnw` (pnw-pilot) + `speedadjust-exec2pnw` (pnw-opendbc). The pnw-pilot half is
+`074c65f440` (2026-08-11), and it is an ancestor of `3devpnw` today: `SpeedAdjustTarget` is published by
+`speedadjust_controller.py` and arbitrated with `IcbmTarget` (see `selfdrive/car/accdrop_pnw.py`).
+The Lightning has used it since: a 2026-09-24 drive report in the workbench (`drives/2026-09-24/ford-tsr-measure/`,
+not in this repo) logs speedadjust confirm/SET taps on the Lightning's stock ACC. Later work builds on it
+(`limitahead2pnw`, `fordtsr2pnw`). Not verified here: whether the on-road A/B this page originally required
+was ever run as a dedicated test (no record found). The review rule is now Fable only; the original
+"Gemini adversarial review" requirement is retired policy.
 
 ## The gap this closes
 
