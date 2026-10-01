@@ -52,3 +52,13 @@ def test_toggle_def_and_description():
 def test_title_suffix_empty_when_off():
   assert T.TogglesLayout._tailscale_title_suffix(SimpleNamespace(_tailscale_text=lambda: "off")) == ""
   assert T.TogglesLayout._tailscale_title_suffix(SimpleNamespace(_tailscale_text=lambda: "needs auth key")) == " - needs auth key"
+
+
+def test_title_carries_only_the_state_word_the_reason_stays_in_the_description():
+  """Fable F3 mutation: put the full text in the title -> the long error overruns the switch."""
+  long_err = "error not connected for over 3 min: " + "x" * 80
+  suffix = T.TogglesLayout._tailscale_title_suffix
+  assert suffix(SimpleNamespace(_tailscale_text=lambda: long_err)) == " - error"
+  assert suffix(SimpleNamespace(_tailscale_text=lambda: "connected 100.64.0.5")) == " - connected"
+  assert suffix(SimpleNamespace(_tailscale_text=lambda: "install deferred until parked")) == " - install deferred until parked"
+  assert "Status: " in inspect.getsource(T.TogglesLayout.__init__) and "self._tailscale_text()" in inspect.getsource(T.TogglesLayout.__init__)

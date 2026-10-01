@@ -42,8 +42,9 @@ BACKOFF_MAX_S = 300.0
 STARTUP_GRACE_S = 20.0    # tailscaled needs a moment before its socket answers
 CLI_TIMEOUT_S = 10.0
 UP_TIMEOUT_S = 30         # `tailscale up --timeout`; the subprocess timeout is a little longer
-SHUTDOWN_DOWN_TIMEOUT_S = 2.0  # manager SIGKILLs us 5 s after SIGINT: the whole shutdown must fit
-SHUTDOWN_WAIT_S = 1.5
+SHUTDOWN_DOWN_TIMEOUT_S = 1.5  # manager SIGKILLs us 5 s after SIGINT: the whole shutdown must fit
+SHUTDOWN_WAIT_S = 1.0
+SHUTDOWN_SETTLE_S = 0.5
 
 _KEY_RE = re.compile(r"tskey-[A-Za-z0-9_-]+")
 
@@ -54,7 +55,9 @@ def redact(text: str) -> str:
 
 class TailscaleDaemon:
   def __init__(self, params, run=subprocess.run, popen=subprocess.Popen, clock=time.monotonic,
-               exists=os.path.exists, authkey_path: str = AUTHKEY_FILE):
+               exists=os.path.exists, authkey_path: str = AUTHKEY_FILE, sleep=time.sleep):
+    self._sleep = sleep
+    self.stuck = False         # a tailscaled we failed to stop is still running while the toggle is OFF
     self.params = params
     self._run_fn = run
     self._popen = popen
@@ -125,8 +128,9 @@ class TailscaleDaemon:
     return self._run([*prefix, TAILSCALE, f"--socket={SOCKET}", *args], timeout)
 
   # ---- tailscaled lifecycle -------------------------------------------------------------------------------------
-  def _choose_mode(self) -> list[str]:
-    """Kernel tun needs root (CAP_NET_ADMIN) via sudo; otherwise userspace networking as the comma user."""
+  def _detect_mode(self) -> None:
+    """Kernel tun needs root (CAP_NET_ADMIN) via sudo; otherwise userspace networking as the comma user.
+    Decided BEFORE anything talks to the socket, so every CLI call (adoption probe, up, down) uses the right user."""
     if not self._exists(TUN_DEVICE):
       cloudlog.warning(f"tailscale: {TUN_DEVICE} absent -> userspace networking")
       self.kernel_mode = False
@@ -138,6 +142,8 @@ class TailscaleDaemon:
         cloudlog.error(f"tailscale: {TUN_DEVICE} present but passwordless sudo failed (rc={rc}: {err.strip()}); "
                        + "falling back to userspace networking")
         self.kernel_mode = False
+
+  def _daemon_cmd(self) -> list[str]:
     args = [TAILSCALED, f"--state={STATE_FILE}", f"--socket={SOCKET}", "--no-logs-no-support"]
     if not self.kernel_mode:
       args.append("--tun=userspace-networking")
@@ -152,20 +158,22 @@ class TailscaleDaemon:
     return lines[-1] if lines else "(daemon log empty)"
 
   def _start_tailscaled(self) -> float:
+    self._detect_mode()
     rc, _, _ = self._cli("status", "--json")
     if rc == 0:
       self.adopted = True  # e.g. a previous supervisor was SIGKILLed; do not start a second daemon
       cloudlog.warning("tailscale: adopting a tailscaled that was already running")
       self.started_at = self._clock()
       return POLL_TRANSITION_S
-    cmd = self._choose_mode()
+    cmd = self._daemon_cmd()
     try:
       os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
       logf = open(DAEMON_LOG, "w")  # the child inherits it; closed right after Popen
     except OSError as e:
       return self.fail(f"cannot open {DAEMON_LOG}: {e}")
     try:
-      self.proc = self._popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+      self.proc = self._popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
+                              preexec_fn=lambda: os.nice(10))  # background priority; sudo passes it to tailscaled
     except OSError as e:
       return self.fail(f"cannot start tailscaled: {e}")
     finally:
@@ -176,17 +184,36 @@ class TailscaleDaemon:
     self.progress_connecting()
     return POLL_TRANSITION_S
 
-  def stop_tailscaled(self) -> None:
-    if self.proc is None:
-      return
-    if self.proc.poll() is None:
-      self.proc.terminate()
-      try:
-        self.proc.wait(timeout=SHUTDOWN_WAIT_S)
-      except subprocess.TimeoutExpired:
-        cloudlog.error("tailscale: tailscaled ignored SIGTERM, sending SIGKILL")
-        self.proc.kill()
-    self.proc = None
+  def _still_running(self) -> bool:
+    """True if any tailscaled is alive: pgrep finds it, or it still answers on the socket. A pgrep that cannot run
+    is treated as 'alive' -- an error must never read as 'gone'."""
+    rc, _, err = self._run(["pgrep", "-x", "tailscaled"], 2)
+    if rc == 0:
+      return True
+    if rc != 1:
+      cloudlog.error(f"tailscale: pgrep failed rc={rc}: {err.strip()}")
+      return True
+    return self._cli("status", "--json", timeout=1.0)[0] == 0
+
+  def stop_tailscaled(self) -> bool:
+    """Stop tailscaled (ours, adopted, or orphaned by a SIGKILLed supervisor) and VERIFY it is gone."""
+    if self.proc is not None:
+      if self.proc.poll() is None:
+        self.proc.terminate()  # signals sudo, which relays to the root tailscaled
+        try:
+          self.proc.wait(timeout=SHUTDOWN_WAIT_S)
+        except subprocess.TimeoutExpired:
+          cloudlog.error("tailscale: sudo/tailscaled ignored SIGTERM")
+      self.proc = None
+    if self._still_running():
+      # proc.kill() would only kill the sudo wrapper and orphan the root daemon: signal tailscaled by name instead.
+      prefix = ["sudo", "-n"] if self.kernel_mode else []
+      rc, out, err = self._run([*prefix, "pkill", "-x", "tailscaled"], 1.5)
+      if rc != 0:
+        cloudlog.error(f"tailscale: pkill tailscaled failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
+      self._sleep(SHUTDOWN_SETTLE_S)
+      return not self._still_running()
+    return True
 
   # ---- auth key ---------------------------------------------------------------------------------------------------
   def _authkey_state(self) -> str | None:
@@ -268,7 +295,7 @@ class TailscaleDaemon:
     return self._bring_up(needs_login=(state == "needs_login"))
 
   def _bring_up(self, needs_login: bool) -> float:
-    args = ["up", f"--hostname={self._hostname()}", "--ssh=false", "--accept-dns=false",
+    args = ["up", "--reset", f"--hostname={self._hostname()}", "--ssh=false", "--accept-dns=false",
             "--advertise-tags=tag:comma", f"--timeout={UP_TIMEOUT_S}s"]
     if self.kernel_mode:
       args.append("--netfilter-mode=off")
@@ -307,19 +334,23 @@ class TailscaleDaemon:
   # ---- shutdown: toggle off, or the manager stopping us ----------------------------------------------------
   def shutdown(self, publish_off: bool = True) -> None:
     """publish_off=False after a crash, so the UI keeps showing the crash instead of a misleading 'off'."""
-    if self.proc is None and not self.adopted:
+    if self.proc is None and not self.adopted and not self.stuck:
       if publish_off:
         self.publish(st.OFF)
       return
     rc, out, err = self._cli("down", timeout=SHUTDOWN_DOWN_TIMEOUT_S)
     if rc != 0:
       cloudlog.error(f"tailscale: `tailscale down` failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
-    if self.adopted:
-      cloudlog.error("tailscale: left an adopted tailscaled running (state is Stopped; it is not ours to kill)")
-      self.adopted = False
-    self.stop_tailscaled()
+    gone = self.stop_tailscaled()
+    self.adopted = False
     self.fail_count = 0
     self.connecting_since = None
+    if not gone:
+      # Never claim 'off' while the node may still be reachable. Retried every tick while the toggle stays off.
+      self.stuck = True
+      self.publish(st.error("tailscaled still running after toggle off; could not stop it"))
+      return
+    self.stuck = False
     if publish_off:
       self.publish(st.OFF)
 
@@ -328,6 +359,7 @@ def main() -> None:
   def _term(*_):
     raise SystemExit(0)  # run the finally block; SIGINT already raises KeyboardInterrupt
   signal.signal(signal.SIGTERM, _term)
+  signal.signal(signal.SIGHUP, _term)  # `tmux kill-session` sends SIGHUP: without this the root tailscaled is orphaned
 
   daemon = TailscaleDaemon(Params())
   crashed = False

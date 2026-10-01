@@ -580,8 +580,8 @@ class TogglesLayout(Widget):
     return self._ts_text
 
   def _tailscale_title_suffix(self) -> str:
-    text = self._tailscale_text()
-    return "" if text == ts_status.OFF else f" - {text}"
+    word = ts_status.title_word(self._tailscale_text())
+    return f" - {word}" if word else ""
 
   def _update_state(self):
     if ui_state.sm.updated["selfdriveState"]:

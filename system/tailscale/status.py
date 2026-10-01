@@ -46,6 +46,17 @@ def classify(status: dict) -> tuple[str, str | None]:
   return "unknown", None
 
 
+def title_word(text: str) -> str:
+  """Short, bounded state word for the toggle title ('off' -> ''); the reason/address stays in the description."""
+  if text == OFF:
+    return ""
+  if text.startswith(CONNECTED_PREFIX):
+    return "connected"
+  if text.startswith(ERROR_PREFIX):
+    return "error"
+  return text  # installing / install deferred until parked / needs auth key / connecting / starting
+
+
 def ui_text(enabled: bool, raw: str) -> str:
   """What the settings screen shows for the toggle. Toggle off -> 'off' no matter what a stale param says;
   toggle on but the daemon has not published yet -> 'starting' (not silence)."""

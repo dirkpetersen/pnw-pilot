@@ -32,7 +32,8 @@ class FakeParams:
 
 
 class FakeProc:
-  def __init__(self, cmd):
+  def __init__(self, cmd, world=None):
+    self.world = world
     self.cmd = cmd
     self.pid = 4242
     self.returncode = None
@@ -45,6 +46,8 @@ class FakeProc:
   def terminate(self):
     self.terminated = True
     self.returncode = 0
+    if self.world is not None and not self.world.ignore_term:
+      self.world.alive = False
 
   def wait(self, timeout=None):
     return self.returncode
@@ -60,7 +63,10 @@ class Harness:
   def __init__(self, tmp_path, tun=False, sudo_ok=True, enabled=True, enrolled=True):
     self.params = FakeParams(enabled)
     self.tun = tun
-    self.preexisting = False     # a tailscaled we did not start already answers on the socket
+    self.alive = False           # a tailscaled process exists (root, in its own session)
+    self.ignore_term = False     # SIGTERM to the sudo wrapper does not stop the daemon
+    self.pkill_works = True
+    self.root_socket = False     # socket is root-only: the CLI works only through sudo
     self.enrolled = enrolled     # does the tailscaled state file exist?
     self.calls = []          # every run() arg list
     self.procs = []
@@ -81,8 +87,16 @@ class Harness:
     a = [x for x in args if x != "sudo" and x != "-n"]
     if a == ["true"]:
       return SimpleNamespace(returncode=0 if self.sudo_ok else 1, stdout="", stderr="" if self.sudo_ok else "sudo: a password is required")
+    if a[:1] == ["pgrep"]:
+      return SimpleNamespace(returncode=0 if self.alive else 1, stdout="4242\n" if self.alive else "", stderr="")
+    if a[:1] == ["pkill"]:
+      if self.pkill_works:
+        self.alive = False
+      return SimpleNamespace(returncode=0 if self.pkill_works else 1, stdout="", stderr="" if self.pkill_works else "not permitted")
+    if self.root_socket and args[0] != "sudo" and a[:1] != ["true"]:
+      return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
     if "status" in a:
-      if not self.procs and not self.preexisting:   # no tailscaled running yet: nothing answers on the socket
+      if not self.alive:                              # nothing answers on the socket
         return SimpleNamespace(returncode=1, stdout="", stderr="cannot connect")
       if isinstance(self.status, int):
         return SimpleNamespace(returncode=self.status, stdout="", stderr="cannot connect")
@@ -94,7 +108,8 @@ class Harness:
     raise AssertionError(f"unexpected command {args}")
 
   def popen(self, cmd, **kw):
-    p = FakeProc(cmd)
+    p = FakeProc(cmd, self)
+    self.alive = True
     self.procs.append(p)
     return p
 
@@ -221,7 +236,8 @@ def test_never_touches_iptables(h):
   h.params.d["TailscaleEnabled"] = False
   h.d.tick()
   execs = {os.path.basename([a for a in c if a not in ("sudo", "-n")][0]) for c in [*h.calls, *(p.cmd for p in h.procs)]}
-  assert {"tailscale", "tailscaled"} <= execs <= {"tailscale", "tailscaled", "true"}, execs  # no iptables / nft / sysctl / nmcli / ip anywhere
+  allowed = {"tailscale", "tailscaled", "true", "pgrep", "pkill"}
+  assert {"tailscale", "tailscaled"} <= execs <= allowed, execs  # no iptables / nft / sysctl / nmcli / ip anywhere
 
 
 def test_tailscaled_start_failure_is_an_error(tmp_path, monkeypatch):
@@ -552,7 +568,7 @@ def test_E_import_is_free_of_side_effects():
 
 
 def test_orphan_tailscaled_is_adopted_not_duplicated_and_down_on_off(h):
-  h.preexisting = True
+  h.alive = True
   h.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.9"]}
   h.d.tick()
   h.d.tick()
@@ -560,3 +576,101 @@ def test_orphan_tailscaled_is_adopted_not_duplicated_and_down_on_off(h):
   h.params.d["TailscaleEnabled"] = False
   h.d.tick()
   assert h.cmds("down") and h.params.statuses[-1] == "off"
+
+
+# ---- Fable F1/F2: toggle OFF must never read 'off' while a tailscaled can still be reached ---------------------------
+@pytest.fixture
+def kh(tmp_path, monkeypatch):
+  """Kernel-mode world (tun + sudo), as on the device."""
+  monkeypatch.setattr(tp.installer, "is_installed", lambda *a, **k: True)
+  monkeypatch.setattr(tp, "DAEMON_LOG", str(tmp_path / "t.log"))
+  monkeypatch.setattr(tp, "STATE_DIR", str(tmp_path))
+  h = Harness(tmp_path, tun=True)
+  h.d._sleep = lambda s: None
+  return h
+
+
+def test_F1_orphaned_root_tailscaled_is_adopted_with_sudo_and_off_really_stops_it(kh):
+  """tmux kill-session left a root tailscaled behind; the next start adopts it through sudo, and OFF stops it."""
+  kh.alive, kh.root_socket = True, True
+  kh.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.9"]}
+  kh.d.tick()
+  kh.d.tick()
+  assert kh.procs == [] and kh.params.statuses[-1] == "connected 100.64.0.9"
+  assert all(c[:2] == ["sudo", "-n"] for c in kh.cmds("status")), "adoption probe must use sudo in kernel mode"
+  kh.params.d["TailscaleEnabled"] = False
+  kh.d.tick()
+  assert kh.alive is False and kh.params.statuses[-1] == "off"
+  assert any(c[:2] == ["sudo", "-n"] for c in kh.cmds("down")) and kh.cmds("pkill")
+
+
+def test_F1_off_with_an_unstoppable_daemon_is_error_never_off(kh):
+  """Mutation F1b: publish 'off' without verifying the daemon is gone -> this fails."""
+  kh.alive, kh.root_socket, kh.pkill_works = True, True, False
+  kh.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.9"]}
+  kh.d.tick()
+  kh.params.d["TailscaleEnabled"] = False
+  kh.d.tick()
+  assert kh.params.statuses[-1] == "error tailscaled still running after toggle off; could not stop it"
+  assert "off" not in kh.params.statuses
+  kh.d.tick()                         # retried while the toggle stays off
+  assert len(kh.cmds("pkill")) == 2
+  kh.pkill_works = True
+  kh.d.tick()
+  assert kh.params.statuses[-1] == "off"
+
+
+def test_F2_sudo_wrapper_ignoring_sigterm_falls_back_to_pkill_by_name_and_verifies(kh):
+  kh.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]}
+  kh.d.tick()
+  kh.d.tick()
+  kh.ignore_term = True
+  kh.params.d["TailscaleEnabled"] = False
+  kh.d.tick()
+  assert not kh.procs[0].killed, "proc.kill() would only kill the sudo wrapper"
+  pk = kh.cmds("pkill")
+  assert pk and pk[0][:2] == ["sudo", "-n"] and pk[0][-2:] == ["-x", "tailscaled"]
+  assert kh.alive is False and kh.params.statuses[-1] == "off"
+
+
+def test_F1_pgrep_failure_is_not_read_as_gone(kh):
+  kh.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]}
+  kh.d.tick()
+  kh.d.tick()
+  real = kh.run
+
+  def run(args, capture_output, text, timeout):
+    if "pgrep" in args:
+      return SimpleNamespace(returncode=127, stdout="", stderr="pgrep: not found")
+    return real(args, capture_output, text, timeout)
+  kh.d._run_fn = run
+  kh.params.d["TailscaleEnabled"] = False
+  kh.d.tick()
+  assert kh.params.statuses[-1].startswith("error tailscaled still running")
+
+
+def test_F1_sighup_runs_the_shutdown_path(monkeypatch):
+  """tmux kill-session sends SIGHUP: main() must turn it into SystemExit so the finally block stops tailscaled."""
+  import signal
+  handlers = {}
+  monkeypatch.setattr(tp.signal, "signal", lambda sig, fn: handlers.__setitem__(sig, fn))
+  monkeypatch.setattr(tp, "Params", lambda: FakeParams(enabled=False))
+  monkeypatch.setattr(tp.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+  with pytest.raises(KeyboardInterrupt):
+    tp.main()
+  assert signal.SIGHUP in handlers and signal.SIGTERM in handlers
+  with pytest.raises(SystemExit):
+    handlers[signal.SIGHUP](signal.SIGHUP, None)
+
+
+def test_F6_up_is_idempotent_and_F7_daemon_is_niced(kh):
+  seen = {}
+  orig = kh.popen
+  kh.popen = lambda cmd, **kw: (seen.update(kw), orig(cmd, **kw))[1]
+  kh.d._popen = kh.popen
+  kh.keyfile.write_text("tskey-auth-SECRET123")
+  kh.d.tick()
+  kh.status = {"BackendState": "NeedsLogin"}
+  kh.d.tick()
+  assert "--reset" in kh.cmds("up")[0]
+  assert callable(seen["preexec_fn"])

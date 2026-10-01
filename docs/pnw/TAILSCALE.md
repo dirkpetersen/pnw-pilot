@@ -49,20 +49,23 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
    }
    ```
 
-   There is deliberately no rule with `tag:comma` as a source. Do not also keep a wildcard `*:*` rule.
-3. **Settings > Keys > Generate auth key**: tick **Pre-approved** if device approval is on, **Tags: `tag:comma`**, leave
+   There is deliberately no rule with `tag:comma` as a source. **This ACL step is load-bearing: do NOT keep the default
+   `*:*` allow-all rule.** In kernel mode (the device has `/dev/net/tun`) the node accepts tailnet traffic to every
+   port bound on 0.0.0.0, so allow-all would expose them all to every device on your tailnet, not just SSH.
+3. On the device, **Settings > Developer > Enable SSH** (`SshEnabled`) must be ON, or sshd is not running and nothing answers on port 22.
+4. **Settings > Keys > Generate auth key**: tick **Pre-approved** if device approval is on, **Tags: `tag:comma`**, leave
    **Reusable** and **Ephemeral OFF** (ephemeral nodes are deleted while the device is off, which is most of the time).
    Tagged nodes have key expiry disabled, so the device will not silently drop off after 180 days.
-4. Put the key on the device **once, over the LAN**, then lock it down (the key never goes in git or chat):
+5. Put the key on the device **once, over the LAN**, then lock it down (the key never goes in git or chat):
 
    ```bash
    ssh comma@<lan-ip> 'umask 077; mkdir -p /data/pnw/secrets; cat > /data/pnw/secrets/tailscale.authkey'   # paste the key, Ctrl-D
    ssh comma@<lan-ip> 'chmod 600 /data/pnw/secrets/tailscale.authkey; wc -c /data/pnw/secrets/tailscale.authkey'
    ```
 
-5. Turn the toggle ON (on WiFi, parked). Watch the status: `installing` -> `connecting` -> `connected 100.x.y.z`. The node
+6. Turn the toggle ON (on WiFi, parked). Watch the status: `installing` -> `connecting` -> `connected 100.x.y.z`. The node
    appears in the admin console as `comma-<dongle id>`.
-6. Once it is `connected`, the key has done its job (the node key now lives in `/data/pnw/tailscale/`); you may expire the
+7. Once it is `connected`, the key has done its job (the node key now lives in `/data/pnw/tailscale/`); you may expire the
    auth key in the admin console.
 
 ## Using it
