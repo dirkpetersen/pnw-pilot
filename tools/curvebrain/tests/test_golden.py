@@ -26,20 +26,75 @@ def _fuzz(out=None, n=SMALL, seed=g.FUZZ_SEED):
 # ---------------------------------------------------------------------------------------------------------------------
 # the self-test
 # ---------------------------------------------------------------------------------------------------------------------
+def _paths(x, y, at="", out=None):
+  """(path, a, b) for every leaf where two parsed canonical lines differ (lists by index)."""
+  out = [] if out is None else out
+  if isinstance(x, dict) and isinstance(y, dict):
+    for k in sorted(set(x) | set(y)):
+      _paths(x.get(k, "<absent>"), y.get(k, "<absent>"), f"{at}/{k}", out)
+  elif isinstance(x, list) and isinstance(y, list) and len(x) == len(y):
+    for i, (u, v) in enumerate(zip(x, y, strict=True)):
+      _paths(u, v, f"{at}[{i}]", out)
+  elif x != y:
+    out.append((at, x, y))
+  return out
+
+
+def _explain(a_path, b_path):
+  """WHICH line and WHICH field differ, for an assertion message. A one-off flake (2026-09-29: c4_fuzz sha 43ac82e2 !=
+  c087844d, green on re-run) must say what it was the next time it happens, not just that two hashes differ."""
+  n, bad, first = g.compare(a_path, b_path)
+  out = [f"{bad} of {n} lines differ; first: {first[:3]}"]
+  if first and first[0][0] != "LENGTH":
+    at = first[0][0]
+    la, lb = (json.loads(next(x for i, x in enumerate(g.read_golden(path), 1) if i == at)) for path in (a_path, b_path))
+    out.append(f"line {at}, differing fields (path, first run, second run): {_paths(la, lb)[:8]}")
+  return "\n".join(out)
+
+
 def test_two_runs_in_two_processes_are_byte_identical(tmp_path):
-  shas, lines, cov, _notes, missing = _fuzz(str(tmp_path))
+  shas, lines, cov, _notes, missing = _fuzz(str(tmp_path / "a"))
   assert not missing and lines["c4_fuzz"] > SMALL                     # + one seg line per scenario
   code = ("import sys; from openpilot.tools.curvebrain import golden as g; " +
-          f"s = g.run(None, ('c4_fuzz',), {{'c4_fuzz': {{'n_frames': {SMALL}}}}})[0]; print(s['c4_fuzz'])")
+          f"s = g.run(sys.argv[1], ('c4_fuzz',), {{'c4_fuzz': {{'n_frames': {SMALL}}}}})[0]; print(s['c4_fuzz'])")
   env = {**os.environ, "PYTHONHASHSEED": "12345"}
-  out = subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True, text=True).stdout
-  assert out.strip().splitlines()[-1] == shas["c4_fuzz"]
+  out = subprocess.run([sys.executable, "-c", code, str(tmp_path / "b")], env=env, check=True, capture_output=True, text=True).stdout
+  sub_sha = out.strip().splitlines()[-1]
+  assert sub_sha == shas["c4_fuzz"], _explain(str(tmp_path / "a" / "c4_fuzz.jsonl.zst"), str(tmp_path / "b" / "c4_fuzz.jsonl.zst"))
   # and the sha is over exactly the bytes on disk
   import hashlib
-  with open(tmp_path / "c4_fuzz.jsonl.zst", "rb") as fh:
+  with open(tmp_path / "a" / "c4_fuzz.jsonl.zst", "rb") as fh:
     raw = zstandard.ZstdDecompressor().stream_reader(fh).read()
   assert hashlib.sha256(raw).hexdigest() == shas["c4_fuzz"]
   assert cov.acct["c4_fuzz"]["ticks"] == SMALL
+
+
+def test_a_slow_machine_does_not_change_the_golden(tmp_path, monkeypatch):
+  """The 2026-09-29 flake: curvedb_shadow's `load_s` (a wall-clock duration rounded to 10 ms) was in every seg line, so a
+  loaded box (a load taking >= 5 ms) wrote a different sha. Every real clock the replay reaches must be the replay clock: here
+  the REAL one is made slow, and the output must not move."""
+  import time as real_time
+
+  class Slow:
+    def __getattr__(self, name):
+      return getattr(real_time, name)
+
+    def monotonic(self):
+      real_time.sleep(0.012)
+      return real_time.monotonic()
+    time = monotonic
+  base = _fuzz(str(tmp_path / "a"), n=600)[0]["c4_fuzz"]
+  monkeypatch.setattr(g.cds, "time", Slow())
+  slow = _fuzz(str(tmp_path / "b"), n=600)[0]["c4_fuzz"]
+  assert slow == base, _explain(str(tmp_path / "a" / "c4_fuzz.jsonl.zst"), str(tmp_path / "b" / "c4_fuzz.jsonl.zst"))
+
+
+def test_explain_names_the_differing_line(tmp_path):
+  a = _fuzz(str(tmp_path / "a"), n=300)[0]
+  b = _fuzz(str(tmp_path / "b"), n=300, seed=g.FUZZ_SEED + 1)[0]
+  assert b["c4_fuzz"] != a["c4_fuzz"]
+  msg = _explain(str(tmp_path / "a" / "c4_fuzz.jsonl.zst"), str(tmp_path / "b" / "c4_fuzz.jsonl.zst"))
+  assert "lines differ" in msg and "differing fields" in msg and "('/" in msg    # a path, not just a count
 
 
 def test_a_1e9_change_to_ICBM_MARGIN_M_is_detected(tmp_path):

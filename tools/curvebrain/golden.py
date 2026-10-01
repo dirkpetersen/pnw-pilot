@@ -363,7 +363,10 @@ class Env:
 
     def p(obj, name, val):
       st.enter_context(_Patch(obj, name, val))
-    for mod in (m, C, cl):
+    # cds too: curvedb_shadow logs `load_s=round(time.monotonic() - t0, 2)` in its curvedb_shadow_loaded event, which lands in
+    # every controller's `seg` line. On an idle box that is 0.0; on a loaded one (xdist, a build) an inline load of the empty
+    # corpus can reach 5 ms and print 0.01 -- a wall-clock value inside the golden (the 2026-09-29 two-process sha flake).
+    for mod in (m, C, cl, cds):
       p(mod, "time", self.clock)
     p(pv, "CURVE_CONFIG_PATH", os.path.join(self.tmp, "absent-curve.json"))
     p(pv, "RAIN_CONFIG_PATH", os.path.join(self.tmp, "absent-rain.json"))
