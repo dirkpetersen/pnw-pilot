@@ -33,7 +33,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   polyline_curvature,
   model_curve_state, brake_cap_for_apex, apply_limits,
-  most_binding_map_curve, twisty_section_cap, required_decel,   # sharpcurve2pnw
+  most_binding_map_curve, notch_reference, twisty_section_cap, required_decel,   # sharpcurve2pnw
   apex_turn_direction)                                          # descentcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import icbm_passed_points   # vtscpass2pnw: the ONE passed-point geometry
@@ -127,6 +127,7 @@ class VTSCController:
     self._tele_gps_age = None    # gpsAge for this tick (s); None = the map fold uses no position with a fix time
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
+    self._notch_held = None   # vtscnotch2pnw: the map-notch reference held through a curve episode (see _notch_ref)
     # sharpcurve2pnw: per-cycle effective decels. Normal commanded decel is capped to EV regen authority
     # (REGEN_A_DECEL ~0.2 g) -> the slowdown is coast/regen, no friction braking. A SHARP curve that regen
     # alone can't make before its entrance raises the rate-limit ceiling to SHARP_A_DECEL_MAX (last resort).
@@ -451,6 +452,19 @@ class VTSCController:
       return self._map_targets
     return [p for p, gone in zip(self._map_targets, mask, strict=True) if not gone]
 
+  def _notch_ref(self, v_set, v_ego):
+    """vtscnotch2pnw: the speed the map-curve minimum-slowdown notch is measured from (see vtsc_pnw.notch_reference). While the state machine
+    is idle it follows min(set, vEgo) live. Once a curve episode is under way (brake / hold / release) it can only RISE (to at most the
+    set speed): measured live all the way, the notch would chase the car down as VTSC slows it (vEgo falls -> notch falls -> the cap falls ->
+    vEgo falls...), and replayed on the 2026-09-30 bends a bend taken at set == vEgo went 81 -> 67 mph. Reset to live whenever the machine
+    is idle again, so every episode starts from what the car is doing then. vEgo >= set -> the set speed, as before. Raven only."""
+    live = notch_reference(v_set, v_ego, self.veh.vtsc_notch_from_vego)
+    if self._state == "idle" or self._notch_held is None:
+      self._notch_held = live
+    else:
+      self._notch_held = min(v_set, max(self._notch_held, live))
+    return self._notch_held
+
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
     whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
@@ -470,11 +484,16 @@ class VTSCController:
     # so every vision-authored cap logged "none", which is the overwhelmingly common case and exactly
     # the case the field exists to name. The caller sets "vis" before calling; only a map win overrides.
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
+    # vtscnotch2pnw: ONLY the minimum-slowdown notch and the gate below are measured from the speed the car is doing (min(set, vEgo),
+    # held through the episode: _notch_ref; Raven, kill switch curve.json tesla.vtsc_notch_vego). The clamp min(tv*scale, set) and every
+    # other threshold stay on the true SET speed, which is what the paragraph above is protecting. vEgo >= set -> notch_ref == set,
+    # byte-identical to before.
+    notch_ref = self._notch_ref(v_cruise_set, v_ego)
     try:
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
         self._ahead_points(v_ego), self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
         C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
-        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0)
+        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0, notch_ref=notch_ref)
     except Exception as e:
       # foldlog2pnw (Rule 2): this was a bare `except Exception: return`, so a failure silently switched map-curve
       # anticipation off and left only the vision cap. The fallback is unchanged -- no map curve, vision's picture
@@ -500,7 +519,7 @@ class VTSCController:
     # multi-point map data (a gentle near node clamps to the set speed, ties on envelope, wins on
     # proximity, and its high raw target then blocks the floor). See that function for the full note.
     # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
-    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
+    if not (0.0 < mv < notch_ref - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])

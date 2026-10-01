@@ -44,7 +44,7 @@ def secs(hms: str) -> float:
   return int(h) * 3600 + int(m) * 60 + int(s)
 
 
-def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_later=None):
+def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_later=None, notch_vego=False):
   """A real VTSCController (Standard mode, map curves ON) on a fake clock; returns (ctrl, clock list)."""
   clock = [1000.0]
   monkeypatch.setattr(VC.time, "monotonic", lambda: clock[0])
@@ -53,6 +53,8 @@ def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_
   ctrl.mem_params = FakeMem()
   if release_later is not None and ctrl.veh.curve_brain_vtsc:
     ctrl.veh._tesla_curve_cfg["release_later"] = release_later
+  if notch_vego is not None and ctrl.veh.curve_brain_vtsc:   # vtscnotch2pnw
+    ctrl.veh._tesla_curve_cfg["notch_vego"] = notch_vego
   ctrl._read_enabled(clock[0])
   assert ctrl._enabled and ctrl._map_curves
   return ctrl, clock

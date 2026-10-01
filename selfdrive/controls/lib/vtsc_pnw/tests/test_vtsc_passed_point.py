@@ -70,6 +70,8 @@ def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla"):
   monkeypatch.setattr(VC, "apex_turn_direction", lambda model: 0)
   ctrl = VC.VTSCController(_CP(fp, brand), params=_Params())
   ctrl.mem_params = _Mem()
+  if ctrl.veh.curve_brain_vtsc:
+    ctrl.veh._tesla_curve_cfg["notch_vego"] = False   # vtscnotch2pnw: these tests pin the passed-point mask / recorded behaviour on the set-relative notch
   ctrl._read_enabled(clock[0])
   assert ctrl._enabled and ctrl._map_curves
   return ctrl, clock

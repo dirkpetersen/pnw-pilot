@@ -4422,7 +4422,7 @@ class CESController:
         cloudlog.error(f"curve_brain: curve.json tesla section NOT honored -- {veh.curve_brain_why}")
       cloudlog.event("curve_brain_cfg", mode=veh.curve_brain, why=veh.curve_brain_why, lat_a=veh.curve_lat_a_cfg,
                      clip_margin=pnw_vehicle_module.CURVE_LAT_CLIP_MARGIN, path=pnw_vehicle_module.CURVE_CONFIG_PATH,
-                     vtsc_release_later=veh.vtsc_release_later)
+                     vtsc_release_later=veh.vtsc_release_later, vtsc_notch_vego=veh.vtsc_notch_from_vego)
     # curvebrain2b2pnw: the Tesla's need layer -- loads the SAME curve DB file the Lightning uses (read-only index, own
     # thread) and publishes the CurveBrain mem-param VTSC reads. None on any car without the capability.
     self._curve_brain = CurveBrain(veh) if veh.curve_brain_vtsc else None
