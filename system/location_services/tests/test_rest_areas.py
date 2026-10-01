@@ -231,8 +231,9 @@ def test_mode_log_is_change_only(monkeypatch):
   monkeypatch.setattr(lsd.cloudlog, "info", lambda m, *a, **k: lines.append(a))
   log = lsd.RestModeLog()
   for m in ["far", "far", "far", "15mi-no-wayref", "15mi-no-wayref", "far"]:
-    log.update(m, "I 5", True)
+    log.update(m, "I 5", "track")
   assert [a[1] for a in lines] == ["far", "15mi-no-wayref", "far"]
+  assert lines[0][3] == "track"
 
 
 def test_main_wires_the_helper_with_the_far_reach():
@@ -292,3 +293,56 @@ def test_bend_case_real_i5_sideways_heading_still_finds_the_right_side():
   good = lsd._line_rest_corridor(items, lat, lon, course, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)
   assert good[0]["name"] == "SeaTac" and good[0]["dir"] == "N"
   assert bad is None or bad[0]["name"] != "SeaTac"                              # the sideways heading loses it
+
+
+def test_uturn_uses_the_instantaneous_heading_on_the_first_reversed_tick(monkeypatch):
+  lines = []
+  monkeypatch.setattr(lsd.cloudlog, "info", lambda m, *a, **k: lines.append((m, a)))
+  tr = lsd.HeadingTrack()
+  _drive(tr, list(_line(0, 8.0)), 0.0)                                  # 8 mi north
+  assert tr.source == "track"
+  b = tr.update(1000.0, *_at(7.95, 0), 180.0)                           # first southbound tick
+  assert b == 180.0 and tr.source == "inst" and len(tr.crumbs) == 1
+  assert any("reversal" in m or "reversal" in str(a) for m, a in lines)
+
+
+def test_crumbs_are_bounded():
+  tr = lsd.HeadingTrack()
+  _drive(tr, list(_line(0, 50.0)), 0.0)
+  assert len(tr.crumbs) <= lsd.HeadingTrack.MAX_CRUMBS
+
+
+def test_crumb_spacing_is_respected():
+  tr = lsd.HeadingTrack()
+  _drive(tr, list(_line(0, 1.0, step=0.01)), 0.0)                       # 100 fixes in 1 mi
+  assert 8 <= len(tr.crumbs) <= 12
+
+
+def test_jump_and_gap_reset_and_log(monkeypatch):
+  lines = []
+  monkeypatch.setattr(lsd.cloudlog, "info", lambda m, *a, **k: lines.append(a))
+  tr = lsd.HeadingTrack()
+  _drive(tr, list(_line(0, 8.0)), 0.0)
+  tr.update(500.0, *_at(30, 0), 0.0)
+  assert len(tr.crumbs) == 1 and any("jump" in str(a) for a in lines)
+  tr.update(5000.0, *_at(30, 0.001), 0.0)
+  assert any("gap" in str(a) for a in lines)
+
+
+def test_fallback_cone_follows_the_instantaneous_heading_not_the_course():
+  # no WayRef -> geometric fallback. Course says north, instantaneous heading says east: the fallback must
+  # use the instantaneous heading (a rest area 10 mi east shows; one 10 mi north does not).
+  east, north = _ra_at("east", 0.0, 10.0), _ra_at("north", 10.0, 0.0)
+  r = _sel([east], wayref="", brg=90.0, corridor_brg=0.0)
+  assert _name(r) == "east"
+  assert _name(_sel([north], wayref="", brg=90.0, corridor_brg=0.0)) is None
+
+
+def test_most_recent_crumb_five_mi_back_is_used_on_a_dog_leg():
+  tr = lsd.HeadingTrack()
+  pts = list(_line(0, 6.0)) + [_at(6.0, e) for e in [i * 0.05 for i in range(1, 121)]]   # 6 mi N, then 6 mi E
+  c = _drive(tr, pts, 90.0)
+  # newest crumb >=5 mi back is on the north leg ending ~6 mi N,  ~1 mi E of the corner: bearing is NE-ish, not
+  # the oldest-crumb bearing (start -> now, ~45 deg) -- they differ by well over 10 deg.
+  oldest = geo.bearing_deg(*_at(0, 0), *pts[-1])
+  assert abs(geo.normalize180(c - oldest)) > 10.0

@@ -1536,19 +1536,29 @@ class HeadingTrack:
   points sideways on a bend (a N-S freeway running E-W through Tacoma/Olympia/Snoqualmie), so the 90-degree
   ahead/side tests pick wrong-side or behind rest areas. Keep breadcrumbs (a fix per CRUMB_MI moved) and use
   the bearing from the crumb >= BASE_MI back to now; with less history use the farthest crumb if it is at
-  least MIN_BASE_MI back; otherwise the instantaneous heading; None stays None (caller clamps to 15 mi)."""
-  CRUMB_MI, BASE_MI, MIN_BASE_MI, MAX_CRUMBS, MAX_AGE_S, JUMP_MI = 0.1, 5.0, 1.0, 100, 1200.0, 2.0
+  least MIN_BASE_MI back; otherwise the instantaneous heading; None stays None (caller clamps to 15 mi).
+  A course more than REVERSAL_DEG from the instantaneous heading is a reversal (U-turn: the crumbs are the
+  outbound leg), so the track restarts and the instantaneous heading is used. Every reset is logged once.
+  `source` after update(): "track" | "inst" | "none"."""
+  CRUMB_MI, BASE_MI, MIN_BASE_MI, MAX_CRUMBS, MAX_AGE_S, JUMP_MI, REVERSAL_DEG = 0.1, 5.0, 1.0, 100, 1200.0, 2.0, 150.0
 
   def __init__(self):
     self.crumbs = []          # (monotonic t, lat, lon), oldest first
+    self.source = "none"
+
+  def _reset(self, now, lat, lon, why):
+    cloudlog.info("location_services: rest heading track reset (%s)", why)
+    self.crumbs = [(now, lat, lon)]
 
   def update(self, now, lat, lon, inst_brg):
     mi = geo.M_PER_MILE
     if self.crumbs:
       last = self.crumbs[-1]
       d = geo.haversine_m(last[1], last[2], lat, lon) / mi
-      if d > self.JUMP_MI or now - last[0] > self.MAX_AGE_S:
-        self.crumbs = []                                   # gap / teleport: the old track is not our course
+      if d > self.JUMP_MI:
+        self._reset(now, lat, lon, f"jump {d:.1f} mi")
+      elif now - last[0] > self.MAX_AGE_S:
+        self._reset(now, lat, lon, f"gap {now - last[0]:.0f} s")
       elif d >= self.CRUMB_MI:
         self.crumbs.append((now, lat, lon))
     if not self.crumbs:
@@ -1564,8 +1574,15 @@ class HeadingTrack:
       if geo.haversine_m(far[1], far[2], lat, lon) / mi >= self.MIN_BASE_MI:
         pick = far
     if pick is None:
+      self.source = "inst" if inst_brg is not None else "none"
       return inst_brg
-    return geo.bearing_deg(pick[1], pick[2], lat, lon)
+    course = geo.bearing_deg(pick[1], pick[2], lat, lon)
+    if inst_brg is not None and abs(geo.normalize180(course - inst_brg)) > self.REVERSAL_DEG:
+      self._reset(now, lat, lon, f"reversal course {course:.0f} vs heading {inst_brg:.0f}")
+      self.source = "inst"
+      return inst_brg
+    self.source = "track"
+    return course
 
 
 def select_rest(items, lat, lon, brg, corridor_brg, path, wayref, on_freeway, max_mi):
@@ -1586,10 +1603,10 @@ class RestModeLog:
   def __init__(self):
     self.mode = None
 
-  def update(self, mode, wayref, have_heading):
+  def update(self, mode, wayref, heading_source):
     if mode != self.mode:
       cloudlog.info("location_services: rest reach mode %s -> %s (wayref=%r heading=%s)", self.mode, mode, wayref,
-                    "ok" if have_heading else "none")
+                    heading_source)
       self.mode = mode
 
 
@@ -1910,7 +1927,7 @@ def main():
       r, rest_mode = select_rest(static.rest, lat, lon, brg, rest_brg, path, wayref, on_freeway,
                                  max_mi=REST_MAX_AHEAD_MI)
       if on_freeway:
-        rest_log.update(rest_mode, wayref, rest_brg is not None)
+        rest_log.update(rest_mode, wayref, heading_track.source)
       r = rest_hold.update(r, now, lat, lon)   # debounce: anti-flicker on curves + drop-when-passed (distance-trend)
 
       # EV chargers: first DROP any charger we've left >EV_RECEDE_MI behind (so the next-nearest shows), then select.
