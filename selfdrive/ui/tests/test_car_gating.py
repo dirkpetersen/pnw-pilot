@@ -141,7 +141,7 @@ def test_ford_convenience_toggle_is_defined_opt_out_and_default_off():
   from openpilot.common.params import Params
   assert Params().get("DisableFordConvenience", return_default=True) is False
   d = T.DESCRIPTIONS["DisableFordConvenience"]
-  assert "Pro Power" in d and "nothing" in d.lower() and "troubleshooting" in d and "Lightning only" in d
+  assert "Pro Power" in d and "Stops the comma" in d and "troubleshooting" in d and "Lightning only" in d
   init = inspect.getsource(T.TogglesLayout.__init__)
   i = init.index('"DisableFordConvenience": (')
   block = init[i:init.index("\n      ),", i)]

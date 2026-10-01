@@ -637,6 +637,17 @@ class TestToggleRegistration:
     assert "Disable Ford Camera Speed Limit" in src and "BC / km/h countries turn this ON" in src
     assert '"FordSignSpeedLimit"' not in src
 
+  def test_nothing_reads_the_retired_param(self):
+    import re
+    import subprocess
+    root = __import__("pathlib").Path(sa.__file__).resolve().parents[4]
+    files = subprocess.run(["git", "ls-files", "*.py", "*.h", "*.cc", "*.pyx", "*.sh"], cwd=root, capture_output=True,
+                           text=True, check=True).stdout.split()
+    assert len(files) > 500
+    bad = [f for f in files if "/tests/" not in f and not f.endswith("params_keys.h")
+           and re.search(r"(?<![A-Za-z])FordSignSpeedLimit", (root / f).read_text(errors="replace"))]
+    assert bad == [], bad
+
   def test_controller_reads_the_inverted_param(self):
     from pathlib import Path
     src = Path(sa.__file__).with_name("speedadjust_controller.py").read_text()

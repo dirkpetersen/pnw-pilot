@@ -349,7 +349,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SnoozeUpdate", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"SshEnabled", {PERSISTENT, BOOL}},
     // tailscale2pnw / toggles2pnw: remote SSH over Tailscale is ENABLED BY DEFAULT (an unconfigured device with no auth
-    // key file stays inert: no download, status "needs auth key"); this is the opt-OUT toggle. It replaces the old
+    // key file stays inert: no download, status "unconfigured"); this is the opt-OUT toggle. It replaces the old
     // TailscaleEnabled (default 0), which is NOT registered any more and NOT migrated: nothing reads it. TailscaleStatus is
     // written by system/tailscale/tailscale_pnw.py (change-only) and shown under the toggle in settings.
     {"DisableTailscale", {PERSISTENT, BOOL, "0"}},

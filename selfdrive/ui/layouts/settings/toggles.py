@@ -74,7 +74,7 @@ DESCRIPTIONS = {
     "by SSH from anywhere. To configure it, put your Tailscale auth key on the device once (see docs/pnw/TAILSCALE.md); " +
     "until then the status reads \"unconfigured\" and nothing is downloaded or started. Once a key is in place it " +
     "downloads about 36 MB (never while driving), so set it up on Wi-Fi. Status: connected, disconnected (switched " +
-    "off here, or the device has no internet), unconfigured, connecting, installing, or error with the reason. " +
+    "off here, or no network link), unconfigured, connecting, installing, or error with the reason. " +
     "Your SSH keys still decide who can log in. Turn this ON to disable Remote SSH: the Tailscale daemon is stopped."
   ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -103,7 +103,8 @@ DESCRIPTIONS = {
     "disagree for a few seconds, the camera wins as long as it does not raise the limit (a work zone's lower sign, or a " +
     "map glitch that drops the limit to the wrong road's). With no map speed limit at all, the camera limit is always " +
     "used, even with this ON. Affects Auto speed reduce only. Turn this ON to ignore the camera limit while a map limit " +
-    "exists. In BC / km/h countries turn this ON until the camera's km/h limit has been measured. " +
+    "exists. In BC / km/h countries turn this ON until the camera's km/h limit has been measured (mainland BC is already " +
+    "map-only; where there is no map limit the sign number is still used). " +
     "F-150 Lightning only."
   ),
   "ConditionalExperimentalSwitching": tr_noop(
@@ -216,12 +217,10 @@ DESCRIPTIONS = {
   ),
   # toggles2pnw: troubleshooting switch for everything the comma WRITES to the Ford over CAN that is not driving control.
   "DisableFordConvenience": tr_noop(
-    "For troubleshooting. By default the comma does a few convenience things on the F-150 Lightning over its CAN bus, none " +
-    "of them driving: today it re-arms Pro Power Onboard (the keep-on-when-the-truck-is-off setting) at a standstill, once " +
-    "per ignition and again every 15 minutes. Turn this ON and the comma transmits NOTHING of that kind: Pro Power goes back to " +
-    "the truck's own behaviour. Takes effect within about a second, no restart. Steering, cruise and buttons are not affected. " +
-    "Chimes and tailgate settings are not written by the comma (they are As-Built settings), so there is nothing to turn off " +
-    "for them. F-150 Lightning only."
+    "For troubleshooting. Stops the comma from re-arming Pro Power Onboard (the only non-driving CAN write it makes on the " +
+    "truck today; chimes and tailgate settings are not comma CAN writes). With this ON, Pro Power goes back to the truck's own " +
+    "behaviour (its keep-on setting may reset at ignition). Takes effect within about a second. Steering, cruise and " +
+    "buttons are never touched. F-150 Lightning only."
   ),
   "DeferHDVideoUpload": tr_noop(
     "Hold back the large HD video files (road/wide camera) from uploading while ON; " +
@@ -241,7 +240,7 @@ CAR_GATED = {
   "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
   "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
   "DisableFordConvenience": (lambda v: v.ford_convenience, tr_noop("Ford F-150 Lightning only")),
-  "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla Model S and Ford F-150 Lightning only")),
+  "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla and Ford F-150 Lightning only")),
   "DisengageOnBrake": (lambda v: v.mads_lateral, tr_noop("Ford F-150 Lightning and Tesla Model S only")),
 }
 

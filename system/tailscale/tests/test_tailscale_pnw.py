@@ -455,14 +455,13 @@ def test_A_param_registered_default_enabled():
 
 
 def test_A_nothing_reads_the_retired_param():
-  """No code path may read the old key (a stale reader would raise UnknownKeyName in a manager process / the UI)."""
+  """No code path may read the old key (a stale reader would raise UnknownKeyName in a manager process / the UI). Scans every
+  tracked source file in the repo (git ls-files), except tests, params_keys.h (its comment names the retired key) and docs."""
   root = pathlib.Path(__file__).resolve().parents[3]
-  readers = []
-  for sub in ("system/tailscale", "selfdrive/ui/layouts", "system/manager"):
-    p = root / sub
-    for f in ([p] if p.is_file() else p.rglob("*.py")):
-      if "tests" not in f.parts and "TailscaleEnabled" in f.read_text():
-        readers.append(str(f.relative_to(root)))
+  files = subprocess.run(["git", "ls-files", "*.py", "*.h", "*.cc", "*.pyx", "*.sh"], cwd=root, capture_output=True, text=True,
+                         check=True).stdout.split()
+  assert len(files) > 500, f"git ls-files returned only {len(files)} files: the scan itself is broken"
+  readers = [f for f in files if "/tests/" not in f and not f.endswith("params_keys.h") and "TailscaleEnabled" in (root / f).read_text(errors="replace")]
   assert readers == [], readers
 
 
@@ -802,7 +801,7 @@ def test_tailscale_pnw_is_non_essential_in_selfdrived():
   assert '"tailscale_pnw"' in line
 
 
-# ---- F: configured but no internet at all -----------------------------------------------------------------------------
+# ---- F: configured but no network link (two consecutive reads) -----------------------------------------------------------------------------
 def test_F_offline_is_disconnected_once_with_no_error_log_and_no_backoff(world, tmp_path):
   h = Harness(tmp_path, enrolled=False)
   h.keyfile.write_text(FAKE_KEY)
@@ -810,10 +809,10 @@ def test_F_offline_is_disconnected_once_with_no_error_log_and_no_backoff(world, 
   world.install_error = installer.InstallError("download failed: timed out")   # would back off / spam if attempted
   h.net = NetworkType.none
   ticks = simulate(h, 120)
-  assert h.params.statuses == ["disconnected - no internet"]
+  assert h.params.statuses == ["disconnected - no network link"]
   assert world.installs == [] and h.procs == [] and h.calls == [], "offline: nothing attempted"
   assert [m for lvl, m in world.logs if lvl == "error"] == [], "offline must not log errors"
-  assert len([m for lvl, m in world.logs if "no internet" in m]) == 1, "one line per transition"
+  assert len([m for lvl, m in world.logs if "no network link" in m]) == 1, "one line per transition"
   assert ticks <= 120 * 60 / tp.POLL_STEADY_S + 1, "no busy loop"
 
 
@@ -823,7 +822,7 @@ def test_F_link_returns_and_it_reconnects_by_itself(world, tmp_path):
   h.keyfile.chmod(0o600)
   h.net = NetworkType.none
   simulate(h, 10)
-  assert h.params.statuses == ["disconnected - no internet"]
+  assert h.params.statuses == ["disconnected - no network link"]
   h.net = NetworkType.wifi
   h.status = {"BackendState": "NeedsLogin"}
   simulate(h, 5)
@@ -838,13 +837,13 @@ def test_F_connected_then_link_lost_then_back_publishes_each_transition_once(h):
   h.d.tick()
   h.now += 30
   h.d.tick()
-  assert h.params.statuses[-1] == "disconnected - no internet"
+  assert h.params.statuses[-1] == "disconnected - no network link"
   assert not h.procs[0].terminated, "losing the link must not stop tailscaled"
   h.net = NetworkType.cell4G
   h.now += 30
   h.d.tick()
   assert h.params.statuses[-1] == "connected 100.64.0.5"
-  assert h.params.statuses.count("disconnected - no internet") == 1
+  assert h.params.statuses.count("disconnected - no network link") == 1
 
 
 def test_F_offline_does_not_hide_a_disabled_toggle(h):
@@ -861,3 +860,29 @@ def test_F_unconfigured_wins_over_offline(world, tmp_path):
   h.net = NetworkType.none
   simulate(h, 5)
   assert h.params.statuses == ["unconfigured"]
+
+
+def test_F_a_single_none_read_changes_nothing(h):
+  """21 of 339 swaglog packets read `none` (boot transients, NM timeouts): one read must not flip the status or stop anything."""
+  run_until_up(h, {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]})
+  n = len(h.params.statuses)
+  h.net = NetworkType.none
+  h.now += 30
+  assert h.d.tick() == tp.POLL_STEADY_S
+  assert len(h.params.statuses) == n and h.params.statuses[-1] == "connected 100.64.0.5"
+  h.net = NetworkType.wifi
+  h.now += 30
+  h.d.tick()
+  h.net = NetworkType.none                       # not consecutive with the first blip: the counter was reset
+  h.now += 30
+  h.d.tick()
+  assert h.params.statuses[-1] == "connected 100.64.0.5" and not h.procs[0].terminated
+
+
+def test_F_a_suspect_tick_does_not_start_a_download(world, tmp_path):
+  h = Harness(tmp_path, enrolled=False)
+  h.keyfile.write_text(FAKE_KEY)
+  h.keyfile.chmod(0o600)
+  h.net = NetworkType.none
+  h.d.tick()
+  assert world.installs == [] and h.params.statuses == [] and h.calls == []

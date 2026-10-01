@@ -38,6 +38,7 @@ TUN_DEVICE = "/dev/net/tun"
 INSTALL_BACKOFF_MIN_S = 600.0   # a failed 36 MB download is retried no sooner than 10 min, doubling, capped at 1 h
 INSTALL_BACKOFF_MAX_S = 3600.0
 CONNECT_TIMEOUT_S = 180.0       # still not connected after this long -> say so (no route to the control plane?)
+OFFLINE_CONFIRM_READS = 2   # consecutive NetworkType.none reads before 'no network link' is believed
 POLL_STEADY_S = 30.0      # connected: one local status call per 30 s
 POLL_TRANSITION_S = 5.0   # connecting / just started
 BACKOFF_MAX_S = 300.0
@@ -70,6 +71,7 @@ class TailscaleDaemon:
     self._clock = clock
     self._exists = exists
     self.authkey_path = authkey_path
+    self._none_reads = 0
     self._net_type = net_type      # () -> NetworkType; None = the device's HARDWARE.get_network_type, imported on first use
 
     self.proc = None
@@ -248,16 +250,22 @@ class TailscaleDaemon:
       cloudlog.error(f"tailscale: {self.authkey_path} is accessible by group/others (mode {s.st_mode & 0o777:o}); chmod 600")
     return None
 
-  def _offline(self) -> bool:
-    """True when the device reports NO link at all (NetworkType.none: no primary connection and no active modem).
-    One NetworkManager property read per tick while enabled and configured -- the call hardwared already makes every
-    10 s. HARDWARE.get_network_type() answers `none` when NM itself cannot be read; that reads as 'no internet' here
-    and the published text says so, but nothing is stopped by it (tailscaled keeps running and reconnects on its own)."""
+  def _link_state(self) -> str:
+    """'ok', 'suspect' (one `none` read) or 'down' (OFFLINE_CONFIRM_READS consecutive `none` reads, >= 60 s at the 30 s tick).
+    `none` = NetworkType.none: no primary connection and no active modem, OR NetworkManager/ModemManager could not be read
+    (HARDWARE.get_network_type() answers `none` for a D-Bus timeout too, and boot transients do the same: the swaglog showed
+    21 of 339 packets `none`). So ONE `none` proves nothing: the state machine does nothing at all on a suspect tick, and
+    'down' only changes the published text -- a running tailscaled is never stopped for it and reconnects on its own.
+    One NetworkManager property read per tick while enabled and configured (hardwared makes the same call every 10 s)."""
     if self._net_type is None:
       from openpilot.system.hardware import HARDWARE
       self._net_type = HARDWARE.get_network_type
     from openpilot.system.hardware.base import NetworkType
-    return self._net_type() == NetworkType.none
+    if self._net_type() != NetworkType.none:
+      self._none_reads = 0
+      return "ok"
+    self._none_reads += 1
+    return "down" if self._none_reads >= OFFLINE_CONFIRM_READS else "suspect"
 
   # ---- one step of the state machine -----------------------------------------------------------------------------
   def tick(self) -> float:
@@ -276,12 +284,16 @@ class TailscaleDaemon:
       if problem is not None:
         return self._key_error(problem)
 
-    # Configured but the device has no link at all: say so (once per transition, no error log, no backoff) instead of
-    # failing a download / `tailscale up` into the void. The next tick after a link returns resumes normally.
-    if self._offline():
+    # Configured but the device reports no network link (confirmed by two consecutive reads): say so (once per transition,
+    # no error log, no backoff) instead of failing a download / `tailscale up` into the void. The next tick after a link
+    # returns resumes normally. A single `none` read changes nothing (it can be a boot transient or an NM read timeout).
+    link = self._link_state()
+    if link == "suspect":
+      return POLL_STEADY_S
+    if link == "down":
       self.fail_count = 0
       self.connecting_since = None
-      self.publish(st.NO_INTERNET)
+      self.publish(st.NO_LINK)
       return POLL_STEADY_S
 
     if not installer.is_installed():

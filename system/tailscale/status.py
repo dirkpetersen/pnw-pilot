@@ -13,7 +13,7 @@ CONNECTED_PREFIX = "connected "
 DISCONNECTED_PREFIX = "disconnected"
 ERROR_PREFIX = "error "
 DISABLED_TEXT = DISCONNECTED_PREFIX + " - disabled by this toggle"
-NO_INTERNET = DISCONNECTED_PREFIX + " - no internet"
+NO_LINK = DISCONNECTED_PREFIX + " - no network link"   # or NetworkManager unreadable; two consecutive reads
 WORDS = ("connected", "disconnected", "unconfigured", "connecting", "installing", "error")
 
 MAX_REASON = 120

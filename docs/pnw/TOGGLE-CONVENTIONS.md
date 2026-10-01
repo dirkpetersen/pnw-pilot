@@ -33,7 +33,7 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
 3. A `self._toggle_defs["DisableX"]` entry `(title, description, icon, needs_restart)`. Title `Disable X` / `No X`.
    A plain `toggle_item` with a description is fine; only an `action_item` combined with a description is
    non-tappable (raylib trap).
-4. Car-specific? Add one row to the car-graying table in `_update_toggles` (param, capability predicate, reason).
+4. Car-specific? Add one row to the module-level `CAR_GATED` table in `toggles.py` (param, capability predicate, reason). `_update_toggles` applies it; rows with no extra logic also need their param added to the small enable loop there.
 5. Read the param where the feature runs. Controllers re-read at about 1 Hz so no restart is needed; if a read fails,
    keep the **default** behaviour (the feature runs) **and log** it (Rule 2).
 6. A test: default value, the reader, the greying row, and a mutation check of the new branch.
@@ -44,8 +44,12 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
   (`opendbc/car/pnw_vehicle.py`) still reads the older positive-sense `FordAngleLateral`, so `toggles.py` and
   `system/manager/manager.py` mirror it (`FordAngleLateral = not NoFordAngleSteering`). Do not add new bridges: read the
   new param directly. When a pin bump moves the opendbc reader, delete the mirror.
-- **Renaming/inverting a param does not migrate the stored value.** The old key is simply no longer read. State the
-  migration decision in the commit and make sure no code path still reads the old key.
+- **Renaming/inverting a param does not migrate the stored value.** A stale param file for a key that is no longer
+  registered is **DELETED at manager start** (the manager's clear_all removes unregistered files), and the new key seeds to its
+  default. State the migration decision in the commit and make sure no code path still reads the old key. toggles2pnw
+  (verified read-only on the owner's device: `FordSignSpeedLimit=1`, `TailscaleEnabled=1`): no migration needed, behaviour
+  identical. **One hazard:** any device that had `FordSignSpeedLimit=0` (camera off) gets the camera back ON; the manual step
+  is to set `DisableFordSignSpeedLimit=1`. Likewise a `TailscaleEnabled=0` device becomes enabled (inert without a key).
 - **`needs_restart` toggles** request an onroad cycle; avoid for troubleshooting toggles where possible.
 - **Convenience CAN TX rule (Ford).** Anything the comma **writes** to the Ford over CAN that is not driving control
   (Pro Power re-arm today; any future chime, tailgate or body-comfort write) must be gated by
@@ -100,6 +104,19 @@ cannot be built logs and leaves the features running.
 MUST be gated by `ConvenienceGate` and listed in the table above. A new convenience TX that ignores this toggle defeats its
 purpose, which is to rule the comma out when something odd happens on the truck. Never put driving CAN behind it.
 
+## Behaviours worth knowing
+
+- **Disable Remote SSH, ON:** the row can read `disconnected` for up to 30 s before the daemon's next tick actually stops
+  `tailscaled` (same delay as before the inversion). There is no leftover-process scan while the device is `unconfigured`.
+- **Convenience toggle ON then OFF builds a fresh armer:** the 3-press budget and the 15-min window reset and it presses again
+  about 9 s later at any standstill, including in Drive and engaged at a red light. It is rate-limited only by how fast the toggle is
+  flipped; a card restart behaves the same. The setting is persistent: it stays ON while the device sits in the Tesla (where the row is
+  greyed), and Pro Power is not re-armed the next time it is in the Lightning until it is turned OFF.
+- **Read failure of `DisableFordConvenience`** (opendbc side): before any successful read the features run (fail-open, logged); after
+  a successful read the last good value is kept, so a transient read error cannot re-enable CAN writes during troubleshooting.
+- **No network link** (Tailscale row) means two consecutive `NetworkType.none` reads (about 60 s) -- also what a NetworkManager read
+  timeout looks like; a single read changes nothing and a running `tailscaled` is never stopped for it.
+
 ## Audit (2026-10-01, `origin/3devpnw` at `788010a427`)
 
 Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` value.
@@ -118,7 +135,7 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `NoFordAngleSteering` | 0 | Lightning only (greyed) | yes | two-param bridge |
 | `TailscaleEnabled` | 0 | both | **NO** | feature OFF by default; ON = default behaviour wanted. Fixed in phase 1 -> `DisableTailscale` (no migration; old key removed; see TAILSCALE.md) |
 | `NoSpeedLimitDisplay` | 0 | both | yes | |
-| `FordSignSpeedLimit` | **1** | Lightning only (greyed) | **NO** | default ON. Fixed in phase 1 -> `DisableFordSignSpeedLimit` (default 0; behaviour unchanged by default; description tells the owner to turn it ON in BC / km/h countries until the camera's km/h limit is measured) |
+| `FordSignSpeedLimit` | **1** | Lightning only (greyed) | **NO** | default ON. Fixed in phase 1 -> `DisableFordSignSpeedLimit` (default 0; behaviour unchanged by default; description tells the owner to turn it ON in BC / km/h countries until the camera's km/h limit is measured; honest scope: mainland BC already resolves to Canada = camera off, and in the residual bbox holes (Prince Rupert/Stewart AK, Windsor MI, Niagara NY) the toggle protects only while a MAP limit exists, because the no-map branch of `sign_limit.py` runs before `use_camera`) |
 | `RefreshLocationMap` | 0 | both | yes | momentary action, greyed when no map here |
 | `DisableLocationServices` | 0 | both | yes | |
 | `EvIncludeLevel2` | 0 | both | yes | opt-in sub-option |

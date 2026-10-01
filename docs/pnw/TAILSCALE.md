@@ -18,18 +18,18 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
   Remote SSH (Tailscale)** (`DisableTailscale`, default OFF). The status word shows in the toggle title and in its
   description; the first word is always one of:
   `connected <tailscale ip>`, `disconnected - disabled by this toggle` (toggle ON; `tailscaled` stopped and verified gone),
-  `disconnected - no internet` (configured, but the device reports no link at all), `unconfigured`, `connecting`,
+  `disconnected - no network link` (configured, and two consecutive reads, about 60 s, say the device has no link -- or NetworkManager could not be read), `unconfigured`, `connecting`,
   `installing` (also `installing - deferred until parked`), or `error <reason>`.
 - **Configured** means an auth key file exists (`/data/pnw/secrets/tailscale.authkey`) **or** node state exists
   (`/data/pnw/tailscale/tailscaled.state`). **Unconfigured** means neither, and the default state of a fresh install:
   status `unconfigured`, the toggle stays OFF, and the device does nothing: no download, no `tailscaled`, no subprocess,
   one local file check per 30 s, no log lines. A key file that exists but is empty or unreadable is *configured but
   broken*: `error auth key file is empty`, never `unconfigured`.
-- **No internet** is read from the device's own network state (`HARDWARE.get_network_type() == none`, one NetworkManager
+- **No network link** is read from the device's own network state (`HARDWARE.get_network_type() == none`, one NetworkManager
   property read per 30 s tick while enabled and configured; hardwared makes the same call every 10 s). While there is no
-  link: `disconnected - no internet`, no download attempt, no error log, no backoff; one log line per transition. A running
+  link: `disconnected - no network link`, no download attempt, no error log, no backoff; one log line per transition. A running
   `tailscaled` is left alone and the next tick after a link returns resumes normally. If NetworkManager itself cannot be
-  read the call also answers `none`, so that case reads as `no internet` too (nothing is stopped by it).
+  read the call also answers `none`, so that case reads as `no network link` too. A single `none` read (boot transients, NM timeouts: 21 of 339 swaglog packets) changes nothing; two consecutive are required. Nothing is stopped by it.
 - Any other failure while a link exists (bad/expired key, control plane unreachable, sha256 mismatch, `tailscaled` will not
   stop) is `error <reason>`, as before.
 - Only once configured and online (and Remote SSH not disabled): the pinned Tailscale `1.102.4` arm64 static release is downloaded (about 36 MB, sha256-verified,
@@ -100,7 +100,7 @@ verified on this device**. If `ssh` times out while the status says `connected`,
 |---|---|
 | `unconfigured` | No key file and no node state: the default of a fresh install. Do steps 4 and 5. |
 | `disconnected - disabled by this toggle` | **Disable Remote SSH** is ON; `tailscaled` is stopped. Turn it OFF to re-enable. |
-| `disconnected - no internet` | The device has no link at all. Nothing to do: it reconnects by itself when a link returns. |
+| `disconnected - no network link` | The device has had no network link for two reads (or NetworkManager is unreadable). Nothing to do: it reconnects by itself when a link returns. |
 | `error auth key file is empty` / `... is unreadable` | The key file exists but cannot be used (empty or unreadable). Redo step 5. |
 | `error node is logged out and the auth key file is ...` | The node was logged out (expired/revoked) and no usable key file exists. Steps 4-5. |
 | `installing - deferred until parked` | You are driving. It installs when you are in Park or the car is off. |
@@ -135,7 +135,7 @@ Every state change is also in the device log (`cloudlog`, lines starting `tailsc
 ## Default ON: migration and consequences (toggles2pnw)
 
 - **No migration.** `TailscaleEnabled` is **removed** from `params_keys.h`; no code reads it (a test pins that, and that
-  reading it raises `UnknownKeyName`). A stale file in the device's params store is ignored. Why no migration: a device
+  reading it raises `UnknownKeyName`). A stale param file is **DELETED at manager start** (the manager's clear_all removes unregistered files), and `DisableTailscale` seeds to 0. Why no migration: a device
   that had it ON behaves identically (default is ON); a device that had it OFF becomes enabled, which is the owner's
   intent, and it stays inert (`unconfigured`) until a key file exists. Keeping a dead key registered "for one release"
   would only add a param nothing reads.

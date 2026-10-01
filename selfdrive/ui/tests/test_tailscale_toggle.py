@@ -59,7 +59,7 @@ def test_toggle_def_and_description():
 def test_title_suffix_for_disabled_and_connected():
   suffix = T.TogglesLayout._tailscale_title_suffix
   assert suffix(SimpleNamespace(_tailscale_text=lambda: T.ts_status.DISABLED_TEXT)) == " - disconnected"
-  assert suffix(SimpleNamespace(_tailscale_text=lambda: "disconnected - no internet")) == " - disconnected"
+  assert suffix(SimpleNamespace(_tailscale_text=lambda: "disconnected - no network link")) == " - disconnected"
   assert suffix(SimpleNamespace(_tailscale_text=lambda: "unconfigured")) == " - unconfigured"
   assert suffix(SimpleNamespace(_tailscale_text=lambda: "connected 100.64.0.5")) == " - connected"
   assert suffix(SimpleNamespace(_tailscale_text=lambda: "off")) == ""
