@@ -17,8 +17,8 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
 - Toggle **Settings > Toggles > Remote SSH (Tailscale)**, **default OFF**. The status shows next to the toggle and in
   its description: `off`, `installing`, `install deferred until parked`, `needs auth key`, `connecting`,
   `connected <tailscale ip>`, or `error <reason>`.
-- **Unconfigured is a safe state.** Toggle OFF (fresh install): the `tailscale_pnw` process is never started by the
-  manager; nothing is downloaded, written or run. Toggle ON without an auth key: status `needs auth key`; still no
+- **Unconfigured is a safe state.** Toggle OFF (fresh install): the `tailscale_pnw` process always runs but is inert
+  (one `/proc` scan every 30 s; no subprocess, network, download or logs); nothing is downloaded, written or run. Toggle ON without an auth key: status `needs auth key`; still no
   download, no `tailscaled`, one log line; it polls the key file locally every 30 s.
 - Only while ON: the pinned Tailscale `1.102.4` arm64 static release is downloaded (about 36 MB, sha256-verified,
   refused loudly on mismatch) into `/data/pnw/tailscale/` (outside `/data/openpilot`, so the updater's `git clean` cannot
