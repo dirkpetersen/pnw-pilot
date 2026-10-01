@@ -270,6 +270,22 @@ def test_a_misspelled_platform_key_warns_that_the_car_uses_the_shared_schedule(s
   assert not [m for m in log.infos if "own schedule" in m]
 
 
+def test_the_lightning_without_its_own_entry_is_info_not_a_warning(sched, log):
+  """A car legitimately without its own entry is normal: only a Tesla entry present, the Lightning says info."""
+  sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
+  dh.lat_accel_target(85 * MPH, LIGHTNING)
+  assert not [m for m in log.warnings if "shared schedule" in m or "match no known platform" in m]
+  infos = [m for m in log.infos if "uses the shared schedule" in m]
+  assert len(infos) == 1 and LIGHTNING in infos[0] and TESLA in infos[0] and "per-car entries exist for" in infos[0]
+
+
+def test_a_key_that_names_no_known_platform_warns(sched, log):
+  sched(_doc({"NOT_A_REAL_CAR": {"breakpoints": TESLA_BP}}))
+  dh.lat_accel_target(85 * MPH, LIGHTNING)
+  assert len([m for m in log.warnings if "match no known platform" in m and "NOT_A_REAL_CAR" in m]) == 1
+  assert not [m for m in log.warnings if "look like a misspelling" in m]    # not a typo of the Lightning
+
+
 def test_a_matching_key_says_info_own_schedule_once_per_load(sched, log):
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
   for _ in range(5):

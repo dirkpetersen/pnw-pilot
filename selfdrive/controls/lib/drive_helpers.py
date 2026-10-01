@@ -1,3 +1,4 @@
+import difflib
 import json
 import math
 import os
@@ -142,6 +143,31 @@ LAT_ACCEL_SLEW_RATE = 4.0  # m/s^2 per second
 DEFAULT_LAT_ACCEL_BREAKPOINTS_MPH: list[list[float]] = [[50, 6.0], [60, 5.0], [70, 4.0], [80, 3.0]]
 
 
+def _looks_like_typo_of(key: str, platform: str) -> bool:
+  """True when a per-car key that is not `platform` itself plausibly MEANT it: equal ignoring case/whitespace/'-', a
+  prefix or suffix of it (or the reverse), or a close string match (difflib ratio >= 0.8)."""
+  if key == platform:
+    return False
+  k = key.strip().upper().replace("-", "_").replace(" ", "_")
+  p = platform.upper()
+  if k == p:
+    return True
+  if len(k) >= 4 and (p.startswith(k) or p.endswith(k) or k.startswith(p) or k.endswith(p)):
+    return True
+  return difflib.SequenceMatcher(None, k, p).ratio() >= 0.8
+
+
+def _unknown_platform_keys(keys) -> list[str]:
+  """Per-car keys that name no opendbc platform. The platform list is imported lazily (opendbc has no openpilot imports, so
+  no cycle; lazy keeps drive_helpers' import cheap). If it cannot be imported, SAY so and report nothing unknown."""
+  try:
+    from opendbc.car.values import PLATFORMS
+  except ImportError as e:
+    cloudlog.error(f"drive_helpers: cannot import the opendbc platform list ({e}) -- per-car keys not checked against it")
+    return []
+  return sorted(k for k in keys if k not in PLATFORMS)
+
+
 class _LatAccelSchedule:
   """Caches the parsed, sanitized speed(m/s)->cap(m/s^2) schedule loaded from LAT_ACCEL_LIMITS_PATH,
   hot-reloaded at most every _LAT_ACCEL_RELOAD_INTERVAL_S. Mirrors the hot-reload/sanitize pattern in
@@ -257,6 +283,10 @@ class _LatAccelSchedule:
     # A key that no car uses (a typo: "TESLA_MODEL_S ", "TESLA_MODEL_S_HW") validates like any other, so say which keys were
     # accepted; report_platform() then says, per car, whether ITS key is among them.
     cloudlog.warning(f"drive_helpers: {LAT_ACCEL_LIMITS_PATH} per-car schedules accepted for: {sorted(out)}")
+    unknown = _unknown_platform_keys(out)
+    if unknown:
+      cloudlog.warning(f"drive_helpers: {LAT_ACCEL_LIMITS_PATH} per-car key(s) {unknown} match no known platform name -- " +
+                       "no car will use them (misspelled?)")
     return out
 
   def _refresh(self) -> None:
@@ -326,8 +356,15 @@ class _LatAccelSchedule:
     if platform in self._cars:
       cloudlog.info(f"drive_helpers: lataccel: {platform} uses its own schedule")
     elif self._cars:
-      cloudlog.warning(f"drive_helpers: lataccel: {platform} uses the shared schedule; per-car keys present: " +
-                       f"{sorted(self._cars)} (none matches -- misspelled?)")
+      # A car legitimately without its own entry is normal (the Lightning with only a Tesla entry): info. Warn only when a
+      # key looks like a typo of THIS car's platform, since that is what silently runs the shared schedule by mistake.
+      typos = sorted(k for k in self._cars if _looks_like_typo_of(k, platform))
+      if typos:
+        cloudlog.warning(f"drive_helpers: lataccel: {platform} uses the shared schedule; per-car key(s) {typos} look like a " +
+                         f"misspelling of it (all per-car keys: {sorted(self._cars)})")
+      else:
+        cloudlog.info(f"drive_helpers: lataccel: {platform} uses the shared schedule " +
+                      f"(per-car entries exist for: {sorted(self._cars)})")
     else:
       cloudlog.info(f"drive_helpers: lataccel: {platform} uses the shared schedule (no per-car entries)")
 
