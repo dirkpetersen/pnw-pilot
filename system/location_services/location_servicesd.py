@@ -120,6 +120,11 @@ EV_TRACK_MI = 8.0                          # only recede-track chargers within t
 REST_MAX_PERP_M = 1.5 * geo.M_PER_MILE
 DISPLAY_MAX_DIST_M = 15.0 * geo.M_PER_MILE   # all three (police/EV/rest) show a POI starting ~15 mi ahead (driver request)
 DISPLAY_MAX_MI = DISPLAY_MAX_DIST_M / geo.M_PER_MILE   # same bound in miles, for straight-line (live_mi) comparisons
+# restfar2pnw (owner 2026-10-01): REST AREAS ONLY (not police/EV) reach this far ahead along a TAGGED corridor
+# (mapd WayRef matches a rest file), so "the NEXT rest area, even 50 mi away" shows. Must stay >= 50 (the owner's
+# minimum; asserted in tests). Anywhere the corridor path cannot answer (no WayRef, no heading, untagged road) the
+# old DISPLAY_MAX_MI (15 mi) geometry applies unchanged.
+REST_MAX_AHEAD_MI = 50.0
 POLICE_POLL_S = 60.0                       # ≤ 1/min (decision §7 / POLICE_WARNING_DESIGN §7)
 POLICE_BBOX_DEG = 0.30                     # axis-aligned box (~±20 mi) around current GPS
 # POLICE freshness (driver decision 2026-07-09, supersedes the 20-min fresher-only rule of 2026-07-01):
@@ -1483,7 +1488,7 @@ _REST_FILE_REFS = {"i5": ("I 5",), "i90": ("I 90",), "i82": ("I 82",), "us12_us9
 _DIR_BEARING = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}
 
 
-def _line_rest_corridor(items, lat, lon, brg, wayref):
+def _line_rest_corridor(items, lat, lon, brg, wayref, max_mi=DISPLAY_MAX_MI):
   """rest2pnw (2026-07-09): corridor-IDENTITY rest-area selection. The 10-mi rest preview flapped
   in/out on curving I-5 because beyond mapd's ~350 m path, 'ahead' projects onto the straight
   extrapolated heading line — a genuinely on-corridor rest area drifts past the 1.5 mi perpendicular
@@ -1492,9 +1497,14 @@ def _line_rest_corridor(items, lat, lon, brg, wayref):
   (N/S/E/W). Selection: same corridor + direction within 90 deg of our heading + genuinely ahead
   (bearing-to-POI within 90 deg of heading; adequate for interstate curvature at <=15 mi) -> nearest
   straight-line. Cross-corridor leaks are impossible BY IDENTITY (the bug the perp filter was for).
-  Returns (poi, dist_mi) or None. Falls back to None when off-corridor (caller uses the old geometry)."""
+  Returns (poi, dist_mi) or None. Falls back to None when off-corridor (caller uses the old geometry).
+  restfar2pnw: `max_mi` is the reach (main passes REST_MAX_AHEAD_MI). Without a heading the direction and
+  "behind" tests cannot run, so the reach is clamped back to DISPLAY_MAX_MI rather than showing a far
+  facility that may be behind us or on the other carriageway."""
   if not wayref:
     return None
+  if brg is None:
+    max_mi = min(max_mi, DISPLAY_MAX_MI)
   best, best_mi = None, None
   for it in items:
     if wayref not in it.get("refs", ()):
@@ -1505,7 +1515,7 @@ def _line_rest_corridor(items, lat, lon, brg, wayref):
     if brg is not None and abs(geo.normalize180(geo.bearing_deg(lat, lon, it["lat"], it["lon"]) - brg)) > 90.0:
       continue                                    # behind us
     d = geo.haversine_m(lat, lon, it["lat"], it["lon"]) / geo.M_PER_MILE
-    if d > DISPLAY_MAX_DIST_M / geo.M_PER_MILE:
+    if d > max_mi:
       continue
     if best_mi is None or d < best_mi:
       best, best_mi = it, d
@@ -1779,6 +1789,7 @@ def main():
   is_tesla = _read_is_tesla(params)          # Tesla -> alternate Supercharger<->other; refreshed periodically below
   last_car_check = 0.0
   road_hold = RoadCtxHold()
+  last_rest_mode = None
 
   while True:
     # toggles-invert2pnw: DisableLocationServices is opt-out (ON == disabled); enabled by default.
@@ -1826,7 +1837,13 @@ def main():
       # 15 mi previews on a known corridor (no heading-line flapping on curves); geometric fallback
       # only when mapd has no WayRef / we're on an untagged corridor.
       if on_freeway:
-        r = _line_rest_corridor(static.rest, lat, lon, brg, wayref)
+        r = _line_rest_corridor(static.rest, lat, lon, brg, wayref, max_mi=REST_MAX_AHEAD_MI)
+        rest_mode = ("far" if r is not None and r[1] > DISPLAY_MAX_MI else "corridor" if r is not None else
+                     "15mi-no-wayref" if not wayref else "15mi-no-corridor-hit")
+        if rest_mode != last_rest_mode:           # change-only: say loudly when the far reach is not in effect
+          cloudlog.info("location_services: rest reach mode %s -> %s (wayref=%r brg=%s)", last_rest_mode, rest_mode,
+                        wayref, "none" if brg is None else "ok")
+          last_rest_mode = rest_mode
         if r is None:
           r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
       else:

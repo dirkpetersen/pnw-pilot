@@ -7,8 +7,10 @@ Maytown / Scatter Creek / Silver Lake carried dir "" although each serves only o
 """
 
 import json
+import math
 import os
 
+from openpilot.system.location_services import geo
 from openpilot.system.location_services import location_servicesd as lsd
 
 I5_FILE = os.path.join(lsd.REST_DIR, "i5_rest_areas.json")
@@ -54,3 +56,98 @@ def test_maytown_is_southbound_only():
   # Southbound north of Maytown: it shows.
   r = _pick(46.90, -122.955, 200.0)
   assert r is not None and r[0]["name"] == "Maytown"
+
+
+# ---- restfar2pnw: rest areas reach REST_MAX_AHEAD_MI along a tagged corridor ------------------------------
+LAT0, LON0 = 45.0, -122.0
+MI_LAT = 1609.344 / (math.pi * 6371000.0 / 180.0)     # degrees of latitude per mile
+
+
+def _ra(name, mi_north, d="N", refs=("I 5",), lon=LON0):
+  return {"name": name, "lat": LAT0 + mi_north * MI_LAT, "lon": lon, "dir": d, "refs": refs, "town": ""}
+
+
+def _far(items, at_mi, brg=0.0, wayref="I 5"):
+  r = lsd._line_rest_corridor(items, LAT0 + at_mi * MI_LAT, LON0, brg, wayref, max_mi=lsd.REST_MAX_AHEAD_MI)
+  return None if r is None else (r[0]["name"], r[1])
+
+
+def test_reach_constant_meets_owner_minimum_and_is_far_only_for_rest():
+  assert lsd.REST_MAX_AHEAD_MI == 50.0
+  assert lsd.DISPLAY_MAX_MI == 15.0           # police/EV cap untouched
+  assert lsd.EV_MAX_DIST_M == 6.0 * geo.M_PER_MILE
+
+
+def test_next_rest_area_then_the_one_after_as_each_is_passed():
+  items = [_ra("a12", 12), _ra("b35", 35), _ra("c48", 48), _ra("d70", 70),
+           _ra("behind", -5), _ra("opposite", 20, d="S")]
+  assert _far(items, 0)[0] == "a12"
+  assert abs(_far(items, 0)[1] - 12.0) < 0.1
+  assert _far(items, 13)[0] == "b35"          # a12 passed -> the NEXT one
+  assert _far(items, 36)[0] == "c48"
+  assert _far(items, 49)[0] == "d70"          # 21 mi away, inside the 50 mi reach
+
+
+def test_a_49_mi_one_is_shown_and_a_70_mi_one_is_not():
+  assert _far([_ra("e49", 49)], 0)[0] == "e49"
+  assert _far([_ra("f70", 70)], 0) is None
+  assert _far([_ra("g90", 90)], 0) is None
+
+
+def test_never_behind_and_never_the_opposite_side():
+  assert _far([_ra("behind", -30)], 0) is None
+  assert _far([_ra("opp", 30, d="S")], 0) is None
+  assert _far([_ra("opp", -30, d="N")], 0, brg=180.0) is None      # southbound: a N-side one is the other carriageway
+
+
+def test_other_corridor_is_never_shown():
+  assert _far([_ra("i90", 30, refs=("I 90",))], 0) is None
+
+
+def test_missing_heading_clamps_to_the_old_15_mi():
+  items = [_ra("near", 10), _ra("far", 40)]
+  assert lsd._line_rest_corridor(items, LAT0, LON0, None, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)[0]["name"] == "near"
+  assert lsd._line_rest_corridor([_ra("far", 40)], LAT0, LON0, None, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI) is None
+
+
+def test_missing_wayref_returns_none_so_the_caller_uses_the_15_mi_geometry():
+  assert lsd._line_rest_corridor([_ra("a", 10)], LAT0, LON0, 0.0, "", max_mi=lsd.REST_MAX_AHEAD_MI) is None
+
+
+def test_default_reach_is_unchanged_15_mi():
+  assert lsd._line_rest_corridor([_ra("far", 60)], LAT0, LON0, 0.0, "I 5") is None
+  assert lsd._line_rest_corridor([_ra("near", 14)], LAT0, LON0, 0.0, "I 5")[0]["name"] == "near"
+
+
+def test_hold_keeps_a_far_target_and_drops_it_once_passed():
+  poi = _ra("far", 60)
+  h = lsd._Hold(lsd.POI_HOLD_S)
+  assert h.update((poi, 60.0), 0.0, LAT0, LON0)[1] == 60.0
+  assert h.update(None, 1.0, LAT0 + 1 * MI_LAT, LON0)[0] is poi            # selection blip: held
+  assert h.update(None, 2.0, LAT0 + 59.9 * MI_LAT, LON0)[0] is poi          # about to reach it: still held
+  assert h.update(None, 3.0, LAT0 + 61 * MI_LAT, LON0) is None             # passed: dropped
+  better = _ra("nearer", 30)
+  h.update((poi, 59.0), 4.0, LAT0 + 1 * MI_LAT, LON0)
+  assert h.update((better, 29.0), 5.0, LAT0 + 1 * MI_LAT, LON0)[0] is better
+
+
+def _real_i5():
+  return _i5_items()
+
+
+def test_real_i5_nearest_ahead_each_direction_from_a_midpoint():
+  items = _real_i5()
+  # midpoint of the I-5 data (mid-WA/OR); every direction's pick must be the nearest by dist among items
+  # that serve that direction and lie ahead.
+  mid_lat, mid_lon = 46.6, -122.9
+  nb = lsd._line_rest_corridor(items, mid_lat, mid_lon, 0.0, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)
+  sb = lsd._line_rest_corridor(items, mid_lat, mid_lon, 180.0, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)
+  assert nb is not None and sb is not None
+  assert nb[0]["dir"] == "N" and sb[0]["dir"] == "S"
+  assert nb[0]["lat"] > mid_lat and sb[0]["lat"] < mid_lat
+  exp_n = min(geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) for r in items
+              if r["dir"] == "N" and r["lat"] > mid_lat and geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) / geo.M_PER_MILE <= lsd.REST_MAX_AHEAD_MI)
+  assert abs(nb[1] - exp_n / geo.M_PER_MILE) < 0.1
+  exp_s = min(geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) for r in items
+              if r["dir"] == "S" and r["lat"] < mid_lat and geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) / geo.M_PER_MILE <= lsd.REST_MAX_AHEAD_MI)
+  assert abs(sb[1] - exp_s / geo.M_PER_MILE) < 0.1
