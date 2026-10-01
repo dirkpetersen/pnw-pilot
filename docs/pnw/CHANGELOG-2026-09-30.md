@@ -2,6 +2,8 @@
 
 Continues [`CHANGELOG-2026-09-28.md`](CHANGELOG-2026-09-28.md) (there is no separate 09-29 file; its ships are section 1 here). All times PT.
 
+**Update 2026-10-01 (later):** section 16 (`toggles2pnw`) shipped after this; the channel tip is `8e51763978`, **GREEN**, 5943 passed; the device still runs `acc42b5a9f` and has `8e51763978` staged (includes sections 13-14) for the next reboot, not yet rebooted.
+
 **Update 2026-10-01:** sections 12-14 shipped after this; the channel tip is `4c48ef4075`, **GREEN**, 5870 passed; the device runs `acc42b5a9f` and has `4c48ef4075` staged for the next reboot.
 
 **Channel tip:** `origin/3devpnw` = `a037278713`, **GREEN**, 5814 passed (sections 9-11 pushed 23:16 PT 09-30 to 00:24 PT 10-01; at `1afb551fa6` the tip was green with 5708). **Installed on the device:** the tip as of the evening installs (~19:15 PT, and a reboot at 21:27 PT); `848d115fed` was the 09-29 ~22:00 PT reboot. Sections 2-3 were pushed during the day and are part of that evening install (`83c152e33f` ... `c0b4bd4499` are ancestors of the tip); sections 5-8 shipped the same evening.
@@ -113,3 +115,25 @@ a misspelled kill-switch key in `curve.json` is silently ignored.
 
 From the evening of 09-30 the code for the ships above was written by Sonnet coders and reviewed by Opus reviewers. The channel tip was tested after the last
 push (green, 5814 passed at `a037278713`).
+
+## 16. `toggles2pnw`: one toggle convention, three toggle changes, car graying (`61418263b7` ... `8e51763978`; opendbc `c2bd3fd4`, `7109dccd`)
+
+Shipped 2026-10-01 after a Sonnet coder and three Opus reviewers. Channel tip `8e51763978`, **GREEN**, 5943 passed. Staged on the device, **not yet installed** (needs a reboot). pnw-pilot commits: `61418263b7` (toggle audit + [`TOGGLE-CONVENTIONS.md`](TOGGLE-CONVENTIONS.md)), `60db827c47` (phase 1), `8becdc0061` (phase 2, car graying), `bf9fb16f7b` (phase 3), `62d4569f1d` (review fixes), `8e51763978` (opendbc pin bump). `pnw-opendbc` `master-pnw` is now `7109dccd`.
+
+**The rule (owner).** A toggle's default operational state is OFF; a feature that is on by default gets an opt-out toggle named `Disable X`. The row shows the live state. A toggle that applies to one car is greyed, never hidden, on the other car. An unknown car (no `CarParamsPersistent`, or a mock) leaves everything enabled. Car graying is one `CAR_GATED` table.
+
+**Remote SSH.** Toggle renamed "Disable Remote SSH (Tailscale)", param `DisableTailscale`, default 0. It is enabled by default only once configured (an auth key file or saved node state exists); until then the status reads `unconfigured`, the toggle stays OFF and the device does nothing. Status words: connected, disconnected, unconfigured, connecting, installing, error. Toggle ON shows "disconnected - disabled by this toggle". Two consecutive `NetworkType.none` reads (about 60 s) show "disconnected - no network link". `TailscaleEnabled` is removed.
+
+**Ford camera speed limit.** Toggle "Disable Ford Camera Speed Limit", param `DisableFordSignSpeedLimit`, default 0. Behaviour is identical by default. In British Columbia the owner turns the toggle ON until the camera's km/h limit has been measured. Mainland BC (for example Vancouver) already resolves to Canada, where the camera is off; Prince Rupert and Stewart resolve to AK, Windsor ON to MI and Niagara ON to NY. With no map limit the sign number is still used and read as mph, even with the toggle ON. That error only means less slowdown, never extra speed.
+
+**Ford convenience features (new).** Toggle "Disable Ford Convenience Features", param `DisableFordConvenience`, default 0, Lightning only (greyed on the Tesla). It gates the only non-driving CAN write the comma makes: the Pro Power Onboard re-arm (0x455, `ProPowerArmer`). There is no tailgate or chime CAN write (those are As-Built/FORScan settings; the comma's chimes are on-device audio). The gate is a `ConvenienceGate` in the opendbc carcontroller that reads the persistent param at 1 Hz. It fails open before the first successful read and keeps the last good value after one. Toggle OFF to ON to OFF builds a fresh armer: the 3-press budget and 15-minute window reset, and it presses again about 9 s later at any standstill (including Drive or engaged at a red light). With the toggle ON, Pro Power follows the truck's own behaviour (its keep-on setting may reset at ignition). CAN output with the toggle OFF is byte-identical to before (4765 frames, simulated drive); with it ON, the output is the old one minus the 18 frames on 0x455.
+
+**No migration.** The manager's `clear_all` deletes param files for keys that are no longer registered at start-up. The owner's comma had `TailscaleEnabled=1` and `FordSignSpeedLimit=1`; those files are deleted on first boot and the new `Disable*` params seed 0, so nothing needs migrating.
+
+**Review findings of note.**
+- Stale-param deletion hazard: removing or renaming a param key silently drops its stored value (see No migration above). Any rename of a live param must check the device's value first.
+- "No internet" needs two consecutive reads, so a single `none` read does not flash "no network link".
+- The camera protection in BC is partial (see the last bullet above): the sign number is still read as mph when there is no map limit. The note should read "only where the device resolves to a US state"; the current wording could be read as applying to BC.
+- The Pro Power toggle persists while the device is in the Tesla, where it is greyed.
+
+**Known limits, not fixed.** (1) `carcontroller.py` comments are slightly stale: `__init__` says a failed read keeps today's behaviour (true only before the first good read), and `update()` refers to "the guard below", which now lives in `_conv_disabled`. (2) `tailscale_pnw.py` `_none_reads` is not reset when `tick()` returns early (disabled or unconfigured), so after re-enabling a single `none` read can show "no network link" at once (display only). (3) The kept-last-value gate does not survive a card restart; a new gate fails open until its first successful read. (4) The UI tests build a stand-in `self`, not the raylib window, so the real rows have not been seen rendering. Tracked in the workbench work-pending item "toggles2pnw review follow-ups".
