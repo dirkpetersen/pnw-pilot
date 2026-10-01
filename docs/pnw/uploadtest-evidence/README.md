@@ -1,5 +1,7 @@
 # `uploadtest-evidence` — the mutation proof for the restored uploader suite
 
+*Added 2026-09-19 (first commit `1f9a352538`).*
+
 `system/loggerd/tests/test_uploader.py` had **4 of 39 tests red on the channel for two weeks**
 (bisected: 1 red at `4bb6a2e23b` 08-14 → 4 red at `6ad65ca264` `uploadanywifi2pnw` 09-05, still 4 at
 `718079e75a` 09-10). The code was right; the tests encoded stock's 2-file expectation while the fork
