@@ -10,6 +10,8 @@ are exactly today's."""
 import math
 import random
 
+import pytest
+
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as C
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_pnw as VP
 from openpilot.selfdrive.controls.lib.vtsc_pnw.tests import release_later_harness as H
@@ -136,12 +138,14 @@ def test_fuzz_below_set_is_bounded(monkeypatch):
     assert all(math.isfinite(c) and C.V_MIN - 1e-9 <= c <= v_set + 1e-9 for c in new)
 
 
-def test_a_gentle_node_below_the_new_notch_is_not_folded_in_traffic(monkeypatch):
-  """The other side of the same rule (reported, not hidden): raw 34 m/s at vEgo 38 / set 40.23. Today it is floored to the set-relative
-  notch 35.7 (a 2.3 m/s trim of a car doing 38); relative to the car's own speed it is not a >=4.5 m/s slowdown, so it is not folded."""
+def test_a_gentle_node_keeps_todays_set_relative_floor_in_traffic(monkeypatch):
+  """Two tiers: raw 34 m/s at vEgo 38 / set 40.23 is floored by today's set-relative notch (35.7) and is NOT floored by the car-relative one
+  (33.5). The change must never be SHALLOWER than today, so the set-relative floor still applies and the caps are today's."""
   fr = _frames(38.0, SET, [(273.0, 34.0)])
-  assert min(_caps(H.replay(monkeypatch, fr, notch_vego=False))) < SET - 1.0
-  assert min(_caps(H.replay(monkeypatch, fr, notch_vego=True))) == SET
+  old = H.replay(monkeypatch, fr, notch_vego=False)
+  new = H.replay(monkeypatch, fr, notch_vego=True)
+  assert min(_caps(old)) < SET - 1.0
+  assert _caps(new) == _caps(old)
 
 
 def test_the_lightning_is_exactly_today(monkeypatch):
@@ -214,10 +218,96 @@ def test_a_bend_taken_at_the_set_speed_is_not_ratcheted_down_by_its_own_slowdown
   assert min(_caps(live)) < min(_caps(old)) - 2.0
 
 
-def test_the_gate_is_measured_from_the_same_reference_as_the_notch(monkeypatch):
-  """A map target that is only a mild slowdown for a car that is already slow (raw 16 m/s -> scaled ~22 m/s, car at 20 m/s, set 40):
-  today its target 22 is 'far below the set speed', so it is folded and a cap is imposed ahead of a car that is not near it; relative to
-  the car's own speed it is not a >= 4.5 m/s slowdown, so it is not folded. Pins that the GATE moved with the notch, not only the notch."""
+def test_a_curve_the_car_is_already_below_keeps_todays_fold(monkeypatch):
+  """raw 16 m/s (scaled ~22) with the car at 20 m/s, set 40: today folds it (22 is far below the set speed). The car-relative notch would not,
+  but the gate stays on the set speed, so the fold -- and today's cap -- are unchanged (never shallower than today)."""
   fr = _frames(20.0, SET, [(250.0, 16.0)])
-  assert min(_caps(H.replay(monkeypatch, fr, notch_vego=False))) < SET - 1.0
-  assert min(_caps(H.replay(monkeypatch, fr, notch_vego=True))) == SET
+  old = H.replay(monkeypatch, fr, notch_vego=False)
+  assert min(_caps(old)) < SET - 1.0
+  assert _caps(H.replay(monkeypatch, fr, notch_vego=True)) == _caps(old)
+
+
+def test_the_second_tier_applies_where_the_car_relative_notch_does_not_floor():
+  pts = _pts((273.0, 34.0))
+  args = (pts, LAT0, LON0, 38.0, 500.0, C.A_DECEL, C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, SET, C.MAP_MIN_SLOWDOWN, 0.0)
+  v, _, _, _, floored = VP.most_binding_map_curve(*args, notch_ref=38.0)
+  assert floored is True and v == SET - C.MAP_MIN_SLOWDOWN          # today's 35.7: not unfloored, not the 33.5 notch
+
+
+def _env(res, v_ego):
+  v, d = res[0], res[1]
+  return VP.brake_cap_for_apex(v, d, v_ego, C.A_DECEL, C.APEX_FINISH_S) if v > 0.0 else float("inf")
+
+
+def test_fold_envelope_with_the_change_is_never_higher_than_today_fuzz():
+  """Property of the fold (the part this change touches): for random vEgo <= set, random map nodes and targets, the decel envelope of the
+  selected curve with the car-relative notch is never HIGHER than today's. (Through the state machine this is not guaranteed pointwise:
+  a deeper map winner that is close can mask a vision curve that today would have started braking for -- measured, see the commit message.)"""
+  rng = random.Random(0x5EED)
+  for _ in range(400):
+    v_set = rng.uniform(22.0, 42.0)
+    v_ego = rng.uniform(8.0, v_set)
+    pts = _pts(*[(rng.uniform(30.0, 480.0), rng.uniform(8.0, 50.0)) for _ in range(rng.randint(1, 8))])
+    args = (pts, LAT0, LON0, v_ego, 500.0, C.A_DECEL, C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_set, C.MAP_MIN_SLOWDOWN,
+            rng.choice([0.0, 22.0]))
+
+    off = _env(VP.most_binding_map_curve(*args), v_ego)
+    on = _env(VP.most_binding_map_curve(*args, notch_ref=VP.notch_reference(v_set, v_ego)), v_ego)
+    assert on <= off + 1e-9, (v_set, v_ego, on, off)
+
+
+# ---------------------------------------------------------------- the recorded fixtures with the change ON (production default)
+
+def _fixtures():
+  from openpilot.selfdrive.controls.lib.vtsc_pnw.tests import release_later_frames as F
+  return (("OR34_LEFT", F.OR34_LEFT), ("TERWILLIGER_LEFT", F.TERWILLIGER_LEFT), ("OLYMPIA_11", F.OLYMPIA_11),
+          ("TERWILLIGER_2232", F.TERWILLIGER_2232))
+
+
+def test_on_is_never_a_higher_cap_than_off_on_the_four_recorded_fixtures(monkeypatch):
+  """Open loop (recorded vEgo) on every recorded fixture: with the change ON each 50 ms cap is <= the cap with it OFF, apart from the
+  state-machine's own re-timing (reported by the margin below, measured at +0.34 m/s at most on these fixtures)."""
+  worst = 0.0
+  for name, fr in _fixtures():
+    on, off = H.replay(monkeypatch, fr, notch_vego=True), H.replay(monkeypatch, fr, notch_vego=False)
+    worst = max(worst, max(a["cap"] - b["cap"] for a, b in zip(on, off, strict=True)))
+    assert min(_caps(on)) <= min(_caps(off)) + 1e-9, name
+  assert worst <= 0.5, worst
+
+
+def test_or34_baseline_with_the_change_on(monkeypatch):
+  """OR-34 (set 85, vEgo 82-84): OFF reproduces the recorded 75 mph floor; ON (production) floors at ~73.8 mph (the notch is measured from vEgo
+  36.6 m/s: 36.6 - 4.5 = 32.1 target vs 33.5) -- a deliberate, small deepening; the state sequence is unchanged."""
+  from openpilot.selfdrive.controls.lib.vtsc_pnw.tests import release_later_frames as F
+  on = H.replay(monkeypatch, F.OR34_LEFT, release_later=False, notch_vego=True)
+  off = H.replay(monkeypatch, F.OR34_LEFT, release_later=False, notch_vego=False)
+  t = H.secs("08:10:42")
+  def at(rows):
+    return next(r for r in rows if r["t"] >= t)
+  assert 74.5 <= at(off)["cap"] / MPH <= 76.0
+  assert 73.0 <= at(on)["cap"] / MPH < at(off)["cap"] / MPH
+  assert [r["state"] for r in on][::20] == [r["state"] for r in off][::20]
+
+
+def test_map_ref_reaches_the_overlay_and_the_ces_events_tick(monkeypatch):
+  """mapRef (the held notch reference) is in VTSCStatus and in the explicit list ces_pnw lifts into every ces_events tick."""
+  import json
+  from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw
+  fr = _frames(38.0, SET, BEND_B)
+  rows = H.replay(monkeypatch, fr, notch_vego=True)
+  pay = [r["pay"] for r in rows if r["pay"]["mapRaw"] > 0][0]
+  assert pay["mapRef"] == pytest.approx(38.0, abs=0.01)                          # the car's speed, not the set speed
+  assert "mapRef" in ces_pnw.VTSC_TELE_KEYS
+  assert H.replay(monkeypatch, fr, notch_vego=False)[40]["pay"]["mapRef"] == pytest.approx(SET, abs=0.01)
+  assert json.loads(json.dumps(pay))["mapRef"] == pay["mapRef"]
+
+
+def test_a_non_finite_vego_falls_back_to_the_set_speed_and_says_so_once(monkeypatch):
+  from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_controller as VC
+  errs = []
+  monkeypatch.setattr(VC.cloudlog, "error", lambda msg, *a, **k: errs.append(msg))
+  c = H.make_controller(monkeypatch)[0]
+  c._state = "brake"
+  for _ in range(3):
+    assert c._notch_ref(40.0, float("nan")) == 40.0
+  assert len(errs) == 1 and "non-finite vEgo" in errs[0]

@@ -69,7 +69,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_constants import (A_LAT_TARG
 # Module-level so vtsc_pnw's tests can assert the publisher actually emits all of them -- see
 # VTSCController.overlay_payload(). Adding a key here without adding it there (or vice versa) silently
 # produces a null column that reads as "the feature did not trigger"; that has happened three times.
-VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "visK", "visD", "visV",
+VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "mapRef", "visK", "visD", "visV",
                   "mapK", "mapKD", "mapKV", "mapKN", "mapKAhead",
                   "apexCurvature", "apexDist", "vCurveSafe", "curveWin", "rsnMap", "rsnVis",
                   "timeToApex",

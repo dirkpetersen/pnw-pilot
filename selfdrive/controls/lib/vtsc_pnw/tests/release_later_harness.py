@@ -44,7 +44,7 @@ def secs(hms: str) -> float:
   return int(h) * 3600 + int(m) * 60 + int(s)
 
 
-def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_later=None, notch_vego=False):
+def make_controller(monkeypatch, fp="TESLA_MODEL_S_HW3", brand="tesla", release_later=None, notch_vego=None):
   """A real VTSCController (Standard mode, map curves ON) on a fake clock; returns (ctrl, clock list)."""
   clock = [1000.0]
   monkeypatch.setattr(VC.time, "monotonic", lambda: clock[0])

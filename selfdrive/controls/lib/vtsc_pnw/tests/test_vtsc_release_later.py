@@ -47,9 +47,10 @@ def _synthetic(v_ego, v_set, cam_v, cam_d, pts, seconds=8):
 # ---------------------------------------------------------------- the three real cases
 
 def test_replay_reproduces_the_recorded_vtsc_behaviour(monkeypatch):
-  """The harness is only worth trusting if the baseline reproduces the logs: OR-34 capped at the set-10 floor (75 mph), brake -> hold ->
+  """(Recorded with today's set-relative notch, so replayed with vtsc_notch_vego OFF; the production ON numbers are pinned in
+  test_vtsc_notch_vego.py.) The harness is only worth trusting if the baseline reproduces the logs: OR-34 capped at the set-10 floor (75 mph), brake -> hold ->
   release at 08:10:44, cap climbing back toward 85 while the camera target falls."""
-  rows = H.replay(monkeypatch, F.OR34_LEFT, release_later=False)
+  rows = H.replay(monkeypatch, F.OR34_LEFT, release_later=False, notch_vego=False)
   by_s = {}
   for r in rows:
     by_s.setdefault(int(r["t"]), r)
@@ -65,8 +66,8 @@ def test_or34_release_is_deferred_so_the_cap_holds_at_75(monkeypatch):
   apex 56 -> 16 m, tta 1.58 -> 0.45 s) and the cap climbed 75 -> 85 while the camera target fell to 63. Now, IN release, the cap stays
   frozen while the target falls (state machine untouched, so the re-arm to brake still runs). HONEST: the frozen cap is ~75, not the
   camera's 63-66 -- freezing does not reduce."""
-  on = H.replay(monkeypatch, F.OR34_LEFT, release_later=True)
-  off = H.replay(monkeypatch, F.OR34_LEFT, release_later=False)
+  on = H.replay(monkeypatch, F.OR34_LEFT, release_later=True, notch_vego=False)
+  off = H.replay(monkeypatch, F.OR34_LEFT, release_later=False, notch_vego=False)
   win = [(a, b) for a, b in zip(on, off, strict=True) if H.secs("08:10:43") <= a["t"] <= H.secs("08:10:47")]
   assert max(a["cap"] for a, _ in win) / MPH <= 75.3
   assert max(b["cap"] for _, b in win) / MPH > 84.0                        # today
@@ -77,8 +78,8 @@ def test_or34_release_is_deferred_so_the_cap_holds_at_75(monkeypatch):
 
 
 def test_terwilliger_release_is_deferred_so_the_cap_holds_at_65(monkeypatch):
-  on = H.replay(monkeypatch, F.TERWILLIGER_LEFT, release_later=True)
-  off = H.replay(monkeypatch, F.TERWILLIGER_LEFT, release_later=False)
+  on = H.replay(monkeypatch, F.TERWILLIGER_LEFT, release_later=True, notch_vego=False)
+  off = H.replay(monkeypatch, F.TERWILLIGER_LEFT, release_later=False, notch_vego=False)
   w = [(a, b) for a, b in zip(on, off, strict=True) if H.secs("22:35:12") <= a["t"] <= H.secs("22:35:14")]
   assert max(a["cap"] for a, _ in w) / MPH <= 65.1
   assert max(b["cap"] for _, b in w) / MPH > 68.0

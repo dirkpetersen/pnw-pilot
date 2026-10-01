@@ -372,7 +372,7 @@ def notch_reference(v_set: float, v_ego: float, enabled: bool = True) -> float:
   min(set, vEgo): exactly `v_set` whenever vEgo >= set (so every such tick is byte-identical to today), lower otherwise.
   vEgo is floored at C.V_MIN (the controller never commands a curve speed below it) so a crawling / zero / noisy vEgo cannot push the
   notch to ~0 and fold every map node; a set speed already below V_MIN is returned as is. A non-finite vEgo returns v_set (today's
-  behaviour -- carState never publishes one, and the same bad value would already raise in brake_cap_for_apex, whose caller logs it).
+  behaviour; carState never publishes one).
   This is the LIVE value; VTSCController._notch_ref holds it through a curve episode so it cannot chase the car down."""
   if not enabled or not math.isfinite(v_ego) or v_ego >= v_set:
     return v_set
@@ -396,8 +396,9 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   Returns (v_target, dist, is_sharp, v_raw, floored): v_target is the effective (scaled+clamped, and
   possibly floored -- see below) target, v_raw is the UNSCALED mapd target for that same curve, and
   floored says the curvefloor2pnw minimum-slowdown floor was applied to at least one candidate.
-  notch_ref (vtscnotch2pnw): the speed the minimum-slowdown notch is measured from; None = v_cruise_cap (today). The clamp
-  min(tv*scale, v_cruise_cap) stays on v_cruise_cap (the true SET speed) either way.
+  notch_ref (vtscnotch2pnw): the speed a DEEPER minimum-slowdown notch is measured from; None = v_cruise_cap (today). A point it does
+  not floor falls back to the set-relative notch (two tiers: never shallower than today). The clamp min(tv*scale, v_cruise_cap)
+  stays on v_cruise_cap (the true SET speed) either way.
   (0.0, inf, False, 0.0, False) if no point / no data. Pure."""
   if not points or cur_lat is None or cur_lon is None:
     return 0.0, float('inf'), False, 0.0, False
@@ -436,6 +437,10 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     shallow_floor = False
     if math.isfinite(v_cruise_cap):
       notch = (v_cruise_cap if notch_ref is None else notch_ref) - min_slowdown
+      if not (tv < notch <= tv_eff):
+        # two tiers: where the car-relative notch does not floor this point, today's set-relative floor still applies, so the
+        # change is never SHALLOWER than today (it only adds the deeper car-relative notch where that one applies)
+        notch = v_cruise_cap - min_slowdown
       if tv < notch <= tv_eff:               # raw says slow down, scaled says don't
         # Target mapd's OWN raw advisory, but bounded on BOTH sides:
         #   never SHALLOWER than the minimum notch (else it wouldn't clear the gate downstream), and

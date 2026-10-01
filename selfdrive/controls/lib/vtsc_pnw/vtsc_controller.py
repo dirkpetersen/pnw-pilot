@@ -85,6 +85,7 @@ class VTSCController:
     # safe to call standalone; _finish() reads them on every tick including the disabled early-return.
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
+    self._tele_map_ref = 0.0     # vtscnotch2pnw telemetry: the notch reference of this tick's fold (0.0 = no fold)
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
@@ -127,6 +128,7 @@ class VTSCController:
     self._tele_gps_age = None    # gpsAge for this tick (s); None = the map fold uses no position with a fix time
     self._state = "idle"      # idle | brake | hold | release
     self._applied = None      # current applied cap (m/s); None = none
+    self._notch_nan_logged = False
     self._notch_held = None   # vtscnotch2pnw: the map-notch reference held through a curve episode (see _notch_ref)
     # sharpcurve2pnw: per-cycle effective decels. Normal commanded decel is capped to EV regen authority
     # (REGEN_A_DECEL ~0.2 g) -> the slowdown is coast/regen, no friction braking. A SHARP curve that regen
@@ -458,6 +460,9 @@ class VTSCController:
     set speed): measured live all the way, the notch would chase the car down as VTSC slows it (vEgo falls -> notch falls -> the cap falls ->
     vEgo falls...), and replayed on the 2026-09-30 bends a bend taken at set == vEgo went 81 -> 67 mph. Reset to live whenever the machine
     is idle again, so every episode starts from what the car is doing then. vEgo >= set -> the set speed, as before. Raven only."""
+    if not math.isfinite(v_ego) and not self._notch_nan_logged:
+      self._notch_nan_logged = True
+      cloudlog.error(f"VTSC: non-finite vEgo ({v_ego}) in the map notch -- using the set speed (today's notch) for it")
     live = notch_reference(v_set, v_ego, self.veh.vtsc_notch_from_vego)
     if self._state == "idle" or self._notch_held is None:
       self._notch_held = live
@@ -514,12 +519,13 @@ class VTSCController:
       return k_apex, d_apex, v_curve, False
     self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
     self._tele_map_floored = bool(floored)
+    self._tele_map_ref = float(notch_ref)         # vtscnotch2pnw: only by a fold that ran, like the rest of the map telemetry
     # curvefloor2pnw: the minimum-slowdown floor is applied PER-POINT inside most_binding_map_curve,
     # before the decel envelope -- doing it here, after selection, was provably suppressed by ordinary
     # multi-point map data (a gentle near node clamps to the set speed, ties on envelope, wins on
     # proximity, and its high raw target then blocks the floor). See that function for the full note.
     # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
-    if not (0.0 < mv < notch_ref - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
+    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
@@ -545,6 +551,7 @@ class VTSCController:
     # exception) republishes the previous enabled tick's map/vision values next to enabled=False.
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
+    self._tele_map_ref = 0.0     # vtscnotch2pnw telemetry: the notch reference of this tick's fold (0.0 = no fold)
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
@@ -995,6 +1002,7 @@ class VTSCController:
         # 2026-09-03, VtscMapCurves=1). A finite distance (incl. the 0.0 of a tick with no fold) is written as before.
         "mapD": round(float(self._tele_map_d), 0) if math.isfinite(self._tele_map_d) else None,
         "mapFlr": bool(self._tele_map_floored),
+        "mapRef": round(float(getattr(self, "_tele_map_ref", 0.0)), 2),   # vtscnotch2pnw: the held notch reference (m/s); = set speed when the switch is off
         # mapcurv2pnw: measured map curvature + what it would advise (m/s). Telemetry only.
         "mapK": round(float(self._tele_mapk), 5),
         "mapKD": round(float(self._tele_mapk_d), 0),

@@ -182,7 +182,7 @@ def test_the_fallback_drives_exactly_like_no_map_data(clock, logs, vision_k):
   got = _drive(clock, CURVE_OVERFLOW, vision_k=vision_k)
   want = _drive(clock, [], vision_k=vision_k)
   assert [cap for cap, _, _ in got] == [cap for cap, _, _ in want]
-  tele = ("mapRaw", "mapEff", "mapD", "mapFlr")
+  tele = ("mapRaw", "mapEff", "mapD", "mapFlr", "mapRef")
   assert [_without(m, *tele) for _, m, _ in got] == [_without(m, *tele) for _, m, _ in want]
   assert [_without(p, *tele, "mapErr") for _, _, p in got] == [_without(p, *tele, "mapErr") for _, _, p in want]
 
