@@ -6,6 +6,7 @@ Maytown / Scatter Creek / Silver Lake carried dir "" although each serves only o
 (WSDOT official names), so the southbound-only Maytown showed to northbound traffic.
 """
 
+import inspect
 import json
 import math
 import os
@@ -151,3 +152,143 @@ def test_real_i5_nearest_ahead_each_direction_from_a_midpoint():
   exp_s = min(geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) for r in items
               if r["dir"] == "S" and r["lat"] < mid_lat and geo.haversine_m(mid_lat, mid_lon, r["lat"], r["lon"]) / geo.M_PER_MILE <= lsd.REST_MAX_AHEAD_MI)
   assert abs(sb[1] - exp_s / geo.M_PER_MILE) < 0.1
+
+
+# ---- review round 1: select_rest helper, shared WayRef, long-baseline course ---------------------------------
+def _at(n_mi, e_mi):
+  """lat/lon n_mi north and e_mi east of (LAT0, LON0)."""
+  return LAT0 + n_mi * MI_LAT, LON0 + e_mi * MI_LAT / math.cos(math.radians(LAT0))
+
+
+def _ra_at(name, n_mi, e_mi, d="N", refs=("I 5",)):
+  lat, lon = _at(n_mi, e_mi)
+  return {"name": name, "lat": lat, "lon": lon, "dir": d, "refs": refs, "town": ""}
+
+
+def _sel(items, wayref="I 5", brg=0.0, corridor_brg=0.0, path=None, on_freeway=True, at=(0, 0)):
+  lat, lon = _at(*at)
+  return lsd.select_rest(items, lat, lon, brg, corridor_brg, path or [], wayref, on_freeway, max_mi=lsd.REST_MAX_AHEAD_MI)
+
+
+def _name(r):
+  return None if r[0] is None else r[0][0]["name"]
+
+
+def test_wayref_parts_split_and_normalise():
+  assert lsd._wayref_parts("I 5;US 12") == {"I 5", "US 12"}
+  assert lsd._wayref_parts(" i  5 ; us 12 ") == {"I 5", "US 12"}
+  assert lsd._wayref_parts("") == set() and lsd._wayref_parts(None) == set()
+
+
+def test_shared_wayref_matches_either_order_and_single():
+  items = [_ra("x", 30)]
+  assert _far(items, 0, wayref="I 5;US 12")[0] == "x"
+  assert _far(items, 0, wayref="US 12;I 5")[0] == "x"
+  assert _far(items, 0, wayref="I 5")[0] == "x"
+  assert _far(items, 0, wayref="US 97") is None
+  assert _far(items, 0, wayref="US 97;OR 99E") is None
+
+
+def test_select_rest_reaches_far_and_reports_mode():
+  r = _sel([_ra("e49", 49)])
+  assert _name(r) == "e49" and r[1] == "far"
+  r = _sel([_ra("e10", 10)])
+  assert _name(r) == "e10" and r[1] == "corridor"
+
+
+def test_select_rest_fallback_stays_15_mi_with_the_perp_rule():
+  # no WayRef: geometric fallback, cone ahead, 15 mi cap, 1.5 mi perpendicular rule
+  r = _sel([_ra_at("near", 10, 0.5)], wayref="")
+  assert _name(r) == "near" and r[1] == "15mi-no-wayref"
+  assert _name(_sel([_ra_at("far", 30, 0.0)], wayref="")) is None          # 30 mi: NOT the far reach
+  assert _name(_sel([_ra_at("wide", 10, 3.0)], wayref="")) is None          # 3 mi off the line: perp rule
+  r = _sel([_ra_at("near", 10, 0.5, refs=("I 90",))], wayref="I 5")
+  assert _name(r) == "near" and r[1] == "15mi-no-corridor-hit"
+  assert _name(_sel([_ra_at("far", 30, 0.0, refs=("I 90",))], wayref="I 5")) is None
+
+
+def test_select_rest_off_freeway_uses_the_surface_radius():
+  r = _sel([_ra_at("a", 2, 0), _ra_at("b", 20, 0)], on_freeway=False)
+  assert _name(r) == "a" and r[1] == "surface"
+  assert _name(_sel([_ra_at("b", 20, 0)], on_freeway=False)) is None
+
+
+def test_missing_course_clamps_to_15_in_select_rest():
+  assert _name(_sel([_ra_at("m", 40, 0)], corridor_brg=None)) is None
+  assert _name(_sel([_ra_at("m", 10, 0)], corridor_brg=None)) == "m"
+
+
+def test_behind_is_strict_at_100_and_120_degrees():
+  for bearing in (100.0, 120.0):
+    n, e = 10 * math.cos(math.radians(bearing)), 10 * math.sin(math.radians(bearing))
+    assert _name(_sel([_ra_at("b", n, e, d="")])) is None, bearing
+  n, e = 10 * math.cos(math.radians(80.0)), 10 * math.sin(math.radians(80.0))
+  assert _name(_sel([_ra_at("ok", n, e, d="")])) == "ok"
+
+
+def test_mode_log_is_change_only(monkeypatch):
+  lines = []
+  monkeypatch.setattr(lsd.cloudlog, "info", lambda m, *a, **k: lines.append(a))
+  log = lsd.RestModeLog()
+  for m in ["far", "far", "far", "15mi-no-wayref", "15mi-no-wayref", "far"]:
+    log.update(m, "I 5", True)
+  assert [a[1] for a in lines] == ["far", "15mi-no-wayref", "far"]
+
+
+def test_main_wires_the_helper_with_the_far_reach():
+  src = inspect.getsource(lsd.main)
+  assert src.count("select_rest(static.rest") == 1
+  call = src[src.index("select_rest(static.rest"):]
+  call = call[:call.index(")")]
+  assert "max_mi=REST_MAX_AHEAD_MI" in call
+  assert "heading_track.update(" in src and "rest_log.update(" in src
+  assert "_line_rest_corridor(" not in src and "_line_static(static.rest" not in src
+
+
+# --- HeadingTrack
+def _drive(track, pts, brg_inst=None, t0=0.0, dt=10.0):
+  out = None
+  for i, (lat, lon) in enumerate(pts):
+    out = track.update(t0 + i * dt, lat, lon, brg_inst)
+  return out
+
+
+def _line(n0, n1, step=0.05, e=0.0):
+  n = n0
+  while n <= n1 + 1e-9:
+    yield _at(n, e)
+    n += step
+
+
+def test_track_uses_inst_when_short_then_the_long_baseline():
+  tr = lsd.HeadingTrack()
+  assert tr.update(0.0, *_at(0, 0), 123.0) == 123.0                       # one fix: instantaneous
+  assert _drive(tr, list(_line(0, 0.5)), 123.0) == 123.0                  # <1 mi of history: instantaneous
+  b = _drive(tr, list(_line(0.5, 8.0)), 123.0, t0=100.0)                  # 8 mi due north: course ~0, not 123
+  assert b < 1.0 or b > 359.0
+  assert _drive(lsd.HeadingTrack(), [_at(0, 0)], None) is None             # no history, no heading
+
+
+def test_track_resets_on_a_jump_or_stale_gap():
+  tr = lsd.HeadingTrack()
+  _drive(tr, list(_line(0, 8.0)), 90.0)
+  assert tr.update(500.0, *_at(30, 0), 90.0) == 90.0                       # teleport: history dropped
+  tr2 = lsd.HeadingTrack()
+  _drive(tr2, list(_line(0, 8.0)), 90.0)
+  assert tr2.update(5000.0, *_at(8.0, 0.01), 45.0) == 45.0                 # stale: history dropped
+
+
+def test_bend_case_real_i5_sideways_heading_still_finds_the_right_side():
+  items = _i5_items()
+  # northbound on I-5 south of SeaTac (real coordinates); the instantaneous heading is sideways (E-W bend)
+  start = (47.10, -122.40)
+  end = (47.22, -122.36)
+  tr = lsd.HeadingTrack()
+  pts = [(start[0] + (end[0] - start[0]) * i / 80, start[1] + (end[1] - start[1]) * i / 80) for i in range(81)]
+  course = _drive(tr, pts, 100.0)
+  assert course is not None and abs(geo.normalize180(course - 20.0)) < 15.0     # ~NNE, not 100
+  lat, lon = end
+  bad = lsd._line_rest_corridor(items, lat, lon, 100.0, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)
+  good = lsd._line_rest_corridor(items, lat, lon, course, "I 5", max_mi=lsd.REST_MAX_AHEAD_MI)
+  assert good[0]["name"] == "SeaTac" and good[0]["dir"] == "N"
+  assert bad is None or bad[0]["name"] != "SeaTac"                              # the sideways heading loses it

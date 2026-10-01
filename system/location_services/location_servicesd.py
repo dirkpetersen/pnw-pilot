@@ -1488,6 +1488,12 @@ _REST_FILE_REFS = {"i5": ("I 5",), "i90": ("I 90",), "i82": ("I 82",), "us12_us9
 _DIR_BEARING = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}
 
 
+def _wayref_parts(wayref):
+  """mapd's WayRef is the raw OSM ref and may name several roads on a shared stretch ("I 5;US 12").
+  Returns the set of normalised parts (stripped, single-spaced, upper-case); empty set when there is none."""
+  return {" ".join(p.split()).upper() for p in (wayref or "").split(";") if p.strip()}
+
+
 def _line_rest_corridor(items, lat, lon, brg, wayref, max_mi=DISPLAY_MAX_MI):
   """rest2pnw (2026-07-09): corridor-IDENTITY rest-area selection. The 10-mi rest preview flapped
   in/out on curving I-5 because beyond mapd's ~350 m path, 'ahead' projects onto the straight
@@ -1501,13 +1507,14 @@ def _line_rest_corridor(items, lat, lon, brg, wayref, max_mi=DISPLAY_MAX_MI):
   restfar2pnw: `max_mi` is the reach (main passes REST_MAX_AHEAD_MI). Without a heading the direction and
   "behind" tests cannot run, so the reach is clamped back to DISPLAY_MAX_MI rather than showing a far
   facility that may be behind us or on the other carriageway."""
-  if not wayref:
+  parts = _wayref_parts(wayref)
+  if not parts:
     return None
   if brg is None:
     max_mi = min(max_mi, DISPLAY_MAX_MI)
   best, best_mi = None, None
   for it in items:
-    if wayref not in it.get("refs", ()):
+    if not parts.intersection(it.get("refs", ())):
       continue
     db = _DIR_BEARING.get((it.get("dir") or "").upper())
     if db is not None and brg is not None and abs(geo.normalize180(db - brg)) > 90.0:
@@ -1522,6 +1529,68 @@ def _line_rest_corridor(items, lat, lon, brg, wayref, max_mi=DISPLAY_MAX_MI):
   if best is None:
     return None
   return best, round(best_mi, 1)
+
+
+class HeadingTrack:
+  """restfar2pnw: long-baseline course for the REST corridor selection only. The instantaneous GPS heading
+  points sideways on a bend (a N-S freeway running E-W through Tacoma/Olympia/Snoqualmie), so the 90-degree
+  ahead/side tests pick wrong-side or behind rest areas. Keep breadcrumbs (a fix per CRUMB_MI moved) and use
+  the bearing from the crumb >= BASE_MI back to now; with less history use the farthest crumb if it is at
+  least MIN_BASE_MI back; otherwise the instantaneous heading; None stays None (caller clamps to 15 mi)."""
+  CRUMB_MI, BASE_MI, MIN_BASE_MI, MAX_CRUMBS, MAX_AGE_S, JUMP_MI = 0.1, 5.0, 1.0, 100, 1200.0, 2.0
+
+  def __init__(self):
+    self.crumbs = []          # (monotonic t, lat, lon), oldest first
+
+  def update(self, now, lat, lon, inst_brg):
+    mi = geo.M_PER_MILE
+    if self.crumbs:
+      last = self.crumbs[-1]
+      d = geo.haversine_m(last[1], last[2], lat, lon) / mi
+      if d > self.JUMP_MI or now - last[0] > self.MAX_AGE_S:
+        self.crumbs = []                                   # gap / teleport: the old track is not our course
+      elif d >= self.CRUMB_MI:
+        self.crumbs.append((now, lat, lon))
+    if not self.crumbs:
+      self.crumbs.append((now, lat, lon))
+    self.crumbs = self.crumbs[-self.MAX_CRUMBS:]
+    pick = None
+    for c in reversed(self.crumbs):                        # most recent crumb that is at least BASE_MI back
+      if geo.haversine_m(c[1], c[2], lat, lon) / mi >= self.BASE_MI:
+        pick = c
+        break
+    if pick is None:
+      far = self.crumbs[0]                                 # oldest = farthest on a track that did not double back
+      if geo.haversine_m(far[1], far[2], lat, lon) / mi >= self.MIN_BASE_MI:
+        pick = far
+    if pick is None:
+      return inst_brg
+    return geo.bearing_deg(pick[1], pick[2], lat, lon)
+
+
+def select_rest(items, lat, lon, brg, corridor_brg, path, wayref, on_freeway, max_mi):
+  """The whole rest-area selection (restfar2pnw). Returns ((poi, dist_mi) or None, mode).
+  Freeway: tagged corridor first, out to max_mi, using corridor_brg (the long-baseline course); else the
+  old geometry, ALWAYS at DISPLAY_MAX_DIST_M (15 mi) with the REST_MAX_PERP_M rule. Off freeway: surface radius."""
+  if not on_freeway:
+    return _nearest_within(items, lat, lon, SURFACE_RANGE_MI), "surface"
+  r = _line_rest_corridor(items, lat, lon, corridor_brg, wayref, max_mi=max_mi)
+  if r is not None:
+    return r, ("far" if r[1] > DISPLAY_MAX_MI else "corridor")
+  mode = "15mi-no-wayref" if not _wayref_parts(wayref) else "15mi-no-corridor-hit"
+  return _line_static(items, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M), mode
+
+
+class RestModeLog:
+  """Change-only log of the rest reach mode, so a silent drop to the 15 mi fallback is visible."""
+  def __init__(self):
+    self.mode = None
+
+  def update(self, mode, wayref, have_heading):
+    if mode != self.mode:
+      cloudlog.info("location_services: rest reach mode %s -> %s (wayref=%r heading=%s)", self.mode, mode, wayref,
+                    "ok" if have_heading else "none")
+      self.mode = mode
 
 
 def _line_static(items, lat, lon, brg, path, max_perp_m=None, max_dist_m=None):
@@ -1789,7 +1858,8 @@ def main():
   is_tesla = _read_is_tesla(params)          # Tesla -> alternate Supercharger<->other; refreshed periodically below
   last_car_check = 0.0
   road_hold = RoadCtxHold()
-  last_rest_mode = None
+  heading_track = HeadingTrack()
+  rest_log = RestModeLog()
 
   while True:
     # toggles-invert2pnw: DisableLocationServices is opt-out (ON == disabled); enabled by default.
@@ -1836,18 +1906,11 @@ def main():
       # rest area (car-agnostic). rest2pnw (2026-07-09): corridor-identity selection FIRST — stable
       # 15 mi previews on a known corridor (no heading-line flapping on curves); geometric fallback
       # only when mapd has no WayRef / we're on an untagged corridor.
+      rest_brg = heading_track.update(now, lat, lon, brg)     # long-baseline course, rest corridor only
+      r, rest_mode = select_rest(static.rest, lat, lon, brg, rest_brg, path, wayref, on_freeway,
+                                 max_mi=REST_MAX_AHEAD_MI)
       if on_freeway:
-        r = _line_rest_corridor(static.rest, lat, lon, brg, wayref, max_mi=REST_MAX_AHEAD_MI)
-        rest_mode = ("far" if r is not None and r[1] > DISPLAY_MAX_MI else "corridor" if r is not None else
-                     "15mi-no-wayref" if not wayref else "15mi-no-corridor-hit")
-        if rest_mode != last_rest_mode:           # change-only: say loudly when the far reach is not in effect
-          cloudlog.info("location_services: rest reach mode %s -> %s (wayref=%r brg=%s)", last_rest_mode, rest_mode,
-                        wayref, "none" if brg is None else "ok")
-          last_rest_mode = rest_mode
-        if r is None:
-          r = _line_static(static.rest, lat, lon, brg, path, max_perp_m=REST_MAX_PERP_M, max_dist_m=DISPLAY_MAX_DIST_M)
-      else:
-        r = _nearest_within(static.rest, lat, lon, SURFACE_RANGE_MI)
+        rest_log.update(rest_mode, wayref, rest_brg is not None)
       r = rest_hold.update(r, now, lat, lon)   # debounce: anti-flicker on curves + drop-when-passed (distance-trend)
 
       # EV chargers: first DROP any charger we've left >EV_RECEDE_MI behind (so the next-nearest shows), then select.
