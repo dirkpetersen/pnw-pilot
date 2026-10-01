@@ -27,5 +27,8 @@ def test_error_is_one_line_and_bounded():
 
 def test_ui_text():
   assert st.ui_text(False, "connected 100.1.1.1") == "off"      # stale param never shown while the toggle is off
+  assert st.ui_text(False, "connecting") == "off"
+  stuck = "error tailscaled still running after toggle off; could not stop it"
+  assert st.ui_text(False, stuck) == stuck                      # ...but a stuck daemon must stay visible after OFF
   assert st.ui_text(True, "") == "starting"                     # on, daemon not yet heard from
   assert st.ui_text(True, "error boom") == "error boom"

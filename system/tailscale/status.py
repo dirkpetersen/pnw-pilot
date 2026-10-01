@@ -58,8 +58,9 @@ def title_word(text: str) -> str:
 
 
 def ui_text(enabled: bool, raw: str) -> str:
-  """What the settings screen shows for the toggle. Toggle off -> 'off' no matter what a stale param says;
-  toggle on but the daemon has not published yet -> 'starting' (not silence)."""
+  """What the settings screen shows for the toggle. Toggle off -> 'off' no matter what a stale param says, EXCEPT an
+  error (e.g. 'tailscaled still running after toggle off') which must stay visible; toggle on but the daemon has not
+  published yet -> 'starting' (not silence)."""
   if not enabled:
-    return OFF
+    return raw if raw.startswith(ERROR_PREFIX) else OFF
   return raw if raw else "starting"

@@ -31,6 +31,7 @@ STATE_FILE = os.path.join(STATE_DIR, "tailscaled.state")
 SOCKET = os.path.join(STATE_DIR, "tailscaled.sock")
 DAEMON_LOG = os.path.join(STATE_DIR, "tailscaled.log")  # truncated at each tailscaled start: bounded
 AUTHKEY_FILE = "/data/pnw/secrets/tailscale.authkey"
+PROC_DIR = "/proc"
 TUN_DEVICE = "/dev/net/tun"
 
 INSTALL_BACKOFF_MIN_S = 600.0   # a failed 36 MB download is retried no sooner than 10 min, doubling, capped at 1 h
@@ -55,8 +56,11 @@ def redact(text: str) -> str:
 
 class TailscaleDaemon:
   def __init__(self, params, run=subprocess.run, popen=subprocess.Popen, clock=time.monotonic,
-               exists=os.path.exists, authkey_path: str = AUTHKEY_FILE, sleep=time.sleep):
+               exists=os.path.exists, authkey_path: str = AUTHKEY_FILE, sleep=time.sleep,
+               proc_dir: str | None = None):
     self._sleep = sleep
+    self.proc_dir = proc_dir or PROC_DIR
+    self._logged: set[str] = set()   # error lines already written during this stop episode (change-only logging)
     self.stuck = False         # a tailscaled we failed to stop is still running while the toggle is OFF
     self.params = params
     self._run_fn = run
@@ -81,8 +85,11 @@ class TailscaleDaemon:
   def publish(self, text: str) -> None:
     if text == self.last_status:
       return
+    first = self.last_status is None
     self.last_status = text
     self.params.put("TailscaleStatus", text)
+    if first and text == st.OFF:
+      return  # steady-state OFF at startup: no log line
     if text.startswith(st.ERROR_PREFIX) or text == st.NEEDS_AUTH_KEY:
       cloudlog.error(f"tailscale: {text}")
     else:
@@ -106,6 +113,12 @@ class TailscaleDaemon:
     health = ((parsed or {}).get("Health") or ["no reason reported; is the Tailscale control plane reachable?"])[0]
     self.publish(st.error(redact(f"not connected for over {int(CONNECT_TIMEOUT_S // 60)} min: {health}")))
     return POLL_STEADY_S  # already reported; poll slowly
+
+  def log_error_once(self, msg: str) -> None:
+    """Error lines on the stop path repeat identically on every retry; write each distinct one once per episode."""
+    if msg not in self._logged:
+      self._logged.add(msg)
+      cloudlog.error(msg)
 
   def fail(self, reason: str) -> float:
     """Publish an error, count it, return the backoff to wait before the next attempt."""
@@ -187,11 +200,11 @@ class TailscaleDaemon:
   def _still_running(self) -> bool:
     """True if any tailscaled is alive: pgrep finds it, or it still answers on the socket. A pgrep that cannot run
     is treated as 'alive' -- an error must never read as 'gone'."""
-    rc, _, err = self._run(["pgrep", "-x", "tailscaled"], 2)
+    rc, _, err = self._run(["pgrep", "-x", "tailscaled"], 1)
     if rc == 0:
       return True
     if rc != 1:
-      cloudlog.error(f"tailscale: pgrep failed rc={rc}: {err.strip()}")
+      self.log_error_once(f"tailscale: pgrep failed rc={rc}: {err.strip()}")
       return True
     return self._cli("status", "--json", timeout=1.0)[0] == 0
 
@@ -203,14 +216,14 @@ class TailscaleDaemon:
         try:
           self.proc.wait(timeout=SHUTDOWN_WAIT_S)
         except subprocess.TimeoutExpired:
-          cloudlog.error("tailscale: sudo/tailscaled ignored SIGTERM")
+          self.log_error_once("tailscale: sudo/tailscaled ignored SIGTERM")
       self.proc = None
     if self._still_running():
       # proc.kill() would only kill the sudo wrapper and orphan the root daemon: signal tailscaled by name instead.
       prefix = ["sudo", "-n"] if self.kernel_mode else []
       rc, out, err = self._run([*prefix, "pkill", "-x", "tailscaled"], 1.5)
       if rc != 0:
-        cloudlog.error(f"tailscale: pkill tailscaled failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
+        self.log_error_once(f"tailscale: pkill tailscaled failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
       self._sleep(SHUTDOWN_SETTLE_S)
       return not self._still_running()
     return True
@@ -237,7 +250,7 @@ class TailscaleDaemon:
   def tick(self) -> float:
     """Advance once; returns seconds to sleep before the next tick."""
     if not self.params.get_bool("TailscaleEnabled"):
-      self.shutdown()
+      self._off_tick()
       return POLL_STEADY_S
 
     # Toggle ON but never enrolled and no usable key: nothing to do yet. Do not download, do not start tailscaled.
@@ -322,6 +335,45 @@ class TailscaleDaemon:
     """Rule 3: IsOnroad follows ignition (a parked, charging Lightning reads 1), so 'driving' = onroad AND not in Park."""
     return self.params.get_bool("IsOnroad") and not self.params.get_bool("GearPark")
 
+  def _tailscaled_pids(self) -> list[int] | None:
+    """Scan /proc/*/comm for exactly 'tailscaled' -- no subprocess. None = /proc could not be read (never 'none')."""
+    try:
+      entries = os.listdir(self.proc_dir)
+    except OSError as e:
+      self.log_error_once(f"tailscale: cannot scan {self.proc_dir} for a leftover tailscaled: {e}")
+      return None
+    pids = []
+    for name in entries:
+      if not name.isdigit():
+        continue
+      try:
+        with open(os.path.join(self.proc_dir, name, "comm")) as f:
+          comm = f.read().strip()
+      except (FileNotFoundError, ProcessLookupError):
+        continue  # the process exited while we scanned
+      except OSError as e:
+        self.log_error_once(f"tailscale: cannot read {self.proc_dir}/{name}/comm: {e}")
+        return None
+      if comm == "tailscaled":
+        pids.append(int(name))
+    return pids
+
+  def _off_tick(self) -> None:
+    """Toggle OFF. Steady state costs one /proc scan per poll: no subprocess, no log, no write. A leftover root
+    tailscaled (manager killed mid-shutdown, failed stop, orphan) is stopped here, since nothing else will notice it."""
+    if self.proc is None and not self.adopted and not self.stuck:
+      pids = self._tailscaled_pids()
+      if pids is None:
+        self.publish(st.error("cannot check for a leftover tailscaled (/proc unreadable)"))
+        return
+      if not pids:
+        self.publish(st.OFF)
+        return
+      cloudlog.error(f"tailscale: toggle is OFF but tailscaled is running (pids {pids}); stopping it")
+      self._detect_mode()
+      self.stuck = True
+    self.shutdown()
+
   def _hostname(self) -> str:
     dongle = self.params.get("DongleId")
     if isinstance(dongle, bytes):
@@ -340,7 +392,7 @@ class TailscaleDaemon:
       return
     rc, out, err = self._cli("down", timeout=SHUTDOWN_DOWN_TIMEOUT_S)
     if rc != 0:
-      cloudlog.error(f"tailscale: `tailscale down` failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
+      self.log_error_once(f"tailscale: `tailscale down` failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
     gone = self.stop_tailscaled()
     self.adopted = False
     self.fail_count = 0
@@ -351,6 +403,7 @@ class TailscaleDaemon:
       self.publish(st.error("tailscaled still running after toggle off; could not stop it"))
       return
     self.stuck = False
+    self._logged.clear()
     if publish_off:
       self.publish(st.OFF)
 

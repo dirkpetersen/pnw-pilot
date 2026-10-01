@@ -29,7 +29,9 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
   and the LTE metering ladder are unaffected. If `/dev/net/tun` and passwordless `sudo` exist it runs in kernel mode with
   `--netfilter-mode=off`; otherwise in userspace networking as the `comma` user (decided at runtime, logged).
 - `tailscaled` is started with `--no-logs-no-support` (no log upload to Tailscale).
-- Toggle OFF (any time): `tailscale down`, then `tailscaled` is stopped. Node state is kept, so turning it back ON
+- Toggle OFF (any time): `tailscale down`, then `tailscaled` is stopped **and verified gone** (never reports `off` while it
+  could still be reached). The `tailscale_pnw` process always runs but is inert while OFF (one `/proc` scan every 30 s; no
+  subprocess, network or log) and stops a leftover `tailscaled` if it finds one. Node state is kept, so turning it back ON
   reconnects as the same device without a new key.
 - No periodic network use of ours. Tailscale's own keepalive/netmap traffic: **idle MB/day is UNMEASURED** (estimate
   2-10 MB/day; measure `/proc/net/dev` over a day before relying on it on LTE).
@@ -89,6 +91,8 @@ verified on this device**. If `ssh` times out while the status says `connected`,
 | `error tailscale up failed ...` | Usually a rejected, expired or already-used key (single-use key consumed by an earlier failed enrolment): make a new one. |
 | `error not connected for over 3 min: ...` | Can't reach Tailscale (offline, captive portal not yet passed). Text is Tailscale's own health message. |
 | `error device needs approval ...` | Approve the device in the admin console (or generate a pre-approved key). |
+| `error tailscaled still running after toggle off ...` | The daemon could not be stopped (the status stays visible after OFF; it is retried every 30 s). If it persists: reboot the device. |
+| `error cannot check for a leftover tailscaled ...` | `/proc` was unreadable; report it. |
 | `error tailscaled exited rc=...` | Last line of `/data/pnw/tailscale/tailscaled.log` is shown; it is restarted with backoff. |
 
 Every state change is also in the device log (`cloudlog`, lines starting `tailscale:`).

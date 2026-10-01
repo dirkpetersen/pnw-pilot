@@ -63,7 +63,8 @@ class Harness:
   def __init__(self, tmp_path, tun=False, sudo_ok=True, enabled=True, enrolled=True):
     self.params = FakeParams(enabled)
     self.tun = tun
-    self.alive = False           # a tailscaled process exists (root, in its own session)
+    self.procdir = tmp_path.with_name(tmp_path.name + "_proc")   # fake /proc (outside tmp_path: 'OFF writes nothing')
+    self.procdir.mkdir()
     self.ignore_term = False     # SIGTERM to the sudo wrapper does not stop the daemon
     self.pkill_works = True
     self.root_socket = False     # socket is root-only: the CLI works only through sudo
@@ -77,7 +78,22 @@ class Harness:
     self.sudo_ok = sudo_ok
     self.keyfile = tmp_path / "authkey"
     self.d = tp.TailscaleDaemon(self.params, run=self.run, popen=self.popen, clock=lambda: self.now,
-                                exists=self._exists, authkey_path=str(self.keyfile))
+                                exists=self._exists, authkey_path=str(self.keyfile),
+                                sleep=lambda s: None, proc_dir=str(self.procdir))
+
+  @property
+  def alive(self):
+    """A tailscaled process exists (root, own session): visible to pgrep, to the socket and to the /proc scan."""
+    return (self.procdir / "4242" / "comm").exists()
+
+  @alive.setter
+  def alive(self, v):
+    d = self.procdir / "4242"
+    if v:
+      d.mkdir(exist_ok=True)
+      (d / "comm").write_text("tailscaled\n")
+    elif (d / "comm").exists():
+      (d / "comm").unlink()
 
   def _exists(self, p):
     return self.tun if p == tp.TUN_DEVICE else (self.enrolled if p == tp.STATE_FILE else True)
@@ -409,18 +425,16 @@ def test_A_off_is_inert_for_two_hours(world, tmp_path):
   h = Harness(tmp_path, enabled=False, enrolled=False)
   ticks = simulate(h, 120)
   assert world.installs == [] and h.calls == [] and h.procs == [], "OFF must do no download, subprocess or spawn"
-  assert h.params.statuses == ["off"]
+  assert h.params.statuses == ["off"]  # one write at startup, then nothing
   assert ticks <= 120 * 60 / tp.POLL_STEADY_S + 1       # param poll only, <= 1 per 30 s
   assert not any(tmp_path.iterdir()), "OFF must not write to disk"
-  assert len([m for lvl, m in world.logs]) == 1          # the single 'off' publish
+  assert world.logs == [], "OFF in steady state must not log"
 
 
-def test_A_manager_only_runs_it_while_the_toggle_is_on():
-  from openpilot.system.manager.process_config import managed_processes, tailscale_on
+def test_A_manager_always_runs_it_but_it_is_inert_while_off():
+  from openpilot.system.manager.process_config import always_run, managed_processes
   p = managed_processes["tailscale_pnw"]
-  assert p.should_run is tailscale_on and p.restart_if_crash
-  assert tailscale_on(False, FakeParams(enabled=False), None) is False
-  assert tailscale_on(True, FakeParams(enabled=True), None) is True      # on, driving or parked: it is not tied to IsOnroad
+  assert p.should_run is always_run and p.restart_if_crash   # inert while OFF: see test_A_off_is_inert_for_two_hours
 
 
 def test_A_param_registered_default_off():
@@ -586,7 +600,6 @@ def kh(tmp_path, monkeypatch):
   monkeypatch.setattr(tp, "DAEMON_LOG", str(tmp_path / "t.log"))
   monkeypatch.setattr(tp, "STATE_DIR", str(tmp_path))
   h = Harness(tmp_path, tun=True)
-  h.d._sleep = lambda s: None
   return h
 
 
@@ -649,10 +662,12 @@ def test_F1_pgrep_failure_is_not_read_as_gone(kh):
   assert kh.params.statuses[-1].startswith("error tailscaled still running")
 
 
-def test_F1_sighup_runs_the_shutdown_path(monkeypatch):
+def test_F1_sighup_runs_the_shutdown_path(monkeypatch, tmp_path):
   """tmux kill-session sends SIGHUP: main() must turn it into SystemExit so the finally block stops tailscaled."""
   import signal
   handlers = {}
+  (tmp_path / "proc").mkdir()
+  monkeypatch.setattr(tp, "PROC_DIR", str(tmp_path / "proc"))  # never scan (or stop!) a real tailscaled of the dev box
   monkeypatch.setattr(tp.signal, "signal", lambda sig, fn: handlers.__setitem__(sig, fn))
   monkeypatch.setattr(tp, "Params", lambda: FakeParams(enabled=False))
   monkeypatch.setattr(tp.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
@@ -674,3 +689,49 @@ def test_F6_up_is_idempotent_and_F7_daemon_is_niced(kh):
   kh.d.tick()
   assert "--reset" in kh.cmds("up")[0]
   assert callable(seen["preexec_fn"])
+
+
+# ---- Fable round 2: the process always runs; OFF notices and stops a leftover root tailscaled ------------------------
+def test_off_finds_a_leftover_tailscaled_in_proc_and_stops_it_via_sudo(world, tmp_path):
+  h = Harness(tmp_path, tun=True, enabled=False)
+  h.alive = True                      # orphan from a killed manager; the daemon has no handle on it
+  h.root_socket = True
+  h.d.tick()
+  assert h.alive is False and h.params.statuses[-1] == "off"
+  assert any(c[:2] == ["sudo", "-n"] for c in h.cmds("down")), "mode must be detected before the stop path runs"
+  assert h.cmds("pkill")[0][:2] == ["sudo", "-n"]
+  assert any("toggle is OFF but tailscaled is running" in m for _, m in world.logs)
+
+
+def test_off_orphan_that_cannot_be_stopped_stays_error_retries_and_logs_once(world, tmp_path):
+  """Mutation: disable the OFF-branch /proc probe -> the orphan is never noticed and this fails."""
+  h = Harness(tmp_path, tun=True, enabled=False)
+  h.alive, h.pkill_works = True, False
+  simulate(h, 120)
+  assert h.params.statuses == ["error tailscaled still running after toggle off; could not stop it"]
+  assert len(h.cmds("pkill")) >= 100                    # retried every 30 s
+  repeats = [m for _, m in world.logs if "pkill tailscaled failed" in m or "`tailscale down` failed" in m]
+  assert len(repeats) == len(set(repeats)) <= 2, repeats  # each distinct line once, not per attempt
+  h.pkill_works = True
+  simulate(h, 1)
+  assert h.params.statuses[-1] == "off" and h.alive is False
+
+
+def test_off_steady_state_costs_nothing_over_two_hours(world, tmp_path):
+  h = Harness(tmp_path, tun=True, enabled=False)
+  (h.procdir / "999").mkdir()                            # a pid that vanished mid-scan (no comm file)
+  (h.procdir / "1000").mkdir()
+  (h.procdir / "1000" / "comm").write_text("tailscale\n")   # similar name is not tailscaled
+  (h.procdir / "1001").mkdir()
+  (h.procdir / "1001" / "comm").write_text("tailscaled-x\n")
+  simulate(h, 120)
+  assert h.calls == [] and h.procs == [] and world.logs == [] and world.installs == []
+
+
+def test_off_unreadable_proc_is_an_error_logged_once_never_off(world, tmp_path):
+  h = Harness(tmp_path, enabled=False)
+  h.d.proc_dir = str(tmp_path / "no-such-proc")
+  simulate(h, 120)
+  assert h.params.statuses == ["error cannot check for a leftover tailscaled (/proc unreadable)"]
+  assert len([m for _, m in world.logs if "cannot scan" in m]) == 1
+  assert h.calls == []

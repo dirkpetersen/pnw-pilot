@@ -28,6 +28,9 @@ def _self(enabled, status):
 def test_status_line_shows_state_when_on_and_off_when_off():
   f = T.TogglesLayout._tailscale_text
   assert f(_self(False, "connected 100.1.2.3")) == "off"          # stale status never shown while the toggle is off
+  stuck = "error tailscaled still running after toggle off; could not stop it"
+  assert f(_self(False, stuck)) == stuck                          # an error survives toggle OFF
+  assert T.TogglesLayout._tailscale_title_suffix(SimpleNamespace(_tailscale_text=lambda: stuck)) == " - error"
   assert f(_self(True, b"needs auth key")) == "needs auth key"
   assert f(_self(True, "error up failed")) == "error up failed"
   assert f(_self(True, None)) == "starting"                        # on, daemon not heard from yet
