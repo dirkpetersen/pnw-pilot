@@ -866,7 +866,8 @@ def main():
                                "mapd cannot keep a stale limit or a stale relaxed-DM road in force")
           except Exception:
             cloudlog.exception("mapd_configd: could not clear MapSpeedLimit with mapd silent -- the last posted " +
-                               "limit STAYS in force for every consumer")
+                               "limit STAYS in force for every consumer, and the RoadContext/MapOneWay/MapLanes/" +
+                               "MapConditionalSpeedLimit clears after it were skipped too")
           mem.put_nonblocking("MapHighwayClass", "")
           mem.put_nonblocking("MapHighwayClassTs", str(time.monotonic()))
           # waysel2pnw: clear these too, so a dead mapd cannot leave a stale "current" in the log and

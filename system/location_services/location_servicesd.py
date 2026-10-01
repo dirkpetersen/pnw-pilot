@@ -765,6 +765,30 @@ def _read_mem(mem):
   return lat, lon, brg, path, ctx, wayref
 
 
+class RoadCtxHold:
+  """mapsl2pnw: mapd_configd clears the bridged RoadContext to "" when mapd dies (so driver monitoring falls strict). mapd
+  itself only ever publishes freeway/city/unknown, never "", so "" means cleared-or-never-set. Police keeps running with
+  mapd dead (its position comes from LastGPSPosition, not mapd), so "" must NOT read as "left the freeway" -- that would
+  drop the police `cap` (banner + speedadjust slowdown): a missed police report. Keep the last non-empty verdict, in memory
+  only; with no history "" stays "" (the existing default). One log line per transition."""
+  def __init__(self):
+    self.last = ""
+    self.holding = False
+
+  def update(self, ctx: str) -> str:
+    if ctx != "":
+      if self.holding:
+        cloudlog.info(f"location_services: RoadContext is live again ({ctx!r}); no longer holding {self.last!r}")
+        self.holding = False
+      self.last = ctx
+      return ctx
+    if self.last != "" and not self.holding:
+      cloudlog.warning(f"location_services: RoadContext cleared (mapd silent) -- holding the last verdict {self.last!r} " +
+                       "so police keeps its freeway behaviour")
+      self.holding = True
+    return self.last
+
+
 def next_police_backoff(cur_backoff: float, consec_fails: int, policy_denial: bool,
                         link_failure: bool = False) -> tuple[float, int]:
   """policebackoff2pnw: pure escalation rule -> (next_backoff_s, next_consecutive_failure_count).
@@ -1754,6 +1778,7 @@ def main():
   last_l2 = None
   is_tesla = _read_is_tesla(params)          # Tesla -> alternate Supercharger<->other; refreshed periodically below
   last_car_check = 0.0
+  road_hold = RoadCtxHold()
 
   while True:
     # toggles-invert2pnw: DisableLocationServices is opt-out (ON == disabled); enabled by default.
@@ -1776,6 +1801,7 @@ def main():
       last_car_check = now
 
     lat, lon, brg, path, ctx, wayref = _read_mem(mem)
+    ctx = road_hold.update(ctx)                # mapsl2pnw: a cleared "" keeps the last verdict (see RoadCtxHold)
     out = {"enabled": True, "ts": int(_now_epoch())}
 
     # Two rules (driver request 2026-06-28):

@@ -3,12 +3,8 @@ values as an UNKNOWN road: hold the last verdict for the 90 s window, then fall 
 'freeway' values kept the relaxed Highway timeouts on forever, even on city streets.)"""
 import pytest
 
-try:
-  from openpilot.selfdrive.monitoring.helpers import DriverMonitoring, DRIVER_MONITOR_SETTINGS
-  from openpilot.system.hardware import HARDWARE
-  AVAILABLE = True
-except Exception:   # pragma: no cover - environment guard
-  AVAILABLE = False
+from openpilot.selfdrive.monitoring.helpers import DriverMonitoring, DRIVER_MONITOR_SETTINGS
+from openpilot.system.hardware import HARDWARE
 
 
 class _Mem:
@@ -34,7 +30,6 @@ def _refresh(dm, n):
     dm._refresh_dm_mode()
 
 
-@pytest.mark.skipif(not AVAILABLE, reason="openpilot helpers deps unavailable")
 def test_cleared_road_values_fall_strict_after_the_hold_while_latched_ones_never_do():
   mem = _Mem(RoadContext="freeway", MapOneWay="1", MapLanes="3")
   dm = _dm(mem)
