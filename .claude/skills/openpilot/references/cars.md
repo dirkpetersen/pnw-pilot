@@ -15,7 +15,7 @@ have caused real failures.
 | Attribute | Value |
 |-----------|-------|
 | Platform | `FORD_F_150_LIGHTNING_MK1` |
-| VIN | `1FT6W3L78SWG05094` |
+| VIN | `1FT6W3L78SWG0XXXX` |
 | Battery / built | 131 kWh extended range / April 2025 |
 | Model-year range | 2022–2025 (one platform) |
 | Bus / harness | CAN FD (`FordCANFD` bus), `CarHarness.ford_q4` |
