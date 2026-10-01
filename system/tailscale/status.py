@@ -2,14 +2,19 @@
 anything heavy, so the settings UI and the tests can import it)."""
 from __future__ import annotations
 
-# The TailscaleStatus param holds exactly one of these shapes (the UI shows it verbatim).
-OFF = "off"
+# The TailscaleStatus param holds exactly one of these shapes (the UI shows it verbatim). The FIRST WORD is one of
+# connected / disconnected / unconfigured / connecting / installing / error (title_word); anything after it is a reason.
+OFF = "off"                 # the daemon's own steady state while Disable Remote SSH is ON; the UI shows DISABLED_TEXT
+UNCONFIGURED = "unconfigured"   # no auth key file AND no node state: nothing to run; the toggle stays OFF (the default)
 INSTALLING = "installing"
-NEEDS_AUTH_KEY = "needs auth key"
 CONNECTING = "connecting"
-INSTALL_DEFERRED = "install deferred until parked"
+INSTALL_DEFERRED = "installing - deferred until parked"
 CONNECTED_PREFIX = "connected "
+DISCONNECTED_PREFIX = "disconnected"
 ERROR_PREFIX = "error "
+DISABLED_TEXT = DISCONNECTED_PREFIX + " - disabled by this toggle"
+NO_INTERNET = DISCONNECTED_PREFIX + " - no internet"
+WORDS = ("connected", "disconnected", "unconfigured", "connecting", "installing", "error")
 
 MAX_REASON = 120
 
@@ -50,17 +55,16 @@ def title_word(text: str) -> str:
   """Short, bounded state word for the toggle title ('off' -> ''); the reason/address stays in the description."""
   if text == OFF:
     return ""
-  if text.startswith(CONNECTED_PREFIX):
-    return "connected"
-  if text.startswith(ERROR_PREFIX):
-    return "error"
-  return text  # installing / install deferred until parked / needs auth key / connecting / starting
+  first = text.split(" ", 1)[0]
+  return first if first in WORDS else text  # an unrecognised status is shown whole, never hidden
 
 
 def ui_text(enabled: bool, raw: str) -> str:
-  """What the settings screen shows for the toggle. Toggle off -> 'off' no matter what a stale param says, EXCEPT an
-  error (e.g. 'tailscaled still running after toggle off') which must stay visible; toggle on but the daemon has not
-  published yet -> 'starting' (not silence)."""
+  """What the settings screen shows for the 'Disable Remote SSH (Tailscale)' toggle. `enabled` = Remote SSH enabled,
+  i.e. the toggle is OFF (the default). Disabled -> 'disconnected - disabled by this toggle' no matter what a stale param
+  says, EXCEPT an error (e.g. 'tailscaled still running after toggle off') which must stay visible. Enabled but the
+  daemon has not published yet, or still shows its own 'off' from before the toggle flipped -> 'connecting' (not
+  silence, not a stale 'off')."""
   if not enabled:
-    return raw if raw.startswith(ERROR_PREFIX) else OFF
-  return raw if raw else "starting"
+    return raw if raw.startswith(ERROR_PREFIX) else DISABLED_TEXT
+  return raw if raw and raw != OFF else CONNECTING

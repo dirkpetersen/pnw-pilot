@@ -70,10 +70,10 @@ class _P:
     self.mode, self.la_mode, self.sign_on = mode, la_mode, sign_on
 
   def get(self, k, return_default=True):
-    if k == "FordSignSpeedLimit":
+    if k == "DisableFordSignSpeedLimit":
       if isinstance(self.sign_on, Exception):
         raise self.sign_on
-      return self.sign_on
+      return not self.sign_on          # sign_on = the camera is used = the Disable toggle is OFF
     return {"AutoSpeedReduce": str(self.mode), "LimitAheadMode": self.la_mode}.get(k)
 
 
@@ -367,7 +367,7 @@ class TestToggleAndStaleness:
     r.run(10.0, map_mph=70, cam=70)
     r.run(10.0, cam=55)
     assert r.limit == 55
-    assert any("FordSignSpeedLimit unreadable" in e for e in r.errors), r.errors
+    assert any("DisableFordSignSpeedLimit unreadable" in e for e in r.errors), r.errors
 
   def test_every_source_change_is_a_cloudlog_event(self, monkeypatch):
     r = Rig(monkeypatch)
@@ -622,13 +622,22 @@ class TestSelectorUnit:
 
 
 class TestToggleRegistration:
-  def test_param_defaults_on(self):
-    from openpilot.common.params import Params
-    assert Params().get("FordSignSpeedLimit", return_default=True) is True
+  def test_param_defaults_off_so_the_camera_is_used(self):
+    from openpilot.common.params import Params, UnknownKeyName
+    assert Params().get("DisableFordSignSpeedLimit", return_default=True) is False
+    with pytest.raises(UnknownKeyName):       # the retired positive-sense key is gone and nothing reads it
+      Params().get("FordSignSpeedLimit")
 
   def test_ui_toggle_is_defined_and_capability_gated_display_only(self):
     from pathlib import Path
     src = (Path(sa.__file__).resolve().parents[4] / "selfdrive/ui/layouts/settings/toggles.py").read_text()
-    assert src.count('"FordSignSpeedLimit": (') == 1 and src.count('"FordSignSpeedLimit": tr_noop(') == 1
-    assert 'self._toggles["FordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)' in src
-    assert 'put_bool("FordSignSpeedLimit"' not in src, "display-only gate: never rewrite the driver's setting"
+    assert src.count('"DisableFordSignSpeedLimit": (') == 1 and src.count('"DisableFordSignSpeedLimit": tr_noop(') == 1
+    assert 'self._toggles["DisableFordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)' in src
+    assert 'put_bool("DisableFordSignSpeedLimit"' not in src, "display-only gate: never rewrite the driver's setting"
+    assert "Disable Ford Camera Speed Limit" in src and "BC / km/h countries turn this ON" in src
+    assert '"FordSignSpeedLimit"' not in src
+
+  def test_controller_reads_the_inverted_param(self):
+    from pathlib import Path
+    src = Path(sa.__file__).with_name("speedadjust_controller.py").read_text()
+    assert 'params.get("DisableFordSignSpeedLimit"' in src and 'params.get("FordSignSpeedLimit"' not in src

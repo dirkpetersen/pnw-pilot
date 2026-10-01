@@ -1,5 +1,5 @@
 """tailscale2pnw daemon state machine, with subprocess mocked. Failure paths first: every one must end in an
-'error ...' / 'needs auth key' status, never silence."""
+'error ...' / 'unconfigured' / 'disconnected' status, never silence."""
 import json
 import os
 import pathlib
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openpilot.system.hardware.base import NetworkType
 from openpilot.system.tailscale import installer, tailscale_pnw as tp
 
 # Fake keys built at runtime so no literal in the source matches a secret-scanner pattern.
@@ -17,7 +18,7 @@ FAKE_KEY2 = "tsk" + "ey-auth-" + "notarealkey1-notarealkey2"
 
 class FakeParams:
   def __init__(self, enabled=True, dongle="abc123"):
-    self.d = {"TailscaleEnabled": enabled, "DongleId": dongle}
+    self.d = {"DisableTailscale": not enabled, "DongleId": dongle}  # enabled = Remote SSH enabled (the default)
     self.puts = []
 
   def get_bool(self, k):
@@ -80,10 +81,11 @@ class Harness:
     self.down_rc = 0
     self.now = 1000.0
     self.sudo_ok = sudo_ok
+    self.net = NetworkType.wifi   # what the device's own network state reports
     self.keyfile = tmp_path / "authkey"
     self.d = tp.TailscaleDaemon(self.params, run=self.run, popen=self.popen, clock=lambda: self.now,
                                 exists=self._exists, authkey_path=str(self.keyfile),
-                                sleep=lambda s: None, proc_dir=str(self.procdir))
+                                sleep=lambda s: None, proc_dir=str(self.procdir), net_type=lambda: self.net)
 
   @property
   def alive(self):
@@ -167,7 +169,7 @@ def test_off_publishes_off_and_runs_nothing(tmp_path, monkeypatch):
 def test_toggle_off_runs_down_and_stops_tailscaled(h):
   run_until_up(h, {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]})
   assert h.params.statuses[-1] == "connected 100.64.0.5"
-  h.params.d["TailscaleEnabled"] = False
+  h.params.d["DisableTailscale"] = True
   h.d.tick()
   assert h.cmds("down"), "tailscale down was not run"
   assert h.procs[0].terminated, "tailscaled was not stopped"
@@ -179,7 +181,7 @@ def test_toggle_off_down_failure_is_logged_but_daemon_still_stopped(h, monkeypat
   monkeypatch.setattr(tp.cloudlog, "error", lambda m, *a, **k: errors.append(m))
   run_until_up(h, {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]})
   h.down_rc = 1
-  h.params.d["TailscaleEnabled"] = False
+  h.params.d["DisableTailscale"] = True
   h.d.tick()
   assert any("tailscale down` failed rc=1" in e for e in errors)
   assert h.procs[0].terminated and h.params.statuses[-1] == "off"
@@ -253,7 +255,7 @@ def test_never_touches_iptables(h):
   run_until_up(h, {"BackendState": "NeedsLogin"})
   h.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]}
   h.d.tick()
-  h.params.d["TailscaleEnabled"] = False
+  h.params.d["DisableTailscale"] = True
   h.d.tick()
   execs = {os.path.basename([a for a in c if a not in ("sudo", "-n")][0]) for c in [*h.calls, *(p.cmd for p in h.procs)]}
   allowed = {"tailscale", "tailscaled", "true", "pgrep", "pkill"}
@@ -295,16 +297,16 @@ def test_status_call_failing_after_grace_is_an_error_but_not_before(h):
 
 
 # ---- auth ---------------------------------------------------------------------------------------------------------------
-def test_missing_key_is_needs_auth_key_and_never_calls_up(h):
-  run_until_up(h, {"BackendState": "NeedsLogin"}, key=False)
-  assert h.params.statuses[-1] == "needs auth key"
+def test_logged_out_node_with_missing_key_is_an_error_and_never_calls_up(h):
+  run_until_up(h, {"BackendState": "NeedsLogin"}, key=False)     # node state exists (enrolled) = configured
+  assert h.params.statuses[-1] == "error node is logged out and the auth key file is missing"
   assert h.cmds("up") == []
 
 
-def test_empty_key_file_is_needs_auth_key(h):
+def test_logged_out_node_with_empty_key_file_is_an_error(h):
   h.keyfile.write_text("  \n")
   run_until_up(h, {"BackendState": "NeedsLogin"}, key=False)
-  assert h.params.statuses[-1] == "needs auth key" and h.cmds("up") == []
+  assert h.params.statuses[-1] == "error node is logged out and the auth key file is empty" and h.cmds("up") == []
 
 
 def test_needs_login_with_key_runs_up_with_file_key_and_pinned_flags(h):
@@ -424,7 +426,7 @@ def world(tmp_path, monkeypatch):
   return w
 
 
-# ---- A: toggle OFF (default / fresh install) -----------------------------------------------------------------------
+# ---- A: Remote SSH disabled (Disable toggle ON); unconfigured-but-default-ON -----------------------------------------------------------------------
 def test_A_off_is_inert_for_two_hours(world, tmp_path):
   h = Harness(tmp_path, enabled=False, enrolled=False)
   ticks = simulate(h, 120)
@@ -441,17 +443,54 @@ def test_A_manager_always_runs_it_but_it_is_inert_while_off():
   assert p.should_run is always_run and p.restart_if_crash   # inert while OFF: see test_A_off_is_inert_for_two_hours
 
 
-def test_A_param_registered_default_off():
-  """No UnknownKeyName / UI crash on a fresh install: both keys exist and the toggle defaults OFF."""
-  from openpilot.common.params import Params
+def test_A_param_registered_default_enabled():
+  """No UnknownKeyName / UI crash on a fresh install. toggles2pnw: Remote SSH is ENABLED by default (DisableTailscale
+  default 0). The old TailscaleEnabled key is NOT registered any more and nothing in the tree reads it."""
+  from openpilot.common.params import Params, UnknownKeyName
   params = Params()
-  assert params.get_bool("TailscaleEnabled") is False
+  assert params.get_bool("DisableTailscale") is False
   assert params.get("TailscaleStatus") is None or isinstance(params.get("TailscaleStatus"), str)
+  with pytest.raises(UnknownKeyName):
+    params.get_bool("TailscaleEnabled")
 
 
-# ---- B: ON, no usable auth key ----------------------------------------------------------------------------------------
-@pytest.mark.parametrize("keyfile", ["missing", "empty", "whitespace", "unreadable"])
-def test_B_no_key_means_needs_auth_key_and_nothing_else(world, tmp_path, keyfile):
+def test_A_nothing_reads_the_retired_param():
+  """No code path may read the old key (a stale reader would raise UnknownKeyName in a manager process / the UI)."""
+  root = pathlib.Path(__file__).resolve().parents[3]
+  readers = []
+  for sub in ("system/tailscale", "selfdrive/ui/layouts", "system/manager"):
+    p = root / sub
+    for f in ([p] if p.is_file() else p.rglob("*.py")):
+      if "tests" not in f.parts and "TailscaleEnabled" in f.read_text():
+        readers.append(str(f.relative_to(root)))
+  assert readers == [], readers
+
+
+def test_A_default_on_but_unconfigured_is_harmless(world, tmp_path):
+  """The default is now ON. A device with an EMPTY param store (default DisableTailscale=0), no auth key file and no
+  enrolled node must: show 'unconfigured', download nothing, spawn nothing, run no subprocess, write nothing."""
+  h = Harness(tmp_path, enrolled=False)
+  h.params.d.pop("DisableTailscale")          # nothing stored: the registered default (0 = enabled) applies
+  assert h.params.get_bool("DisableTailscale") is False
+  simulate(h, 120)
+  assert h.params.statuses == ["unconfigured"]
+  assert world.installs == [] and h.procs == [] and h.calls == []
+  assert not any(tmp_path.iterdir()), "unconfigured must not write to disk"
+  assert world.logs == [], "unconfigured in steady state must not log"
+
+
+# ---- B: enabled, nothing configured / key file unusable -------------------------------------------------------------------
+def test_B_no_key_file_and_no_state_is_unconfigured_and_nothing_else(world, tmp_path):
+  h = Harness(tmp_path, enrolled=False)
+  simulate(h, 120)
+  assert h.params.statuses == ["unconfigured"]
+  assert world.installs == [], "unconfigured -> no 36 MB download"
+  assert h.procs == [] and h.calls == [], "unconfigured -> tailscaled is not started, no subprocess at all"
+  assert [m for lvl, m in world.logs] == [], "unconfigured: no log lines, not per poll and not at all"
+
+
+@pytest.mark.parametrize("keyfile", ["empty", "whitespace", "unreadable"])
+def test_B_a_key_file_that_exists_but_is_unusable_is_an_error_not_unconfigured(world, tmp_path, keyfile):
   h = Harness(tmp_path, enrolled=False)
   if keyfile == "empty":
     h.keyfile.write_text("")
@@ -460,11 +499,11 @@ def test_B_no_key_means_needs_auth_key_and_nothing_else(world, tmp_path, keyfile
   elif keyfile == "unreadable":
     h.keyfile.mkdir()        # open() raises IsADirectoryError, an OSError like a permission failure
   simulate(h, 120)
-  assert h.params.statuses == ["needs auth key"]
-  assert world.installs == [], "no key -> no 36 MB download"
-  assert h.procs == [] and h.calls == [], "no key -> tailscaled is not started, no subprocess at all"
-  warnings = [m for lvl, m in world.logs if lvl in ("warning", "error") and "needs auth key" in m]
-  assert len(warnings) == 1, "one log line per state change, not per poll"
+  assert len(h.params.statuses) == 1
+  assert h.params.statuses[0].startswith("error auth key file is ")
+  assert world.installs == [] and h.procs == [] and h.calls == []
+  errs = [m for lvl, m in world.logs if lvl == "error" and "auth key file" in m]
+  assert len(errs) == 1, "one error line per distinct problem, not per poll"
 
 
 def test_B_key_arrives_later_then_it_installs_once_and_connects(world, tmp_path):
@@ -548,7 +587,7 @@ def test_D_off_while_connecting_stops_cleanly_and_keeps_state(world, tmp_path):
   h.keyfile.write_text(FAKE_KEY)
   h.status = {"BackendState": "Starting"}
   simulate(h, 1)
-  h.params.d["TailscaleEnabled"] = False
+  h.params.d["DisableTailscale"] = True
   h.d.tick()
   assert h.cmds("down") and h.procs[0].terminated and not h.procs[0].killed
   assert not h.cmds("logout"), "state must be kept: never `tailscale logout`"
@@ -561,7 +600,7 @@ def test_E_no_install_while_driving_then_installs_when_parked(world, tmp_path):
   h.keyfile.write_text(FAKE_KEY)
   h.params.d.update({"IsOnroad": True, "GearPark": False})
   simulate(h, 30)
-  assert world.installs == [] and h.params.statuses == ["install deferred until parked"]
+  assert world.installs == [] and h.params.statuses == ["installing - deferred until parked"]
   h.params.d["GearPark"] = True      # parked + charging: IsOnroad is still 1, Rule 3
   h.status = {"BackendState": "NeedsLogin"}
   simulate(h, 2)
@@ -591,7 +630,7 @@ def test_orphan_tailscaled_is_adopted_not_duplicated_and_down_on_off(h):
   h.d.tick()
   h.d.tick()
   assert h.procs == [] and h.params.statuses[-1] == "connected 100.64.0.9"
-  h.params.d["TailscaleEnabled"] = False
+  h.params.d["DisableTailscale"] = True
   h.d.tick()
   assert h.cmds("down") and h.params.statuses[-1] == "off"
 
@@ -615,7 +654,7 @@ def test_F1_orphaned_root_tailscaled_is_adopted_with_sudo_and_off_really_stops_i
   kh.d.tick()
   assert kh.procs == [] and kh.params.statuses[-1] == "connected 100.64.0.9"
   assert all(c[:2] == ["sudo", "-n"] for c in kh.cmds("status")), "adoption probe must use sudo in kernel mode"
-  kh.params.d["TailscaleEnabled"] = False
+  kh.params.d["DisableTailscale"] = True
   kh.d.tick()
   assert kh.alive is False and kh.params.statuses[-1] == "off"
   assert any(c[:2] == ["sudo", "-n"] for c in kh.cmds("down")) and kh.cmds("pkill")
@@ -626,7 +665,7 @@ def test_F1_off_with_an_unstoppable_daemon_is_error_never_off(kh):
   kh.alive, kh.root_socket, kh.pkill_works = True, True, False
   kh.status = {"BackendState": "Running", "TailscaleIPs": ["100.64.0.9"]}
   kh.d.tick()
-  kh.params.d["TailscaleEnabled"] = False
+  kh.params.d["DisableTailscale"] = True
   kh.d.tick()
   assert kh.params.statuses[-1] == "error tailscaled still running after toggle off; could not stop it"
   assert "off" not in kh.params.statuses
@@ -642,7 +681,7 @@ def test_F2_sudo_wrapper_ignoring_sigterm_falls_back_to_pkill_by_name_and_verifi
   kh.d.tick()
   kh.d.tick()
   kh.ignore_term = True
-  kh.params.d["TailscaleEnabled"] = False
+  kh.params.d["DisableTailscale"] = True
   kh.d.tick()
   assert not kh.procs[0].killed, "proc.kill() would only kill the sudo wrapper"
   pk = kh.cmds("pkill")
@@ -661,7 +700,7 @@ def test_F1_pgrep_failure_is_not_read_as_gone(kh):
       return SimpleNamespace(returncode=127, stdout="", stderr="pgrep: not found")
     return real(args, capture_output, text, timeout)
   kh.d._run_fn = run
-  kh.params.d["TailscaleEnabled"] = False
+  kh.params.d["DisableTailscale"] = True
   kh.d.tick()
   assert kh.params.statuses[-1].startswith("error tailscaled still running")
 
@@ -704,7 +743,7 @@ def test_off_finds_a_leftover_tailscaled_in_proc_and_stops_it_via_sudo(world, tm
   assert h.alive is False and h.params.statuses[-1] == "off"
   assert any(c[:2] == ["sudo", "-n"] for c in h.cmds("down")), "mode must be detected before the stop path runs"
   assert h.cmds("pkill")[0][:2] == ["sudo", "-n"]
-  assert any("toggle is OFF but tailscaled is running" in m for _, m in world.logs)
+  assert any("Disable Remote SSH is ON but tailscaled is running" in m for _, m in world.logs)
 
 
 def test_off_orphan_that_cannot_be_stopped_stays_error_retries_and_logs_once(world, tmp_path):
@@ -761,3 +800,64 @@ def test_tailscale_pnw_is_non_essential_in_selfdrived():
   src = (pathlib.Path(tp.__file__).resolve().parents[2] / "selfdrive" / "selfdrived" / "selfdrived.py").read_text()  # source, not import:
   line = next(ln for ln in src.splitlines() if "NON_ESSENTIAL_PROCS = {" in ln)
   assert '"tailscale_pnw"' in line
+
+
+# ---- F: configured but no internet at all -----------------------------------------------------------------------------
+def test_F_offline_is_disconnected_once_with_no_error_log_and_no_backoff(world, tmp_path):
+  h = Harness(tmp_path, enrolled=False)
+  h.keyfile.write_text(FAKE_KEY)
+  h.keyfile.chmod(0o600)
+  world.install_error = installer.InstallError("download failed: timed out")   # would back off / spam if attempted
+  h.net = NetworkType.none
+  ticks = simulate(h, 120)
+  assert h.params.statuses == ["disconnected - no internet"]
+  assert world.installs == [] and h.procs == [] and h.calls == [], "offline: nothing attempted"
+  assert [m for lvl, m in world.logs if lvl == "error"] == [], "offline must not log errors"
+  assert len([m for lvl, m in world.logs if "no internet" in m]) == 1, "one line per transition"
+  assert ticks <= 120 * 60 / tp.POLL_STEADY_S + 1, "no busy loop"
+
+
+def test_F_link_returns_and_it_reconnects_by_itself(world, tmp_path):
+  h = Harness(tmp_path, enrolled=False)
+  h.keyfile.write_text(FAKE_KEY)
+  h.keyfile.chmod(0o600)
+  h.net = NetworkType.none
+  simulate(h, 10)
+  assert h.params.statuses == ["disconnected - no internet"]
+  h.net = NetworkType.wifi
+  h.status = {"BackendState": "NeedsLogin"}
+  simulate(h, 5)
+  assert world.installs == [1] and len(h.procs) == 1
+
+
+def test_F_connected_then_link_lost_then_back_publishes_each_transition_once(h):
+  run_until_up(h, {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]})
+  assert h.params.statuses[-1] == "connected 100.64.0.5"
+  h.net = NetworkType.none
+  h.now += 30
+  h.d.tick()
+  h.now += 30
+  h.d.tick()
+  assert h.params.statuses[-1] == "disconnected - no internet"
+  assert not h.procs[0].terminated, "losing the link must not stop tailscaled"
+  h.net = NetworkType.cell4G
+  h.now += 30
+  h.d.tick()
+  assert h.params.statuses[-1] == "connected 100.64.0.5"
+  assert h.params.statuses.count("disconnected - no internet") == 1
+
+
+def test_F_offline_does_not_hide_a_disabled_toggle(h):
+  """Disabled wins: the OFF path runs before any network check (tailscaled must still be stopped offline)."""
+  run_until_up(h, {"BackendState": "Running", "TailscaleIPs": ["100.64.0.5"]})
+  h.net = NetworkType.none
+  h.params.d["DisableTailscale"] = True
+  h.d.tick()
+  assert h.procs[0].terminated and h.params.statuses[-1] == "off"
+
+
+def test_F_unconfigured_wins_over_offline(world, tmp_path):
+  h = Harness(tmp_path, enrolled=False)
+  h.net = NetworkType.none
+  simulate(h, 5)
+  assert h.params.statuses == ["unconfigured"]

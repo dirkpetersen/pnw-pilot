@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""tailscale2pnw: remote SSH over a Tailscale tailnet. Manager process; runs only while TailscaleEnabled is on.
+"""tailscale2pnw: remote SSH over a Tailscale tailnet. Manager process; ENABLED BY DEFAULT, inert
+without an auth key file, stopped while DisableTailscale is on.
 
 Reaches the device's existing OpenSSH (port 22, the owner's existing keys) from anywhere -- no Tailscale SSH.
 Design rules (docs/pnw/TAILSCALE.md):
@@ -57,7 +58,7 @@ def redact(text: str) -> str:
 class TailscaleDaemon:
   def __init__(self, params, run=subprocess.run, popen=subprocess.Popen, clock=time.monotonic,
                exists=os.path.exists, authkey_path: str = AUTHKEY_FILE, sleep=time.sleep,
-               proc_dir: str | None = None):
+               proc_dir: str | None = None, net_type=None):
     self._sleep = sleep
     self.proc_dir = proc_dir or PROC_DIR
     self._scan_err = ""
@@ -69,6 +70,7 @@ class TailscaleDaemon:
     self._clock = clock
     self._exists = exists
     self.authkey_path = authkey_path
+    self._net_type = net_type      # () -> NetworkType; None = the device's HARDWARE.get_network_type, imported on first use
 
     self.proc = None
     self.adopted = False       # a tailscaled we did not start was already answering on the socket
@@ -79,7 +81,6 @@ class TailscaleDaemon:
     self.install_blocked = False   # permanent install failure: do not re-download until this process restarts
     self.install_fail_count = 0
     self.connecting_since: float | None = None
-    self._logged_key_problem: str | None = None
     self._warned_key_perms = False
 
   # ---- publishing (change-only) -------------------------------------------------------------------------------
@@ -89,9 +90,9 @@ class TailscaleDaemon:
     first = self.last_status is None
     self.last_status = text
     self.params.put("TailscaleStatus", text)
-    if first and text == st.OFF:
-      return  # steady-state OFF at startup: no log line
-    if text.startswith(st.ERROR_PREFIX) or text == st.NEEDS_AUTH_KEY:
+    if first and text in (st.OFF, st.UNCONFIGURED):
+      return  # steady-state OFF / unconfigured at startup: no log line
+    if text.startswith(st.ERROR_PREFIX):
       cloudlog.error(f"tailscale: {text}")
     else:
       cloudlog.warning(f"tailscale: {text}")
@@ -237,7 +238,7 @@ class TailscaleDaemon:
       with open(self.authkey_path) as f:
         empty = not f.read().strip()
     except FileNotFoundError:
-      return "missing"
+      return "missing"   # the ONLY state that means 'not configured'; empty / unreadable below are errors
     except OSError as e:
       return f"unreadable: {e}"
     if empty:
@@ -247,18 +248,41 @@ class TailscaleDaemon:
       cloudlog.error(f"tailscale: {self.authkey_path} is accessible by group/others (mode {s.st_mode & 0o777:o}); chmod 600")
     return None
 
+  def _offline(self) -> bool:
+    """True when the device reports NO link at all (NetworkType.none: no primary connection and no active modem).
+    One NetworkManager property read per tick while enabled and configured -- the call hardwared already makes every
+    10 s. HARDWARE.get_network_type() answers `none` when NM itself cannot be read; that reads as 'no internet' here
+    and the published text says so, but nothing is stopped by it (tailscaled keeps running and reconnects on its own)."""
+    if self._net_type is None:
+      from openpilot.system.hardware import HARDWARE
+      self._net_type = HARDWARE.get_network_type
+    from openpilot.system.hardware.base import NetworkType
+    return self._net_type() == NetworkType.none
+
   # ---- one step of the state machine -----------------------------------------------------------------------------
   def tick(self) -> float:
     """Advance once; returns seconds to sleep before the next tick."""
-    if not self.params.get_bool("TailscaleEnabled"):
+    if self.params.get_bool("DisableTailscale"):
       self._off_tick()
       return POLL_STEADY_S
 
-    # Toggle ON but never enrolled and no usable key: nothing to do yet. Do not download, do not start tailscaled.
+    # CONFIGURED = an auth key file exists OR node state exists. Neither (and no daemon of ours): TRULY UNCONFIGURED -- the
+    # default state of a fresh install. Do nothing: no download, no tailscaled, no subprocess, one log line.
+    # A key file that exists but is empty/unreadable is configured-but-broken: an error, never 'unconfigured'.
     if self.proc is None and not self.adopted and not self._exists(STATE_FILE):
       problem = self._authkey_state()
+      if problem == "missing":
+        return self._unconfigured()
       if problem is not None:
-        return self._needs_key(problem)
+        return self._key_error(problem)
+
+    # Configured but the device has no link at all: say so (once per transition, no error log, no backoff) instead of
+    # failing a download / `tailscale up` into the void. The next tick after a link returns resumes normally.
+    if self._offline():
+      self.fail_count = 0
+      self.connecting_since = None
+      self.publish(st.NO_INTERNET)
+      return POLL_STEADY_S
 
     if not installer.is_installed():
       if self.install_blocked:
@@ -316,7 +340,7 @@ class TailscaleDaemon:
     if needs_login:  # first enrollment / expired node: needs the key. A merely 'Stopped' node re-ups with its state.
       problem = self._authkey_state()
       if problem is not None:
-        return self._needs_key(problem)
+        return self._key_error(problem, logged_out=True)
       args.append(f"--auth-key=file:{self.authkey_path}")
     self.progress_connecting()
     rc, out, err = self._cli(*args, timeout=UP_TIMEOUT_S + 15)
@@ -324,12 +348,16 @@ class TailscaleDaemon:
       return self.fail(f"tailscale up failed rc={rc}: {(err.strip() or out.strip())[-100:]}")
     return POLL_TRANSITION_S
 
-  def _needs_key(self, problem: str) -> float:
+  def _unconfigured(self) -> float:
     self.fail_count = 0
-    self.publish(st.NEEDS_AUTH_KEY)  # change-only: one cloudlog line per state change, not per poll
-    if problem != "missing" and problem != self._logged_key_problem:
-      self._logged_key_problem = problem
-      cloudlog.error(f"tailscale: auth key file {self.authkey_path} is {problem}")
+    self.publish(st.UNCONFIGURED)  # change-only: one cloudlog line per state change, not per poll
+    return POLL_STEADY_S
+
+  def _key_error(self, problem: str, logged_out: bool = False) -> float:
+    """Configured (a key file or node state exists) but the key cannot be used: an ERROR, shown and logged once."""
+    self.fail_count = 0
+    what = "node is logged out and the auth key file" if logged_out else "auth key file"
+    self.publish(st.error(f"{what} is {problem}"))  # publish() logs an error once per change
     return POLL_STEADY_S
 
   def _driving(self) -> bool:
@@ -373,7 +401,7 @@ class TailscaleDaemon:
       if not pids:
         self.publish(st.OFF)
         return
-      cloudlog.error(f"tailscale: toggle is OFF but tailscaled is running (pids {pids}); stopping it")
+      cloudlog.error(f"tailscale: Disable Remote SSH is ON but tailscaled is running (pids {pids}); stopping it")
       self._detect_mode()
       self.stuck = True
     self.shutdown()

@@ -424,7 +424,7 @@ class SpeedAdjustController:
     self._sign = SignLimitSelector() if sign_limit else None
     self._sign_sm = None         # the SubMaster of the current cap() call (its carState carries the camera value)
     self._map_fresh = False      # mapd is publishing: NextMapSpeedLimit was fresh on the last read
-    self._sign_on = True         # FordSignSpeedLimit (default ON), read at READ_S
+    self._sign_on = True         # NOT DisableFordSignSpeedLimit (default: camera used), read at READ_S
     self._sign_on_err_t = None
     self._sign_on_err_n = 0
     self._sign_cs_err_t = None
@@ -515,22 +515,23 @@ class SpeedAdjustController:
 
   def _select_sign(self, map_sl: float) -> float:
     """fordtsr2pnw: the raw limit after weighing the camera against the map (SignLimitSelector). Inputs: the
-    FordSignSpeedLimit toggle, the camera from sm['carState'], the lower limit mapd announces ahead (option 2's basis)
+    DisableFordSignSpeedLimit toggle (inverted: camera used unless it is ON), the camera from sm['carState'], the lower
+    limit mapd announces ahead (option 2's basis)
     and whether mapd is publishing at all (mapd_configd clears MapSpeedLimit after ~5 s of silence, mapsl2pnw; until then
     a dead mapd leaves it at its last value)."""
     now = time.monotonic()
     try:
-      v = self.params.get("FordSignSpeedLimit", return_default=True)
+      v = self.params.get("DisableFordSignSpeedLimit", return_default=True)
       if v is None:
         raise ValueError("no value and no registered default")
-      self._sign_on = bool(v)
+      self._sign_on = not bool(v)
     except Exception as e:
       # Rule 2: the fallback is the shipped default (ON), and it is said. What raises: UnknownKeyName on a
       # params_keys.h / params_pyx.so mismatch. With no map the camera is used either way.
       self._sign_on = True
       self._sign_on_err_n += 1
       if self._sign_on_err_t is None or now - self._sign_on_err_t >= POLICE_READ_ERR_LOG_S:
-        cloudlog.exception(f"speedadjust: FordSignSpeedLimit unreadable ({type(e).__name__}) -- treated as ON (the " +
+        cloudlog.exception(f"speedadjust: DisableFordSignSpeedLimit unreadable ({type(e).__name__}) -- camera treated as ON (the " +
                            f"default) ({self._sign_on_err_n} failed read(s) since the last log)")
         self._sign_on_err_t = now
         self._sign_on_err_n = 0

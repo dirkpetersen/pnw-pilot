@@ -140,8 +140,8 @@ procs = [
   # where before this feature a crash left mapd on its own subscription, untouched. Non-control daemon,
   # same reasoning as `ui`/`card` above.
   PythonProcess("mapd_configd", "system.mapd.mapd_configd", always_run, enabled=TICI, restart_if_crash=True),
-  # tailscale2pnw: ALWAYS runs but is inert while the (default-OFF) toggle is off (one /proc scan per 30 s, no
-  # subprocess), so a leftover root tailscaled is noticed and stopped even after the manager killed us mid-shutdown.
+  # tailscale2pnw: ALWAYS runs but is inert while Disable Remote SSH is ON or the device is unconfigured (one /proc scan
+  # or key-file check per 30 s, no subprocess), so a leftover root tailscaled is noticed and stopped even after the manager killed us mid-shutdown.
   # restart_if_crash -- non-control daemon; a crash would otherwise leave remote access dead until reboot
   # (the daemon also publishes the crash to TailscaleStatus). Not tied to IsOnroad or gear.
   PythonProcess("tailscale_pnw", "system.tailscale.tailscale_pnw", always_run, enabled=TICI, restart_if_crash=True),

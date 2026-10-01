@@ -26,9 +26,15 @@ def test_error_is_one_line_and_bounded():
 
 
 def test_ui_text():
-  assert st.ui_text(False, "connected 100.1.1.1") == "off"      # stale param never shown while the toggle is off
-  assert st.ui_text(False, "connecting") == "off"
+  # first arg = Remote SSH ENABLED (the Disable toggle is OFF)
+  assert st.ui_text(False, "connected 100.1.1.1") == st.DISABLED_TEXT  # stale param never shown while disabled
+  assert st.ui_text(False, "connecting") == st.DISABLED_TEXT
   stuck = "error tailscaled still running after toggle off; could not stop it"
   assert st.ui_text(False, stuck) == stuck                      # ...but a stuck daemon must stay visible after OFF
-  assert st.ui_text(True, "") == "starting"                     # on, daemon not yet heard from
+  assert st.ui_text(True, "off") == "connecting"                # the daemon's own pre-flip 'off' is not shown as state
+  assert st.title_word(st.DISABLED_TEXT) == "disconnected" and st.title_word("off") == ""
+  assert st.title_word(st.NO_INTERNET) == "disconnected" and st.title_word(st.UNCONFIGURED) == "unconfigured"
+  assert st.title_word(st.INSTALL_DEFERRED) == "installing" and st.title_word("connected 100.1.1.1") == "connected"
+  assert st.title_word("error boom") == "error" and st.title_word("mystery") == "mystery"
+  assert st.ui_text(True, "") == "connecting"                     # on, daemon not yet heard from
   assert st.ui_text(True, "error boom") == "error boom"

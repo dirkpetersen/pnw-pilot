@@ -115,7 +115,7 @@ class SignLimitSelector:
     of a death. ann_sl: the lower limit mapd announces ahead (m/s) or None. cam_num: the number on the sign, read as MPH --
     so the camera is used in US STATES ONLY (region_us; NOT the car's unit flag, which follows the cluster).
     region: the region code for the log (None = position unknown).
-    use_camera: the FordSignSpeedLimit toggle. la_n: the limit (m/s) a LIVE look-ahead episode announced, else None."""
+    use_camera: NOT the DisableFordSignSpeedLimit toggle. la_n: the limit (m/s) a LIVE look-ahead episode announced, else None."""
     cam = float(cam_num) * MPH_TO_MS if cam_status == "valid" else 0.0
     if not (math.isfinite(cam) and 0.0 < cam <= SANE_MAX_SL):
       cam = 0.0

@@ -1,5 +1,5 @@
 ---
-updated: 2026-09-30
+updated: 2026-10-01
 status: current
 ---
 
@@ -14,25 +14,37 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
 
 ## What the feature is, and is not
 
-- Toggle **Settings > Toggles > Remote SSH (Tailscale)**, **default OFF**. The status shows next to the toggle and in
-  its description: `off`, `installing`, `install deferred until parked`, `needs auth key`, `connecting`,
-  `connected <tailscale ip>`, or `error <reason>`.
-- **Unconfigured is a safe state.** Toggle OFF (fresh install): the `tailscale_pnw` process always runs but is inert
-  (one `/proc` scan every 30 s; no subprocess, network, download or logs); nothing is downloaded, written or run. Toggle ON without an auth key: status `needs auth key`; still no
-  download, no `tailscaled`, one log line; it polls the key file locally every 30 s.
-- Only while ON: the pinned Tailscale `1.102.4` arm64 static release is downloaded (about 36 MB, sha256-verified,
+- **On by default once configured** (toggles2pnw, 2026-10-01). The toggle is the opt-out **Settings > Toggles > Disable
+  Remote SSH (Tailscale)** (`DisableTailscale`, default OFF). The status word shows in the toggle title and in its
+  description; the first word is always one of:
+  `connected <tailscale ip>`, `disconnected - disabled by this toggle` (toggle ON; `tailscaled` stopped and verified gone),
+  `disconnected - no internet` (configured, but the device reports no link at all), `unconfigured`, `connecting`,
+  `installing` (also `installing - deferred until parked`), or `error <reason>`.
+- **Configured** means an auth key file exists (`/data/pnw/secrets/tailscale.authkey`) **or** node state exists
+  (`/data/pnw/tailscale/tailscaled.state`). **Unconfigured** means neither, and the default state of a fresh install:
+  status `unconfigured`, the toggle stays OFF, and the device does nothing: no download, no `tailscaled`, no subprocess,
+  one local file check per 30 s, no log lines. A key file that exists but is empty or unreadable is *configured but
+  broken*: `error auth key file is empty`, never `unconfigured`.
+- **No internet** is read from the device's own network state (`HARDWARE.get_network_type() == none`, one NetworkManager
+  property read per 30 s tick while enabled and configured; hardwared makes the same call every 10 s). While there is no
+  link: `disconnected - no internet`, no download attempt, no error log, no backoff; one log line per transition. A running
+  `tailscaled` is left alone and the next tick after a link returns resumes normally. If NetworkManager itself cannot be
+  read the call also answers `none`, so that case reads as `no internet` too (nothing is stopped by it).
+- Any other failure while a link exists (bad/expired key, control plane unreachable, sha256 mismatch, `tailscaled` will not
+  stop) is `error <reason>`, as before.
+- Only once configured and online (and Remote SSH not disabled): the pinned Tailscale `1.102.4` arm64 static release is downloaded (about 36 MB, sha256-verified,
   refused loudly on mismatch) into `/data/pnw/tailscale/` (outside `/data/openpilot`, so the updater's `git clean` cannot
   delete it), and `tailscaled` is run with `--state=/data/pnw/tailscale/tailscaled.state`.
-- **The download never happens while driving** (`IsOnroad` and not in Park). **Turn it on for the first time at home on
-  WiFi.** A failed download is retried no sooner than 10 min, doubling to 1 h.
+- **The download never happens while driving** (`IsOnroad` and not in Park). **Put the key on the device for the first time at
+  home on WiFi.** A failed download is retried no sooner than 10 min, doubling to 1 h.
 - It never touches iptables, nftables, `ip_forward`, NetworkManager or DNS (`--accept-dns=false`): hotspot tethering NAT
   and the LTE metering ladder are unaffected. If `/dev/net/tun` and passwordless `sudo` exist it runs in kernel mode with
   `--netfilter-mode=off`; otherwise in userspace networking as the `comma` user (decided at runtime, logged).
 - `tailscaled` is started with `--no-logs-no-support` (no log upload to Tailscale).
-- Toggle OFF (any time): `tailscale down`, then `tailscaled` is stopped **and verified gone** (never reports `off` while it
-  could still be reached). The `tailscale_pnw` process always runs but is inert while OFF (one `/proc` scan every 30 s; no
-  subprocess, network or log) and stops a leftover `tailscaled` if it finds one. With the toggle OFF it stops **any** process
-  named `tailscaled` every 30 s (none other exists on the 3X). Node state is kept, so turning it back ON
+- Disable toggle ON (any time): `tailscale down`, then `tailscaled` is stopped **and verified gone** (never reports `off` while it
+  could still be reached). The `tailscale_pnw` process always runs but is inert while disabled (one `/proc` scan every 30 s; no
+  subprocess, network or log) and stops a leftover `tailscaled` if it finds one. With the toggle ON (disabled) it stops **any** process
+  named `tailscaled` every 30 s (none other exists on the 3X). Node state is kept, so turning Disable back OFF
   reconnects as the same device without a new key.
 - No periodic network use of ours. Tailscale's own keepalive/netmap traffic: **idle MB/day is UNMEASURED** (estimate
   2-10 MB/day; measure `/proc/net/dev` over a day before relying on it on LTE).
@@ -66,7 +78,8 @@ Limit nothing fixes: the device must be **powered**. It shuts itself down about 
    ssh comma@<lan-ip> 'chmod 600 /data/pnw/secrets/tailscale.authkey; wc -c /data/pnw/secrets/tailscale.authkey'
    ```
 
-6. Turn the toggle ON (on WiFi, parked). Watch the status: `installing` -> `connecting` -> `connected 100.x.y.z`. The node
+6. Nothing to switch on: Remote SSH is on by default and picks the key up within about 30 s (do this on WiFi,
+   parked). Watch the status: `installing` -> `connecting` -> `connected 100.x.y.z`. The node
    appears in the admin console as `comma-<dongle id>`.
 7. Once it is `connected`, the key has done its job (the node key now lives in `/data/pnw/tailscale/`); you may expire the
    auth key in the admin console.
@@ -85,8 +98,12 @@ verified on this device**. If `ssh` times out while the status says `connected`,
 
 | Status | Meaning / action |
 |---|---|
-| `needs auth key` | `/data/pnw/secrets/tailscale.authkey` is missing, empty or unreadable. Step 4. (Also shown if the node was logged out and the key is gone.) |
-| `install deferred until parked` | You are driving. It installs when you are in Park or the car is off. |
+| `unconfigured` | No key file and no node state: the default of a fresh install. Do steps 4 and 5. |
+| `disconnected - disabled by this toggle` | **Disable Remote SSH** is ON; `tailscaled` is stopped. Turn it OFF to re-enable. |
+| `disconnected - no internet` | The device has no link at all. Nothing to do: it reconnects by itself when a link returns. |
+| `error auth key file is empty` / `... is unreadable` | The key file exists but cannot be used (empty or unreadable). Redo step 5. |
+| `error node is logged out and the auth key file is ...` | The node was logged out (expired/revoked) and no usable key file exists. Steps 4-5. |
+| `installing - deferred until parked` | You are driving. It installs when you are in Park or the car is off. |
 | `error sha256 mismatch ...` | The download did not match the pinned digest; it was **not** installed and will not be retried until the next restart. Report it. |
 | `error download failed ...` | No route / DNS / server error; retried every 10 min to 1 h. |
 | `error tailscale up failed ...` | Usually a rejected, expired or already-used key (single-use key consumed by an earlier failed enrolment): make a new one. |
@@ -102,7 +119,7 @@ Every state change is also in the device log (`cloudlog`, lines starting `tailsc
 
 - Admin console: **delete** the machine `comma-<dongle id>` (its node key is invalid immediately) and delete/expire the auth
   key. Removing the `tag:comma` rule is optional: with no outbound rules a compromised comma can reach nothing on the tailnet.
-- On the device: turn the toggle OFF; to forget the node entirely `rm -rf /data/pnw/tailscale` (this deletes the node
+- On the device: turn **Disable Remote SSH** ON; to forget the node entirely `rm -rf /data/pnw/tailscale` (this deletes the node
   identity, the binaries and the log) and delete `/data/pnw/secrets/tailscale.authkey`.
 
 ## Maintenance
@@ -110,7 +127,21 @@ Every state change is also in the device log (`cloudlog`, lines starting `tailsc
 - The release is **pinned** (`system/tailscale/installer.py`: `TAILSCALE_VERSION`, `TAILSCALE_SHA256`). There is no
   auto-update; a version bump is a reviewed commit. The digest is published at
   `https://pkgs.tailscale.com/stable/tailscale_<version>_arm64.tgz.sha256` and must also be recomputed locally.
-- Params: `TailscaleEnabled` (BOOL, default 0, persistent), `TailscaleStatus` (STRING, cleared at manager start).
+- Params: `DisableTailscale` (BOOL, default 0, persistent; replaces the retired `TailscaleEnabled`, see "Default ON" below), `TailscaleStatus` (STRING, cleared at manager start).
 - Code: `system/tailscale/{installer,tailscale_pnw,status}.py`, manager entry `tailscale_pnw` in
   `system/manager/process_config.py`, toggle in `selfdrive/ui/layouts/settings/toggles.py`.
 - Tests: `system/tailscale/tests/`, `selfdrive/ui/tests/test_tailscale_toggle.py`.
+
+## Default ON: migration and consequences (toggles2pnw)
+
+- **No migration.** `TailscaleEnabled` is **removed** from `params_keys.h`; no code reads it (a test pins that, and that
+  reading it raises `UnknownKeyName`). A stale file in the device's params store is ignored. Why no migration: a device
+  that had it ON behaves identically (default is ON); a device that had it OFF becomes enabled, which is the owner's
+  intent, and it stays inert (`unconfigured`) until a key file exists. Keeping a dead key registered "for one release"
+  would only add a param nothing reads.
+- **A device with no key** (any fresh install, the friends channel) reads `unconfigured` and does nothing else
+  (`test_A_default_on_but_unconfigured_is_harmless`, `test_B_*`).
+- **Disabling** (toggle ON) still stops `tailscaled` and verifies it gone (the F1/F2 tests are unchanged).
+- Statuses renamed: `needs auth key` is gone (`unconfigured` when nothing exists, an `error` when a key file/node exists
+  but cannot be used); `off` is only the daemon's internal value (the UI shows `disconnected - disabled by this toggle`);
+  `install deferred until parked` is now `installing - deferred until parked`.

@@ -16,7 +16,7 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
 2. **The param default in `common/params_keys.h` is `"0"`** for every bool toggle. A param whose default is `"1"`
    is a violation of the rule (the toggle would show ON in the default state).
 3. **Status text shows the live state.** If a toggle governs a service with an observable state (Tailscale), the row
-   shows that state in words (`connected`, `needs auth key`, `connecting`, `error ...`, `disabled`), not just a switch.
+   shows that state in words (`connected`, `disconnected`, `unconfigured`, `connecting`, `installing`, `error ...`), not just a switch.
 4. **Car-specific toggles are greyed on the other car, never hidden**, with a short reason in the description
    (for example `Ford F-150 Lightning only`). Greying is **by capability** (`PnwVehicle`), never by fingerprint, and it
    is **display only**: the stored param is never written by the greying. The device moves between a Tesla and a
@@ -76,9 +76,9 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `DisableLaneCentering` | 0 | both | yes | |
 | `DisableCoopSteer` | 0 | Tesla only (greyed on Lightning) | yes | |
 | `NoFordAngleSteering` | 0 | Lightning only (greyed) | yes | two-param bridge |
-| `TailscaleEnabled` | 0 | both | **NO** | feature OFF by default; ON = default behaviour wanted. Fixed in phase 1 -> `DisableTailscale` |
+| `TailscaleEnabled` | 0 | both | **NO** | feature OFF by default; ON = default behaviour wanted. Fixed in phase 1 -> `DisableTailscale` (no migration; old key removed; see TAILSCALE.md) |
 | `NoSpeedLimitDisplay` | 0 | both | yes | |
-| `FordSignSpeedLimit` | **1** | Lightning only (greyed) | **NO** | default ON. Fixed in phase 1 -> `DisableFordSignSpeedLimit` |
+| `FordSignSpeedLimit` | **1** | Lightning only (greyed) | **NO** | default ON. Fixed in phase 1 -> `DisableFordSignSpeedLimit` (default 0; behaviour unchanged by default; description tells the owner to turn it ON in BC / km/h countries until the camera's km/h limit is measured) |
 | `RefreshLocationMap` | 0 | both | yes | momentary action, greyed when no map here |
 | `DisableLocationServices` | 0 | both | yes | |
 | `EvIncludeLevel2` | 0 | both | yes | opt-in sub-option |

@@ -67,11 +67,15 @@ DESCRIPTIONS = {
   ),
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
-  # tailscale2pnw: default OFF. The live status line is appended in TogglesLayout._tailscale_text().
-  "TailscaleEnabled": tr_noop(
-    "Reach this device by SSH from anywhere through your own Tailscale network. Needs a one-time setup: put your " +
-    "Tailscale auth key on the device (see docs/pnw/TAILSCALE.md). Once a key is in place it downloads about 36 MB " +
-    "(never while driving), so set it up on Wi-Fi. Only runs while this is ON; your SSH keys still decide who can log in."
+  # tailscale2pnw / toggles2pnw: Remote SSH is ENABLED by default; this is the opt-OUT toggle. The live status line
+  # is appended in TogglesLayout._tailscale_text().
+  "DisableTailscale": tr_noop(
+    "Remote SSH over your own Tailscale network: once configured it is ON by default, so you can reach this device " +
+    "by SSH from anywhere. To configure it, put your Tailscale auth key on the device once (see docs/pnw/TAILSCALE.md); " +
+    "until then the status reads \"unconfigured\" and nothing is downloaded or started. Once a key is in place it " +
+    "downloads about 36 MB (never while driving), so set it up on Wi-Fi. Status: connected, disconnected (switched " +
+    "off here, or the device has no internet), unconfigured, connecting, installing, or error with the reason. " +
+    "Your SSH keys still decide who can log in. Turn this ON to disable Remote SSH: the Tailscale daemon is stopped."
   ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
   # mapdstate2pnw: repurposed from the old "Get map for this location" on-demand-download toggle.
@@ -92,12 +96,15 @@ DESCRIPTIONS = {
     "whole state automatically (on any network; the sign shows \"-\" until the download completes). " +
     "Requires a GPS fix to display a limit. Turn this ON to hide the display and warning."
   ),
-  # fordtsr2pnw: the Lightning's own traffic-sign speed limit, weighed against the map limit by Auto speed reduce.
-  "FordSignSpeedLimit": tr_noop(
-    "Use the F-150 Lightning's own traffic-sign camera speed limit together with the map. When the two disagree " +
-    "for a few seconds, the camera wins as long as it does not raise the limit (a work zone's lower sign, or a map " +
-    "glitch that drops the limit to the wrong road's). With no map speed limit at all, the camera limit is always " +
-    "used, even with this off. Affects Auto speed reduce only. ON by default. F-150 Lightning only."
+  # fordtsr2pnw / toggles2pnw: the Lightning's own traffic-sign speed limit, weighed against the map limit by Auto speed
+  # reduce. ON by default in behaviour; this is the opt-OUT toggle.
+  "DisableFordSignSpeedLimit": tr_noop(
+    "By default the F-150 Lightning's own traffic-sign camera speed limit is used together with the map. When the two " +
+    "disagree for a few seconds, the camera wins as long as it does not raise the limit (a work zone's lower sign, or a " +
+    "map glitch that drops the limit to the wrong road's). With no map speed limit at all, the camera limit is always " +
+    "used, even with this ON. Affects Auto speed reduce only. Turn this ON to ignore the camera limit while a map limit " +
+    "exists. In BC / km/h countries turn this ON until the camera's km/h limit has been measured. " +
+    "F-150 Lightning only."
   ),
   "ConditionalExperimentalSwitching": tr_noop(
     "Conditional Experimental Switching (CES): stay in Chill Mode for steady cruising and automatically " +
@@ -220,7 +227,7 @@ class TogglesLayout(Widget):
     super().__init__()
     self._params = Params()
     self._ts_read_at = -1e9  # tailscale2pnw: throttle for the status line
-    self._ts_text = ts_status.OFF
+    self._ts_text = ts_status.DISABLED_TEXT
     self._is_release = self._params.get_bool("IsReleaseBranch")
 
     # param, title, desc, icon, needs_restart
@@ -343,11 +350,12 @@ class TogglesLayout(Widget):
         "metric.png",
         False,
       ),
-      # tailscale2pnw: no restart (the tailscale_pnw manager process follows the param). The title carries the live
-      # status too, so an error is visible without opening the description.
-      "TailscaleEnabled": (
-        lambda: tr("Remote SSH (Tailscale)") + self._tailscale_title_suffix(),
-        DESCRIPTIONS["TailscaleEnabled"],
+      # tailscale2pnw / toggles2pnw: opt-OUT (default OFF = Remote SSH enabled). No restart (the tailscale_pnw manager
+      # process follows the param). The title carries the live status too, so an error is visible without opening
+      # the description.
+      "DisableTailscale": (
+        lambda: tr("Disable Remote SSH (Tailscale)") + self._tailscale_title_suffix(),
+        DESCRIPTIONS["DisableTailscale"],
         "warning.png",
         False,
       ),
@@ -359,11 +367,12 @@ class TogglesLayout(Widget):
         "speed_limit.png",
         False,
       ),
-      # fordtsr2pnw: camera speed limit, next to the map speed-limit toggle. Default ON; greyed on a car without
-      # the capability (display only, see _update_toggles). No restart: speedadjust reads it at ~1 Hz.
-      "FordSignSpeedLimit": (
-        lambda: tr("Ford Camera Speed Limit"),
-        DESCRIPTIONS["FordSignSpeedLimit"],
+      # fordtsr2pnw / toggles2pnw: camera speed limit, next to the map speed-limit toggle. Opt-OUT (default OFF = camera
+      # used); greyed on a car without the capability (display only, see _update_toggles). No restart: speedadjust
+      # reads it at ~1 Hz.
+      "DisableFordSignSpeedLimit": (
+        lambda: tr("Disable Ford Camera Speed Limit"),
+        DESCRIPTIONS["DisableFordSignSpeedLimit"],
         "speed_limit.png",
         False,
       ),
@@ -537,8 +546,8 @@ class TogglesLayout(Widget):
       toggle.set_description(lambda og_desc=toggle.description, add_desc=additional_desc: tr(og_desc) + (" " + tr(add_desc) if add_desc else ""))
 
       # tailscale2pnw: live status line under the toggle (and, via the title, next to it)
-      if param == "TailscaleEnabled":
-        toggle.set_description(lambda: tr(DESCRIPTIONS["TailscaleEnabled"]) + "\n\nStatus: " + self._tailscale_text())
+      if param == "DisableTailscale":
+        toggle.set_description(lambda: tr(DESCRIPTIONS["DisableTailscale"]) + "\n\nStatus: " + self._tailscale_text())
 
       # track for engaged state updates
       if locked:
@@ -574,7 +583,7 @@ class TogglesLayout(Widget):
       try:
         raw = self._params.get("TailscaleStatus")
         raw = raw.decode() if isinstance(raw, bytes) else (raw or "")
-        self._ts_text = ts_status.ui_text(self._params.get_bool("TailscaleEnabled"), raw)
+        self._ts_text = ts_status.ui_text(not self._params.get_bool("DisableTailscale"), raw)
       except UnknownKeyName as e:
         self._ts_text = f"error status unavailable ({e})"
     return self._ts_text
@@ -637,8 +646,8 @@ class TogglesLayout(Widget):
     # fordtsr2pnw: operable only on a car whose camera reports the limit (PnwVehicle.camera_speed_limit). DISPLAY ONLY --
     # no put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Tesla this
     # greys it, and the driver's Lightning setting is left exactly as he set it.
-    if "FordSignSpeedLimit" in self._toggles:
-      self._toggles["FordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)
+    if "DisableFordSignSpeedLimit" in self._toggles:
+      self._toggles["DisableFordSignSpeedLimit"].action_item.set_enabled(veh.camera_speed_limit)
 
     # coopsteer2pnw: operable only on a car with the coop_steer capability (the Raven). DISPLAY ONLY -- no
     # put_bool, for the shared-device reason spelled out under the angle-steering clamp below: on the Lightning

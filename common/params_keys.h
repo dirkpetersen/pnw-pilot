@@ -250,7 +250,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CESMode", {PERSISTENT, INT, "0"}},  // light-ces-gentle: 3-way master 0=Off 1=Light(gentle) 2=Standard. Source of truth.
     {"AutoSpeedReduce", {PERSISTENT, INT, "0"}},  // speedadjust2pnw: 3-way auto cruise-speed reduction 0=Off 1=Police(ease to limit+5 ~30s ahead) 2=Police+Limits(also cap proportionally on a posted-limit drop). Reduce-only, op-long only, default OFF.
     {"LimitAheadMode", {PERSISTENT, INT, "1"}},  // limitahead2pnw: slow down AHEAD of a lower limit mapd announces (needs AutoSpeedReduce=2). 0=Off 1=Shadow (log what it would do, change nothing; DEFAULT) 2=Live.
-    {"FordSignSpeedLimit", {PERSISTENT, BOOL, "1"}},  // fordtsr2pnw: use the Lightning camera's traffic-sign speed limit (carState.cruiseState.speedLimitSign) against the map limit in speedadjust. Default ON (owner 2026-09-27). With NO usable map limit the camera is used regardless of this toggle. Read at ~1 Hz, no restart.
+    // fordtsr2pnw / toggles2pnw: opt-OUT. The Lightning camera's traffic-sign speed limit (carState.cruiseState.speedLimitSign) is
+    // weighed against the map limit in speedadjust BY DEFAULT; ON ignores the camera. Replaces FordSignSpeedLimit (default 1), which is
+    // NOT registered any more and NOT migrated (it only ever held the default or a deliberate OFF; nothing reads it). With NO usable
+    // map limit the camera is used regardless of this toggle. Read at ~1 Hz, no restart.
+    {"DisableFordSignSpeedLimit", {PERSISTENT, BOOL, "0"}},
     {"HideCESDebug", {PERSISTENT, BOOL, "0"}},  // ces2pnw (driver req 2026-07-10): hide the onroad CES debug overlay; default OFF = overlay shows
     {"RainMode", {PERSISTENT, INT, "0"}},  // rain2pnw (driver req 2026-07-12): 3-way wet-weather curve-slowdown selector. 0=None, 1=Light (3 mph slower in curves by default), 2=Heavy (5 mph). Applies to BOTH cars, same reduction. Magnitudes tunable in /data/pnw/rain.json. Default None.
     {"CESCurves", {PERSISTENT, BOOL, "1"}},   // ces2xnor: per-condition enable
@@ -340,9 +344,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RouteCount", {PERSISTENT, INT, "0"}},
     {"SnoozeUpdate", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"SshEnabled", {PERSISTENT, BOOL}},
-    // tailscale2pnw: remote SSH over Tailscale. Toggle is default OFF; TailscaleStatus is written by
-    // system/tailscale/tailscale_pnw.py (change-only) and shown under the toggle in settings.
-    {"TailscaleEnabled", {PERSISTENT, BOOL, "0"}},
+    // tailscale2pnw / toggles2pnw: remote SSH over Tailscale is ENABLED BY DEFAULT (an unconfigured device with no auth
+    // key file stays inert: no download, status "needs auth key"); this is the opt-OUT toggle. It replaces the old
+    // TailscaleEnabled (default 0), which is NOT registered any more and NOT migrated: nothing reads it. TailscaleStatus is
+    // written by system/tailscale/tailscale_pnw.py (change-only) and shown under the toggle in settings.
+    {"DisableTailscale", {PERSISTENT, BOOL, "0"}},
     {"TailscaleStatus", {CLEAR_ON_MANAGER_START, STRING}},
     {"UbloxAvailable", {PERSISTENT, BOOL}},
     {"UpdateAvailable", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
