@@ -329,6 +329,7 @@ class SpeedAdjustController:
     self._police = None          # last LocationServices["police"] dict
     self._police_err_t = None    # policer2pnw: monotonic time of the last logged police-read failure (None = never)
     self._police_err_n = 0       # policer2pnw: failed police reads since that log line
+    self._pol_ahead_tgt = None   # policeahead2pnw: the look-ahead-anticipated police target this tick (None = not applied)
     self._police_latched = False # once within the approach window, hold until the report clears
     # policelatch2pnw: WHICH report the latch belongs to. The latch means "I am approaching THIS
     # report"; it must not survive onto a different one. Without this the cap carried across reports:
@@ -710,6 +711,7 @@ class SpeedAdjustController:
     capped the car to 15 mph in city traffic. The latch is kept independent of limit availability,
     so if the limit becomes known mid-approach the cap engages then."""
     p = self._police
+    self._pol_ahead_tgt = None               # policeahead2pnw: set below only on the tick the anticipated target applies
     if not isinstance(p, dict) or p.get("state") != "alert":
       self._police_latched = False           # cleared/passed report → release
       self._police_latched_key = None
@@ -789,21 +791,25 @@ class SpeedAdjustController:
       # look-ahead is running for an announced lower limit and the report is at or beyond that boundary (the report's
       # limit IS the announced one), the target is announced limit + 5 from the moment the look-ahead starts, so the car
       # is at it at the boundary. Never above the plain cap; the look-ahead going away (aborted/ended) puts it back to
-      # self._sl + margin. dist_mi is rounded to 0.1 mi (+-80 m), so a report right at the boundary can read either side
+      # self._sl + margin. dist_mi is rounded to 0.1 mi (+-80 m) and is read once a second while the boundary
+      # distance is dead-reckoned every tick (~+33 m at 33 m/s), so a report right at the boundary can read either side
       # of it from one tick to the next: the first strict "report is beyond it" reading is HELD for this report and
-      # episode (a wrong "beyond" for a report <= 80 m short of the boundary costs 10 mph for those metres; a flickering
-      # cap target would cost a surge). The status quo (no anticipation) is what every doubtful case falls back to.
+      # announced limit (a wrong "beyond" for a report up to ~110 m short of the boundary costs 10 mph for those metres;
+      # a flickering cap target would cost a surge). A look-ahead RE-TARGET (chained drop) drops the verdict: the report
+      # must be re-judged against the new boundary. The status quo (no anticipation) is what every doubtful case falls back to.
       la = self._la
       if la is not None and la["live"]:
+        verdict = (self._police_latched_key, la["n"])
         if dist_m >= la["b"] - self._odo:
-          la["pol_beyond_key"] = self._police_latched_key
-        beyond = la.get("pol_beyond_key") == self._police_latched_key and "pol_beyond_key" in la
+          la["pol_beyond"] = verdict
+        beyond = la.get("pol_beyond") == verdict
       else:
         beyond = False
       if beyond:
         ahead_cap = la["n"] + POLICE_MARGIN
         if ahead_cap < cap:
           cap = ahead_cap
+          self._pol_ahead_tgt = ahead_cap
           if not la.get("pol_logged"):
             la["pol_logged"] = True
             cloudlog.event("speedadjust_police_ahead", cap=round(float(cap), 2), plain=round(float(self._sl + POLICE_MARGIN), 2),
@@ -954,6 +960,8 @@ class SpeedAdjustController:
       if ann["b"] - self._odo <= d2:
         ep.update(n=ann["n"], tgt=tgt2, b=ann["b"], b0=ann["b"], d_start=d2, mat_t=None, hold_t=None, bad_t=None,
                   skip_logged=False)
+        ep.pop("pol_beyond", None)           # policeahead2pnw: the report is re-judged against the NEW boundary
+        ep.pop("pol_logged", None)
         self._la_log(ep, "retarget", dist=ann["b"] - self._odo, d_start=d2, v=v_ego)
     raw = self._sl_raw
     if 0.0 < raw <= ep["n"] + SL_DROP_EPS:
@@ -1036,6 +1044,8 @@ class SpeedAdjustController:
       "polLatch": bool(self._police_latched),
       "polSupp": bool(self._police_suppressed),
       "polKey": self._police_latched_key,
+      "polAhead": self._pol_ahead_tgt is not None,              # policeahead2pnw: the anticipated target is in effect
+      "polTgt": _r(self._pol_ahead_tgt),                        # ...and its value (m/s)
       "epLim": bool(getattr(self, "_ep_limit_drop", False)),   # sanorestore2pnw
       "noRst": getattr(self, "_no_restore_why", None),          # sanorestore2pnw (+ zoneSet / zoneAbandoned)
       "zoneTgt": _r(getattr(self, "_zone_target", None)),       # sazoneset2pnw: zone target, None = no zone episode

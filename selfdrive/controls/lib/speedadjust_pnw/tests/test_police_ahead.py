@@ -24,7 +24,8 @@ PM = sa.POLICE_MARGIN
 
 
 class _CP:
-  openpilotLongitudinalControl = True
+  def __init__(self, op_long=True):
+    self.openpilotLongitudinalControl = op_long
 
 
 class _Params:
@@ -117,13 +118,6 @@ def test_another_report_does_not_inherit_the_beyond_verdict():
   assert c._police_cap(V75, V75) == V70 + PM
 
 
-def test_never_below_the_floor_in_cap_impl():
-  """The existing MIN_CAP floor still applies to the anticipated target (an announced 12 mph limit -> 17 mph cap)."""
-  c = _ctrl(la=_la(n=12 * MPH, boundary=500.0), police=_pol(800.0))
-  assert c._police_cap(V75, V75) == pytest.approx(12 * MPH + PM)
-  assert max(sa.MIN_CAP, min([c._police_cap(V75, V75)])) >= sa.MIN_CAP
-
-
 # ---- closed loop: the 2026-10-01 15:24 numbers on the REAL controller -------------------------------------------------
 class _Clock:
   t = 1000.0
@@ -171,14 +165,14 @@ class _SM:
 
 
 def drive(monkeypatch, report_after_boundary, la_mode=sa.LA_LIVE, anticipate=True, tau=1.0, a_dn=2.0, xb=851.0, announce_m=752.0,
-          v0_mph=89.7, set_mph=90.0, cur_mph=70, nxt_mph=60, T=60.0, police_cur=None):
+          v0_mph=89.7, set_mph=90.0, cur_mph=70, nxt_mph=60, T=60.0, chain=None, op_long=True):
   """The 15:24:30 state: latched, v 89.7 mph, set 90, posted 70, a 60 announced 752 m out, cap 75 -> the boundary at xb m
   (mapd's current limit flips as the truck crosses it, read at 1 Hz). Plant: first-order lag tau toward the cap, decel
   bounded by a_dn (the log: <= 1.9 m/s^2). Report at xb + report_after_boundary. Returns the run record."""
   _Clock.t = 1000.0
   monkeypatch.setattr(sa, "time", _Clock)
   monkeypatch.setattr(sa.cloudlog, "event", lambda *a, **k: None)
-  c = sa.SpeedAdjustController(_CP(), params=_P(la_mode))
+  c = sa.SpeedAdjustController(_CP(op_long), params=_P(la_mode))
   c.mem_params = _Mem()
   if not anticipate:                         # the pre-change cap: the new branch reads only self._la, so hide it from there
     orig = c._police_cap
@@ -193,13 +187,17 @@ def drive(monkeypatch, report_after_boundary, la_mode=sa.LA_LIVE, anticipate=Tru
   sm = _SM()
   set_ms, v, x = set_mph * MPH, v0_mph * MPH, 0.0
   xr = xb + report_after_boundary
-  r = types.SimpleNamespace(v_at_boundary=None, v_at_report=None, rows=[], c=c)
+  r = types.SimpleNamespace(v_at_boundary=None, v_at_report=None, rows=[], c=c, tele=[])
   while _Clock.t - 1000.0 < T:
     dt = 0.05
     _Clock.t += dt
-    cur, nxt = (cur_mph, nxt_mph) if x < xb else (nxt_mph, 0)
+    if chain is None:
+      cur, nxt, xn = (cur_mph, nxt_mph, xb) if x < xb else (nxt_mph, 0, 0.0)
+    else:                                    # chain = (limit mph, boundary x): a SECOND drop after the first
+      cur, nxt, xn = ((cur_mph, nxt_mph, xb) if x < xb else (nxt_mph, chain[0], chain[1]) if x < chain[1]
+                      else (chain[0], 0, 0.0))
     c.mem_params.sl = cur * MPH
-    c.mem_params.nxt = (nxt * MPH, xb - x) if (nxt and xb - x <= announce_m) else None
+    c.mem_params.nxt = (nxt * MPH, xn - x) if (nxt and xn - x <= announce_m) else None
     c.mem_params.police = _pol(max(xr - x, 0.0)) if x < xr + 150 else None
     out = c.cap(sm, set_ms, set_ms, v, True)
     a = max(-a_dn, min((min(out, set_ms) - v) / tau, 1.0))
@@ -211,6 +209,7 @@ def drive(monkeypatch, report_after_boundary, la_mode=sa.LA_LIVE, anticipate=Tru
     if x0 < xr <= x:
       r.v_at_report = v / MPH
     r.rows.append((_Clock.t - 1000.0, x, v / MPH, out / MPH))
+    r.tele.append((x, c._pol_ahead_tgt))
   return r
 
 
@@ -265,3 +264,75 @@ def test_a_report_without_an_identity_is_never_judged_beyond_by_default():
   c = _ctrl(la=_la(boundary=500.0), police={"state": "alert", "dist_mi": 0.1, "tier": "confirmed", "cap": {"dist_mi": 0.1}})
   assert c._police_cap(V75, V75) == V70 + PM
   assert c._police_latched_key is None
+
+
+def test_the_min_cap_floor_still_applies_to_the_anticipated_target(monkeypatch):
+  """An announced 3 mph limit -> anticipated police target 8 mph, but _cap_impl's MIN_CAP (10 mph) floor holds the cap."""
+  r = drive(monkeypatch, 309.0, nxt_mph=3, T=45.0)
+  assert any(t is not None and t < sa.MIN_CAP for _x, t in r.tele), "the anticipated target (8 mph) was never in effect"
+  assert min(row[3] for row in r.rows) >= sa.MIN_CAP / MPH - 1e-6
+
+
+def test_chained_drop_rejudges_the_report_against_the_new_boundary(monkeypatch):
+  """70 -> 60 at 851 m, then 60 -> 50 at 1400 m (the look-ahead
+  re-targets ~410 m before it, with the report still ahead). Report A is 300 m into the 60 zone (1151 m): its limit is 60, so
+  exactly 65 -- the 50 announced beyond it must NOT reach it. (A stale 'beyond' verdict gave 55: 10 mph under the rule.)"""
+  new = drive(monkeypatch, 300.0, chain=(50, 1400.0), T=75.0)
+  old = drive(monkeypatch, 300.0, chain=(50, 1400.0), anticipate=False, T=75.0)
+  assert new.v_at_report == pytest.approx(65.0, abs=1.5), new.v_at_report
+  assert new.v_at_report >= old.v_at_report - 1.5
+  assert new.v_at_report > 62.0, f"under the owner's rule limit + 5: {new.v_at_report:.1f}"
+
+
+def test_a_retarget_clears_the_verdict_and_the_log_latch():
+  c = _ctrl(la=_la(boundary=500.0), police=_pol(800.0))
+  assert c._police_cap(V75, V75) == pytest.approx(V60 + PM)
+  assert c._la["pol_beyond"] and c._la["pol_logged"]
+  # the look-ahead re-targets to a 50 whose boundary is BEYOND the report: the report is judged afresh
+  c._la.update(n=50 * MPH, b=1500.0)
+  c._la.pop("pol_beyond", None)              # what the re-target does
+  assert c._police_cap(V75, V75) == V70 + PM
+
+
+def test_the_verdict_is_keyed_to_the_announced_limit_even_without_the_pop():
+  """Belt and braces: a verdict made for the 60 is not valid for a 50 (same report, same episode dict)."""
+  c = _ctrl(la=_la(n=V60, boundary=500.0), police=_pol(800.0))
+  assert c._police_cap(V75, V75) == pytest.approx(V60 + PM)
+  c._la["n"], c._la["b"] = 50 * MPH, 1500.0
+  assert c._police_cap(V75, V75) == V70 + PM
+
+
+def test_boundary_precision_a_report_100_m_past_the_boundary_is_beyond(monkeypatch):
+  """Pins the strict comparison: report 100 m past the sign must anticipate. (A mutant requiring >100 m past, or a
+  margin of one rounding step, would leave 75 at the report.)"""
+  c = _ctrl(la=_la(boundary=500.0), police=_pol(600.0))      # dist_mi rounds 600 m -> 0.4 mi = 644 m > 500
+  assert c._police_cap(V75, V75) == pytest.approx(V60 + PM)
+  c2 = _ctrl(la=_la(boundary=500.0), police={"state": "alert", "dist_mi": 0.3, "tier": "confirmed",
+                                             "cap": {"dist_mi": 0.3, "key": "q", "uuid": "q"}})   # 483 m, short
+  assert c2._police_cap(V75, V75) == V70 + PM
+  c3 = _ctrl(la=_la(boundary=480.0), police={"state": "alert", "dist_mi": 0.3, "tier": "confirmed",
+                                             "cap": {"dist_mi": 0.3, "key": "q", "uuid": "q"}})   # 483 m vs 480: beyond
+  assert c3._police_cap(V75, V75) == pytest.approx(V60 + PM)
+
+
+def test_telemetry_flags_the_anticipated_target_in_the_status_publish(monkeypatch):
+  r = drive(monkeypatch, 309.0)
+  st = [v for k, v in r.c.mem_params.calls if k == "SpeedAdjustStatus"][-1]
+  assert "polAhead" in st and "polTgt" in st
+  mid = [t for x, t in r.tele if 450.0 < x < 840.0]
+  assert mid and all(t == pytest.approx(V65, abs=1e-3) for t in mid)
+  assert all(t is None for x, t in r.tele if x < 50.0), "nothing is flagged before the look-ahead starts"
+
+
+def test_a_car_without_op_long_gets_announced_limit_plus_5_as_its_speedadjust_target(monkeypatch):
+  """Stock-ACC (the Lightning): the same cap rides SpeedAdjustTarget to the button executor."""
+  r = drive(monkeypatch, 309.0, op_long=False, v0_mph=89.7)
+  tg = [v["target"] for k, v in r.c.mem_params.calls if k == "SpeedAdjustTarget" and v.get("target")]
+  assert tg and min(tg) == pytest.approx(V65, abs=0.05), min(tg)
+  assert max(tg) <= 90 * MPH + 1e-6
+  old = drive(monkeypatch, 309.0, op_long=False, anticipate=False)
+  tg_old = [v["target"] for k, v in old.c.mem_params.calls if k == "SpeedAdjustTarget" and v.get("target")]
+  assert min(tg_old) == pytest.approx(V65, abs=0.05), "same END state as before (65), just reached earlier"
+  first65 = next(i for i, t in enumerate(tg) if t <= V65 + 0.01)
+  first65_old = next(i for i, t in enumerate(tg_old) if t <= V65 + 0.01)
+  assert first65 < first65_old
