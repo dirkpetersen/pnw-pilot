@@ -2,6 +2,8 @@
 
 Continues [`CHANGELOG-2026-09-28.md`](CHANGELOG-2026-09-28.md) (there is no separate 09-29 file; its ships are section 1 here). All times PT.
 
+**Update 2026-10-01 (evening):** sections 17-20 shipped after this; the channel tip is `9d9de83b78`, **GREEN**, 6115 passed. The device still runs `10ef871`; the tip is staged for the next reboot.
+
 **Update 2026-10-01 (later):** section 16 (`toggles2pnw`) shipped after this; the channel tip is `8e51763978`, **GREEN**, 5943 passed; the device still runs `acc42b5a9f` and has `8e51763978` staged (includes sections 13-14) for the next reboot, not yet rebooted.
 
 **Update 2026-10-01:** sections 12-14 shipped after this; the channel tip is `4c48ef4075`, **GREEN**, 5870 passed; the device runs `acc42b5a9f` and has `4c48ef4075` staged for the next reboot.
@@ -137,3 +139,33 @@ Shipped 2026-10-01 after a Sonnet coder and three Opus reviewers. Channel tip `8
 - The Pro Power toggle persists while the device is in the Tesla, where it is greyed.
 
 **Known limits, not fixed.** (1) `carcontroller.py` comments are slightly stale: `__init__` says a failed read keeps today's behaviour (true only before the first good read), and `update()` refers to "the guard below", which now lives in `_conv_disabled`. (2) `tailscale_pnw.py` `_none_reads` is not reset when `tick()` returns early (disabled or unconfigured), so after re-enabling a single `none` read can show "no network link" at once (display only). (3) The kept-last-value gate does not survive a card restart; a new gate fails open until its first successful read. (4) The UI tests build a stand-in `self`, not the raylib window, so the real rows have not been seen rendering. Tracked in the workbench work-pending item "toggles2pnw review follow-ups".
+
+## 17. `dbfirst2pnw`: the Tesla's VTSC map notch becomes curve-DB-first (`cecd8d6df1`, `9d9de83b78`)
+
+Owner rule: a curve the car has driven and trusts is decided by the curve DB, not by a flat notch; a never-recorded OSM curve is capped at 1.15 x the
+posted limit at the car; everything else keeps today's notch. Kill switch `tesla.vtsc_db_first` in `curve.json`. Tesla only. Rule, codes, telemetry and
+the install-order warning (code before a flagged table): [`VTSC-DB-FIRST.md`](VTSC-DB-FIRST.md). With the unflagged table that is deployed, every covered row is
+unreliable, so the only driver-visible change is the 1.15 x cap on never-recorded roads with a known limit. Tests: tip GREEN 6115.
+
+**Review (Opus x3).** The first mild-curve idea (`165195e065`) was not shipped: the replay used a lateral-acceleration bound of 2.7 where the shipped value is 3.59;
+the polyline was measured over the whole horizon, not at the protected curve; the camera adds nothing at range; hysteresis made "only removes slowing" false.
+Open follow-ups, none changing behaviour: the brain comment "at most ~2 mph lower, never higher" overstates (the brain output can differ in both directions with
+the switch ON; only lowerings of up to 2 mph reach VTSC); the exporter nearest-first test is weak; coverage keys use rounded floats; the per-curve override circle
+can miss a bend that is far from its centre (a data issue); the strict rule is not validated out of sample. Known side effect: the 1.15 x cap can deepen a
+slowdown on a surface road with a low posted limit.
+
+## 18. `policeahead2pnw` (`35cdb6206b` ... `9e4e32a9ed`)
+
+A latched confirmed police report now anchors the police target at the announced limit + 5 mph once the report lies beyond an announced lower limit, from
+the moment the look-ahead starts. Reduce-only, same slew, held per report. Look-ahead off or shadow = the old cap exactly. Found on a 2026-10-01 drive where the
+car held 75 in a 60 zone for about 4 s because the police cap used only the current limit. 22 tests, mutation-checked. Telemetry `polAhead`, `polTgt`.
+
+## 19. `restfar2pnw` (`6b741a0ebf` ... `252bf04366`)
+
+The next rest area is shown up to 50 mi ahead along a tagged corridor (was 15 mi). Display-only; police and EV caps and the perpendicular rule are unchanged; with
+no WayRef or heading the old reach applies and the mode change is logged once. Two review rounds added a U-turn guard and tighter tests.
+
+## 20. `dmtext2pnw` (`10ef871923`)
+
+Text only. Driver-monitoring `DmMode` Default is not stock openpilot; the on-screen text, comments and docs now say what it is: standard alert timeouts plus the
+fork's recovery rules. No logic, constant, param or test expectation changed.
