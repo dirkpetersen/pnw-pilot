@@ -782,7 +782,34 @@ class SpeedAdjustController:
     if not self._police_latched:
       return None                            # not close enough yet — hold current speed
     if self._sl > 0.0:
-      return self._sl + POLICE_MARGIN
+      cap = self._sl + POLICE_MARGIN
+      # policeahead2pnw (owner 2026-10-01; drives/2026-10-01/tesla-police-limit-drop): the cap used the CURRENT limit only,
+      # so a 70 -> 60 boundary ahead of a latched report left the cap at 75 until the sign (mapd had announced the 60
+      # 750 m out, 22 s earlier), then it ramped to 65 at CAP_SLEW -- 4-5 s and ~150 m INSIDE the 60 zone. When a LIVE
+      # look-ahead is running for an announced lower limit and the report is at or beyond that boundary (the report's
+      # limit IS the announced one), the target is announced limit + 5 from the moment the look-ahead starts, so the car
+      # is at it at the boundary. Never above the plain cap; the look-ahead going away (aborted/ended) puts it back to
+      # self._sl + margin. dist_mi is rounded to 0.1 mi (+-80 m), so a report right at the boundary can read either side
+      # of it from one tick to the next: the first strict "report is beyond it" reading is HELD for this report and
+      # episode (a wrong "beyond" for a report <= 80 m short of the boundary costs 10 mph for those metres; a flickering
+      # cap target would cost a surge). The status quo (no anticipation) is what every doubtful case falls back to.
+      la = self._la
+      if la is not None and la["live"]:
+        if dist_m >= la["b"] - self._odo:
+          la["pol_beyond_key"] = self._police_latched_key
+        beyond = la.get("pol_beyond_key") == self._police_latched_key and "pol_beyond_key" in la
+      else:
+        beyond = False
+      if beyond:
+        ahead_cap = la["n"] + POLICE_MARGIN
+        if ahead_cap < cap:
+          cap = ahead_cap
+          if not la.get("pol_logged"):
+            la["pol_logged"] = True
+            cloudlog.event("speedadjust_police_ahead", cap=round(float(cap), 2), plain=round(float(self._sl + POLICE_MARGIN), 2),
+                           announced=round(float(la["n"]), 2), boundary_m=round(float(la["b"] - self._odo), 1),
+                           report_m=round(float(dist_m), 1))
+      return cap
     return None                              # no posted limit → no basis to pick a target → no cap
 
   def _update_baseline(self, v_cruise_set: float):
