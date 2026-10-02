@@ -284,14 +284,50 @@ def test_chained_drop_rejudges_the_report_against_the_new_boundary(monkeypatch):
   assert new.v_at_report > 62.0, f"under the owner's rule limit + 5: {new.v_at_report:.1f}"
 
 
-def test_a_retarget_clears_the_verdict_and_the_log_latch():
-  c = _ctrl(la=_la(boundary=500.0), police=_pol(800.0))
+def test_a_retarget_clears_the_verdict_and_the_log_latch(monkeypatch):
+  """Through the REAL _la_step re-target (chained 60 -> 50), not by hand."""
+  monkeypatch.setattr(sa.cloudlog, "event", lambda *a, **k: None)
+  c = _ctrl(la=None, odo=0.0, police=_pol(800.0))
+  c._la_mode = sa.LA_LIVE
+  c._ratio = 1.0
+  c._la = {"n": V60, "tgt": V60, "ratio": 1.0, "pre": V75, "b": 500.0, "b0": 500.0, "d_start": 400.0, "mat_t": None,
+           "hold_t": None, "bad_t": None, "bad_why": None, "live": True, "skip_logged": False}
   assert c._police_cap(V75, V75) == pytest.approx(V60 + PM)
   assert c._la["pol_beyond"] and c._la["pol_logged"]
-  # the look-ahead re-targets to a 50 whose boundary is BEYOND the report: the report is judged afresh
-  c._la.update(n=50 * MPH, b=1500.0)
-  c._la.pop("pol_beyond", None)              # what the re-target does
-  assert c._police_cap(V75, V75) == V70 + PM
+  now = sa.time.monotonic()
+  c._ann = {"n": 50 * MPH, "b": 550.0, "since": now - 10.0}     # a lower limit announced, steady, inside its start distance
+  c._sl_raw = V70
+  c._la_step(now, 33.0, V75)
+  assert c._la["n"] == pytest.approx(50 * MPH), "the look-ahead did not re-target"
+  assert "pol_beyond" not in c._la and "pol_logged" not in c._la
+
+
+def test_polahead_telemetry_resets_when_the_cap_path_is_left(monkeypatch):
+  """After the anticipation, polAhead/polTgt must read False/None once the look-ahead ends, on ACC-off (uninitialized
+  cruise) and with the feature off (mode 0) -- the early returns in _cap_impl skip _police_cap()."""
+  r = drive(monkeypatch, 309.0)
+  c = r.c
+  c._la = dict(_la(boundary=1e6), tgt=V60, ratio=1.0, pre=V75, b0=1e6, d_start=400.0, mat_t=None, hold_t=None, bad_t=None,
+               bad_why=None, skip_logged=False)
+  c._police = _pol(1e6 + 800.0)
+  c._police_latched, c._police_latched_key = True, "p1"
+  c._pol_ahead_tgt = V65                                   # as left by a tick that anticipated
+  sm = _SM()
+  c.cap(sm, V75, V75, 20.0, False)                          # cruise not initialized (ACC off): early return
+  assert c._pol_ahead_tgt is None
+  c._pol_ahead_tgt = V65
+  c._mode = 0
+  c.cap(sm, V75, V75, 20.0, True)                           # feature off: early return
+  assert c._pol_ahead_tgt is None
+  st = [v for k, v in c.mem_params.calls if k == "SpeedAdjustStatus"][-1]
+  assert st["polAhead"] is False and st["polTgt"] is None
+
+
+def test_polahead_telemetry_resets_when_the_look_ahead_ends(monkeypatch):
+  r = drive(monkeypatch, 309.0, T=75.0)                     # long enough for the look-ahead to promote and end
+  assert r.tele[-1][1] is None
+  st = [v for k, v in r.c.mem_params.calls if k == "SpeedAdjustStatus"][-1]
+  assert st["polAhead"] is False and st["polTgt"] is None
 
 
 def test_the_verdict_is_keyed_to_the_announced_limit_even_without_the_pop():

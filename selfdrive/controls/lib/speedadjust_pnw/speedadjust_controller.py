@@ -1397,6 +1397,7 @@ class SpeedAdjustController:
     now = time.monotonic()
     dt = min(max(now - self._last_t, 0.0), 0.5) if self._last_t is not None else 0.0
     self._last_t = now
+    self._pol_ahead_tgt = None               # policeahead2pnw: re-set by _police_cap() only; the early returns below skip it
     self._odo += max(float(v_ego), 0.0) * dt  # limitahead2pnw: announced boundaries are kept on this odometer
     if now - self._last_read >= READ_S:
       self._last_read = now
