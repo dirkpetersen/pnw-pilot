@@ -23,7 +23,7 @@ MAPD_SETTINGS = {"personalities": {"aggressive": {"map_curve_target_lat_a": 2.4}
 
 
 def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl.FORMAT, exclude_date=None,
-             tamper=None) -> str:
+             tamper=None, flags: bool = False) -> str:
   """Write a rows file + manifest the way tools/curvedb/v2_live_export.py does. `tamper(blob) -> blob`
   corrupts the rows AFTER the manifest hash was taken."""
   os.makedirs(d, exist_ok=True)
@@ -34,6 +34,8 @@ def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl
   man = {"format": fmt, "file": cl.ROWS_NAME, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(),
          "anchors": len(anchors), "rows_with_authority": n_rows, "first_date": "2026-07-13",
          "last_date": "2026-09-22", "exclude_date": exclude_date}
+  if flags:                                    # dbfirst2pnw: the table declares per-row lowerBound flags
+    man["flags"] = "lowerBound"
   if tamper is not None:
     blob = tamper(blob)
   with open(os.path.join(d, cl.ROWS_NAME), "wb") as f:

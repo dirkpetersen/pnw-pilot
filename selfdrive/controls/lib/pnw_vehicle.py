@@ -408,6 +408,14 @@ VTSC_NOTCH_VEGO_DEFAULT = True
 # {"tesla": {"vtsc_hold_envelope": false}} in curve.json (hot-reloaded with the rest of the tesla section); same fail-safe as release-later: a
 # present-but-unreadable file / bad value turns it OFF = today's frozen hold.
 VTSC_HOLD_ENVELOPE_DEFAULT = True
+# dbfirst2pnw (owner design 2026-10-01): on the Raven, VTSC's map minimum-slowdown notch (set - 4.5 m/s on ANY OSM-flagged curve) is replaced by
+# "the curve DB first". Where the curve DB COVERS the flagged point in the driving direction (a row with authority: driven, measured), the OSM
+# fold is not applied there -- the DB (the curve brain's need) and vision decide. Where it does not, the flat notch becomes a cap of
+# vtsc_constants.UNCOVERED_CURVE_LIMIT_RATIO x the posted limit, relaxed when the polyline and the camera both measure the curve mild. Needs the
+# curve brain ACTING (curve_brain lower/raise): in shadow/off, or with no fresh coverage, today's notch stands. DEFAULT ON. Kill switch:
+# {"tesla": {"vtsc_db_first": false}} in curve.json (hot-reloaded with the rest of the tesla section); same fail-safe as the other switches: a
+# present-but-unreadable file / bad value turns it OFF = today's flat notch.
+VTSC_DB_FIRST_DEFAULT = True
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
 # curvebrain2b2pnw A2..A5: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
@@ -474,7 +482,7 @@ def _load_tesla_curve_config() -> dict:
   error at start too)."""
   cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT, "why": "default",
          "release_later": VTSC_RELEASE_LATER_DEFAULT, "notch_vego": VTSC_NOTCH_VEGO_DEFAULT,
-         "hold_envelope": VTSC_HOLD_ENVELOPE_DEFAULT}
+         "hold_envelope": VTSC_HOLD_ENVELOPE_DEFAULT, "db_first": VTSC_DB_FIRST_DEFAULT}
   path = CURVE_CONFIG_PATH
   try:
     st = os.stat(path)
@@ -486,6 +494,7 @@ def _load_tesla_curve_config() -> dict:
       cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
       cfg["notch_vego"] = False      # vtscnotch2pnw: unreadable file -> set-relative notch (today's)
       cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
+      cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
       return cfg
     with open(path) as f:
       data = json.load(f)
@@ -499,6 +508,7 @@ def _load_tesla_curve_config() -> dict:
     cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
     cfg["notch_vego"] = False      # vtscnotch2pnw: unreadable file -> set-relative notch (today's)
     cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
+    cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
     return cfg
   # The key parse is guarded like the read above (Fable F1): json.load turns a 309+ digit literal into an int that
   # math.isfinite / float() cannot convert (OverflowError), and a raise here would take down EVERY process that builds
@@ -515,6 +525,7 @@ def _load_tesla_curve_config() -> dict:
       cfg["release_later"] = False   # vtscfloor2pnw: unreadable file -> release-later OFF
       cfg["notch_vego"] = False      # vtscnotch2pnw: unreadable file -> set-relative notch (today's)
       cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
+      cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
       return cfg
     bad, clamped = [], []
     if "curve_lat_a" in tesla:
@@ -568,6 +579,17 @@ def _load_tesla_curve_config() -> dict:
       else:
         cfg["hold_envelope"] = False
         bad.append(f"vtsc_hold_envelope {raw!r:.24} is not true/false -> OFF")
+    if "vtsc_db_first" in tesla:
+      # dbfirst2pnw kill switch, same contract as the other vtsc_* switches above: true / false (0 / 1); anything else is a `bad` key, the switch
+      # goes OFF (today's flat notch) and the section is not honoured (mid-drive: last good config kept).
+      raw = tesla["vtsc_db_first"]
+      if isinstance(raw, bool):
+        cfg["db_first"] = raw
+      elif isinstance(raw, (int, float)) and raw in (0, 1):
+        cfg["db_first"] = bool(raw)
+      else:
+        cfg["db_first"] = False
+        bad.append(f"vtsc_db_first {raw!r:.24} is not true/false -> OFF")
     if clamped:
       cloudlog.warning(f"pnw_vehicle: {path}: tesla value(s) clamped into bounds: {', '.join(clamped)}")
     if bad:
@@ -580,7 +602,7 @@ def _load_tesla_curve_config() -> dict:
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
     return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT, "release_later": False,
-            "notch_vego": False, "hold_envelope": False,
+            "notch_vego": False, "hold_envelope": False, "db_first": False,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
 
@@ -1155,18 +1177,21 @@ class PnwVehicle:
       if not _tesla_cfg_is_honored(new) and self._tesla_cfg_good:
         cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
                        f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} " +
-                       f"release_later={old['release_later']} notch_vego={old['notch_vego']} hold_envelope={old['hold_envelope']}")
+                       f"release_later={old['release_later']} notch_vego={old['notch_vego']} hold_envelope={old['hold_envelope']} " +
+                       f"db_first={old['db_first']}")
         self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
         return False
       self._tesla_curve_cfg = new
       self._tesla_cfg_good = _tesla_cfg_is_honored(new)
-      changed = ((new["curve_brain"], new["curve_lat_a"], new["release_later"], new["notch_vego"], new["hold_envelope"])
-                 != (old["curve_brain"], old["curve_lat_a"], old["release_later"], old["notch_vego"], old["hold_envelope"]))
+      changed = ((new["curve_brain"], new["curve_lat_a"], new["release_later"], new["notch_vego"], new["hold_envelope"],
+                  new["db_first"])
+                 != (old["curve_brain"], old["curve_lat_a"], old["release_later"], old["notch_vego"], old["hold_envelope"], old["db_first"]))
       cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
                      prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
                      release_later=new["release_later"], prev_release_later=old["release_later"],
                      notch_vego=new["notch_vego"], prev_notch_vego=old["notch_vego"],
                      hold_envelope=new["hold_envelope"], prev_hold_envelope=old["hold_envelope"],
+                     db_first=new["db_first"], prev_db_first=old["db_first"],
                      file="absent" if sig is None else "present")
       return changed
     except Exception as e:
@@ -1204,6 +1229,13 @@ class PnwVehicle:
     when the car is at safe speed)? The Raven (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_hold_envelope is not switched
     off; False on every other car, so the Lightning's VTSC (inert anyway: no op-long) is byte-unchanged."""
     return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["hold_envelope"])
+
+  @property
+  def vtsc_db_first(self) -> bool:
+    """dbfirst2pnw: is the curve DB first for VTSC's map curve notch (DB-covered points skip the OSM fold, uncovered ones get the posted-limit
+    cap instead of the flat notch)? The Raven (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_db_first is not switched off;
+    False on every other car, so the Lightning's VTSC (inert anyway: no op-long) is byte-unchanged."""
+    return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["db_first"])
 
   @property
   def curve_brain_why(self) -> str:

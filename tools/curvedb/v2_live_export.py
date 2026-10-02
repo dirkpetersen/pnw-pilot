@@ -22,6 +22,13 @@ WHAT IS IN IT. Every anchor of the table (not only the ones with authority) with
 * An anchor with no granted branch is exported too, so the car's nearest-anchor search picks the same
   anchor the offline replay picked; a nearest anchor with nothing granted means no DB effect.
 
+* dbfirst2pnw: `--flags F` marks rows `lowerBound` (a 5th element 1 on the branch, and "flags": "lowerBound" in the manifest). F is a JSON list
+  of [anchor_lat, anchor_lon, branch_end_lat, branch_end_lon] -- the branches whose passes include SATURATED ones (the steering was at its limit,
+  so the achieved path curvature, hence k, is only a LOWER BOUND of the road's). The car (Tesla VTSC db-first) does not let such a row replace
+  the OSM notch. The flags are computed by the private build from the drive corpus (they need per-pass saturation, which the table does not
+  store); a flag that matches no row with authority fails the export. A file WITHOUT `--flags` declares nothing, and the car then treats every
+  row as unreliable for that purpose.
+
 `--exclude-date` builds the same file leave-one-date-out (the replay test's fixture; never shipped).
 
 Run:
@@ -49,10 +56,15 @@ MANIFEST_NAME = "manifest.json"
 KEY_PARAMS = ("site_radius_m", "heading_tol_deg", "extent_back_m", "extent_fwd_m", "branch_radius_m")
 
 
-def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None) -> tuple[dict, dict]:
-  """(document, counts). Pure apart from reading `idx`."""
+def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound: list | None = None) -> tuple[dict, dict]:
+  """(document, counts). Pure apart from reading `idx`. `lower_bound`: [[anchor_lat, anchor_lon, end_lat, end_lon], ...] (see the header);
+  None = the file declares no flags."""
   p = idx.p
   anchors, n_rows, n_branches, dates = [], 0, 0, set()
+  flagged: dict = {}
+  for fl in lower_bound or ():
+    flagged.setdefault((round(float(fl[0]), 6), round(float(fl[1]), 6)), []).append([float(fl[2]), float(fl[3]), False])
+  n_flagged = 0
   for a in idx.anchors:
     obs_dates = {o.date for o in a.obs if o.date != exclude_date}
     dates |= obs_dates
@@ -65,12 +77,21 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None) -> tuple[di
       n_branches += 1
       k = round(v.k, 8) if v.granted else None
       n_rows += v.granted
-      brs.append([round(br[0], 6), round(br[1], 6), k, v.n_dates])
+      row = [round(br[0], 6), round(br[1], 6), k, v.n_dates]
+      if v.granted:
+        for fl in flagged.get((round(a.lat, 6), round(a.lon, 6)), ()):
+          if rt.haversine_m(fl[0], fl[1], br[0], br[1]) <= p.branch_radius_m:
+            fl[2] = True
+            row.append(1)
+            n_flagged += 1
+            break
+      brs.append(row)
     anchors.append([round(a.lat, 6), round(a.lon, 6), round(a.brg, 1), brs])
   doc = {"format": FORMAT, "params": {k: getattr(p, k) for k in KEY_PARAMS},
          "exclude_date": exclude_date, "anchors": anchors}
   counts = {"anchors": len(anchors), "branches": n_branches, "rows_with_authority": n_rows,
-            "dates": sorted(dates)}
+            "dates": sorted(dates), "flags": lower_bound is not None, "lower_bound_rows": n_flagged,
+            "lower_bound_unmatched": sum(1 for v in flagged.values() for fl in v if not fl[2])}
   return doc, counts
 
 
@@ -91,6 +112,7 @@ def write(doc: dict, counts: dict, out: str, source: str) -> dict:
          "rows_with_authority": counts["rows_with_authority"],
          "first_date": counts["dates"][0] if counts["dates"] else None,
          "last_date": counts["dates"][-1] if counts["dates"] else None, "n_dates": len(counts["dates"]),
+         **({"flags": "lowerBound", "lower_bound_rows": counts["lower_bound_rows"]} if counts.get("flags") else {}),
          "exclude_date": doc["exclude_date"], "source_table": os.path.basename(source), "source_sha256": src_sha,
          "built_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}
   mpath = os.path.join(out, MANIFEST_NAME)
@@ -107,9 +129,17 @@ def main(argv=None) -> int:
   ap.add_argument("--out", required=True)
   ap.add_argument("--exclude-date", help="leave-one-date-out build (test fixture only; never ship it)")
   ap.add_argument("--expect-rows", type=int, help="fail unless exactly this many rows have authority")
+  ap.add_argument("--flags", help="dbfirst2pnw: JSON list of [anchor_lat, anchor_lon, end_lat, end_lon] lowerBound branches (see the header)")
   a = ap.parse_args(argv)
   idx = load_table(a.table)
-  doc, counts = export_doc(idx, a.exclude_date)
+  lower_bound = None
+  if a.flags:
+    with open(a.flags) as f:
+      lower_bound = json.load(f)
+  doc, counts = export_doc(idx, a.exclude_date, lower_bound)
+  if counts["lower_bound_unmatched"]:
+    print(f"{counts['lower_bound_unmatched']} lowerBound flag(s) match no row with authority -- not written (the flag file does not belong to this table)")
+    return 2
   if counts["rows_with_authority"] == 0:
     print("ZERO rows with authority -- refusing to write a file the car would load as an empty DB")
     return 2

@@ -37,7 +37,8 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   apex_turn_direction)                                          # descentcurve2pnw
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import icbm_passed_points   # vtscpass2pnw: the ONE passed-point geometry
-from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import parse_entry as parse_curve_brain_entry   # curvebrain2b2pnw
+from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (   # curvebrain2b2pnw; dbfirst2pnw: parse_coverage
+  parse_entry as parse_curve_brain_entry, parse_coverage)
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
 
 # twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
@@ -86,6 +87,7 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_map_ref = 0.0     # vtscnotch2pnw telemetry: the notch reference of this tick's fold (0.0 = no fold)
+    self._tele_dbf = ("", "", None)   # dbfirst2pnw: (mapSrc, mapCov, mapCap15) of this tick's fold; per tick, like the rest
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
@@ -171,6 +173,9 @@ class VTSCController:
     self._cb_ign_t = None      # monotonic time of the last logged "entry ignored" line
     self._cb_ign_n = 0         # entries ignored (stale / bad) since that line
     self._cb_raise_logged = False
+    self._cb_cov = None        # dbfirst2pnw: the last parsed coverage map {(lat, lon): 1|0} (None = no usable coverage) ...
+    self._cb_cov_why = "absent"  # ... and why there is none: absent / stale / mode / bad / "ok"
+    self._dbf_state = None     # dbfirst2pnw: (avail, why, limit known) last logged, so the verdict logs on CHANGE only
     self._tele_cb = self._cb_tele_blank()
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
@@ -472,6 +477,43 @@ class VTSCController:
       self._notch_held = min(v_set, max(self._notch_held, live))
     return self._notch_held
 
+  def _db_first_inputs(self):
+    """dbfirst2pnw (Raven, curve.json tesla.vtsc_db_first, default ON): (db_cov, uncov_cap) for most_binding_map_curve, or
+    (None, None) = TODAY's fold, byte-identical. db_cov is the curve brain's coverage of mapd's path ({(lat, lon): 1 covered | 0 not});
+    it exists only while the brain ACTS (mode lower/raise in both processes) and its entry is fresh. uncov_cap = UNCOVERED_CURVE_LIMIT_RATIO x
+    the posted limit (m/s), None while no limit is known (the flat notch then stays on uncovered
+    points). Every way of NOT having coverage keeps the notch and is logged when it CHANGES (Rule 2); an exception loudly. Never raises."""
+    if not self.veh.vtsc_db_first:
+      return None, None
+    try:
+      now = time.monotonic()
+      if self.veh.curve_brain in ("lower", "raise"):
+        self._read_brain(now)
+        cov, why = self._cb_cov, self._cb_cov_why
+      else:
+        cov, why = None, "mode:" + str(self.veh.curve_brain)
+      limit = float(self._speed_limit)
+      cap = limit * C.UNCOVERED_CURVE_LIMIT_RATIO if (math.isfinite(limit) and limit > 0.0) else None
+      n_unrel = 0 if cov is None else sum(1 for c in cov.values() if c == 2)
+      state = (cov is not None, why, cap is not None, n_unrel > 0)
+      if state != self._dbf_state:
+        if cov is None:
+          # "absent" / "mode:..." are the brain's own gates (no row-bearing road, shadow mode, nothing published yet): normal, said once at info.
+          # "stale" / "bad" mean a published entry could not be used: warning.
+          (cloudlog.warning if why in ("stale", "bad") else cloudlog.info)(
+            "VTSC db-first: NO curve-DB coverage (%s) -- the flat OSM map notch applies as before", why)
+        else:
+          cloudlog.info("VTSC db-first: coverage of %d path points from the curve brain (%d covered but UNRELIABLE: lower-bound row, notch stays); " +
+                        "posted limit %s", len(cov), n_unrel,
+                        "unknown -- uncovered points keep the flat notch" if cap is None else f"{limit:.1f} m/s -> uncovered-curve cap {cap:.1f} m/s")
+        self._dbf_state = state
+      if cov is None:
+        return None, None
+      return cov, cap
+    except Exception as e:
+      self._note_cb_err(time.monotonic(), e, "db-first inputs")
+      return None, None
+
   def _fold_map_curve(self, k_apex, d_apex, v_curve, v_cruise_set, v_ego, horizon_m):
     """ces-i90-2pnw (MTSC) + sharpcurve2pnw: fold the upcoming MAP curve into the curve picture, using
     whichever of vision / map is MORE BINDING (needs the lower speed NOW via the decel envelope). Now
@@ -497,10 +539,14 @@ class VTSCController:
     # byte-identical to before.
     notch_ref = self._notch_ref(v_cruise_set, v_ego)
     try:
+      pts = self._ahead_points(v_ego)
+      db_cov, uncov_cap = self._db_first_inputs()   # (None, None) when the switch is off
+      info = {} if db_cov is not None else None
       mv, md, sharp, mv_raw, floored = most_binding_map_curve(
-        self._ahead_points(v_ego), self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
+        pts, self._cur_lat, self._cur_lon, v_ego, horizon_m, self.tune['A_DECEL'],
         C.APEX_FINISH_S, C.SHARP_CURVE_V, C.MAP_SPEED_SCALE, v_cruise_set, C.MAP_MIN_SLOWDOWN,
-        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0, notch_ref=notch_ref)
+        self._speed_limit if (self._is_freeway and self._speed_limit > 0.0) else 0.0, notch_ref=notch_ref,
+        db_cov=db_cov, uncov_cap=uncov_cap, info=info)
     except Exception as e:
       # foldlog2pnw (Rule 2): this was a bare `except Exception: return`, so a failure silently switched map-curve
       # anticipation off and left only the vision cap. The fallback is unchanged -- no map curve, vision's picture
@@ -511,6 +557,7 @@ class VTSCController:
       # too large for a float). Caught broadly for the reason twistyr2pnw's Fable review gave: plannerd is
       # restart_if_crash=False, so an escaping exception would disengage both cars with no re-engage.
       self._tele_map_err = type(e).__name__
+      self._tele_dbf = ("", "", None)   # dbfirst2pnw: a failed fold reports no db-first verdict, like the rest of its telemetry
       self._fold_err_n += 1
       now = time.monotonic()
       if self._fold_err_t is None or now - self._fold_err_t >= TWISTY_ERR_LOG_S:
@@ -522,12 +569,17 @@ class VTSCController:
     self._tele_map_raw, self._tele_map_eff, self._tele_map_d = mv_raw, mv, md
     self._tele_map_floored = bool(floored)
     self._tele_map_ref = float(notch_ref)         # vtscnotch2pnw: only by a fold that ran, like the rest of the map telemetry
+    if info is not None:                          # dbfirst2pnw telemetry: which rule decided the map curve this tick
+      self._tele_dbf = (info.get("src", ""), info.get("cov", ""), round(float(uncov_cap), 2) if uncov_cap is not None else None)
     # curvefloor2pnw: the minimum-slowdown floor is applied PER-POINT inside most_binding_map_curve,
     # before the decel envelope -- doing it here, after selection, was provably suppressed by ordinary
     # multi-point map data (a gentle near node clamps to the set speed, ties on envelope, wins on
     # proximity, and its high raw target then blocks the floor). See that function for the full note.
     # only a real map curve meaningfully below the SET speed counts (ignore GPS noise / trivial targets)
-    if not (0.0 < mv < v_cruise_set - C.MAP_MIN_SLOWDOWN + 1e-6) or md <= 0.0:
+    # dbfirst2pnw: a point the posted-limit cap bound is meant to be a real (if mild) slowdown, so it passes at CONFIDENCE_CUT; every other
+    # point (and every tick with the switch off) is judged at MAP_MIN_SLOWDOWN, as before.
+    min_sd = C.CONFIDENCE_CUT if (info is not None and info.get("capped")) else C.MAP_MIN_SLOWDOWN
+    if not (0.0 < mv < v_cruise_set - min_sd + 1e-6) or md <= 0.0:
       return k_apex, d_apex, v_curve, False
     rsn_vis = brake_cap_for_apex(v_curve, d_apex, v_ego, self.tune['A_DECEL']) if d_apex >= 0.0 else float('inf')
     rsn_map = brake_cap_for_apex(mv, md, v_ego, self.tune['A_DECEL'])
@@ -554,6 +606,7 @@ class VTSCController:
     self._tele_map_raw = self._tele_map_eff = self._tele_map_d = 0.0
     self._tele_map_floored = False
     self._tele_map_ref = 0.0     # vtscnotch2pnw telemetry: the notch reference of this tick's fold (0.0 = no fold)
+    self._tele_dbf = ("", "", None)   # dbfirst2pnw: per tick, like the rest
     self._tele_vis_k = self._tele_vis_d = self._tele_vis_v = 0.0
     self._tele_curve_win = "none"
     self._tele_rsn_map = self._tele_rsn_vis = -1.0
@@ -870,6 +923,7 @@ class VTSCController:
     if now - self._cb_read_t < 0.05:
       return
     self._cb_read_t = now
+    raw = None
     try:
       raw = self.mem_params.get("CurveBrain", return_default=True) if self.mem_params is not None else None
       entry, problem, age = parse_curve_brain_entry(raw, now)
@@ -889,6 +943,10 @@ class VTSCController:
                        f"term is INACTIVE, VTSC runs exactly as before ({self._cb_ign_n} ignored since the last log)")
         self._cb_ign_t, self._cb_ign_n = now, 0
     self._cb_entry, self._cb_problem, self._cb_age = entry, problem, age
+    if self.veh.vtsc_db_first:                    # dbfirst2pnw: the same raw read; never raises (a malformed entry is a "bad" verdict)
+      self._cb_cov, self._cb_cov_why = parse_coverage(raw, now)
+    else:
+      self._cb_cov, self._cb_cov_why = None, "off"
 
   def _apply_brain(self, now, dt, v_cruise, v_ego, capped) -> float:
     """curvebrain2b2pnw T1/T2 (design s5.2): returns `capped`, LOWERED only when the brain's DB need binds and the mode
@@ -1024,6 +1082,13 @@ class VTSCController:
         # 2026-09-03, VtscMapCurves=1). A finite distance (incl. the 0.0 of a tick with no fold) is written as before.
         "mapD": round(float(self._tele_map_d), 0) if math.isfinite(self._tele_map_d) else None,
         "mapFlr": bool(self._tele_map_floored),
+        # dbfirst2pnw: which rule decided the map curve this tick -- mapSrc "db" (curve DB covers it: no OSM fold) / "cap15" (uncovered: posted-limit
+        # cap) / "notch" (today's flat notch: limit or coverage unknown, or the covering row is unreliable) / "osm" (a real OSM curve,
+        # unchanged) / "" (not evaluated); mapCov "1" covered / "0" not / "u" covered but the row is unreliable (lower bound) / "?" unknown;
+        # mapCap15 the cap speed (m/s), null = no limit known.
+        # getattr: permissive test stubs build the payload without the state.
+        "mapSrc": getattr(self, "_tele_dbf", ("", "", None))[0], "mapCov": getattr(self, "_tele_dbf", ("", "", None))[1],
+        "mapCap15": getattr(self, "_tele_dbf", ("", "", None))[2],
         "mapRef": round(float(getattr(self, "_tele_map_ref", 0.0)), 2),   # vtscnotch2pnw: the held notch reference (m/s); = set speed when the switch is off
         # mapcurv2pnw: measured map curvature + what it would advise (m/s). Telemetry only.
         "mapK": round(float(self._tele_mapk), 5),

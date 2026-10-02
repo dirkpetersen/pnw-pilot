@@ -144,7 +144,8 @@ class RowIndex:
   """Immutable spatial index over the exported anchors. Same cell scheme and nearest-anchor rule as
   roadtable.AnchorIndex, so the car picks the anchor the offline replay picked."""
 
-  def __init__(self, anchors: list, params: dict):
+  def __init__(self, anchors: list, params: dict, flags: bool = False):
+    self.has_flags = bool(flags)   # dbfirst2pnw: the file declares per-row `lowerBound` flags (manifest "flags"); see Match.reliable
     self.radius = float(params["site_radius_m"])
     self.tol = float(params["heading_tol_deg"])
     self.back = float(params["extent_back_m"])
@@ -162,8 +163,12 @@ class RowIndex:
         raise CurveDbFileError(f"anchor {n}: position/bearing out of range")
       brs = []
       for b in a[3]:
-        if not (isinstance(b, list) and len(b) == 4):
+        # dbfirst2pnw: an OPTIONAL 5th element 1 = `lowerBound` (its passes include saturated ones, so k is only a lower bound of the road's
+        # curvature). It may appear only in a file whose manifest declares flags, and only on a row with a curvature.
+        if not (isinstance(b, list) and len(b) in (4, 5)):
           raise CurveDbFileError(f"anchor {n}: malformed branch")
+        if len(b) == 5 and not (self.has_flags and b[4] == 1 and b[2] is not None):
+          raise CurveDbFileError(f"anchor {n}: a lowerBound flag the manifest does not declare, a value other than 1, or on a row without k")
         e_lat, e_lon = float(b[0]), float(b[1])
         k = None if b[2] is None else float(b[2])
         if not (math.isfinite(e_lat) and math.isfinite(e_lon)):
@@ -174,7 +179,7 @@ class RowIndex:
           if int(b[3]) < 2:     # the owner's >= 2 dates rule, re-checked on the car
             raise CurveDbFileError(f"anchor {n}: a row with authority on {b[3]} date(s)")
           self.n_rows += 1
-        brs.append((e_lat, e_lon, k, int(b[3])))
+        brs.append((e_lat, e_lon, k, int(b[3]), len(b) == 5))
       self.anchors.append((lat, lon, brg, tuple(brs)))
       self._grid.setdefault(self._key(lat, lon), []).append(n)
 
@@ -256,7 +261,7 @@ def load_rows(data_dir: str) -> tuple[RowIndex, dict]:
   if not isinstance(anchors, list) or not anchors:
     raise CurveDbFileError("no anchors")
   try:
-    idx = RowIndex(anchors, params)
+    idx = RowIndex(anchors, params, flags=man.get("flags") == "lowerBound")
   except (TypeError, ValueError) as e:
     raise CurveDbFileError(f"rows malformed: {type(e).__name__}: {e}") from e
   if idx.n_rows != man.get("rows_with_authority") or idx.n_rows == 0:
@@ -331,11 +336,14 @@ class Polyline:
 
 
 class Match:
-  __slots__ = ("why", "anchor", "branch", "k", "s_anchor", "lat", "lon", "s_q")
+  __slots__ = ("why", "anchor", "branch", "k", "s_anchor", "lat", "lon", "s_q", "reliable")
 
-  def __init__(self, why, anchor=None, branch=None, k=None, s_anchor=None, lat=None, lon=None, s_q=None):
+  def __init__(self, why, anchor=None, branch=None, k=None, s_anchor=None, lat=None, lon=None, s_q=None, reliable=True):
     self.why, self.anchor, self.branch, self.k, self.s_anchor, self.lat, self.lon = why, anchor, branch, k, s_anchor, lat, lon
     self.s_q = s_q            # path odometer of the query point
+    # dbfirst2pnw: may this row's k replace the OSM notch? False when the row is flagged `lowerBound`, or when the file declares no flags at
+    # all (an unflagged table cannot say; it is then treated as unreliable everywhere). Only the Tesla's db-first rule reads it.
+    self.reliable = reliable
 
   @property
   def row_id(self):
@@ -371,7 +379,7 @@ def match_at(idx: RowIndex, poly: Polyline, s_q: float, q_lat: float, q_lon: flo
   b = a[3][hits[0]]
   if b[2] is None:
     return Match("noAuthority", anchor=ai, branch=hits[0], s_anchor=s_a, lat=a[0], lon=a[1])
-  return Match("ok", anchor=ai, branch=hits[0], k=b[2], s_anchor=s_a, lat=a[0], lon=a[1])
+  return Match("ok", anchor=ai, branch=hits[0], k=b[2], s_anchor=s_a, lat=a[0], lon=a[1], reliable=idx.has_flags and not b[4])
 
 
 def scan_ahead(idx: RowIndex, poly: Polyline, s_ego: float, horizon_m: float, step_m: float = SCAN_STEP_M):

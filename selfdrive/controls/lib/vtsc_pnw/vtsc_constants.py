@@ -112,6 +112,18 @@ MAP_MIN_SLOWDOWN  = 4.5   # m/s; only fold a map curve whose (scaled) target is 
 #   1.0          70 mph                51 mph                70 mph
 MAP_FLOOR_DEPTH   = 0.0
 
+# dbfirst2pnw (owner design 2026-10-01): the flat notch above is blind to HOW sharp an OSM-flagged curve is ("OpenStreetMap does not tell how sharp a
+# curve is; our curve database should be better"). On the Raven, with the curve brain acting and curve.json tesla.vtsc_db_first not off:
+#   * COVERED point (the curve DB has a row with authority at it in the driving direction: driven and measured, incl. measured-straight): the OSM
+#     fold is NOT applied to that map point at all; the DB (CurveBrain) and vision decide. An override (curve_overrides.json) still wins there.
+#   * UNCOVERED point (never driven / row refused): the flat notch becomes a CAP of UNCOVERED_CURVE_LIMIT_RATIO x the posted limit, applied only
+#     over the curve (the point's own brake envelope), only when the set speed exceeds it, never raising anything. NO relaxation from the
+#     polyline or the camera: Opus's review of vtscmild2pnw showed neither measures the protected curve reliably (dense nodes read unmeasurable,
+#     the camera under-reads at range), and a gate that flips is itself a hazard.
+#   * posted limit unknown, or no fresh coverage from the brain: today's notch.
+# Owner 2026-10-01: 15 % above the limit (first brief said 20 %).
+UNCOVERED_CURVE_LIMIT_RATIO = 1.15
+
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -
 # Root cause of the recurring sharp-curve "TAKE CONTROL" (I-90 descents): pfeiferj mapd publishes a
 # FIXED 500 m path horizon (MIN_WAY_DIST in mapd/settings/const.go), but VTSC only scanned

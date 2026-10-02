@@ -31,6 +31,18 @@ in the record rather than assumed: the corroborated-shape path (design s3.3 step
 candidates (VTSC has its own; they are the phantom sources), so a curve the DB has no row for is left to VTSC exactly as
 today.
 
+dbfirst2pnw (owner design 2026-10-01): the brain also says WHICH of mapd's path points the DB COVERS. For every path vertex ahead it asks the
+same keying the rows use (curvedb_live.match_at, at the vertex, in the path's direction): a row with authority = COVERED (driven on >= 2 dates,
+measured, agreeing -- including a measured-straight row); no anchor / a refused branch / a branch the path takes that was never driven =
+UNCOVERED; a path too short to key it, or two branches near, or an uncovered vertex inside a per-curve override = UNKNOWN (omitted: VTSC treats
+it as today). A covered row may replace the OSM notch only if its curvature is TRUSTWORTHY for pricing: a row flagged `lowerBound` in the table
+(its passes include saturated ones, so k is only a lower bound of the road's curvature), or any row of a table that declares no flags, is
+COVERED-UNRELIABLE (2): the notch stays there. Published as `cov` = [[lat, lon, 1|0|2], ...] in the CurveBrain param, ONLY while
+curve.json tesla.vtsc_db_first is on, the mode acts
+(lower/raise) and every gate below passed; otherwise the key is absent and VTSC keeps its OSM notch. Every covered vertex's row is also priced
+for the need, so a covered point is never left to a row the 25 m scan happened to skip. COVERAGE IS A SUBSET OF "DRIVEN": a stretch only the
+Tesla drove (the table never accepts Tesla-only evidence), driven once, or whose dates disagreed is UNCOVERED here.
+
 NO EFFECT AT ALL (v is None, `why` names the gate) when: the mode is off; the DB is not loaded; GPS is stale / none;
 mapd's way selection is not `current` (2 s hold, as the Lightning's); the road class is unknown or a ramp; mapd's path
 is missing or the car is more than OFF_PATH_MAX_M off it; the Tesla lateral target is unusable. Every one is a `cbWhy`.
@@ -67,7 +79,10 @@ MODES = ("off", "shadow", "lower", "raise")
 # Every key tele() emits -- pinned by the tests: a key added here and not emitted (or vice versa) is a silently-null
 # ces_events column (that happened four times in ces_pnw.py's history).
 TELE_KEYS = ("cbOn", "cbDb", "cbWhy", "cbV", "cbD", "cbSrc", "cbEv", "cbA", "cbK", "cbRow", "cbN", "cbErr", "cbSeq",
-             "cbRows", "cbCfg", "cbOvr", "cbOvrN")
+             "cbRows", "cbCfg", "cbOvr", "cbOvrN", "cbCov")
+# dbfirst2pnw: a covered vertex is only RELIABLE when no lowerBound row lies between the car and it, or within this far past it
+COV_LOOKAHEAD_M = 250.0
+COV_MAX_POINTS = 300                    # dbfirst2pnw: path vertices classified per tick (mapd's 500 m path is ~100); the rest stay UNKNOWN
 
 # curvebrain2b2pnw A5 (owner 2026-09-29): the general steering ceiling is the vehicle-model clamp itself (3.6), which is acceptable
 # only because KNOWN bad curves carry their own lower limit. The DB rows store only k, so the limits are a small separate PRIVATE
@@ -326,6 +341,7 @@ class CurveBrain:
     self._last_t = -1e9
     self._err_t = None
     self._err_n = 0
+    self._noflags_logged = False
     self.err = None
     if veh.curve_override_platform is None:              # the brain is Tesla-only; a car without the capability must not build one
       raise ValueError("CurveBrain built for a car without curve_override_platform")
@@ -349,7 +365,7 @@ class CurveBrain:
     self._seq += 1
     out = {"ts": round(float(now), 3), "seq": self._seq, "mode": mode, "v": None, "d": None, "src": None, "ev": None,
            "a": None, "k": None, "row": None}
-    rec = {"cbWhy": None, "cbN": 0, "cbErr": None, "cbOvr": None}
+    rec = {"cbWhy": None, "cbN": 0, "cbErr": None, "cbOvr": None, "cbCov": None}
     try:
       # tracked on EVERY tick before any gate, so the last-"current" time stays true while another gate is closed
       ws = self.db.way_sel_held(way_sel, now)[0] if mode != "off" else way_sel
@@ -361,6 +377,10 @@ class CurveBrain:
           why = "offPath"
         else:
           rows = scan_ahead(self.db.index, poly, s_ego, HORIZON_M)
+          if self.veh.vtsc_db_first and mode in ("lower", "raise"):
+            out["cov"], extra = self._coverage(poly, points, s_ego, rows)
+            rows = rows + extra                  # a covered point's row is always priced, even where the 25 m scan stepped over it
+            rec["cbCov"] = _cov_summary(out["cov"])
           need, n = most_binding_row(self.db.index, rows, s_ego, self.veh, float(v_ego), float(a_decel),
                                      overrides=self.overrides)
           rec["cbOvr"] = need["ovr"] if need is not None else None
@@ -375,9 +395,54 @@ class CurveBrain:
     except Exception as e:
       rec["cbWhy"], rec["cbErr"] = "err", type(e).__name__
       out.update(v=None, d=None, src=None, ev=None, a=None, k=None, row=None)
+      out.pop("cov", None)                               # an exception never publishes coverage: VTSC keeps its notch
+      rec["cbCov"] = None
       self._note_err(now, e, "need layer")
     self._last, self._last_t = {**out, **rec}, now
     return out
+
+  def _coverage(self, poly, points, s_ego, rows):
+    """dbfirst2pnw: (cov, extra) -- cov = [[lat, lon, 1|0|2], ...] for the path vertices from just behind the car to the horizon (omitted =
+    unknown), extra = the Matches of covered vertices whose row the 25 m scan did not already hold. See the module header for the verdicts."""
+    idx = self.db.index
+    if not idx.has_flags and not self._noflags_logged:
+      self._noflags_logged = True
+      cloudlog.warning("curve_brain: the loaded curve DB table declares no `lowerBound` reliability flags -- every covered row is treated as " +
+                       "UNRELIABLE, so VTSC's map notch stays everywhere a row exists (db-first frees nothing until a flagged table is installed)")
+    seen = {m.row_id for m in rows}
+    cov, extra = [], []
+    for j, s in enumerate(poly.s):
+      if s < s_ego - 25.0 or s > s_ego + HORIZON_M:
+        continue
+      if len(cov) >= COV_MAX_POINTS:
+        break
+      p = points[poly.src_idx[j]]
+      la, lo = float(p["latitude"]), float(p["longitude"])
+      m = cl.match_at(idx, poly, s, la, lo)
+      if m.why == "ok":
+        c = 1 if m.reliable else 2                         # 2 = covered, but the row is a lower bound (or the table has no flags): notch stays
+        if m.row_id not in seen:
+          seen.add(m.row_id)
+          extra.append(m)
+      elif m.why in ("noAnchor", "noAuthority"):
+        c = 0
+      elif m.why == "branchUnknown" and m.s_anchor is not None and m.s_anchor + idx.fwd <= poly.s_max:
+        c = 0                                              # the path is long enough to key the branch, and the branch it takes was never recorded
+      else:
+        continue                                           # too short a path to key it / two branches near: unknown
+      if c == 0 and not self.overrides.failsafe and self.overrides.limit(la, lo, poly.heading(s))[0] is not None:
+        continue                                           # a known bad curve with no row to price: not a point to relax -- unknown (today's notch)
+      cov.append([la, lo, c, s])
+    # A covered vertex stands in for the OSM notch, which is a speed cap over the brake envelope from the car TO that vertex (and the apex just past
+    # it), so it is RELIABLE only if no lowerBound row (or any row of an unflagged table) lies between the car and the vertex or within
+    # COV_LOOKAHEAD_M past it. On the 2026-09-30 22:32 bend the mapd node that carried the notch sat 100-280 m AFTER the saturated apex rows.
+    unreliable_s = [m.s_anchor for m in rows + extra if not m.reliable]
+    out = []
+    for la, lo, c, s in cov:
+      if c == 1 and any(s_ego - 25.0 <= sa <= s + COV_LOOKAHEAD_M for sa in unreliable_s):
+        c = 2
+      out.append([la, lo, c])
+    return out, extra
 
   def _gate(self, mode, plat, plon, gps_state, ws, hwy, points):
     if mode == "off":
@@ -413,7 +478,7 @@ class CurveBrain:
     if self._last and now - self._last_t <= 2.0 * PUBLISH_S + 0.5:
       L = self._last
       out.update(cbWhy=L["cbWhy"], cbV=L["v"], cbD=L["d"], cbSrc=L["src"], cbEv=L["ev"], cbA=L["a"], cbK=L["k"],
-                 cbRow=L["row"], cbN=L["cbN"], cbSeq=L["seq"], cbOvr=L["cbOvr"])
+                 cbRow=L["row"], cbN=L["cbN"], cbSeq=L["seq"], cbOvr=L["cbOvr"], cbCov=L["cbCov"])
       if L["cbErr"]:
         out["cbErr"] = L["cbErr"]
     else:
@@ -458,3 +523,51 @@ def parse_entry(raw, now) -> tuple[dict | None, str | None, float | None]:
             "a": raw.get("a"), "k": raw.get("k")}, None, age
   except Exception:   # anything else in an untrusted param is "malformed": the caller counts and logs it
     return None, "bad", None
+
+
+def _cov_summary(cov) -> str:
+  """"covered-reliable / uncovered / covered-unreliable vertex counts of a `cov` list, for the cbCov telemetry column."""
+  n1, n2 = sum(1 for c in cov if c[2] == 1), sum(1 for c in cov if c[2] == 2)
+  return f"{n1}/{len(cov) - n1 - n2}/{n2}"
+
+
+def parse_coverage(raw, now) -> tuple[dict | None, str]:
+  """VTSC's side of the coverage contract: the CurveBrain param -> ({(lat, lon): 1|0|2}, "ok"), or (None, why). 1 = covered and reliable, 0 = not
+  covered, 2 = covered but the row is a LOWER BOUND. Pure; never raises.
+
+  A coverage map is only usable from a fresh entry (age in [-PUBLISH_S, ENTRY_MAX_AGE_S], like parse_entry) published by a brain that is
+  ACTING (mode lower/raise) with a well-formed `cov`. why: "absent" (nothing published / no `cov` key -- the brain's own gates, the switch off,
+  or a mode that does not act), "stale", "mode" (the brain is in shadow/off), "bad" (malformed). Every non-"ok" result means: no coverage,
+  VTSC keeps today's OSM notch."""
+  try:
+    if raw in (None, b"", ""):
+      return None, "absent"
+    if isinstance(raw, (bytes, str)):
+      raw = json.loads(raw)
+    if not isinstance(raw, dict) or not raw:
+      return None, ("absent" if raw == {} else "bad")
+    ts = raw.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+      return None, "bad"
+    age = float(now) - float(ts)
+    if not -PUBLISH_S <= age <= ENTRY_MAX_AGE_S:
+      return None, "stale"
+    if raw.get("mode") not in ("lower", "raise"):
+      return None, "mode"
+    cov = raw.get("cov")
+    if cov is None:
+      return None, "absent"
+    if not isinstance(cov, list) or len(cov) > 2 * COV_MAX_POINTS:
+      return None, "bad"
+    out = {}
+    for item in cov:
+      if not (isinstance(item, list) and len(item) == 3):
+        return None, "bad"
+      la, lo, c = item
+      if (isinstance(la, bool) or isinstance(lo, bool) or not isinstance(la, (int, float)) or not isinstance(lo, (int, float))
+              or not (math.isfinite(la) and math.isfinite(lo)) or isinstance(c, bool) or c not in (0, 1, 2)):
+        return None, "bad"
+      out[(float(la), float(lo))] = int(c)
+    return out, "ok"
+  except Exception:   # anything else in an untrusted param is "malformed"
+    return None, "bad"

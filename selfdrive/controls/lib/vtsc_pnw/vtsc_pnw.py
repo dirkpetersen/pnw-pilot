@@ -385,7 +385,9 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
                            v_cruise_cap: float = float('inf'),
                            min_slowdown: float = C.MAP_MIN_SLOWDOWN,
                            floor_limit: float = 0.0, floor_depth: float = C.MAP_FLOOR_DEPTH,
-                           notch_ref: float | None = None):
+                           notch_ref: float | None = None,
+                           db_cov: dict | None = None, uncov_cap: float | None = None,
+                           info: dict | None = None):
   """sharpcurve2pnw: scan pfeiferj map path points {latitude,longitude,velocity} within horizon_m and
   return (v_target, dist, is_sharp) of the curve whose decel-limited brake cap is the LOWEST right now
   — i.e. the one to start slowing for first. This is the distance-based lookahead: a far sharp curve
@@ -399,7 +401,19 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   notch_ref (vtscnotch2pnw): the speed a DEEPER minimum-slowdown notch is measured from; None = v_cruise_cap (today). A point it does
   not floor falls back to the set-relative notch (two tiers: never shallower than today). The clamp min(tv*scale, v_cruise_cap)
   stays on v_cruise_cap (the true SET speed) either way.
+  dbfirst2pnw (db_cov None = today, byte-identical): db_cov maps (lat, lon) of a path point to 1 = the curve DB COVERS it (a row with authority
+  in the driving direction whose k is trustworthy), 0 = the DB does not (never driven / row refused), 2 = covered but UNRELIABLE (lowerBound row);
+  a point not in it is UNKNOWN (= today's treatment). Only a point
+  that would bind today (a real OSM curve below the notch, or a flagged one the notch floors) is looked at: a covered one is SKIPPED (the DB and
+  vision decide); an uncovered flagged one gets min(its scaled target, uncov_cap) instead of the flat notch (uncov_cap = ratio x the posted limit
+  in m/s, None = limit unknown -> today's notch); there is deliberately NO relaxation of that cap from the polyline or the camera (Opus review of
+  vtscmild2pnw: neither measures the protected curve reliably). `info`, when given, is filled with
+  src ("db" / "cap15" / "notch" / "osm" / "" = no point looked at) and cov ("1" / "0" / "u" covered-but-unreliable / "?") of the SELECTED point (or the nearest
+  covered point skipped, when none was selected), `capped` (the selected point's target is the cap: the caller's meaningful-slowdown gate
+  is then a CONFIDENCE_CUT, not MAP_MIN_SLOWDOWN) and `n_db` (covered points skipped). A covered point never ADDS slowing.
   (0.0, inf, False, 0.0, False) if no point / no data. Pure."""
+  if info is not None:                                  # dbfirst2pnw: always filled, also on the no-data return below
+    info.update(src="", cov="", capped=False, n_db=0, db_d=float('inf'))
   if not points or cur_lat is None or cur_lon is None:
     return 0.0, float('inf'), False, 0.0, False
   best_cap = float('inf')
@@ -408,6 +422,7 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   best_sharp = False
   best_raw = 0.0
   best_floored = False
+  best_src, best_cov, best_capped, n_db, db_d = "", "", False, 0, float('inf')   # dbfirst2pnw
   for p in points:
     try:
       d = _haversine_m(cur_lat, cur_lon, p["latitude"], p["longitude"])
@@ -435,6 +450,7 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
     # the selection so the SELECTED curve matches the value used downstream.
     floored_pt = False
     shallow_floor = False
+    tv_scaled = tv_eff                   # dbfirst2pnw: the scaled+clamped target BEFORE any notch
     if math.isfinite(v_cruise_cap):
       # The deeper car-relative notch applies only BEYOND the hold horizon (HOLD_TTA_S of travel). For a point inside it the state machine
       # would go brake -> hold on a map apex ~1 s away and freeze the cap, hiding a vision curve a few seconds further on (replay: +4.7 m/s
@@ -468,6 +484,21 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
         # target while denying it the authority to reach it, which is worse than not deepening at
         # all. (A raw target of 25-29 m/s is both "sharp" and floorable, so this is reachable.)
         shallow_floor = tv_eff >= notch - 1e-6
+    pt_src, pt_cov, pt_capped = "", "", False
+    if db_cov is not None and math.isfinite(v_cruise_cap) and (floored_pt or 0.0 < tv_eff < v_cruise_cap - min_slowdown + 1e-6):
+      # dbfirst2pnw: this point binds today (a flagged curve the notch floors, or a real OSM curve under the notch). What the curve DB knows
+      # of it decides what OSM may say. Unknown coverage keeps today's value (pt_src "notch" / "osm").
+      state = db_cov.get((float(p["latitude"]), float(p["longitude"])))
+      if state == 1:
+        n_db += 1
+        db_d = min(db_d, d)
+        continue                           # covered: the DB (curve brain) and vision decide; nothing from OSM for this point
+      pt_cov = {0: "0", 2: "u"}.get(state, "?")           # u = covered, but the row is a lower bound / the table has no flags: the notch stays
+      pt_src = "notch" if floored_pt else "osm"
+      if state == 0 and floored_pt and uncov_cap is not None:
+        tv_eff = min(tv_scaled, uncov_cap)      # the posted-limit cap replaces the flat notch; never above what the scaled fold allowed
+        floored_pt, shallow_floor, pt_src = True, True, "cap15"
+        pt_capped = tv_eff < tv_scaled - 1e-9
     if tv_eff <= 0.0:
       continue
     cap = brake_cap_for_apex(tv_eff, d, v_ego, a_decel, finish_s)
@@ -484,6 +515,10 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
       # accumulator would mislabel the telemetry whenever a non-selected point happened to be floored.
       best_floored = floored_pt
       best_raw = tv                            # UNSCALED mapd target for the chosen curve
+      best_src, best_cov, best_capped = pt_src, pt_cov, pt_capped
+  if info is not None:
+    info.update(src=best_src if best_src else ("db" if n_db else ""), cov=best_cov if best_src else ("1" if n_db else ""),
+                capped=bool(best_capped), n_db=n_db, db_d=db_d)
   return best_v, best_d, best_sharp, best_raw, best_floored
 
 
