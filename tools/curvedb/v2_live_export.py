@@ -68,7 +68,7 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
   for a in idx.anchors:
     obs_dates = {o.date for o in a.obs if o.date != exclude_date}
     dates |= obs_dates
-    brs = []
+    brs, granted = [], []
     # Branch centers come from the passes that remain after the exclusion, exactly as the replay's
     # query side sees them (row_verdict filters by date first, then by branch).
     kept = rt.Anchor(a.lat, a.lon, a.brg, [o for o in a.obs if o.date != exclude_date])
@@ -77,15 +77,21 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
       n_branches += 1
       k = round(v.k, 8) if v.granted else None
       n_rows += v.granted
-      row = [round(br[0], 6), round(br[1], 6), k, v.n_dates]
+      brs.append([round(br[0], 6), round(br[1], 6), k, v.n_dates])
       if v.granted:
-        for fl in flagged.get((round(a.lat, 6), round(a.lon, 6)), ()):
-          if rt.haversine_m(fl[0], fl[1], br[0], br[1]) <= p.branch_radius_m:
-            fl[2] = True
-            row.append(1)
-            n_flagged += 1
-            break
-      brs.append(row)
+        granted.append((len(brs) - 1, br))
+    # One-to-one, nearest first: a flag marks the single granted branch it is nearest to (within the branch radius) and a branch takes at most
+    # one flag, so two branches 15 m apart can never both be marked by one flag and no flag is "used up" by the wrong branch.
+    fls = flagged.get((round(a.lat, 6), round(a.lon, 6)), [])
+    pairs = sorted((rt.haversine_m(fl[0], fl[1], br[0], br[1]), fi, bi) for fi, fl in enumerate(fls) for bi, br in granted)
+    taken_f, taken_b = set(), set()
+    for dist, fi, bi in pairs:
+      if dist <= p.branch_radius_m and fi not in taken_f and bi not in taken_b:
+        taken_f.add(fi)
+        taken_b.add(bi)
+        fls[fi][2] = True
+        brs[bi].append(1)
+        n_flagged += 1
     anchors.append([round(a.lat, 6), round(a.lon, 6), round(a.brg, 1), brs])
   doc = {"format": FORMAT, "params": {k: getattr(p, k) for k in KEY_PARAMS},
          "exclude_date": exclude_date, "anchors": anchors}

@@ -55,10 +55,10 @@ def test_the_verdicts(tmp_path, monkeypatch, cfgpath, schedule, log):
   cov = _cov(out)
   assert cov[300] == 1                                              # a row with authority
   assert cov[60] == 0 and cov[220] == 0                              # no anchor: never driven
-  assert cov[140] == 0                                              # an anchor whose row was refused: driven, NOT measured
-  assert cov[420] == 0                                              # driven, but not along this branch
+  assert cov[140] == 3                                              # an anchor whose row was refused: DRIVEN, not measured (owner: not 'never driven')
+  assert cov[420] == 4                                              # driven, but not along this branch: also not 'never driven'
   n1, n2 = sum(1 for c in cov.values() if c == 1), sum(1 for c in cov.values() if c == 2)
-  assert out["v"] is not None and b.tele(100.0)["cbCov"] == f"{n1}/{len(cov) - n1 - n2}/{n2}"
+  assert out["v"] is not None and b.tele(100.0)["cbCov"] == f"{n1}/{sum(1 for c in cov.values() if c == 0)}/{n2}/{sum(1 for c in cov.values() if c in (3, 4))}"
   assert min(cov) >= -20 and max(cov) <= 500                        # from just behind the car to mapd's horizon
   assert log.errors == [] and log.exceptions == []
 
@@ -196,8 +196,8 @@ def _entry(**kw):
   return e
 
 
-def test_parse_accepts_covered_unreliable():
-  assert cb.parse_coverage(_entry(cov=[[1.0, 2.0, 2]]), 100.0) == ({(1.0, 2.0): 2}, "ok")
+def test_parse_accepts_every_verdict():
+  assert cb.parse_coverage(_entry(cov=[[1.0, 2.0, 2], [1.0, 3.0, 3], [1.0, 4.0, 4]]), 100.0) == ({(1.0, 2.0): 2, (1.0, 3.0): 3, (1.0, 4.0): 4}, "ok")
 
 
 def test_parse_ok_returns_exact_keys():
@@ -210,7 +210,7 @@ def test_parse_ok_returns_exact_keys():
   (_entry(), 101.5, "stale"), (_entry(), 99.0, "stale"),
   (_entry(mode="shadow"), 100.0, "mode"), (_entry(mode="off"), 100.0, "mode"),
   ("{nope", 100.0, "bad"), ([], 100.0, "bad"), (_entry(ts=None), 100.0, "bad"), (_entry(ts=float("nan")), 100.0, "bad"),
-  (_entry(cov="x"), 100.0, "bad"), (_entry(cov=[[1, 2]]), 100.0, "bad"), (_entry(cov=[[1, 2, 3]]), 100.0, "bad"),
+  (_entry(cov="x"), 100.0, "bad"), (_entry(cov=[[1, 2]]), 100.0, "bad"), (_entry(cov=[[1, 2, 5]]), 100.0, "bad"),
   (_entry(cov=[[1, 2, True]]), 100.0, "bad"), (_entry(cov=[[float("inf"), 2, 1]]), 100.0, "bad"),
   (_entry(cov=[["a", 2, 1]]), 100.0, "bad"), (_entry(cov=[[1, 2, 1]] * (2 * cb.COV_MAX_POINTS + 1)), 100.0, "bad"),
 ])
@@ -262,3 +262,24 @@ def test_match_reliability(tmp_path):
     la, lo = _ll(0.0, 300.0)
     m = cl.match_at(idx, poly, poly.project(la, lo)[0], la, lo)
     assert m.why == "ok" and m.reliable is want
+
+
+def test_the_loaded_event_carries_the_flags_and_the_manifest_count_is_checked(tmp_path, monkeypatch):
+  events = []
+  monkeypatch.setattr(cl.cloudlog, "event", lambda name, **kw: events.append((name, kw)))
+  d = tmp_path / "e"
+  write_db(str(d), [_flag(_anchor(300.0, 0.004)), _anchor(500.0, 0.002)], flags=True)
+  db = cl.CurveDbLive(True, data_dir=str(d), read_params=lambda: (None, None), start=False)
+  db.load()
+  ev = [kw for n, kw in events if n == "curvedb_v2_loaded"][0]
+  assert db.state == "ok" and ev["flags"] == "lowerBound" and ev["lower_bound_rows"] == 1 and ev["rows"] == 2
+  man = json.loads((d / "manifest.json").read_text())
+  man["lower_bound_rows"] = 5
+  (d / "manifest.json").write_text(json.dumps(man))
+  with pytest.raises(cl.CurveDbFileError, match="lowerBound rows"):
+    cl.load_rows(str(d))
+  d2 = tmp_path / "u"
+  write_db(str(d2), [_anchor(300.0, 0.004)])
+  events.clear()
+  cl.CurveDbLive(True, data_dir=str(d2), read_params=lambda: (None, None), start=False).load()
+  assert events[0][1]["flags"] is None and events[0][1]["lower_bound_rows"] == 0          # an unflagged table says so

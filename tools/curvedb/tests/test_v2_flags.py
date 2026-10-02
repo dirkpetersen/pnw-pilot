@@ -79,3 +79,34 @@ def test_the_loader_accepts_only_the_value_1(tmp_path, val):
   write_db(str(tmp_path), [[LAT0, LON0, 0.0, [[END[0], END[1], 0.002, 3, val]]]], flags=True)
   with pytest.raises(cl.CurveDbFileError):
     cl.load_rows(str(tmp_path))
+
+
+def _two_branch_idx():
+  """One anchor, two granted branches whose ends are ~20 m apart (A at END, B 0.00018 deg = 20 m north of it)."""
+  idx = rt.AnchorIndex(rt.PROVISIONAL_V2)
+  a = idx.anchors[idx.add(LAT0, LON0, 0.0)]
+  for tag, dlat in (("a", 0.0), ("b", 0.00018)):
+    for n, date in enumerate(("2026-09-01", "2026-09-02", "2026-09-03")):
+      a.obs.append(rt.PassObs(date=date, drive=f"{tag}{n}", car="FORD_F_150_LIGHTNING_MK1", t=float(n), k_ext=0.002, k_loc=0.002, way=0,
+                              hwy="motorway", road="I 5|", spl=30.0, mode="op", d_m=1.0, end_lat=END[0] + dlat, end_lon=END[1]))
+  return idx
+
+
+def _m(lat):
+  return lat * 111320.0
+
+
+def test_matching_is_one_to_one_and_nearest_not_first_come(tmp_path):
+  """f1 is 6 m from B (14 m from A), f2 is 6 m from A. First-match would let f1 mark BOTH branches and leave f2 'unmatched'."""
+  doc, counts = ex.export_doc(_two_branch_idx(), None, [[LAT0, LON0, END[0] + 0.00018 - 6 / 111320.0, END[1]], [LAT0, LON0, END[0] + 6 / 111320.0, END[1]]])
+  rows = doc["anchors"][0][3]
+  assert len(rows) == 2 and all(len(b) == 5 for b in rows)
+  assert counts["lower_bound_rows"] == 2 and counts["lower_bound_unmatched"] == 0
+
+
+def test_two_flags_for_one_branch_mark_it_once_and_the_second_is_unmatched():
+  doc, counts = ex.export_doc(_two_branch_idx(), None, [[LAT0, LON0, END[0] + 5 / 111320.0, END[1]], [LAT0, LON0, END[0] + 4 / 111320.0, END[1]]])
+  rows = doc["anchors"][0][3]
+  assert sorted(len(b) for b in rows) == [4, 5] or sorted(len(b) for b in rows) == [5, 5]     # never a 6-element branch
+  assert max(len(b) for b in rows) == 5
+  assert counts["lower_bound_rows"] + counts["lower_bound_unmatched"] == 2

@@ -402,7 +402,8 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
   not floor falls back to the set-relative notch (two tiers: never shallower than today). The clamp min(tv*scale, v_cruise_cap)
   stays on v_cruise_cap (the true SET speed) either way.
   dbfirst2pnw (db_cov None = today, byte-identical): db_cov maps (lat, lon) of a path point to 1 = the curve DB COVERS it (a row with authority
-  in the driving direction whose k is trustworthy), 0 = the DB does not (never driven / row refused), 2 = covered but UNRELIABLE (lowerBound row);
+  in the driving direction whose k is trustworthy), 0 = the DB does not (never driven / row refused), 2 = covered but UNRELIABLE (lowerBound row),
+  3 = driven but the table refused the row, 4 = driven but this branch was never recorded (3/4: today's notch);
   a point not in it is UNKNOWN (= today's treatment). Only a point
   that would bind today (a real OSM curve below the notch, or a flagged one the notch floors) is looked at: a covered one is SKIPPED (the DB and
   vision decide); an uncovered flagged one gets min(its scaled target, uncov_cap) instead of the flat notch (uncov_cap = ratio x the posted limit
@@ -493,7 +494,8 @@ def most_binding_map_curve(points, cur_lat, cur_lon, v_ego: float, horizon_m: fl
         n_db += 1
         db_d = min(db_d, d)
         continue                           # covered: the DB (curve brain) and vision decide; nothing from OSM for this point
-      pt_cov = {0: "0", 2: "u"}.get(state, "?")           # u = covered, but the row is a lower bound / the table has no flags: the notch stays
+      # u = covered, row is a lower bound / table has no flags; r = driven, row REFUSED; b = driven, branch never recorded: the notch stays
+      pt_cov = {0: "0", 2: "u", 3: "r", 4: "b"}.get(state, "?")
       pt_src = "notch" if floored_pt else "osm"
       if state == 0 and floored_pt and uncov_cap is not None:
         tv_eff = min(tv_scaled, uncov_cap)      # the posted-limit cap replaces the flat notch; never above what the scaled fold allowed

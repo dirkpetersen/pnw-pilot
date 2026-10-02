@@ -482,7 +482,8 @@ class VTSCController:
     (None, None) = TODAY's fold, byte-identical. db_cov is the curve brain's coverage of mapd's path ({(lat, lon): 1 covered | 0 not});
     it exists only while the brain ACTS (mode lower/raise in both processes) and its entry is fresh. uncov_cap = UNCOVERED_CURVE_LIMIT_RATIO x
     the posted limit (m/s), None while no limit is known (the flat notch then stays on uncovered
-    points). Every way of NOT having coverage keeps the notch and is logged when it CHANGES (Rule 2); an exception loudly. Never raises."""
+    points). Every way of NOT having coverage keeps the notch and is logged when it CHANGES (Rule 2); an exception loudly.
+    The posted limit is the one at the CAR (MapSpeedLimit), not at the curve. Never raises."""
     if not self.veh.vtsc_db_first:
       return None, None
     try:
@@ -1084,7 +1085,8 @@ class VTSCController:
         "mapFlr": bool(self._tele_map_floored),
         # dbfirst2pnw: which rule decided the map curve this tick -- mapSrc "db" (curve DB covers it: no OSM fold) / "cap15" (uncovered: posted-limit
         # cap) / "notch" (today's flat notch: limit or coverage unknown, or the covering row is unreliable) / "osm" (a real OSM curve,
-        # unchanged) / "" (not evaluated); mapCov "1" covered / "0" not / "u" covered but the row is unreliable (lower bound) / "?" unknown;
+        # unchanged) / "" (not evaluated); mapCov "1" covered / "0" not / "u" covered but the row is unreliable (lower bound) / "r" driven, row
+        # refused / "b" driven, branch never recorded / "?" unknown;
         # mapCap15 the cap speed (m/s), null = no limit known.
         # getattr: permissive test stubs build the payload without the state.
         "mapSrc": getattr(self, "_tele_dbf", ("", "", None))[0], "mapCov": getattr(self, "_tele_dbf", ("", "", None))[1],

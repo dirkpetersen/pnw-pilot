@@ -122,6 +122,13 @@ MAP_FLOOR_DEPTH   = 0.0
 #     the camera under-reads at range), and a gate that flips is itself a hazard.
 #   * posted limit unknown, or no fresh coverage from the brain: today's notch.
 # Owner 2026-10-01: 15 % above the limit (first brief said 20 %).
+# The posted limit in that cap is the one at the CAR (MapSpeedLimit, the same value the freeway floor uses), not the limit at the curve: a limit
+# that changes between the car and the curve is not seen until the car reaches it.
+# A road DRIVEN where the table refused the row (<2 dates, dates disagree, Tesla-only) or whose branch was never recorded is NOT "never driven"
+# (owner 2026-10-01): it keeps today's notch (mapCov "r" / "b"); only a vertex with no anchor at all gets the cap.
+# INSTALL ORDER (Opus review): the table may carry `lowerBound` flags (a 5th branch element + manifest "flags"). The tip's loader REFUSES such a file
+# ("anchor N: malformed branch") and turns the curve DB OFF on BOTH cars -- so this code MUST be installed before a flagged table, and a code
+# rollback MUST restore the unflagged b72a613b first. This code loads an unflagged table unchanged (and then frees nothing: every row unreliable).
 UNCOVERED_CURVE_LIMIT_RATIO = 1.15
 
 # --- sharpcurve2pnw: earlier lookahead + regen-coast slowdown for blind curves -

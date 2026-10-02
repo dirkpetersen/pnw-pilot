@@ -36,6 +36,7 @@ def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl
          "last_date": "2026-09-22", "exclude_date": exclude_date}
   if flags:                                    # dbfirst2pnw: the table declares per-row lowerBound flags
     man["flags"] = "lowerBound"
+    man["lower_bound_rows"] = sum(1 for a in anchors for b in a[3] if len(b) == 5)
   if tamper is not None:
     blob = tamper(blob)
   with open(os.path.join(d, cl.ROWS_NAME), "wb") as f:

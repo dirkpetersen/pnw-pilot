@@ -33,14 +33,18 @@ today.
 
 dbfirst2pnw (owner design 2026-10-01): the brain also says WHICH of mapd's path points the DB COVERS. For every path vertex ahead it asks the
 same keying the rows use (curvedb_live.match_at, at the vertex, in the path's direction): a row with authority = COVERED (driven on >= 2 dates,
-measured, agreeing -- including a measured-straight row); no anchor / a refused branch / a branch the path takes that was never driven =
-UNCOVERED; a path too short to key it, or two branches near, or an uncovered vertex inside a per-curve override = UNKNOWN (omitted: VTSC treats
+measured, agreeing -- including a measured-straight row); NO anchor = UNCOVERED (0, truly never driven); an anchor whose row the table REFUSED
+(3) or whose branch this path takes was never recorded (4) = DRIVEN-BUT-UNMEASURED (owner 2026-10-01: not "never driven" -- today's notch stays);
+a path too short to key it, or two branches near, or an uncovered vertex inside a per-curve override = UNKNOWN (omitted: VTSC treats
 it as today). A covered row may replace the OSM notch only if its curvature is TRUSTWORTHY for pricing: a row flagged `lowerBound` in the table
 (its passes include saturated ones, so k is only a lower bound of the road's curvature), or any row of a table that declares no flags, is
-COVERED-UNRELIABLE (2): the notch stays there. Published as `cov` = [[lat, lon, 1|0|2], ...] in the CurveBrain param, ONLY while
+COVERED-UNRELIABLE (2): the notch stays there. Published as `cov` = [[lat, lon, 1|0|2|3|4], ...] in the CurveBrain param, ONLY while
 curve.json tesla.vtsc_db_first is on, the mode acts
-(lower/raise) and every gate below passed; otherwise the key is absent and VTSC keeps its OSM notch. Every covered vertex's row is also priced
-for the need, so a covered point is never left to a row the 25 m scan happened to skip. COVERAGE IS A SUBSET OF "DRIVEN": a stretch only the
+(lower/raise) and every gate below passed; otherwise the key is absent and VTSC keeps its OSM notch. NOTE: with the switch ON the BRAIN's own
+output (cbV / cbRow) can differ from the switch-OFF output even where VTSC gets no coverage: every covered vertex's row is priced, so a row the 25 m
+scan stepped over can now bind (fleet replay: ~300 of ~190k steps, at most ~2 mph lower, never higher); "exactly today" holds for VTSC's fold only.
+Every covered vertex's row is priced for the need, so a covered point is never left to a row the 25 m scan happened to skip.
+COVERAGE IS A SUBSET OF "DRIVEN": a stretch only the
 Tesla drove (the table never accepts Tesla-only evidence), driven once, or whose dates disagreed is UNCOVERED here.
 
 NO EFFECT AT ALL (v is None, `why` names the gate) when: the mode is off; the DB is not loaded; GPS is stale / none;
@@ -53,6 +57,7 @@ SAME file the Lightning reads (/data/pnw/curvedb_v2, curvedb_live.load_rows); no
 """
 from __future__ import annotations
 
+import collections
 import json
 import math
 import os
@@ -402,7 +407,7 @@ class CurveBrain:
     return out
 
   def _coverage(self, poly, points, s_ego, rows):
-    """dbfirst2pnw: (cov, extra) -- cov = [[lat, lon, 1|0|2], ...] for the path vertices from just behind the car to the horizon (omitted =
+    """dbfirst2pnw: (cov, extra) -- cov = [[lat, lon, 1|0|2|3|4], ...] for the path vertices from just behind the car to the horizon (omitted =
     unknown), extra = the Matches of covered vertices whose row the 25 m scan did not already hold. See the module header for the verdicts."""
     idx = self.db.index
     if not idx.has_flags and not self._noflags_logged:
@@ -424,10 +429,12 @@ class CurveBrain:
         if m.row_id not in seen:
           seen.add(m.row_id)
           extra.append(m)
-      elif m.why in ("noAnchor", "noAuthority"):
-        c = 0
+      elif m.why == "noAnchor":
+        c = 0                                              # nothing recorded within 40 m in this direction: truly never driven
+      elif m.why == "noAuthority":
+        c = 3                                              # DRIVEN, but the table refused the row (<2 dates, dates disagree, Tesla-only): not "never driven"
       elif m.why == "branchUnknown" and m.s_anchor is not None and m.s_anchor + idx.fwd <= poly.s_max:
-        c = 0                                              # the path is long enough to key the branch, and the branch it takes was never recorded
+        c = 4                                              # an anchor exists; the path can key the branch and the branch it takes was never recorded
       else:
         continue                                           # too short a path to key it / two branches near: unknown
       if c == 0 and not self.overrides.failsafe and self.overrides.limit(la, lo, poly.heading(s))[0] is not None:
@@ -526,14 +533,14 @@ def parse_entry(raw, now) -> tuple[dict | None, str | None, float | None]:
 
 
 def _cov_summary(cov) -> str:
-  """"covered-reliable / uncovered / covered-unreliable vertex counts of a `cov` list, for the cbCov telemetry column."""
-  n1, n2 = sum(1 for c in cov if c[2] == 1), sum(1 for c in cov if c[2] == 2)
-  return f"{n1}/{len(cov) - n1 - n2}/{n2}"
+  """covered-reliable / uncovered / covered-unreliable / driven-but-unmeasured vertex counts of a `cov` list, for the cbCov telemetry column."""
+  n = collections.Counter(c[2] for c in cov)
+  return f"{n[1]}/{n[0]}/{n[2]}/{n[3] + n[4]}"
 
 
 def parse_coverage(raw, now) -> tuple[dict | None, str]:
-  """VTSC's side of the coverage contract: the CurveBrain param -> ({(lat, lon): 1|0|2}, "ok"), or (None, why). 1 = covered and reliable, 0 = not
-  covered, 2 = covered but the row is a LOWER BOUND. Pure; never raises.
+  """VTSC's side of the coverage contract: the CurveBrain param -> ({(lat, lon): 0..4}, "ok"), or (None, why). 1 = covered and reliable, 0 = never driven
+  (no anchor), 2 = covered but the row is a LOWER BOUND, 3 = driven but the table REFUSED the row, 4 = driven, but not along this branch. Pure; never raises.
 
   A coverage map is only usable from a fresh entry (age in [-PUBLISH_S, ENTRY_MAX_AGE_S], like parse_entry) published by a brain that is
   ACTING (mode lower/raise) with a well-formed `cov`. why: "absent" (nothing published / no `cov` key -- the brain's own gates, the switch off,
@@ -565,7 +572,7 @@ def parse_coverage(raw, now) -> tuple[dict | None, str]:
         return None, "bad"
       la, lo, c = item
       if (isinstance(la, bool) or isinstance(lo, bool) or not isinstance(la, (int, float)) or not isinstance(lo, (int, float))
-              or not (math.isfinite(la) and math.isfinite(lo)) or isinstance(c, bool) or c not in (0, 1, 2)):
+              or not (math.isfinite(la) and math.isfinite(lo)) or isinstance(c, bool) or c not in (0, 1, 2, 3, 4)):
         return None, "bad"
       out[(float(la), float(lo))] = int(c)
     return out, "ok"

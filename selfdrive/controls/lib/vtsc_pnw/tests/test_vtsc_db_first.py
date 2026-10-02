@@ -74,6 +74,14 @@ def test_a_covered_but_unreliable_point_keeps_todays_notch_with_a_reason():
   assert (info["src"], info["cov"], info["capped"]) == ("notch", "u", False)
 
 
+@pytest.mark.parametrize("state, label", [(3, "r"), (4, "b")])
+def test_a_driven_but_unmeasured_point_keeps_todays_notch_not_the_cap(state, label):
+  """Owner 2026-10-01: a road DRIVEN where the table refused the row (3) / never recorded this branch (4) is not 'never driven': NOT the 1.15 x limit cap."""
+  info = {}
+  assert _mbmc(FLAGGED, db_cov={_key(FLAGGED[0]): state}, uncov_cap=CAP, info=info)[0] == NOTCH
+  assert (info["src"], info["cov"], info["capped"]) == ("notch", label, False)
+
+
 def test_an_unclassified_point_is_todays_notch():
   info = {}
   assert _mbmc(FLAGGED, db_cov={}, uncov_cap=CAP, info=info)[0] == NOTCH
@@ -384,18 +392,33 @@ def _strip(pay):
   return {k: v for k, v in pay.items() if k not in _NEW_KEYS}
 
 
+def _replay_with_switch(monkeypatch, fr, db_first):
+  """H.replay builds its controller internally, so the switch is forced at construction through the capability config default."""
+  orig = H.make_controller
+
+  def mk(mp, **kw):
+    ctrl, clock = orig(mp, **kw)
+    if ctrl.veh.curve_brain_vtsc:
+      ctrl.veh._tesla_curve_cfg["db_first"] = db_first
+    return ctrl, clock
+  monkeypatch.setattr(H, "make_controller", mk)
+  try:
+    return H.replay(monkeypatch, fr, notch_vego=True)
+  finally:
+    monkeypatch.setattr(H, "make_controller", orig)
+
+
 def test_switch_on_without_coverage_is_byte_identical_to_switch_off_over_fuzz(monkeypatch):
+  """The switch is set BEFORE the replay runs (Opus review: the first version flipped it after H.replay returned and compared ON with ON)."""
   rng = random.Random(4242)
   for _ in range(20):
     v_set = rng.uniform(20.0, 42.0)
     v_ego = rng.uniform(8.0, v_set + 2.0)
     pts = [(rng.uniform(40.0, 480.0), rng.uniform(10.0, 45.0)) for _ in range(rng.randint(1, 6))]
     fr = _frames(v_ego, v_set, pts, seconds=6)
-    off = H.replay(monkeypatch, fr, notch_vego=True)
-    for r in off:
-      r["ctrl"].veh._tesla_curve_cfg["db_first"] = False
-    on = H.replay(monkeypatch, fr, notch_vego=True)                       # ON (the default), nothing publishes coverage
+    off = _replay_with_switch(monkeypatch, fr, False)
+    on = _replay_with_switch(monkeypatch, fr, True)             # ON (the default), nothing publishes coverage
+    assert off[0]["ctrl"].veh.vtsc_db_first is False and on[0]["ctrl"].veh.vtsc_db_first is True
     assert [o["cap"] for o in on] == [o["cap"] for o in off]
-    assert [(o["state"], o["win"], _strip(o["pay"]) == _strip(f["pay"])) for o, f in zip(on, off, strict=True)] == \
-           [(o["state"], o["win"], True) for o in off]
-    assert not math.isnan(sum(o["cap"] for o in on))
+    assert [(o["state"], o["win"], _strip(o["pay"])) for o in on] == [(o["state"], o["win"], _strip(o["pay"])) for o in off]
+    assert all(o["pay"]["mapSrc"] == "" for o in on) and not math.isnan(sum(o["cap"] for o in on))

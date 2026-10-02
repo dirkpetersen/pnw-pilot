@@ -73,6 +73,8 @@ MAX_ROWS_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024   # decompressed; the 2026-09-24 table is ~2.9 MB
 # The keying the table was built with (roadtable.PROVISIONAL_V2). A file built with anything else is
 # refused rather than matched with these constants.
+# INSTALL ORDER (dbfirst2pnw): a flagged table (5th branch element, manifest "flags") is refused by a loader without this change ("malformed
+# branch" -> DB OFF on both cars). Install this code first; on a code rollback restore the unflagged table first.
 EXPECTED_PARAMS = {"site_radius_m": 40.0, "heading_tol_deg": 35.0, "extent_back_m": 25.0,
                    "extent_fwd_m": 150.0, "branch_radius_m": 15.0}
 
@@ -155,6 +157,7 @@ class RowIndex:
     self.anchors: list[tuple] = []
     self._grid: dict[tuple[int, int], list[int]] = {}
     self.n_rows = 0
+    self.n_lower_bound = 0       # dbfirst2pnw: rows flagged lowerBound (logged at load so the first drive can verify the table)
     for n, a in enumerate(anchors):
       if not (isinstance(a, list) and len(a) == 4 and isinstance(a[3], list)):
         raise CurveDbFileError(f"anchor {n}: malformed")
@@ -179,6 +182,7 @@ class RowIndex:
           if int(b[3]) < 2:     # the owner's >= 2 dates rule, re-checked on the car
             raise CurveDbFileError(f"anchor {n}: a row with authority on {b[3]} date(s)")
           self.n_rows += 1
+        self.n_lower_bound += len(b) == 5
         brs.append((e_lat, e_lon, k, int(b[3]), len(b) == 5))
       self.anchors.append((lat, lon, brg, tuple(brs)))
       self._grid.setdefault(self._key(lat, lon), []).append(n)
@@ -264,6 +268,8 @@ def load_rows(data_dir: str) -> tuple[RowIndex, dict]:
     idx = RowIndex(anchors, params, flags=man.get("flags") == "lowerBound")
   except (TypeError, ValueError) as e:
     raise CurveDbFileError(f"rows malformed: {type(e).__name__}: {e}") from e
+  if idx.has_flags and man.get("lower_bound_rows") is not None and man["lower_bound_rows"] != idx.n_lower_bound:
+    raise CurveDbFileError(f"{idx.n_lower_bound} lowerBound rows != manifest {man['lower_bound_rows']}")
   if idx.n_rows != man.get("rows_with_authority") or idx.n_rows == 0:
     raise CurveDbFileError(f"{idx.n_rows} rows with authority != manifest {man.get('rows_with_authority')}")
   return idx, man
@@ -543,7 +549,7 @@ class CurveDbLive:
       self.index, self.manifest = idx, man   # one assignment each, after the index is complete
       self.state = "ok"
       cloudlog.event("curvedb_v2_loaded", rows=idx.n_rows, anchors=len(idx.anchors), sha256=man.get("sha256"),
-                     first_date=man.get("first_date"), last_date=man.get("last_date"),
+                     flags=man.get("flags"), lower_bound_rows=idx.n_lower_bound, first_date=man.get("first_date"), last_date=man.get("last_date"),
                      seconds=round(time.monotonic() - t0, 2))
     finally:
       self._loaded.set()
