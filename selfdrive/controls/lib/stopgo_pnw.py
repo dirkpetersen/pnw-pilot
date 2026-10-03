@@ -15,7 +15,8 @@ the launch accel). It is deliberately narrow:
   * never with the driver braking or forceDecel, never while the e2e model is braking the moving car (accel < -0.3 above 0.3 m/s), at
     most MAX_HANDOFF_S long; any failed condition re-latches to today's behaviour at once;
   * ONE hand-off per stop: once one has ended (for any reason) the next needs a new context -- the lead itself stopping (a real queue),
-    a lost / different lead, the ego above REARM_V, or the driver's gas. Otherwise a lead that keeps moving away while the e2e model is
+    the ego above REARM_V, or the driver's gas. A lost lead or a dRel step is NOT one: radar noise on the SAME moving lead does both.
+    Otherwise a lead that keeps moving away while the e2e model is
     RIGHT to hold (a red light the lead runs, a pedestrian) would be answered with a lunge every few seconds.
 With NO lead (red light, stop sign, crosswalk) the gate is False on every tick: the e2e stop stays authoritative.
 
@@ -42,10 +43,9 @@ VISION_GRACE_S = 2.0     # modelProb flickers 0 <-> ~1 on a real, radar-tracked 
 MAX_HANDOFF_S = 5.0      # s: one hand-off lasts at most this long (behind a lead crawling <= 1.3 m/s it would otherwise run 5-8 s / 6-10 m)
 E2E_BRAKE_V = 0.3        # m/s: the e2e model only says "stop" below this; above it, it slows the car through its requested accel ...
 E2E_BRAKE_A = -0.3       # m/s^2: ... so an e2e accel below this while moving means the model is braking for something -> hand-off ends
-LOST_S = 1.0             # s without a lead: a lost lead -> a new context
-JUMP_M = 3.0             # m: a dRel step between ticks this big is a different lead -> a new context
 QUEUE_V = 0.3            # m/s: the lead itself at (near) standstill ...
-QUEUE_S = 0.5            # s: ... for this long is a real queue stop -> a new context
+QUEUE_S = 0.5            # s: ... for this long (continuously) is a real queue stop -> a new context
+                         # (with REARM_V and the driver's gas, the ONLY ones: a lost lead / a dRel jump is radar noise)
 REARM_V = 3.0            # m/s: the ego got going properly -> a new context
 ACCEL_CAP = 0.8          # m/s^2: launch accel ceiling while the bypass is active (the Tesla has no gentle_launch_accel: +inf there)
 
@@ -60,9 +60,7 @@ class StopGoHandoff:
     self._vis_age = math.inf   # s since vision last confirmed the lead; inf = never (in this arming/hand-off run)
     self._dur = 0.0            # s the current hand-off has lasted
     self._used = False         # a hand-off already happened in this stop context: no second until _track says the context changed
-    self._lost_s = 0.0
     self._stop_s = 0.0
-    self._prev_d = None
 
   def _clear(self):
     self._t_open = 0.0
@@ -114,30 +112,21 @@ class StopGoHandoff:
 
   def _track(self, v_ego, lead, driver_gas, dt):
     """Context tracking that runs every tick: what makes a NEW hand-off legitimate after one was used. A real queue (the lead itself stops),
-    a lost / different lead, the ego leaving the stop (> REARM_V) or the driver's gas. Anything else -- the e2e braking us back down while
+    the ego leaving the stop (> REARM_V) or the driver's gas. Anything else -- the e2e braking us back down while
     the lead is still moving away -- is the e2e model being RIGHT, and must not be answered with another lunge."""
-    d = vl = None
+    vl = None
     if lead is not None and bool(getattr(lead, "status", False)):
-      d, vl = float(getattr(lead, "dRel", float("nan"))), float(getattr(lead, "vLead", float("nan")))
-      if not (math.isfinite(d) and math.isfinite(vl)):
-        d = vl = None
-    if d is None:
-      self._lost_s += dt
-      self._stop_s = 0.0
-      self._prev_d = None
-      if self._lost_s >= LOST_S:
+      vl = float(getattr(lead, "vLead", float("nan")))
+      if not math.isfinite(vl):
+        vl = None
+    if vl is None:
+      self._stop_s = 0.0      # no usable lead this tick: NOT a new context (radar glitches / dropouts of the SAME moving lead are ordinary)
+    elif vl < QUEUE_V:
+      self._stop_s += dt
+      if self._stop_s >= QUEUE_S:
         self._used = False
     else:
-      self._lost_s = 0.0
-      if self._prev_d is not None and abs(d - self._prev_d) > JUMP_M:
-        self._used = False
-      self._prev_d = d
-      if vl < QUEUE_V:
-        self._stop_s += dt
-        if self._stop_s >= QUEUE_S:
-          self._used = False
-      else:
-        self._stop_s = 0.0
+      self._stop_s = 0.0
     if v_ego > REARM_V or driver_gas:
       self._used = False
 

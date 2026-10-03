@@ -161,12 +161,12 @@ def test_losing_the_lead_relatches_at_once_and_a_second_handoff_needs_a_new_cont
   # a one-tick radar blink is NOT a new context: the hand-off is used up
   flags = run(g, [(d + 0.05 * i, 1.5) for i in range(1, 80)], v_ego=0.0)
   assert not any(flags) and g.why == "used"
-  # a lead gone for >= LOST_S is: then it needs a fresh dwell
+  # nor is a long dropout (radar flicker on the same moving lead): still used
   g, d = _engaged()
-  for _ in range(int(sg.LOST_S / DT) + 1):
+  for _ in range(int(3.0 / DT)):
     g.update(**kw(lead=None, v_ego=0.0))
-  flags = run(g, [(d + 0.05 * i, 1.5) for i in range(1, 60)], v_ego=0.0)
-  assert flags.index(True) * DT >= sg.OPEN_S - DT
+  flags = run(g, [(d + 0.05 * i, 1.5) for i in range(1, 80)], v_ego=0.0)
+  assert not any(flags) and g.why == "used"
 
 
 def test_a_shrinking_gap_relatches():
@@ -506,12 +506,6 @@ def _new_context_then_opening(g, d, action):
   if action == "queue":                       # the lead itself stops for QUEUE_S
     for _ in range(int(sg.QUEUE_S / DT) + 1):
       g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
-  elif action == "lost":
-    for _ in range(int(sg.LOST_S / DT) + 1):
-      g.update(**kw(lead=None, v_ego=0.0))
-  elif action == "newTrack":
-    d += sg.JUMP_M + 1.0
-    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.0))
   elif action == "fast":
     g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=sg.REARM_V + 0.5))
   elif action == "gas":
@@ -519,24 +513,19 @@ def _new_context_then_opening(g, d, action):
   return [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(4 / DT))]
 
 
-@pytest.mark.parametrize("action", ["queue", "lost", "newTrack", "fast", "gas"])
+@pytest.mark.parametrize("action", ["queue", "fast", "gas"])
 def test_a_new_context_allows_the_next_handoff(action):
   g, d = _used_up("e2eBraking")
   flags = _new_context_then_opening(g, d, action)
   assert any(flags), action
 
 
-@pytest.mark.parametrize("action", ["queue", "lost", "newTrack", "fast", "gas"])
+@pytest.mark.parametrize("action", ["queue", "fast", "gas"])
 def test_a_context_change_is_needed_to_clear_used_not_just_any_tick(action):
   """The partial versions (a too-short stop / absence, a small jump, a slow ego, no gas) must NOT clear it."""
   g, d = _used_up("e2eBraking")
   if action == "queue":
     g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
-  elif action == "lost":
-    g.update(**kw(lead=None, v_ego=0.0))
-  elif action == "newTrack":
-    d += sg.JUMP_M - 1.0
-    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.0))
   elif action == "fast":
     g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=sg.REARM_V - 0.5))
   flags = [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(4 / DT))]
@@ -597,3 +586,37 @@ def test_planner_passes_gas_e2e_accel_and_mode_through(lp):
   p._stopgo_step(_sm(lead(), gas=True), 0.2, False, False, False, -0.7)
   k = seen[0]
   assert k["driver_gas"] is True and k["e2e_accel"] == -0.7 and k["experimental"] is False and k["active"] is True
+
+
+def test_radar_noise_on_the_same_moving_lead_is_never_a_new_context():
+  """Review F1-noise: a 0.2 s out-and-back dRel glitch (10-01 09:41:56.9: 25.9 -> 21.5 -> 28.9 m) and a 1.5 s dropout while the lead keeps
+  moving away must not re-arm a second hand-off (they used to: a lunge toward a lead ~40 m away)."""
+  g, d = _used_up("e2eBraking")
+  flags = []
+  for i in range(int(40 / DT)):
+    t = i * DT
+    dd = d + 1.5 * t
+    ld = lead(d=dd, vl=1.5)
+    if 10.0 <= t < 10.2:
+      ld = lead(d=dd - 4.4, vl=1.5)           # out ...
+    elif 10.2 <= t < 10.4:
+      ld = lead(d=dd + 3.0, vl=1.5)           # ... and back
+    elif 20.0 <= t < 21.5:
+      ld = None                               # a 1.5 s dropout
+    elif 30.0 <= t < 33.0:
+      ld = lead(d=dd + 12.0, vl=1.5)          # a 3 s wrong-track stretch
+    flags.append(g.update(**kw(lead=ld, v_ego=0.0)))
+  assert not any(flags) and g.why == "used"
+
+
+def test_the_queue_stop_must_be_continuous():
+  """Two 0.3 s stretches of a stopped lead around a dropout are not a 0.5 s queue stop."""
+  g, d = _used_up("e2eBraking")
+  n = int(0.35 / DT)                                                         # 0.35 s each: < QUEUE_S alone, > QUEUE_S together
+  for _ in range(n):
+    g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
+  g.update(**kw(lead=None, v_ego=0.0))
+  for _ in range(n):
+    g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
+  flags = [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(4 / DT))]
+  assert not any(flags) and g.why == "used"

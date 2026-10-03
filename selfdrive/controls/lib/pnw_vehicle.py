@@ -1211,13 +1211,13 @@ class PnwVehicle:
       # but the reload EVENT is VTSC's (one per change, not two)
       if log_event:
         cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
-                     prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
-                     release_later=new["release_later"], prev_release_later=old["release_later"],
-                     notch_vego=new["notch_vego"], prev_notch_vego=old["notch_vego"],
-                     hold_envelope=new["hold_envelope"], prev_hold_envelope=old["hold_envelope"],
-                     db_first=new["db_first"], prev_db_first=old["db_first"],
-                     stop_go=new["stop_go"], prev_stop_go=old["stop_go"],
-                     file="absent" if sig is None else "present")
+                       prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
+                       release_later=new["release_later"], prev_release_later=old["release_later"],
+                       notch_vego=new["notch_vego"], prev_notch_vego=old["notch_vego"],
+                       hold_envelope=new["hold_envelope"], prev_hold_envelope=old["hold_envelope"],
+                       db_first=new["db_first"], prev_db_first=old["db_first"],
+                       stop_go=new["stop_go"], prev_stop_go=old["stop_go"],
+                       file="absent" if sig is None else "present")
       return changed
     except Exception as e:
       cloudlog.error(f"pnw_vehicle: curve.json hot-reload FAILED ({type(e).__name__}: {e}) -- keeping the last config")

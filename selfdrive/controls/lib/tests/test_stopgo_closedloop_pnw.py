@@ -22,6 +22,7 @@ SCN = {
   "crawl_1.0": (dict(lead=_lead([(2, 0), (3, 1.0), (99, 0.0)], 5.8), e2e_acc=TIMID), "ces"),
   "brisk": (dict(lead=_lead([(2, 0), (5, 1.5), (99, 0.0)], 6.0), e2e_acc=lambda t, v, d: 0.02 if t < 5 else 1.0), "ces"),
   "queue_then_leave": (dict(lead=_lead([(2, 0), (3.5, 1.0), (5, -1.0), (15, 0), (16.5, 1.0), (99, 0.0)], 5.8), e2e_acc=TIMID), "ces"),
+  "e2e_brake_noisy": (dict(lead=_lead([(2, 0), (4, 1.2), (99, 0.0)], 6.0), e2e_acc=BRAKE(-1.5), d_noise=2.5), "real"),   # sd 2.5 m dRel noise
   "e2e_brake-1.5": (dict(lead=_lead([(2, 0), (4, 1.2), (99, 0.0)], 6.0), e2e_acc=BRAKE(-1.5)), "real"),
   "e2e_brake-0.5": (dict(lead=_lead([(2, 0), (4, 1.2), (99, 0.0)], 6.0), e2e_acc=BRAKE(-0.5)), "real"),
   "ghost_move": (dict(lead=lambda: lambda t, x: {"x": 9.0, "v": 0.0}, e2e_acc=TIMID, v_noise=0.4, v_bias=0.5, d_noise=0.3), "ces"),
@@ -81,3 +82,9 @@ def test_a_brisk_departure_is_not_slower_and_keeps_its_gap():
 def test_a_mistracked_parked_car_never_moves_the_ego():
   m, _ = sim("ghost_move", True)
   assert m["x_end"] == 0.0 and m["hand_edges"] == 0, m
+
+
+def test_radar_noise_on_a_moving_lead_does_not_bring_the_lunges_back():
+  """Review F1-noise: dRel noise (sd 2.5 m, so frequent > 3 m steps and the occasional 0 m reading) on the same moving lead, e2e right to hold."""
+  m, _ = sim("e2e_brake_noisy", True)
+  assert m["hand_edges"] <= 2 and m["x_end"] <= 3.5, m
