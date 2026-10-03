@@ -155,10 +155,16 @@ def _engaged(d0=6.0, vl=1.5):
   return g, d0 + vl * 3.0
 
 
-def test_losing_the_lead_relatches_at_once_and_rearming_needs_a_fresh_dwell():
+def test_losing_the_lead_relatches_at_once_and_a_second_handoff_needs_a_new_context():
   g, d = _engaged()
   assert g.update(**kw(lead=None, v_ego=0.4)) is False and g.why == "noLead"
-  # lead is back immediately: must NOT re-engage on the first tick
+  # a one-tick radar blink is NOT a new context: the hand-off is used up
+  flags = run(g, [(d + 0.05 * i, 1.5) for i in range(1, 80)], v_ego=0.0)
+  assert not any(flags) and g.why == "used"
+  # a lead gone for >= LOST_S is: then it needs a fresh dwell
+  g, d = _engaged()
+  for _ in range(int(sg.LOST_S / DT) + 1):
+    g.update(**kw(lead=None, v_ego=0.0))
   flags = run(g, [(d + 0.05 * i, 1.5) for i in range(1, 60)], v_ego=0.0)
   assert flags.index(True) * DT >= sg.OPEN_S - DT
 
@@ -202,7 +208,7 @@ def test_the_handoff_sustains_through_the_launch_and_ends_at_the_stoplatch_relea
   assert g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=sg.RELEASE_V)) is False
   assert g.why == "inactive"
   # after the release it cannot restart from a rolling car
-  assert g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.9)) is False and g.why == "moving"
+  assert g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.9)) is False and g.why == "used"
 
 
 def test_the_release_speed_is_the_stoplatch_release():
@@ -318,15 +324,15 @@ class _SM(dict):
     self.alive = {"radarState": alive}
 
 
-def _sm(ld, brake=False, enabled=True, long_active=True, alive=True):
-  return _SM({"radarState": SimpleNamespace(leadOne=ld), "carState": SimpleNamespace(brakePressed=brake),
+def _sm(ld, brake=False, enabled=True, long_active=True, alive=True, gas=False):
+  return _SM({"radarState": SimpleNamespace(leadOne=ld), "carState": SimpleNamespace(brakePressed=brake, gasPressed=gas),
               "selfdriveState": SimpleNamespace(enabled=enabled), "carControl": SimpleNamespace(longActive=long_active)}, alive=alive)
 
 
 def _planner(lp, op_long=True, radar_unavailable=False, switch=True):
   cp = car.CarParams.new_message(openpilotLongitudinalControl=op_long, radarUnavailable=radar_unavailable)
   p = lp.LongitudinalPlanner(cp)
-  p.veh = SimpleNamespace(stop_go_handoff=switch, refresh_curve_brain_cfg=lambda: False)    # the planner only reads this capability + reloads it
+  p.veh = SimpleNamespace(stop_go_handoff=switch, refresh_curve_brain_cfg=lambda **k: False)    # the planner only reads this capability + reloads it
   return p
 
 
@@ -426,9 +432,9 @@ def test_the_planner_reloads_its_own_vehicle_config_each_tick(lp):
   """VTSC owns a separate PnwVehicle; without this call the kill switch would only ever be read at plannerd start."""
   p = _planner(lp)
   calls = []
-  p.veh = SimpleNamespace(stop_go_handoff=True, refresh_curve_brain_cfg=lambda: calls.append(1))
+  p.veh = SimpleNamespace(stop_go_handoff=True, refresh_curve_brain_cfg=lambda **k: calls.append(k))
   p._stopgo_step(_sm(lead()), 0.0, False, False)
-  assert calls == [1]
+  assert calls == [{"log_event": False}]                 # and quietly: VTSC's instance owns the reload event
 
 
 def test_vision_flicker_on_a_radar_tracked_lead_does_not_break_the_gate():
@@ -467,3 +473,127 @@ def test_a_not_opening_tick_restarts_the_dwell():
   seq += [(d + 0.05 + 1.5 * (i + 1) * DT, 1.5) for i in range(60)]
   flags = run(g, seq)
   assert flags.index(True) >= 17 + int(sg.OPEN_S / DT) - 1
+
+
+# ---------------------------------------------------------------- one hand-off per stop (review F1), e2e braking (F2), time cap (F3), shrink pin (F5)
+
+def _used_up(how):
+  """An engaged gate that has just ended for the given reason; the lead keeps pulling away (the e2e model is 'right')."""
+  g, d = _engaged(d0=9.0, vl=1.5)
+  if how == "e2eBraking":
+    assert g.update(**kw(lead=lead(d=d), v_ego=0.6, e2e_accel=-1.5)) is False and g.why == "e2eBraking"
+  elif how == "release":
+    assert g.update(**kw(lead=lead(d=d), v_ego=sg.RELEASE_V + 0.1)) is False
+  elif how == "timeCap":
+    for _ in range(int(sg.MAX_HANDOFF_S / DT) + 5):
+      d += 1.0 * DT
+      g.update(**kw(lead=lead(d=d, vl=1.0), v_ego=1.0))
+    assert not g.active and g.why in ("timeCap", "used")
+  elif how == "gap":
+    assert g.update(**kw(lead=lead(d=d - 2.0), v_ego=0.6)) is False and g.why == "gapShrinking"
+  return g, d
+
+
+@pytest.mark.parametrize("how", ["e2eBraking", "release", "timeCap", "gap"])
+def test_one_handoff_per_stop_the_lead_moving_away_is_not_a_new_context(how):
+  g, d = _used_up(how)
+  # ego back down to a stop, lead still opening: the e2e model was right to hold; no second lunge, however long it lasts
+  flags = [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(30 / DT))]
+  assert not any(flags) and g.why == "used"
+
+
+def _new_context_then_opening(g, d, action):
+  if action == "queue":                       # the lead itself stops for QUEUE_S
+    for _ in range(int(sg.QUEUE_S / DT) + 1):
+      g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
+  elif action == "lost":
+    for _ in range(int(sg.LOST_S / DT) + 1):
+      g.update(**kw(lead=None, v_ego=0.0))
+  elif action == "newTrack":
+    d += sg.JUMP_M + 1.0
+    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.0))
+  elif action == "fast":
+    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=sg.REARM_V + 0.5))
+  elif action == "gas":
+    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.0, driver_gas=True))
+  return [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(4 / DT))]
+
+
+@pytest.mark.parametrize("action", ["queue", "lost", "newTrack", "fast", "gas"])
+def test_a_new_context_allows_the_next_handoff(action):
+  g, d = _used_up("e2eBraking")
+  flags = _new_context_then_opening(g, d, action)
+  assert any(flags), action
+
+
+@pytest.mark.parametrize("action", ["queue", "lost", "newTrack", "fast", "gas"])
+def test_a_context_change_is_needed_to_clear_used_not_just_any_tick(action):
+  """The partial versions (a too-short stop / absence, a small jump, a slow ego, no gas) must NOT clear it."""
+  g, d = _used_up("e2eBraking")
+  if action == "queue":
+    g.update(**kw(lead=lead(d=d, vl=0.0), v_ego=0.0))
+  elif action == "lost":
+    g.update(**kw(lead=None, v_ego=0.0))
+  elif action == "newTrack":
+    d += sg.JUMP_M - 1.0
+    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=0.0))
+  elif action == "fast":
+    g.update(**kw(lead=lead(d=d, vl=1.5), v_ego=sg.REARM_V - 0.5))
+  flags = [g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5), v_ego=0.0)) for i in range(int(4 / DT))]
+  assert not any(flags), action
+
+
+def test_op_long_off_or_switch_off_is_a_new_context():
+  for kwargs in (dict(active=False), dict(enabled=False)):
+    g, d = _used_up("e2eBraking")
+    g.update(**kw(lead=lead(d=d), **kwargs))
+    assert any(run(g, [(d + 1.5 * i * DT, 1.5) for i in range(int(4 / DT))])), kwargs
+
+
+def test_e2e_braking_ends_the_handoff_only_when_moving_and_hard_enough():
+  g, d = _engaged()
+  assert g.update(**kw(lead=lead(d=d), v_ego=0.6, e2e_accel=-0.29)) is True      # mild: the stuck cases had +0.02..+0.05
+  assert g.update(**kw(lead=lead(d=d), v_ego=sg.E2E_BRAKE_V - 0.05, e2e_accel=-2.0)) is True   # below 0.3 m/s the model speaks via shouldStop, not accel
+  assert g.update(**kw(lead=lead(d=d), v_ego=0.6, e2e_accel=-0.31)) is False and g.why == "e2eBraking"
+  assert sg.E2E_BRAKE_A == -0.3 and sg.E2E_BRAKE_V == 0.3
+
+
+def test_e2e_braking_blocks_arming_too():
+  g = sg.StopGoHandoff()
+  flags = [g.update(**kw(lead=lead(d=d, vl=v), v_ego=0.4, e2e_accel=-1.0)) for d, v in opening(secs=4.0)]
+  assert not any(flags)
+
+
+def test_the_time_cap_ends_a_slow_creep_handoff():
+  g, d = _engaged()
+  already = g._dur
+  n = 0
+  while g.active and n < int(10 / DT):
+    d += 1.0 * DT
+    g.update(**kw(lead=lead(d=d, vl=1.0), v_ego=1.0))
+    n += 1
+  assert not g.active and g.why == "timeCap" and abs(already + n * DT - sg.MAX_HANDOFF_S) <= 2 * DT and sg.MAX_HANDOFF_S == 5.0
+
+
+def test_chill_ends_the_handoff_without_resetting_context():
+  g, d = _engaged()
+  assert g.update(**kw(lead=lead(d=d), v_ego=0.6, experimental=False)) is False and g.why == "chill"
+  assert not any(g.update(**kw(lead=lead(d=d + 1.5 * i * DT, vl=1.5))) for i in range(int(4 / DT)))
+
+
+def test_the_engaged_shrink_tolerance_is_one_metre():
+  """Literal numbers (the constant is also asserted): 3.0 m would let a closing lead run the hand-off on."""
+  assert sg.KEEP_SHRINK_TOL == 1.0 and sg.SHRINK_TOL == 0.5
+  g, d = _engaged()
+  assert g.update(**kw(lead=lead(d=d - 0.9, vl=1.5), v_ego=0.6)) is True
+  g, d = _engaged()
+  assert g.update(**kw(lead=lead(d=d - 1.5, vl=1.5), v_ego=0.6)) is False and g.why == "gapShrinking"
+
+
+def test_planner_passes_gas_e2e_accel_and_mode_through(lp):
+  p = _planner(lp)
+  seen = []
+  p.stopgo.update = lambda **k: seen.append(k) or False
+  p._stopgo_step(_sm(lead(), gas=True), 0.2, False, False, False, -0.7)
+  k = seen[0]
+  assert k["driver_gas"] is True and k["e2e_accel"] == -0.7 and k["experimental"] is False and k["active"] is True

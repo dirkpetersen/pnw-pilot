@@ -161,15 +161,16 @@ class LongitudinalPlanner:
       cloudlog.exception(f"stopgo2pnw: {what} FAILED -- hand-off OFF this tick (today's e2e stop stays authoritative)")
       self._stopgo_err_t = now
 
-  def _stopgo_step(self, sm, v_ego, reset_state, force_slow_decel) -> bool:
+  def _stopgo_step(self, sm, v_ego, reset_state, force_slow_decel, experimental=True, e2e_accel=0.0) -> bool:
     """stopgo2pnw: True = hand the stop decision to the MPC this tick. Fail-closed: any exception is logged and means False."""
     try:
       # the planner's own PnwVehicle is a different instance from VTSC's: it needs its own (throttled, never-raising) curve.json reload for the switch
-      self.veh.refresh_curve_brain_cfg()
+      self.veh.refresh_curve_brain_cfg(log_event=False)
       return self.stopgo.update(
         enabled=self.veh.stop_go_handoff and self.CP.openpilotLongitudinalControl, active=not reset_state, v_ego=v_ego,
         lead=sm['radarState'].leadOne if sm.alive['radarState'] else None, radar_expected=not self.CP.radarUnavailable,
-        driver_braking=bool(sm['carState'].brakePressed), force_decel=bool(force_slow_decel), dt=self.dt)
+        driver_braking=bool(sm['carState'].brakePressed), force_decel=bool(force_slow_decel), dt=self.dt,
+        driver_gas=bool(sm['carState'].gasPressed), e2e_accel=float(e2e_accel), experimental=bool(experimental))
     except Exception:
       self.stopgo.active = False
       self._stopgo_log_err("hand-off gate")
@@ -323,7 +324,7 @@ class LongitudinalPlanner:
     # stopgo2pnw: while a lead is demonstrably pulling away from a standstill the MPC's stop decision replaces the e2e veto (stopgo_pnw);
     # handoff False is exactly the stock combine.
     experimental = bool(sm['selfdriveState'].experimentalMode)
-    handoff = self._stopgo_step(sm, v_ego, reset_state or not experimental, force_slow_decel)
+    handoff = self._stopgo_step(sm, v_ego, reset_state, force_slow_decel, experimental, output_a_target_e2e)
     output_a_target, should_stop, e2e_binds = combine_stop_plan(experimental, handoff, output_a_target_e2e,
                                                                  bool(output_should_stop_e2e), output_a_target_mpc, bool(output_should_stop_mpc))
     self.output_should_stop = should_stop

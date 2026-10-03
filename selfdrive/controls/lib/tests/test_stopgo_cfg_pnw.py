@@ -150,3 +150,26 @@ def test_the_switch_is_independent_of_the_vtsc_switches(cfg):
   assert t.stop_go_handoff is False and t.vtsc_db_first is True and t.vtsc_release_later is True and t.vtsc_hold_envelope is True
   cfg({"tesla": {"vtsc_release_later": False, "vtsc_notch_vego": False, "vtsc_hold_envelope": False, "vtsc_db_first": False}})
   assert tesla().stop_go_handoff is True
+
+
+def test_the_planners_quiet_reload_applies_the_change_but_logs_no_event(cfg, log):
+  """Review F6: the planner's own PnwVehicle re-reads the file VTSC's instance also reads (same process); only one of them logs the event."""
+  cfg(None)
+  t = tesla()
+  assert _reload_quiet(t, cfg, {"tesla": {"stop_go_handoff": False}}, t._tesla_cfg_poll + 1.0) is True
+  assert t.stop_go_handoff is False
+  assert "curve_brain_cfg_reload" not in [m for lvl, m in log.lines if lvl == "event"]
+
+
+def _reload_quiet(t, cfg_writer, doc, now):
+  path = cfg_writer(doc)
+  st = os.stat(path)
+  os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+  return t.refresh_curve_brain_cfg(now, log_event=False)
+
+
+def test_a_quiet_reload_still_logs_a_rejected_config(cfg, log):
+  cfg({"tesla": {"stop_go_handoff": False}})
+  t = tesla()
+  _reload_quiet(t, cfg, {"tesla": {"stop_go_handoff": "flase"}}, t._tesla_cfg_poll + 1.0)
+  assert any("NOT applied" in e for e in log.at("error"))

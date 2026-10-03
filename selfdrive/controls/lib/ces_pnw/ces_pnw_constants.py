@@ -246,6 +246,10 @@ STANDSTILL_PROMOTE_LEAD_S     = 0.5   # s of continuous lead presence at standst
 # NOT the same knobs as STANDSTILL_LATCH_V/STANDSTILL_RELEASE_V above (that machinery is about
 # holding through a close-lead LAUNCH, wide 5.0 m/s release); this latch is about never leaving
 # Experimental before a genuine launch at ALL, so its release margin is deliberately small.
+# stopgo2pnw NOTE: "ANY crossing above RELEASE_V is part of a model-commanded launch" (above) is no longer the whole story on the Raven: while a
+# lead pulls away from a standstill, stopgo_pnw.StopGoHandoff hands the stop decision to the lead-aware MPC, so the car can cross
+# RELEASE_V on the MPC's say-so with the e2e model still holding. The latch is unchanged and still cannot wedge (it releases on v_ego alone);
+# the hand-off itself ends at this same RELEASE_V (stopgo_pnw.RELEASE_V is this constant) or sooner (5 s cap, lead/e2e conditions).
 NOCHILL_ARM_V     = 1.0   # m/s: below this -> arm, unconditionally (covers the field creep, ~0.7)
 NOCHILL_RELEASE_V = 1.3   # m/s: above this -> release, unconditionally (hysteresis vs ARM_V is the
                           #   ENTIRE anti-flap mechanism; no other condition gates either edge)

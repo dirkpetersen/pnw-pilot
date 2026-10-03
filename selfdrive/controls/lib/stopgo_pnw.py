@@ -12,7 +12,11 @@ the launch accel). It is deliberately narrow:
     than when the window began;
   * sustains only while the lead stays ok and the gap does not shrink, and only until vEgo reaches RELEASE_V (the stopLatch
     release -- after that today's normal following applies);
-  * never with the driver braking or forceDecel; any failed condition re-latches to today's behaviour at once.
+  * never with the driver braking or forceDecel, never while the e2e model is braking the moving car (accel < -0.3 above 0.3 m/s), at
+    most MAX_HANDOFF_S long; any failed condition re-latches to today's behaviour at once;
+  * ONE hand-off per stop: once one has ended (for any reason) the next needs a new context -- the lead itself stopping (a real queue),
+    a lost / different lead, the ego above REARM_V, or the driver's gas. Otherwise a lead that keeps moving away while the e2e model is
+    RIGHT to hold (a red light the lead runs, a pedestrian) would be answered with a lunge every few seconds.
 With NO lead (red light, stop sign, crosswalk) the gate is False on every tick: the e2e stop stays authoritative.
 
 Pure logic, no I/O except cloudlog.event on a change.
@@ -35,6 +39,14 @@ MAX_YREL = 1.5           # m: lead must be in lane
 MIN_MODEL_PROB = 0.5     # vision must confirm the lead (radard's low-speed radar-only override reports modelProb 0)
 VISION_GRACE_S = 2.0     # modelProb flickers 0 <-> ~1 on a real, radar-tracked lead at 8-13 m (07:54:26, 09-30 07:50: 1-1.5 s dropouts); a lead vision
                          # confirmed within this long ago and that the radar still tracks counts as confirmed. Longer = vision has really lost it.
+MAX_HANDOFF_S = 5.0      # s: one hand-off lasts at most this long (behind a lead crawling <= 1.3 m/s it would otherwise run 5-8 s / 6-10 m)
+E2E_BRAKE_V = 0.3        # m/s: the e2e model only says "stop" below this; above it, it slows the car through its requested accel ...
+E2E_BRAKE_A = -0.3       # m/s^2: ... so an e2e accel below this while moving means the model is braking for something -> hand-off ends
+LOST_S = 1.0             # s without a lead: a lost lead -> a new context
+JUMP_M = 3.0             # m: a dRel step between ticks this big is a different lead -> a new context
+QUEUE_V = 0.3            # m/s: the lead itself at (near) standstill ...
+QUEUE_S = 0.5            # s: ... for this long is a real queue stop -> a new context
+REARM_V = 3.0            # m/s: the ego got going properly -> a new context
 ACCEL_CAP = 0.8          # m/s^2: launch accel ceiling while the bypass is active (the Tesla has no gentle_launch_accel: +inf there)
 
 
@@ -46,12 +58,18 @@ class StopGoHandoff:
     self._d_ref = 0.0
     self._d_max = 0.0
     self._vis_age = math.inf   # s since vision last confirmed the lead; inf = never (in this arming/hand-off run)
+    self._dur = 0.0            # s the current hand-off has lasted
+    self._used = False         # a hand-off already happened in this stop context: no second until _track says the context changed
+    self._lost_s = 0.0
+    self._stop_s = 0.0
+    self._prev_d = None
 
   def _clear(self):
     self._t_open = 0.0
     self._d_ref = 0.0
     self._d_max = 0.0
     self._vis_age = math.inf
+    self._dur = 0.0
 
   def _lead_ok(self, lead, radar_expected: bool, dt: float) -> str | None:
     """None when the lead is usable, else the reason it is not."""
@@ -73,45 +91,96 @@ class StopGoHandoff:
     return None
 
   def update(self, enabled: bool, active: bool, v_ego: float, lead, radar_expected: bool, driver_braking: bool,
-             force_decel: bool, dt: float) -> bool:
+             force_decel: bool, dt: float, driver_gas: bool = False, e2e_accel: float = 0.0, experimental: bool = True) -> bool:
     """One planner tick. True = the MPC's stop decision replaces the e2e veto this tick."""
     was = self.active
-    why = self._step(enabled, active, v_ego, lead, radar_expected, driver_braking, force_decel, dt)
+    why = self._step(enabled, active, v_ego, lead, radar_expected, driver_braking, force_decel, dt, driver_gas, e2e_accel, experimental)
     self.why = why
     if self.active != was:
       d = float(getattr(lead, "dRel", float("nan"))) if lead is not None else float("nan")
       vl = float(getattr(lead, "vLead", float("nan"))) if lead is not None else float("nan")
       cloudlog.event("stop_go_handoff", on=self.active, why=why, v_ego=round(float(v_ego), 2), dRel=round(d, 1), vLead=round(vl, 2),
                      gain=round(self._d_max - self._d_ref, 1), radar=bool(getattr(lead, "radar", False)),
-                     modelProb=round(float(getattr(lead, "modelProb", 0.0)), 2) if lead is not None else None)
+                     modelProb=round(float(getattr(lead, "modelProb", 0.0)), 2) if lead is not None else None,
+                     e2e_accel=round(float(e2e_accel), 2), dur=round(self._dur, 1))
     return self.active
 
-  def _step(self, enabled, active, v_ego, lead, radar_expected, driver_braking, force_decel, dt) -> str:
+  def _end(self):
+    """A hand-off ends (for ANY reason): it is USED -- no second one until the stop context changes (see _track)."""
+    if self.active:
+      self._used = True
+    self.active = False
+    self._clear()
+
+  def _track(self, v_ego, lead, driver_gas, dt):
+    """Context tracking that runs every tick: what makes a NEW hand-off legitimate after one was used. A real queue (the lead itself stops),
+    a lost / different lead, the ego leaving the stop (> REARM_V) or the driver's gas. Anything else -- the e2e braking us back down while
+    the lead is still moving away -- is the e2e model being RIGHT, and must not be answered with another lunge."""
+    d = vl = None
+    if lead is not None and bool(getattr(lead, "status", False)):
+      d, vl = float(getattr(lead, "dRel", float("nan"))), float(getattr(lead, "vLead", float("nan")))
+      if not (math.isfinite(d) and math.isfinite(vl)):
+        d = vl = None
+    if d is None:
+      self._lost_s += dt
+      self._stop_s = 0.0
+      self._prev_d = None
+      if self._lost_s >= LOST_S:
+        self._used = False
+    else:
+      self._lost_s = 0.0
+      if self._prev_d is not None and abs(d - self._prev_d) > JUMP_M:
+        self._used = False
+      self._prev_d = d
+      if vl < QUEUE_V:
+        self._stop_s += dt
+        if self._stop_s >= QUEUE_S:
+          self._used = False
+      else:
+        self._stop_s = 0.0
+    if v_ego > REARM_V or driver_gas:
+      self._used = False
+
+  def _step(self, enabled, active, v_ego, lead, radar_expected, driver_braking, force_decel, dt, driver_gas, e2e_accel, experimental) -> str:
     if not enabled:
-      self.active = False
-      self._clear()
+      self._end()
+      self._used = False
       return "off"
-    if not active or not math.isfinite(v_ego) or v_ego >= RELEASE_V or driver_braking or force_decel:
-      self.active = False
-      self._clear()
+    if not active or not math.isfinite(v_ego):
+      self._end()
+      self._used = False      # op-long off / driver took over: a new engagement is a new context
       return "inactive"
+    self._track(v_ego, lead, bool(driver_gas), dt)
+    if not experimental:
+      self._end()
+      return "chill"
+    if v_ego >= RELEASE_V or driver_braking or force_decel:
+      self._end()
+      return "inactive"
+    if v_ego > E2E_BRAKE_V and float(e2e_accel) < E2E_BRAKE_A:   # the e2e model slows the car through its accel above 0.3 m/s, not through shouldStop
+      self._end()
+      return "e2eBraking"
     bad = self._lead_ok(lead, radar_expected, dt)
     if bad is not None:
-      self.active = False
-      self._clear()
+      self._end()
       return bad
     d, vl = float(lead.dRel), float(lead.vLead)
     if self.active:   # sustain: only the lead matters now (v_ego < RELEASE_V is checked above)
+      self._dur += dt
+      if self._dur >= MAX_HANDOFF_S:
+        self._end()
+        return "timeCap"
       if vl < KEEP_V:
-        self.active = False
-        self._clear()
+        self._end()
         return "leadStopped"
       if d < self._d_max - KEEP_SHRINK_TOL:
-        self.active = False
-        self._clear()
+        self._end()
         return "gapShrinking"
       self._d_max = max(self._d_max, d)
       return "handoff"
+    if self._used:
+      self._clear()
+      return "used"
     if v_ego >= START_V:   # not stopped and not already handed off: cannot arm
       self._clear()
       return "moving"
@@ -123,6 +192,7 @@ class StopGoHandoff:
       self._d_max = max(self._d_max, d)
       if self._t_open >= OPEN_S and d >= MIN_GAP and d - self._d_ref >= MIN_GAIN:
         self.active = True
+        self._dur = 0.0
         return "handoff"
       return "arming"
     self._clear()

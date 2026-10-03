@@ -1172,7 +1172,7 @@ class PnwVehicle:
     return min(self._tesla_curve_cfg["curve_lat_a"], clip if per_car else clip - CURVE_LAT_CLIP_MARGIN,
                _tesla_steer_lat_ceiling())
 
-  def refresh_curve_brain_cfg(self, now: float | None = None) -> bool:
+  def refresh_curve_brain_cfg(self, now: float | None = None, log_event: bool = True) -> bool:
     """curvebrain2b2pnw: hot-reload curve.json's "tesla" section (the owner's kill switch: {"tesla": {"curve_brain":
     "shadow"}} or "off" takes effect within CURVE_CFG_POLL_S plus the caller's own cadence, no restart). One os.stat
     per poll; the file is re-parsed only when its (mtime, size) changed. Returns True when the live config changed.
@@ -1207,7 +1207,10 @@ class PnwVehicle:
                   new["db_first"], new["stop_go"])
                  != (old["curve_brain"], old["curve_lat_a"], old["release_later"], old["notch_vego"], old["hold_envelope"], old["db_first"],
                      old["stop_go"]))
-      cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
+      # log_event False: the planner's own instance (stopgo2pnw) re-reads the same file as VTSC's in the same process; its errors still log,
+      # but the reload EVENT is VTSC's (one per change, not two)
+      if log_event:
+        cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
                      prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
                      release_later=new["release_later"], prev_release_later=old["release_later"],
                      notch_vego=new["notch_vego"], prev_notch_vego=old["notch_vego"],
