@@ -2606,6 +2606,9 @@ ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz
 # satele2pnw: every key SpeedAdjustController._publish_status() emits, forwarded into the ces_events tick
 # record as "sa<Key>". A module constant so a test can assert publisher keys == forwarded keys against
 # the REAL published dict -- a key published to /dev/shm but missing here silently evaporates.
+# stopgo2pnw: the StopGoStatus mem-param fields (plannerd) that reach ces_events verbatim. ADD A KEY IN longitudinal_planner._stopgo_publish ->
+# ADD IT HERE, or it evaporates in /dev/shm (test_stopgo_telemetry pins both directions).
+STOPGO_TELE_KEYS = ("eng", "lAct", "e2eStop", "mpcA", "mpcStop", "stopHand", "stopHandWhy")
 SA_TELE_KEYS = ("mode", "sl", "slRef", "ratio", "cap", "out", "vSet", "vCruise", "lastSet",
                 "ovr", "eng", "polLatch", "polSupp", "polKey", "polAhead", "polTgt", "epLim", "noRst", "zoneTgt", "zoneN", "zoneLast",
                 "icbmHold", "inst",
@@ -4277,6 +4280,7 @@ class CESController:
     self._vtsc_dir = ""
     self._vtsc_tele: dict = {}   # curve-source forensics from VTSCStatus
     self._sa_tele: dict = {}     # satele2pnw: speedadjust forensics from SpeedAdjustStatus
+    self._stopgo_tele: dict = {}  # stopgo2pnw: stop/launch forensics from StopGoStatus
     # lanecenter2pnw telemetry: lane-centering trim status (from LaneCenterStatus, published by
     # controlsd — see selfdrive/controls/lib/lane_centering.py) — logging only, never gates control
     # here. Defaulted so a missing/never-published param (feature disabled, or before the first
@@ -4760,6 +4764,19 @@ class CESController:
       self._sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in SA_TELE_KEYS}
     except Exception:
       self._sa_tele = {}
+    # stopgo2pnw: stop/launch forensics (plannerd) -- logging only. Same /dev/shm channel and cherry-pick rule as SpeedAdjustStatus above.
+    # Absent / unreadable is NORMAL while plannerd is not running (parked, offroad) -> keys null; a read that RAISES is logged (Rule 2).
+    try:
+      sg = self.mem_params.get("StopGoStatus", return_default=True)
+      if isinstance(sg, (bytes, str)):
+        sg = json.loads(sg)
+      self._stopgo_tele = {k: sg.get(k) for k in STOPGO_TELE_KEYS} if isinstance(sg, dict) else {}
+    except Exception as e:
+      self._stopgo_tele = {}
+      now_sg = time.monotonic()
+      if now_sg - (getattr(self, "_stopgo_err_t", None) or -1e9) > 60.0:
+        self._stopgo_err_t = now_sg
+        cloudlog.error(f"stopgo2pnw: StopGoStatus read FAILED ({type(e).__name__}: {e}) -- stop/launch telemetry is null")
     # lanecenter2pnw telemetry: lane-centering trim status — logging only (see _event_record).
     # Same cross-process read as VTSCStatus just above: controlsd (100 Hz) publishes to
     # /dev/shm/params at ~5 Hz, this reads it at ~1 Hz. Fully defensive — any missing key, wrong
@@ -5307,6 +5324,7 @@ class CESController:
         # VTSC applied cap + state (from VTSCStatus) — same fields as the enabled-path tick record.
         "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),
         **getattr(self, "_sa_tele", {}),
+        **(getattr(self, "_stopgo_tele", None) or {}),
         # lanecenter2pnw fields (from LaneCenterStatus) — same subset the enabled-path tick logs.
         "lcCorr": self._lc_corr, "lcAct": self._lc_act, "lcGate": self._lc_gate, "lcErr": self._lc_err,
         "lcLimN": self._lc_lim_n,
@@ -6401,6 +6419,7 @@ class CESController:
       # I-84 gas-override cluster couldn't be attributed (VTSC/MTSC vs CES) from the log alone.
       "vtscCap": self._vtsc_cap, "vtscState": self._vtsc_state, **getattr(self, "_vtsc_tele", {}),
         **getattr(self, "_sa_tele", {}),
+        **(getattr(self, "_stopgo_tele", None) or {}),
       # vtsctele2pnw: the penalty components VTSC actually applied (Lightning penalty m/s, the road
       # pitch it used, apex turn direction L/R) — 2026-07-12 westbound over-slow forensics needed
       # these and had to infer them.

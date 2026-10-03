@@ -18,6 +18,7 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_controller import VTSCContro
 from openpilot.selfdrive.controls.lib.speedadjust_pnw.speedadjust_controller import SpeedAdjustController  # speedadjust2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # standstillsoft2pnw
 from openpilot.selfdrive.controls.lib.leadloss_pnw import LeadLossHoldShadow  # leadloss2pnw (shadow)
+from openpilot.selfdrive.controls.lib.stopgo_pnw import StopGoHandoff, combine_stop_plan  # stopgo2pnw
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -48,6 +49,10 @@ MIN_MAPD_SUGGESTED_SPEED = 2.0
 # leadlossr2pnw (Rule 2): a failing lead-loss shadow detector is logged -- the first failure at once, then
 # at most one log line per this many seconds (plannerd runs at 20 Hz, so an unthrottled log would flood).
 LEADLOSS_ERR_LOG_S = 60.0
+
+# stopgo2pnw (Rule 2): a failing hand-off gate or status publish is logged -- the first failure at once, then at most one line per this many s.
+STOPGO_ERR_LOG_S = 60.0
+STOPGO_PUB_S = 0.2   # StopGoStatus publish throttle (ces_events reads it at ~1 Hz)
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -88,6 +93,15 @@ class LongitudinalPlanner:
     self.leadloss = LeadLossHoldShadow()   # leadloss2pnw: SHADOW-only lead-dropout detector (logs, never actuates)
     self._leadloss_err_t = None   # leadlossr2pnw: monotonic time of the last logged detector failure (None = never)
     self._leadloss_err_n = 0      # leadlossr2pnw: detector failures since that log line
+    self.stopgo = StopGoHandoff()   # stopgo2pnw: lead-pulling-away-from-a-stop hand-off of the stop decision to the MPC
+    self._stopgo_err_t = None       # monotonic time of the last logged stopgo failure (None = never)
+    self._stopgo_pub_t = -1e9
+    try:
+      from openpilot.common.params import Params as _P
+      self._stopgo_mem = _P("/dev/shm/params")
+    except Exception:
+      cloudlog.exception("stopgo2pnw: cannot open the mem-param store -- StopGoStatus telemetry will NOT be recorded (control unaffected)")
+      self._stopgo_mem = None
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -140,6 +154,42 @@ class LongitudinalPlanner:
                            f"is NOT being recorded ({self._leadloss_err_n} failure(s) since the last log)")
         self._leadloss_err_t = now
         self._leadloss_err_n = 0
+
+  def _stopgo_log_err(self, what):
+    now = time.monotonic()
+    if self._stopgo_err_t is None or now - self._stopgo_err_t >= STOPGO_ERR_LOG_S:
+      cloudlog.exception(f"stopgo2pnw: {what} FAILED -- hand-off OFF this tick (today's e2e stop stays authoritative)")
+      self._stopgo_err_t = now
+
+  def _stopgo_step(self, sm, v_ego, reset_state, force_slow_decel) -> bool:
+    """stopgo2pnw: True = hand the stop decision to the MPC this tick. Fail-closed: any exception is logged and means False."""
+    try:
+      # the planner's own PnwVehicle is a different instance from VTSC's: it needs its own (throttled, never-raising) curve.json reload for the switch
+      self.veh.refresh_curve_brain_cfg()
+      return self.stopgo.update(
+        enabled=self.veh.stop_go_handoff and self.CP.openpilotLongitudinalControl, active=not reset_state, v_ego=v_ego,
+        lead=sm['radarState'].leadOne if sm.alive['radarState'] else None, radar_expected=not self.CP.radarUnavailable,
+        driver_braking=bool(sm['carState'].brakePressed), force_decel=bool(force_slow_decel), dt=self.dt)
+    except Exception:
+      self.stopgo.active = False
+      self._stopgo_log_err("hand-off gate")
+      return False
+
+  def _stopgo_publish(self, sm, mpc_a, mpc_stop, e2e_stop):
+    """Per-tick forensics for ces_events (ces_pnw cherry-picks these keys from the StopGoStatus mem-param -- add a key here, add it to
+    STOPGO_TELE_KEYS there, or it evaporates)."""
+    if self._stopgo_mem is None:
+      return
+    now = time.monotonic()
+    if now - self._stopgo_pub_t < STOPGO_PUB_S:
+      return
+    self._stopgo_pub_t = now
+    try:
+      self._stopgo_mem.put_nonblocking("StopGoStatus", {
+        "eng": bool(sm['selfdriveState'].enabled), "lAct": bool(sm['carControl'].longActive), "e2eStop": bool(e2e_stop),
+        "mpcA": round(float(mpc_a), 3), "mpcStop": bool(mpc_stop), "stopHand": bool(self.stopgo.active), "stopHandWhy": self.stopgo.why})
+    except Exception:
+      self._stopgo_log_err("StopGoStatus publish")
 
   def update(self, sm):
     if len(sm['carControl'].orientationNED) == 3:
@@ -270,14 +320,16 @@ class LongitudinalPlanner:
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
-    if sm['selfdriveState'].experimentalMode:
-      output_a_target = min(output_a_target_e2e, output_a_target_mpc)
-      self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
-      if output_a_target < output_a_target_mpc:
-        self.mpc.source = LongitudinalPlanSource.e2e
-    else:
-      output_a_target = output_a_target_mpc
-      self.output_should_stop = output_should_stop_mpc
+    # stopgo2pnw: while a lead is demonstrably pulling away from a standstill the MPC's stop decision replaces the e2e veto (stopgo_pnw);
+    # handoff False is exactly the stock combine.
+    experimental = bool(sm['selfdriveState'].experimentalMode)
+    handoff = self._stopgo_step(sm, v_ego, reset_state or not experimental, force_slow_decel)
+    output_a_target, should_stop, e2e_binds = combine_stop_plan(experimental, handoff, output_a_target_e2e,
+                                                                 bool(output_should_stop_e2e), output_a_target_mpc, bool(output_should_stop_mpc))
+    self.output_should_stop = should_stop
+    if e2e_binds:
+      self.mpc.source = LongitudinalPlanSource.e2e
+    self._stopgo_publish(sm, output_a_target_mpc, output_should_stop_mpc, output_should_stop_e2e)
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
