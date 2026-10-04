@@ -37,8 +37,8 @@ New memory param `StopGoStatus`; per-tick fields in the CES event log: `eng`, `l
 
 ## Kill switch
 
-`curve.json`, key `tesla.stop_go_handoff` (default ON). Set `false` to restore the previous behaviour. A misspelled key
-is reported, not ignored. There is no on-screen toggle yet (open owner question).
+`curve.json`, key `tesla.stop_go_handoff` (default ON). Set `false` to restore the previous behaviour.
+There is no on-screen toggle yet (open owner question).
 
 ## Known behaviour change
 
