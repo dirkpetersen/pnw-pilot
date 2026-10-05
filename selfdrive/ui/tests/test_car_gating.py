@@ -27,6 +27,7 @@ OPERABLE_ON = {
   "NoFordAngleSteering": {"lightning"},
   "DisableFordSignSpeedLimit": {"lightning"},
   "DisableEverDrive": {"lightning"},
+  "DisableMapdCarGps": {"lightning"},
   "NudgeForLaneChange": {"lightning", "tesla"},
   "DisengageOnBrake": {"lightning", "tesla"},
 }
@@ -102,12 +103,12 @@ def run_update(monkeypatch, car, stored=None):
 
 @pytest.mark.parametrize("car", ["tesla", "lightning"])
 def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
-  stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableFordConvenience": True,
+  stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableMapdCarGps": True, "DisableFordConvenience": True,
             "FordAngleLateral": False}
   me, params = run_update(monkeypatch, car, dict(stored))
   for param, cars in OPERABLE_ON.items():
     assert param in me._toggles, "greyed means present, never removed"
-    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit"):
+    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps"):
       assert me._toggles[param].enabled == (car in cars), param
     assert (me._grey_reason[param] is None) == (car in cars), param
     if car not in cars:
@@ -115,7 +116,7 @@ def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
   assert SETTABLE_EVERYWHERE in me._toggles and SETTABLE_EVERYWHERE not in me._grey_reason, "never greyed, on either car"
   assert me._toggles[SETTABLE_EVERYWHERE].enabled is True
   assert params.writes == [], "greying is display only: the stored params are never written"
-  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience"):
+  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableFordConvenience"):
     assert params.vals[k] is True
 
 
@@ -156,3 +157,14 @@ def test_ford_convenience_toggle_is_defined_opt_out_and_default_off():
   i = init.index('"DisableFordConvenience": (')
   block = init[i:init.index("\n      ),", i)]
   assert "Disable Ford Convenience Features" in block and block.rstrip().rstrip(",").endswith("False")  # no restart
+
+
+def test_mapd_car_gps_row_exists_defaults_off_and_is_registered():
+  """mapdcargpsdefault2pnw: opt-out row, reason names the Lightning, default "0" in params_keys.h, old key gone."""
+  import re
+  from pathlib import Path
+  assert "DisableMapdCarGps" in T.DESCRIPTIONS
+  assert T.CAR_GATED["DisableMapdCarGps"][1] == "Ford F-150 Lightning only"
+  hdr = (Path(__file__).resolve().parents[3] / "common" / "params_keys.h").read_text()
+  assert re.search(r'\{"DisableMapdCarGps", \{PERSISTENT, BOOL, "0"\}\}', hdr)
+  assert "MapdUseCarGps" not in hdr

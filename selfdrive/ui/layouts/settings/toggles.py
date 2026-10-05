@@ -218,6 +218,11 @@ DESCRIPTIONS = {
     "sending data, so it never shows on the Tesla or on a truck without one. Display-only — never " +
     "affects steering or speed. Turn this ON to hide it."
   ),
+  # mapdcargpsdefault2pnw: the truck's GPS feeding the maps is ON by default on the Lightning; this is the opt-OUT.
+  "DisableMapdCarGps": tr_noop(
+    "Maps use the comma's own GPS instead of the truck's. By default the F-150 Lightning's GPS is used, which keeps " +
+    "maps working when the comma's GPS view is blocked. F-150 Lightning only. Reboot after changing it: maps stay on one GPS source until the next boot."
+  ),
   # toggles2pnw: troubleshooting switch for everything the comma WRITES to the Ford over CAN that is not driving control.
   "DisableFordConvenience": tr_noop(
     "For troubleshooting. Stops the comma from re-arming Pro Power Onboard (the only non-driving CAN write it makes on the " +
@@ -246,6 +251,7 @@ CAR_GATED = {
   "NoFordAngleSteering": (lambda v: v.stock_acc_buttons, tr_noop("Ford F-150 Lightning only")),
   "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
   "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
+  "DisableMapdCarGps": (lambda v: v.car_gps, tr_noop("Ford F-150 Lightning only")),
   "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla and Ford F-150 Lightning only")),
   "DisengageOnBrake": (lambda v: v.mads_lateral, tr_noop("Ford F-150 Lightning and Tesla Model S only")),
 }
@@ -443,6 +449,15 @@ class TogglesLayout(Widget):
       "DisableEverDrive": (
         lambda: tr("Disable EverDrive Display"),
         DESCRIPTIONS["DisableEverDrive"],
+        "speed_limit.png",
+        False,
+      ),
+      # mapdcargpsdefault2pnw: opt-OUT; greyed (CAR_GATED, PnwVehicle.car_gps) on a car with no CAN GPS. mapd latches to the
+      # relayed GPS for the life of the process, so a change applies at the next reboot (needs_restart stays False: that flag
+      # cycles onroad, which does not restart mapd).
+      "DisableMapdCarGps": (
+        lambda: tr("Disable Ford GPS for Maps"),
+        DESCRIPTIONS["DisableMapdCarGps"],
         "speed_limit.png",
         False,
       ),
@@ -706,7 +721,7 @@ class TogglesLayout(Widget):
     car_ok = {}
     for param in CAR_GATED:
       car_ok[param], self._grey_reason[param] = car_gate(veh, param)
-    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive"):
+    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableMapdCarGps"):
       if param in self._toggles:
         self._toggles[param].action_item.set_enabled(car_ok[param])
 

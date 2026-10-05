@@ -731,7 +731,7 @@ def main():
       # and its mapd->CES bridge, never the LastGPSPosition write every other consumer depends on.
       # Short-circuit order matters too: on a car without the capability the param is never even read.
       try:
-        ext_ok = car_gps_capable and not ext_self_feed and params.get_bool("MapdUseCarGps")
+        ext_ok = car_gps_capable and not ext_self_feed and not params.get_bool("DisableMapdCarGps")
       except Exception:
         # Fable 2026-09-16: the commit understated this. An UnknownKeyName here (params_keys.h carries the
         # new key but params_pyx.so was not rebuilt) does NOT cost "this loop" -- it fires EVERY loop at
@@ -740,7 +740,7 @@ def main():
         # the pre-drive sync rule already forbids, but the containment costs three lines: the relay turns
         # OFF and says why, once, and the bridge below keeps running.
         if not ext_param_warned:
-          cloudlog.exception("mapd_configd: MapdUseCarGps unreadable -- car-GPS relay OFF; rebuild params_pyx.so")
+          cloudlog.exception("mapd_configd: DisableMapdCarGps unreadable -- car-GPS relay OFF (fail safe); rebuild params_pyx.so")
           ext_param_warned = True
         ext_ok = False
       if ext_src is not None and ext_ok:
@@ -774,7 +774,7 @@ def main():
         cloudlog.event("mapd_cargps_ext_stop",
                        reason=("the car_gps capability is gone (CarParams cleared, or moved to the other car)"
                                if not car_gps_capable else
-                               "MapdUseCarGps off" if not ext_ok else
+                               "DisableMapdCarGps set" if not ext_ok else
                                f"neither receiver produced a fix for {now_fix - ext_sent_at:.1f} s"),
                        car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
                        note="mapd will NOT fall back to gpsLocation -- it is now stalled on its last position")

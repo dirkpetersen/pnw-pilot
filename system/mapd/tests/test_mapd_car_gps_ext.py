@@ -46,7 +46,7 @@ def _run(monkeypatch, t_end, device=(), truck=(), use_car_gps=True, cp=LIGHTNING
       if flags is not None:
         blob = {**blob, **flags(i)}
       mem_script.setdefault(_grid(t), {})["CarGps"] = blob
-  p = {"MapdUseCarGps": use_car_gps}
+  p = {} if use_car_gps is None else {"DisableMapdCarGps": not use_car_gps}   # None = key absent (factory state)
   if cp is not None:
     p["CarParams"] = cp
   p.update(persistent or {})
@@ -128,8 +128,28 @@ class TestItRelaysTheSelection:
 # --- the gate: the param and the capability, and nothing else ---------------------------------------
 
 class TestTheGate:
+  def test_default_with_the_key_unset_relays_on_a_capable_car(self, monkeypatch):
+    """mapdcargpsdefault2pnw: the opt-OUT param absent from the store (the true factory state) = relay ON."""
+    unset = _run(monkeypatch, 31.0, TUNNEL_DEVICE, TUNNEL_TRUCK, use_car_gps=None)
+    assert "DisableMapdCarGps" not in unset.params.store and "DisableMapdCarGps" in unset.params.gets
+    assert _ext(unset) and len(_starts(unset)) == 1
+
+  def test_unreadable_param_fails_safe_and_loud(self, monkeypatch):
+    """A read that raises (key unregistered / params_pyx.so not rebuilt) = relay OFF, said once, bridge keeps running."""
+    real = R.FakeParams.get_bool
+
+    def boom(self, key, block=False):
+      if key == "DisableMapdCarGps":
+        raise RuntimeError("UnknownKeyName")
+      return real(self, key, block)
+    monkeypatch.setattr(R.FakeParams, "get_bool", boom)
+    res = _run(monkeypatch, 31.0, TUNNEL_DEVICE, TUNNEL_TRUCK)
+    assert _ext(res) == [] and res.pubs == [["mapdIn"]]
+    assert sum(1 for m in _lines(res) if "DisableMapdCarGps unreadable" in m) == 1
+    assert R.positions(res), "the bridge must keep writing LastGPSPosition"
+
   def test_off_publishes_nothing_and_does_not_even_own_the_queue(self, monkeypatch):
-    """The default. The scenario is the one that DOES publish when the param is on, so an empty result
+    """DisableMapdCarGps=1. The scenario is the one that DOES publish when the param is on, so an empty result
     here is the gate and not an inert fixture. `pubs` matters too: a publisher in main()'s PubMaster
     would take the gpsLocationExternal msgq queue at boot even with the feature off, which would make
     "the default is inert" true of the message count but not of the queue."""
@@ -153,14 +173,14 @@ class TestTheGate:
 
   def test_turning_it_off_mid_drive_stops_and_says_so(self, monkeypatch):
     res = _run(monkeypatch, 20.0, _device_track(20), _straight(20),
-               params_script={10.0: {"MapdUseCarGps": False}})
+               params_script={10.0: {"DisableMapdCarGps": True}})
     assert max(t for t, _ in _ext(res)) < 10.0 + DT
-    assert len(_stops(res)) == 1 and _stops(res)[0]["reason"] == "MapdUseCarGps off"
+    assert len(_stops(res)) == 1 and _stops(res)[0]["reason"] == "DisableMapdCarGps set"
     assert "stalled on its last position" in _stops(res)[0]["note"]
 
   def test_turning_it_on_mid_drive_starts_relaying(self, monkeypatch):
     res = _run(monkeypatch, 20.0, _device_track(20), _straight(20), use_car_gps=False,
-               params_script={10.0: {"MapdUseCarGps": True}})
+               params_script={10.0: {"DisableMapdCarGps": False}})
     assert not [t for t, _ in _ext(res) if t < 10.0]
     assert [t for t, _ in _ext(res) if t >= 10.0]
     assert len(_starts(res)) == 1
@@ -171,7 +191,7 @@ class TestTheGate:
     res = _run(monkeypatch, 31.0, TUNNEL_DEVICE, TUNNEL_TRUCK, cp=TESLA_CP)
     assert _ext(res) == [] and res.pubs == [["mapdIn"]]
     assert "CarGps" not in res.mem.gets
-    assert "MapdUseCarGps" not in res.params.gets
+    assert "DisableMapdCarGps" not in res.params.gets
     assert not _starts(res) and not _stops(res)
     # ... while the device fix itself was written the whole time, so the run was not simply empty
     assert {d["src"] for _t, d in R.positions(res)} == {"device"}

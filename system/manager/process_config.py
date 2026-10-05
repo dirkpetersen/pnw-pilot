@@ -133,7 +133,7 @@ procs = [
   # names and is silently deaf+mute all session (no speed limit / map curves / road context; seen
   # I-82 2026-07-06). Forcing the prefix matches this tree's msgq (msgq.cc uses /dev/shm/msgq_<name>).
   NativeProcess("mapd", "selfdrive", ["/usr/bin/env", "USE_MSGQ_PREFIX=true", MAPD_BINARY], mapd_running),
-  # mapdcargps2pnw: restart_if_crash — with MapdUseCarGps on, mapd_configd is mapd's SOLE GPS source
+  # mapdcargps2pnw: restart_if_crash — with the car-GPS relay on (the default on the Lightning; DisableMapdCarGps=0), mapd_configd is mapd's SOLE GPS source
   # (mapd latches to gpsLocationExternal on the first message and never reads gpsLocation again for the
   # life of the process). A crash here would therefore starve mapd for the rest of the boot — frozen
   # speed limits and map curves, with mapdOut still publishing at 20 Hz so nothing downstream notices —

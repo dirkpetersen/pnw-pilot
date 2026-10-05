@@ -98,9 +98,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // mapdcargps2pnw: relay the GPS fix mapd_configd already SELECTED (truck CAN fix or comma modem
     // fix) onto gpsLocationExternal, so the mapd binary navigates from the same position as the rest
     // of the system instead of always from the modem. mapd polls gpsLocationExternal first and LATCHES
-    // to it for the life of the process -- it can never fall back -- which is why this is opt-in.
-    // Lightning only (PnwVehicle.car_gps); on the Tesla it is not even read.
-    {"MapdUseCarGps", {PERSISTENT, BOOL, "0"}},
+    // to it for the life of the process -- it can never fall back. ON by default on the Lightning (owner 2026-10-04);
+    // this is the opt-OUT (Disable Ford GPS for Maps). Lightning only (PnwVehicle.car_gps); on the Tesla it is not even read.
+    {"DisableMapdCarGps", {PERSISTENT, BOOL, "0"}},
     // mapd2xnor: keys used by the pfeiferj mapd binary + mapd_manager (OSM speed limits + map curve)
     {"MapSpeedLimit", {PERSISTENT, STRING}},
     {"NextMapSpeedLimit", {PERSISTENT, JSON}},  // limitahead2pnw: mapd_configd bridges mapdOut.nextSpeedLimit as {"sl": m/s (0 = none), "d": m, "ts": monotonic} to the /dev/shm mem store; speedadjust reads it at ~1 Hz
