@@ -736,7 +736,6 @@ def main():
       # mapd on its last position (mapdOut keeps publishing, tileLoaded stays true) with nobody told. So: set while
       # relaying = keep relaying, warn ONCE, applies at the next start. (Residual, by design: if mapd_configd itself
       # restarts with the param set, ext_pm is None again and the relay does not resume.)
-      ext_param_unreadable = False
       try:
         ext_ok = False
         if car_gps_capable and not ext_self_feed:
@@ -750,17 +749,20 @@ def main():
           else:
             ext_set_warned = False
       except Exception:
-        ext_param_unreadable = True
         # Fable 2026-09-16: the commit understated this. An UnknownKeyName here (params_keys.h carries the
         # new key but params_pyx.so was not rebuilt) does NOT cost "this loop" -- it fires EVERY loop at
         # 20 Hz and takes the whole mapd->CES bridge with it (MapSpeedLimit / MapHighwayClass /
         # MapTargetVelocities) until the rebuild. Only reachable by a hot-patch without a rebuild, which
         # the pre-drive sync rule already forbids, but the containment costs three lines: the relay turns
-        # OFF and says why, once, and the bridge below keeps running.
+        # OFF and says why, once, and the bridge below keeps running. If the relay is ALREADY live, stopping it would
+        # freeze mapd on its last position (it cannot leave the external GPS), so it is KEPT, loudly, once.
         if not ext_param_warned:
-          cloudlog.exception("mapd_configd: DisableMapdCarGps unreadable -- car-GPS relay OFF (fail safe); rebuild params_pyx.so")
+          if ext_pm is None:
+            cloudlog.exception("mapd_configd: DisableMapdCarGps unreadable -- car-GPS relay OFF (fail safe); rebuild params_pyx.so")
+          else:
+            cloudlog.exception("mapd_configd: DisableMapdCarGps unreadable while relaying -- relay kept, applies after reboot")
           ext_param_warned = True
-        ext_ok = False
+        ext_ok = ext_pm is not None
       if ext_src is not None and ext_ok:
         try:
           # Built here, inside the guard, so a malformed blob cannot escape into the outer bridge try
@@ -792,7 +794,6 @@ def main():
         cloudlog.event("mapd_cargps_ext_stop",
                        reason=("the car_gps capability is gone (CarParams cleared, or moved to the other car)"
                                if not car_gps_capable else
-                               "DisableMapdCarGps unreadable" if ext_param_unreadable else
                                "the relay gate closed (self-feed refused)" if not ext_ok else
                                f"neither receiver produced a fix for {now_fix - ext_sent_at:.1f} s"),
                        car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,

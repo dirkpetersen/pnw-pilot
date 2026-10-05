@@ -147,7 +147,8 @@ class TestTheGate:
     assert _ext(res) == [] and res.pubs == [["mapdIn"]]
     assert sum(1 for m in _lines(res) if "DisableMapdCarGps unreadable" in m) == 1
 
-  def test_unreadable_after_start_stops_with_its_own_reason(self, monkeypatch):
+  def test_unreadable_after_start_keeps_relaying_and_logs_once(self, monkeypatch):
+    """Already relaying: stopping would freeze mapd (it cannot leave the external GPS), so keep going, loudly, once."""
     real = R.FakeParams.get_bool
 
     def boom(self, key, block=False):
@@ -156,8 +157,8 @@ class TestTheGate:
       return real(self, key, block)
     monkeypatch.setattr(R.FakeParams, "get_bool", boom)
     res = _run(monkeypatch, 20.0, _device_track(20), _straight(20))
-    assert len(_stops(res)) == 1 and _stops(res)[0]["reason"] == "DisableMapdCarGps unreadable"
-    assert R.positions(res), "the bridge must keep writing LastGPSPosition"
+    assert max(t for t, _ in _ext(res)) > 19.0 and _stops(res) == []
+    assert sum(1 for m in _lines(res) if "unreadable while relaying -- relay kept" in m) == 1
 
   def test_off_publishes_nothing_and_does_not_even_own_the_queue(self, monkeypatch):
     """DisableMapdCarGps=1. The scenario is the one that DOES publish when the param is on, so an empty result
