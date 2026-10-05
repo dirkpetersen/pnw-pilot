@@ -221,7 +221,7 @@ DESCRIPTIONS = {
   # mapdcargpsdefault2pnw: the truck's GPS feeding the maps is ON by default on the Lightning; this is the opt-OUT.
   "DisableMapdCarGps": tr_noop(
     "Maps use the comma's own GPS instead of the truck's. By default the F-150 Lightning's GPS is used, which keeps " +
-    "maps working when the comma's GPS view is blocked. F-150 Lightning only. Reboot after changing it: maps stay on one GPS source until the next boot."
+    "maps working when the comma's GPS view is blocked. F-150 Lightning only. Takes effect at the next start of the comma."
   ),
   # toggles2pnw: troubleshooting switch for everything the comma WRITES to the Ford over CAN that is not driving control.
   "DisableFordConvenience": tr_noop(

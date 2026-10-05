@@ -146,6 +146,17 @@ class TestTheGate:
     res = _run(monkeypatch, 31.0, TUNNEL_DEVICE, TUNNEL_TRUCK)
     assert _ext(res) == [] and res.pubs == [["mapdIn"]]
     assert sum(1 for m in _lines(res) if "DisableMapdCarGps unreadable" in m) == 1
+
+  def test_unreadable_after_start_stops_with_its_own_reason(self, monkeypatch):
+    real = R.FakeParams.get_bool
+
+    def boom(self, key, block=False):
+      if key == "DisableMapdCarGps" and self.clock.t >= 10.0:
+        raise RuntimeError("read failed")
+      return real(self, key, block)
+    monkeypatch.setattr(R.FakeParams, "get_bool", boom)
+    res = _run(monkeypatch, 20.0, _device_track(20), _straight(20))
+    assert len(_stops(res)) == 1 and _stops(res)[0]["reason"] == "DisableMapdCarGps unreadable"
     assert R.positions(res), "the bridge must keep writing LastGPSPosition"
 
   def test_off_publishes_nothing_and_does_not_even_own_the_queue(self, monkeypatch):
@@ -171,12 +182,17 @@ class TestTheGate:
     assert on.mem.writes == off.mem.writes
     assert _ext(on) and not _ext(off), "the comparison proves nothing if neither published"
 
-  def test_turning_it_off_mid_drive_stops_and_says_so(self, monkeypatch):
+  def test_setting_the_toggle_mid_drive_keeps_relaying_and_warns_once(self, monkeypatch):
+    """F1: mapd cannot leave the external GPS mid-boot, so stopping the relay would freeze it. Warn once, keep going."""
     res = _run(monkeypatch, 20.0, _device_track(20), _straight(20),
                params_script={10.0: {"DisableMapdCarGps": True}})
-    assert max(t for t, _ in _ext(res)) < 10.0 + DT
-    assert len(_stops(res)) == 1 and _stops(res)[0]["reason"] == "DisableMapdCarGps set"
-    assert "stalled on its last position" in _stops(res)[0]["note"]
+    assert max(t for t, _ in _ext(res)) > 19.0, "the relay must continue"
+    assert _stops(res) == []
+    assert sum(1 for m in _lines(res) if "DisableMapdCarGps set while relaying" in m) == 1
+
+  def test_set_before_start_never_relays(self, monkeypatch):
+    res = _run(monkeypatch, 20.0, _device_track(20), _straight(20), use_car_gps=False)
+    assert _ext(res) == [] and not [m for m in _lines(res) if "while relaying" in m]
 
   def test_turning_it_on_mid_drive_starts_relaying(self, monkeypatch):
     res = _run(monkeypatch, 20.0, _device_track(20), _straight(20), use_car_gps=False,

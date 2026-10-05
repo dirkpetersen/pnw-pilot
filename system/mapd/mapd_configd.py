@@ -609,6 +609,7 @@ def main():
   gps_source = None              # gpssel2pnw: last LOGGED (src, car kind, truck DR flag)
   ext_pm = None                  # mapdcargps2pnw: gpsLocationExternal publisher, created on the FIRST relay
   ext_on = False
+  ext_set_warned = False         # mapdcargpsdefault2pnw: one-shot "DisableMapdCarGps set while relaying" warning
   ext_param_warned = False                 # mapdcargps2pnw: the selected fix is currently being relayed to mapd
   ext_sent_at = 0.0              # mapdcargps2pnw: monotonic time of the last successful relay publish
   ext_send_failed = False        # mapdcargps2pnw: one-shot guard so a broken publish warns once, not at 1 Hz
@@ -730,9 +731,26 @@ def main():
       # device whose params_pyx.so was not rebuilt for the new key) can only cost this loop its relay
       # and its mapd->CES bridge, never the LastGPSPosition write every other consumer depends on.
       # Short-circuit order matters too: on a car without the capability the param is never even read.
+      # mapdcargpsdefault2pnw: DisableMapdCarGps only gates the START of the relay. Once mapd has latched onto
+      # gpsLocationExternal it can never fall back, so stopping the relay because a toggle was tapped would freeze
+      # mapd on its last position (mapdOut keeps publishing, tileLoaded stays true) with nobody told. So: set while
+      # relaying = keep relaying, warn ONCE, applies at the next start. (Residual, by design: if mapd_configd itself
+      # restarts with the param set, ext_pm is None again and the relay does not resume.)
+      ext_param_unreadable = False
       try:
-        ext_ok = car_gps_capable and not ext_self_feed and not params.get_bool("DisableMapdCarGps")
+        ext_ok = False
+        if car_gps_capable and not ext_self_feed:
+          ext_disabled = params.get_bool("DisableMapdCarGps")
+          ext_ok = ext_pm is not None or not ext_disabled
+          if ext_disabled and ext_pm is not None:
+            if not ext_set_warned:
+              cloudlog.warning("mapd_configd: DisableMapdCarGps set while relaying -- applies after reboot " +
+                               "(mapd cannot leave the external GPS mid-boot)")
+              ext_set_warned = True
+          else:
+            ext_set_warned = False
       except Exception:
+        ext_param_unreadable = True
         # Fable 2026-09-16: the commit understated this. An UnknownKeyName here (params_keys.h carries the
         # new key but params_pyx.so was not rebuilt) does NOT cost "this loop" -- it fires EVERY loop at
         # 20 Hz and takes the whole mapd->CES bridge with it (MapSpeedLimit / MapHighwayClass /
@@ -774,7 +792,8 @@ def main():
         cloudlog.event("mapd_cargps_ext_stop",
                        reason=("the car_gps capability is gone (CarParams cleared, or moved to the other car)"
                                if not car_gps_capable else
-                               "DisableMapdCarGps set" if not ext_ok else
+                               "DisableMapdCarGps unreadable" if ext_param_unreadable else
+                               "the relay gate closed (self-feed refused)" if not ext_ok else
                                f"neither receiver produced a fix for {now_fix - ext_sent_at:.1f} s"),
                        car=car_gps.kind, car_detail=car_gps.detail, device=cur_fix_state,
                        note="mapd will NOT fall back to gpsLocation -- it is now stalled on its last position")

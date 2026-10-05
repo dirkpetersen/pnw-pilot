@@ -25,9 +25,12 @@ hand to 1 on the owner's device since 2026-09-19) is replaced by the opt-out `Di
 - `mapd_configd.py`: `ext_ok = car_gps_capable and not ext_self_feed and not params.get_bool("DisableMapdCarGps")`. An unreadable
   param still fails safe and loud (relay OFF, logged once). Stop reason is now `DisableMapdCarGps set`. The Tesla is unchanged:
   the relay is gated on the capability and the param is never read there.
-- Unchanged on purpose: once mapd latches to `gpsLocationExternal` it cannot fall back until reboot, so the row says to reboot
-  after changing it. Turning it ON mid-boot while mapd already runs on its own GPS latches it; turning it OFF mid-boot leaves
-  mapd stalled on its last position until the reboot.
+- Unchanged on purpose: once mapd latches to `gpsLocationExternal` it cannot fall back until reboot. Therefore the param only
+  gates the START of the relay (review fix F1): setting it while the relay is already running does NOT stop it (a stop would
+  freeze mapd on its last position with `mapdOut` still publishing, which keeps the nudgeless freeway gate open off-freeway).
+  It logs once `DisableMapdCarGps set while relaying -- applies after reboot` and takes effect at the next start of the comma.
+  Residual (documented, not built): if `mapd_configd` itself crashes and restarts with the param set, the relay does not resume.
+  An unreadable param stops/blocks the relay with its own reason `DisableMapdCarGps unreadable` (F2).
 - Migration: the owner's device has `MapdUseCarGps=1`. The key is gone from `params_keys.h`; the manager's `clear_all` at start
   unlinks files that are not registered keys (`common/params.cc`), so the stale file is deleted, harmless, and the new default
   yields the same behaviour. A device that had it unset or 0 now gets the truck GPS on the Lightning; set `DisableMapdCarGps=1` to opt out.
