@@ -75,7 +75,18 @@ Stock openpilot toggles keep their stock semantics (see the audit table) and are
 ## Disable Ford Convenience Features (`DisableFordConvenience`)
 
 A troubleshooting switch (default OFF, no restart): ON = the comma transmits **nothing** on the Ford CAN bus that is not
-driving control. Greyed on the Tesla (`CAR_GATED`).
+driving control. **OWNER-REQUESTED EXCEPTION to the "car-specific toggles are greyed on the other car" rule (2026-10-04):** this
+row is NOT in `CAR_GATED` and is operable on every car, the Tesla and an unknown car included. Why: ONE device moves between the
+cars, and the owner wants a clean environment where the comma never writes to the Ford's CAN. Setting it on the Tesla, before the
+first start in the truck, means that first start sends nothing. The description still says it affects only the F-150 Lightning, and
+adds "Can be set in advance on any car so the comma never sends a convenience frame the first time it starts in the truck."
+
+**Why the first start is clean (traced, `test_convenience_toggle_pnw.py`):** `CarController.__init__` builds the `ConvenienceGate`
+and immediately calls `_conv_disabled()`. The gate's `_read_at` starts `None`, so that first call reads the persistent param
+(`/data/params`) synchronously, not after the 1 Hz interval. With the param persisted ON the armer is never constructed, so no
+`0x455` goes out on any cycle. Even with the param OFF the armer's own settle delay (`PPO_SETTLE_S`, 8 s) means the first frame
+is at least 8 s after the first `update()`. Residual, by design: if the first read FAILS (store unreadable) or the gate cannot be
+built, the features run (fail-open) and the failure is logged loudly.
 
 **Inventory of non-driving CAN writes the comma makes on the Ford (2026-10-01, pin `c602973c`):**
 
@@ -111,7 +122,7 @@ purpose, which is to rule the comma out when something odd happens on the truck.
 - **Convenience toggle ON then OFF builds a fresh armer:** the 3-press budget and the 15-min window reset and it presses again
   about 9 s later at any standstill, including in Drive and engaged at a red light. It is rate-limited only by how fast the toggle is
   flipped; a card restart behaves the same. The setting is persistent: it stays ON while the device sits in the Tesla (where the row is
-  greyed), and Pro Power is not re-armed the next time it is in the Lightning until it is turned OFF.
+  settable too), and Pro Power is not re-armed the next time it is in the Lightning until it is turned OFF.
 - **Read failure of `DisableFordConvenience`** (opendbc side): before any successful read the features run (fail-open, logged); after
   a successful read the last good value is kept, so a transient read error cannot re-enable CAN writes during troubleshooting.
 - **No network link** (Tailscale row) means two consecutive `NetworkType.none` reads (about 60 s) -- also what a NetworkManager read
@@ -141,7 +152,7 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `EvIncludeLevel2` | 0 | both | yes | opt-in sub-option |
 | `DisableEverDrive` | 0 | **Lightning only, but NOT greyed on the Tesla before phase 2** | yes | greying added in phase 2 (`PnwVehicle.everdrive`, display only) |
 | `DeferHDVideoUpload` | 0 | both | yes | opt-in |
-| `DisableFordConvenience` (new, phase 3) | 0 | Lightning only (greyed) | yes | troubleshooting switch, see below |
+| `DisableFordConvenience` (new, phase 3) | 0 | Lightning only, but operable on EVERY car (owner exception 2026-10-04, never greyed) | yes | troubleshooting switch, see below |
 
 ### Stock openpilot toggles (stock semantics, NOT changed)
 

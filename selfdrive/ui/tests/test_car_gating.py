@@ -27,10 +27,11 @@ OPERABLE_ON = {
   "NoFordAngleSteering": {"lightning"},
   "DisableFordSignSpeedLimit": {"lightning"},
   "DisableEverDrive": {"lightning"},
-  "DisableFordConvenience": {"lightning"},
   "NudgeForLaneChange": {"lightning", "tesla"},
   "DisengageOnBrake": {"lightning", "tesla"},
 }
+# owner 2026-10-04: affects only the Lightning but is settable on EVERY car (set in advance, before the first start in the truck)
+SETTABLE_EVERYWHERE = "DisableFordConvenience"
 
 
 @pytest.mark.parametrize("param", sorted(OPERABLE_ON))
@@ -48,6 +49,12 @@ def test_car_gate_table(param, car):
 def test_table_covers_exactly_the_car_specific_toggles_and_each_has_a_reason():
   assert set(T.CAR_GATED) == set(OPERABLE_ON)
   assert all(isinstance(r, str) and "only" in r for _, r in T.CAR_GATED.values())
+
+
+@pytest.mark.parametrize("car", sorted(CARS))
+def test_ford_convenience_is_operable_on_every_car_and_not_gated(car):
+  assert SETTABLE_EVERYWHERE not in T.CAR_GATED
+  assert T.car_gate(PnwVehicle(CARS[car]), SETTABLE_EVERYWHERE) == (True, None)
 
 
 def test_a_param_outside_the_table_is_never_gated():
@@ -83,7 +90,7 @@ def run_update(monkeypatch, car, stored=None):
   monkeypatch.setattr(ui_state, "CP", CARS[car], raising=False)
   monkeypatch.setattr(ui_state, "has_longitudinal_control", False, raising=False)
   params = _Params(stored)
-  names = list(OPERABLE_ON) + ["DisableLaneCentering", "RefreshLocationMap"]
+  names = list(OPERABLE_ON) + [SETTABLE_EVERYWHERE, "DisableLaneCentering", "RefreshLocationMap"]
   toggles = {n: _Item() for n in names}
   toggles["CESMode"], toggles["AutoSpeedReduce"] = _Item(), _Item()
   me = SimpleNamespace(_params=params, _toggles=toggles, _toggle_defs=dict.fromkeys(names, (None, None, None, False)),
@@ -100,11 +107,13 @@ def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
   me, params = run_update(monkeypatch, car, dict(stored))
   for param, cars in OPERABLE_ON.items():
     assert param in me._toggles, "greyed means present, never removed"
-    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience"):
+    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit"):
       assert me._toggles[param].enabled == (car in cars), param
     assert (me._grey_reason[param] is None) == (car in cars), param
     if car not in cars:
       assert "only" in me._grey_reason[param]
+  assert SETTABLE_EVERYWHERE in me._toggles and SETTABLE_EVERYWHERE not in me._grey_reason, "never greyed, on either car"
+  assert me._toggles[SETTABLE_EVERYWHERE].enabled is True
   assert params.writes == [], "greying is display only: the stored params are never written"
   for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience"):
     assert params.vals[k] is True
@@ -142,6 +151,7 @@ def test_ford_convenience_toggle_is_defined_opt_out_and_default_off():
   assert Params().get("DisableFordConvenience", return_default=True) is False
   d = T.DESCRIPTIONS["DisableFordConvenience"]
   assert "Pro Power" in d and "Stops the comma" in d and "troubleshooting" in d and "Lightning only" in d
+  assert "Can be set in advance on any car so the comma never sends a convenience frame the first time it starts in the truck." in d
   init = inspect.getsource(T.TogglesLayout.__init__)
   i = init.index('"DisableFordConvenience": (')
   block = init[i:init.index("\n      ),", i)]
