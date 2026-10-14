@@ -27,5 +27,9 @@ page, NM connectivity still reads `full` because LTE is up, and uploads over WiF
   leaving the SSID resets the clock, the probe runs in a thread (the loop keeps ticking while it blocks).
 - Mutation check: dropping the `portal_done_for` reset (2 tests fail), interval 300 to 3000 (1), error treated as expired (1), probe run
   inline (1), the still-expired event removed (1).
-- Not changed: the probe does not bind to wlan0 (neither does accept()). If WiFi were not the default route the probe would pass over LTE
-  and report online; today that cannot happen with the metric 600 vs 1000 routes.
+- Review fixes (Opus, same day): the recheck also starts once the `accept()` tries are exhausted (a rejoin with a still-valid session has
+  no form, so `accept()` never returns True); each still-offline recheck grants ONE more `accept()` (at most 12 per hour) so it recovers
+  without leaving the SSID; `probe_online()` treats 403 and 511 as a portal page; a worker result tagged with an older session counter
+  (SSID left and rejoined) is ignored, for both the probe and the `accept()` thread.
+- Not changed: the probe does not bind to wlan0 (neither does `accept()`). If WiFi ever lost the default route the probe would go over LTE
+  and report online. Not observed (WiFi metric 600 against LTE 1000); acceptable because LTE then carries the uploads.

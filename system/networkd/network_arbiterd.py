@@ -791,10 +791,11 @@ def main() -> NoReturn:
   signal_tick = 0
   portal_done_for: str | None = None   # ssid we've already satisfied a captive portal for this session
   portal_tries: dict[str, int] = {}    # ssid -> accept() attempts this session (bounded by PORTAL_MAX_TRIES)
-  portal_result: dict[str, bool] = {}  # ssid -> last accept() online result (set by the worker thread)
+  portal_result: dict[str, tuple[int, bool]] = {}  # ssid -> (session, last accept() online result) (set by the worker thread)
+  portal_session = 0                   # portalrecheck2pnw: bumped on leaving a portal SSID; a worker result tagged with an older one is ignored
   portal_thread: threading.Thread | None = None  # captive-portal accept() runs here so it NEVER blocks this loop
   # portalrecheck2pnw: the session-expiry recheck. Uses portal_thread too, so it is still one thread at a time.
-  portal_probe_out: dict[str, object] = {}  # ssid -> True online / False portal page / Exception (set by the worker)
+  portal_probe_out: dict[str, tuple[int, object]] = {}  # ssid -> (session, True online / False portal page / Exception (set by the worker)
   portal_probe_at = 0.0                # monotonic: when the last success or probe started (the 300 s timer)
   portal_last_ok = 0.0                 # monotonic: last time the portal was known good
   portal_expired_since: float | None = None  # monotonic: first expiry seen, until we are online again
@@ -1293,7 +1294,11 @@ def main() -> NoReturn:
         # tethering/hotspot NAT upkeep. The thread stores its result in portal_result; we read it next
         # loop. One thread at a time; bounded to PORTAL_MAX_TRIES per session.
         pnow = time.monotonic()
-        if portal_result.get(ssid):                # worker confirmed we're actually online -> done
+        res = portal_result.get(ssid)              # (session, online) from the worker
+        if res is not None and res[0] != portal_session:
+          portal_result.pop(ssid, None)            # a worker from a previous visit to this SSID
+          res = None
+        if res is not None and res[1]:             # worker confirmed we're actually online -> done
           if portal_done_for != ssid:
             portal_last_ok = portal_probe_at = pnow
             if portal_expired_since is not None:
@@ -1304,10 +1309,15 @@ def main() -> NoReturn:
         # page, yet NM stays "full" because LTE is up. Re-probe every PORTAL_RECHECK_S -- in the same daemon thread
         # pattern, so the loop never blocks. A probe ERROR is neither "online" nor "expired": log, retry next interval.
         out = portal_probe_out.pop(ssid, None)
+        if out is not None and out[0] != portal_session:
+          out = None                             # a probe from a previous visit to this SSID
+        elif out is not None:
+          out = out[1]
         if out is True:
           portal_last_ok = pnow
           if portal_done_for != ssid:            # came back by itself while accept() was exhausted
-            cloudlog.event("network2xnor_portal_relogin_ok", ssid=ssid, down_s=round(pnow - (portal_expired_since or pnow), 1))
+            cloudlog.event("network2xnor_portal_relogin_ok" if portal_expired_since is not None else "network2xnor_portal_online_no_login",
+                           ssid=ssid, down_s=round(pnow - (portal_expired_since or pnow), 1))
             portal_done_for, portal_expired_since = ssid, None
         elif out is False:
           if portal_done_for == ssid:
@@ -1321,19 +1331,19 @@ def main() -> NoReturn:
             cloudlog.event("network2xnor_portal_still_expired", ssid=ssid, tries=portal_tries.get(ssid, 0),
                            down_s=round(pnow - (portal_expired_since or pnow), 1),
                            error="portal login not re-established; WiFi still redirected, uploads over WiFi will stall")
+            portal_tries[ssid] = PORTAL_MAX_TRIES - 1   # grant ONE more accept() per recheck, so it recovers without a rejoin
         elif out is not None:
           cloudlog.event("network2xnor_portal_probe_error", ssid=ssid, error=repr(out), recheck_s=PORTAL_RECHECK_S)
-        if ((portal_done_for == ssid
-             or (portal_expired_since is not None and portal_tries.get(ssid, 0) >= PORTAL_MAX_TRIES))
+        if ((portal_done_for == ssid or portal_tries.get(ssid, 0) >= PORTAL_MAX_TRIES)
             and pnow - portal_probe_at >= PORTAL_RECHECK_S
             and (portal_thread is None or not portal_thread.is_alive())):
           portal_probe_at = pnow
 
-          def _probe(sid=ssid):
+          def _probe(sid=ssid, sess=portal_session):
             try:
-              portal_probe_out[sid] = captive_portal.probe_online()
+              portal_probe_out[sid] = (sess, captive_portal.probe_online())
             except Exception as probe_err:
-              portal_probe_out[sid] = probe_err
+              portal_probe_out[sid] = (sess, probe_err)
 
           portal_thread = threading.Thread(target=_probe, name="captive_portal_probe", daemon=True)
           portal_thread.start()
@@ -1344,20 +1354,21 @@ def main() -> NoReturn:
                          current_active=current_active, connectivity_full=_has_connectivity(),
                          attempt=portal_tries[ssid])
 
-          def _poke(handler=active_portal_entry["portal"], sid=ssid):
+          def _poke(handler=active_portal_entry["portal"], sid=ssid, sess=portal_session):
             try:
-              portal_result[sid] = bool(captive_portal.accept(handler, already_online=False))
+              portal_result[sid] = (sess, bool(captive_portal.accept(handler, already_online=False)))
             except Exception:
-              portal_result[sid] = False
+              portal_result[sid] = (sess, False)
 
           portal_thread = threading.Thread(target=_poke, name="captive_portal", daemon=True)
           portal_thread.start()
       else:
         # not on a configured portal SSID -> reset session state so re-entry re-tries cleanly. A still-
-        # running daemon thread just finishes its HTTP harmlessly (it only writes its result file).
+        # running daemon thread just finishes its HTTP; its result is tagged with the old portal_session and ignored.
         # Mutate (.clear()) rather than rebind so the worker thread's closure always shares this object.
         if portal_done_for is not None or portal_tries or portal_result or portal_probe_out or portal_expired_since is not None:
           portal_done_for = None
+          portal_session += 1
           portal_expired_since = None
           portal_probe_out.clear()
           portal_tries.clear()

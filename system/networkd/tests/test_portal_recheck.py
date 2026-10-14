@@ -118,14 +118,24 @@ class TestSessionExpiry:
     assert portal.accepts == 1, "an error must not be treated as expiry"
     assert len(portal.probe_calls) == 2 and portal.probe_calls[1] - portal.probe_calls[0] >= d.PORTAL_RECHECK_S
 
-  def test_exhausted_tries_stay_loud(self, monkeypatch, portal, events):
+  def test_exhausted_tries_stay_loud_and_each_recheck_grants_one_more_login(self, monkeypatch, portal, events):
     # first login fine; then expired, and every re-login fails
-    portal.accept_results = [True] + [False] * d.PORTAL_MAX_TRIES
+    portal.accept_results = [True] + [False] * 50
     portal.probes = [False, False, False]
     go(monkeypatch, portal, 3 * TICKS_PER_RECHECK + 12)
-    assert portal.accepts == 1 + d.PORTAL_MAX_TRIES, "bounded per expiry"
     assert names(events).count("network2xnor_portal_expired") == 1
-    assert names(events).count("network2xnor_portal_still_expired") >= 2, names(events)
+    still = names(events).count("network2xnor_portal_still_expired")
+    assert still >= 2, names(events)
+    assert portal.accepts == 1 + d.PORTAL_MAX_TRIES + still, "one extra accept() per still-offline recheck, not a burst"
+
+  def test_a_login_that_never_succeeds_is_still_rechecked(self, monkeypatch, portal, events):
+    # accept() False six times (e.g. rejoin with a valid session: no form to submit), then the 300 s probe must still run
+    portal.accept_results = [False] * 50
+    portal.probes = [True]
+    go(monkeypatch, portal, TICKS_PER_RECHECK + 8)
+    assert portal.accepts == d.PORTAL_MAX_TRIES
+    assert len(portal.probe_calls) >= 1, "silence after the tries ran out is the original bug"
+    assert "network2xnor_portal_online_no_login" in names(events)
 
   def test_leaving_the_ssid_resets_the_timer(self, monkeypatch, portal, events):
     def leave(nm, n):
@@ -140,6 +150,70 @@ class TestSessionExpiry:
     monkeypatch.setattr(d, "threading", types.SimpleNamespace(Thread=SyncThread))
     run_loop(monkeypatch, nm, ticks=TICKS_PER_RECHECK + 6, hooks=(leave,))
     assert portal.probe_calls == [], "the 300 s clock restarts on re-entry"
+
+
+class DeferredThread(SyncThread):
+  """start() queues the target instead of running it, so a test decides when a worker 'finishes'."""
+
+  queue: list = []
+
+  def start(self):
+    DeferredThread.queue.append(self.target)
+
+
+class TestStaleWorkers:
+  def test_a_result_arriving_after_leave_and_rejoin_is_ignored(self, monkeypatch, portal, events):
+    DeferredThread.queue = []
+    stale: list = []
+    at_delivery: list[int] = []
+
+    def hook(nm, n):
+      if n == 3:
+        nm.active = None
+        stale.extend(DeferredThread.queue)
+      elif n == 5:
+        nm.active = CID
+      elif n == 7:
+        at_delivery.append(names(events).count("network2xnor_portal_try"))
+        for t in stale:
+          t()  # the OLD visit's accept() finally returns True
+
+    nm = FakeNM()
+    portal.nm = nm
+    nm.active, nm.ip[CID] = CID, "10.0.0.2"
+    monkeypatch.setattr(d, "threading", types.SimpleNamespace(Thread=DeferredThread))
+    run_loop(monkeypatch, nm, ticks=14, hooks=(hook,))
+    tries_after = names(events).count("network2xnor_portal_try") - at_delivery[0]
+    assert tries_after >= 3, "the stale True was taken as this visit's login, so the loop stopped trying"
+
+
+class TestProbeOnline:
+  @staticmethod
+  def _session(monkeypatch, status=None, text="", exc=None):
+    import requests
+
+    R = types.SimpleNamespace(status_code=status, text=text)
+
+    class S:
+      headers: dict = {}
+
+      def get(self, *a, **k):
+        if exc:
+          raise exc
+        return R
+
+    monkeypatch.setattr(requests, "Session", S)
+
+  @pytest.mark.parametrize("status,text,want", [(204, "", True), (200, "<html>login</html>", False), (302, "", False), (403, "", False), (511, "", False)])
+  def test_classification(self, monkeypatch, status, text, want):
+    self._session(monkeypatch, status, text)
+    assert d.captive_portal.probe_online() is want
+
+  @pytest.mark.parametrize("status,exc", [(500, None), (None, TimeoutError("dns"))])
+  def test_an_error_raises_rather_than_answering(self, monkeypatch, status, exc):
+    self._session(monkeypatch, status, exc=exc)
+    with pytest.raises((RuntimeError, TimeoutError)):
+      d.captive_portal.probe_online()
 
 
 class TestItNeverBlocksTheLoop:
