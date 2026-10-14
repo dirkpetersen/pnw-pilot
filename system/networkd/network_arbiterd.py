@@ -70,6 +70,7 @@ POLL_INTERVAL_S = 20.0
 NMCLI_TIMEOUT_S = 15.0
 SIGNAL_EVERY_N = 3   # run LTE signal logging only every Nth loop (~60s) so its mmcli calls can't repeatedly stall WiFi recovery
 LEARN_MIN_MOVE_M = 50.0   # only re-write a learned home location if GPS moved more than this (flash-wear guard)
+PORTAL_RECHECK_S = 300.0   # portalrecheck2pnw: re-probe a portal SSID this often after a success (session expiry)
 PORTAL_MAX_TRIES = 6   # max captive-portal accept() attempts per SSID session (bounds loop time; resets on leaving)
 
 LTE_CONNECTION_ID = "lte"
@@ -792,6 +793,11 @@ def main() -> NoReturn:
   portal_tries: dict[str, int] = {}    # ssid -> accept() attempts this session (bounded by PORTAL_MAX_TRIES)
   portal_result: dict[str, bool] = {}  # ssid -> last accept() online result (set by the worker thread)
   portal_thread: threading.Thread | None = None  # captive-portal accept() runs here so it NEVER blocks this loop
+  # portalrecheck2pnw: the session-expiry recheck. Uses portal_thread too, so it is still one thread at a time.
+  portal_probe_out: dict[str, object] = {}  # ssid -> True online / False portal page / Exception (set by the worker)
+  portal_probe_at = 0.0                # monotonic: when the last success or probe started (the 300 s timer)
+  portal_last_ok = 0.0                 # monotonic: last time the portal was known good
+  portal_expired_since: float | None = None  # monotonic: first expiry seen, until we are online again
   prev_on_priority: bool | None = None  # firehose2pnw: change-only publish of OnPriorityNetwork (flash-wear guard)
   assoc_fail: dict[str, tuple[int, float]] = {}  # netcosttier2pnw: ssid -> (consecutive failures, blocked-until)
   pending_up: tuple[str, float] | None = None   # netcosttier2pnw: (ssid, raised_at) awaiting judgement
@@ -1286,8 +1292,51 @@ def main() -> NoReturn:
         # GETs time out (~tens of seconds), and blocking THIS loop would delay LTE-signal logging and
         # tethering/hotspot NAT upkeep. The thread stores its result in portal_result; we read it next
         # loop. One thread at a time; bounded to PORTAL_MAX_TRIES per session.
+        pnow = time.monotonic()
         if portal_result.get(ssid):                # worker confirmed we're actually online -> done
+          if portal_done_for != ssid:
+            portal_last_ok = portal_probe_at = pnow
+            if portal_expired_since is not None:
+              cloudlog.event("network2xnor_portal_relogin_ok", ssid=ssid, down_s=round(pnow - portal_expired_since, 1))
+              portal_expired_since = None
           portal_done_for = ssid
+        # portalrecheck2pnw: the session expires (~5 h on Visitor) and every request is then redirected to the login
+        # page, yet NM stays "full" because LTE is up. Re-probe every PORTAL_RECHECK_S -- in the same daemon thread
+        # pattern, so the loop never blocks. A probe ERROR is neither "online" nor "expired": log, retry next interval.
+        out = portal_probe_out.pop(ssid, None)
+        if out is True:
+          portal_last_ok = pnow
+          if portal_done_for != ssid:            # came back by itself while accept() was exhausted
+            cloudlog.event("network2xnor_portal_relogin_ok", ssid=ssid, down_s=round(pnow - (portal_expired_since or pnow), 1))
+            portal_done_for, portal_expired_since = ssid, None
+        elif out is False:
+          if portal_done_for == ssid:
+            cloudlog.event("network2xnor_portal_expired", ssid=ssid, since_ok_s=round(pnow - portal_last_ok, 1),
+                           error="portal session expired; WiFi is redirected to the login page -- re-running accept()")
+            portal_expired_since = pnow
+            portal_done_for = None
+            portal_tries.pop(ssid, None)
+            portal_result.pop(ssid, None)
+          else:                                  # accept() tries exhausted and still offline: stay loud
+            cloudlog.event("network2xnor_portal_still_expired", ssid=ssid, tries=portal_tries.get(ssid, 0),
+                           down_s=round(pnow - (portal_expired_since or pnow), 1),
+                           error="portal login not re-established; WiFi still redirected, uploads over WiFi will stall")
+        elif out is not None:
+          cloudlog.event("network2xnor_portal_probe_error", ssid=ssid, error=repr(out), recheck_s=PORTAL_RECHECK_S)
+        if ((portal_done_for == ssid
+             or (portal_expired_since is not None and portal_tries.get(ssid, 0) >= PORTAL_MAX_TRIES))
+            and pnow - portal_probe_at >= PORTAL_RECHECK_S
+            and (portal_thread is None or not portal_thread.is_alive())):
+          portal_probe_at = pnow
+
+          def _probe(sid=ssid):
+            try:
+              portal_probe_out[sid] = captive_portal.probe_online()
+            except Exception as probe_err:
+              portal_probe_out[sid] = probe_err
+
+          portal_thread = threading.Thread(target=_probe, name="captive_portal_probe", daemon=True)
+          portal_thread.start()
         if (portal_done_for != ssid and portal_tries.get(ssid, 0) < PORTAL_MAX_TRIES
             and (portal_thread is None or not portal_thread.is_alive())):
           portal_tries[ssid] = portal_tries.get(ssid, 0) + 1
@@ -1307,8 +1356,10 @@ def main() -> NoReturn:
         # not on a configured portal SSID -> reset session state so re-entry re-tries cleanly. A still-
         # running daemon thread just finishes its HTTP harmlessly (it only writes its result file).
         # Mutate (.clear()) rather than rebind so the worker thread's closure always shares this object.
-        if portal_done_for is not None or portal_tries or portal_result:
+        if portal_done_for is not None or portal_tries or portal_result or portal_probe_out or portal_expired_since is not None:
           portal_done_for = None
+          portal_expired_since = None
+          portal_probe_out.clear()
           portal_tries.clear()
           portal_result.clear()
     except Exception:

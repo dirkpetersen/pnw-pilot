@@ -133,6 +133,22 @@ def _online(session) -> bool:
     return False
 
 
+def probe_online() -> bool:
+  """portalrecheck2pnw: is the portal session still valid? True = real internet (204, empty body);
+  False = a portal/redirect page answered (session expired). RAISES on a transport error or an
+  unexpected status -- an error is neither "online" nor "expired" (Rule 2); the caller logs it and
+  retries. Same unbound request path as accept()'s own _online() check."""
+  import requests
+  s = requests.Session()
+  s.headers.update(_BROWSER_HEADERS)
+  r = s.get(ONLINE_CHECK, timeout=PORTAL_TIMEOUT_S, allow_redirects=False)
+  if r.status_code == 204 and not r.text.strip():
+    return True
+  if r.status_code in (200, 301, 302, 303, 307, 308):
+    return False
+  raise RuntimeError(f"unexpected status {r.status_code} from {ONLINE_CHECK}")
+
+
 def _wlan_mac() -> str | None:
   """The comma's own WiFi MAC, uppercase (MikroTik UAM usernames are 'T-<MAC>' in this form)."""
   try:
