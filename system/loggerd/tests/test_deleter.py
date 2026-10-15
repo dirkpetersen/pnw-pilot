@@ -312,3 +312,57 @@ class TestDeleter(UploaderTestCase):
     finally:
       os.chmod(bad.parent, 0o755)
     assert any(str(bad.parent) in m for m in self.log.of("exception"))   # the per-directory "issue deleting" line
+
+  # deleterhdfirst2pnw: under disk pressure the order is 1. uploaded segments, 2. un-uploaded HD video (logs kept),
+  # 3. only then whole un-uploaded segments (rlog lost).
+  def _seg(self, i, files, uploaded=()):
+    return {n: self.make_file_with_data(self.seg_format.format(i), n, upload_xattr=UPLOAD_ATTR_VALUE if n in uploaded else None)
+            for n in files}
+
+  def run_until(self, cond, msg="condition"):
+    self.start_thread()
+    try:
+      with Timeout(5, f"Timeout waiting for {msg}"):
+        while not cond():
+          time.sleep(0.01)
+    finally:
+      self.join_thread()
+
+  def test_hd_goes_before_any_unuploaded_log(self, loss):
+    old = self._seg(0, ["rlog.zst", "fcamera.hevc", "ecamera.hevc", "dcamera.hevc"])
+    new = self._seg(1, ["rlog.zst", "fcamera.hevc", "ecamera.hevc", "dcamera.hevc"])
+    hd = [p for s in (old, new) for n, p in s.items() if n.endswith(".hevc")]
+    self.run_until(lambda: not any(p.exists() for p in hd), "all HD removed")
+    # the deleter thread is joined right after the last HD file; the logs must still be there
+    assert old["rlog.zst"].exists() and new["rlog.zst"].exists(), "rlog destroyed while HD video existed"
+    recs = self.records()
+    assert recs and all(r["kind"] == deleter.KIND_HD for r in recs)
+    assert sorted(f for r in recs for f in r["files"]) == ["ecamera.hevc", "ecamera.hevc", "fcamera.hevc", "fcamera.hevc"]  # no dcamera
+
+  def test_rlog_survives_while_hd_exists_anywhere(self, loss):
+    # oldest segment has no HD left; a NEWER one does -> the newer HD goes, the older rlog stays
+    old = self._seg(0, ["rlog.zst"])
+    new = self._seg(1, ["rlog.zst", "fcamera.hevc"])
+    self.run_until(lambda: not new["fcamera.hevc"].exists(), "newer HD removed")
+    assert old["rlog.zst"].exists() and new["rlog.zst"].exists()
+
+  def test_uploaded_segments_go_before_unuploaded_hd(self, loss):
+    unup = self._seg(0, ["rlog.zst", "fcamera.hevc"])
+    up = self._seg(1, ["rlog.zst", "fcamera.hevc"], uploaded={"rlog.zst", "fcamera.hevc"})
+    self.run_until(lambda: not up["rlog.zst"].parent.exists(), "uploaded segment removed")
+    assert unup["fcamera.hevc"].exists() and unup["rlog.zst"].exists()
+    assert self.records() == []
+
+  def test_whole_segment_lost_only_when_no_hd_left_with_kind_log(self, loss):
+    a = self._seg(0, ["rlog.zst", "qlog.zst"])
+    b = self._seg(1, ["rlog.zst", "fcamera.hevc"])
+    self.run_until(lambda: not a["rlog.zst"].parent.exists(), "oldest segment destroyed")
+    assert not b["fcamera.hevc"].exists(), "HD of the newer segment must be sacrificed before the old rlog is lost"
+    kinds = [(r["seg"], r["kind"]) for r in self.records()]
+    assert kinds == [(self.seg_format.format(1), deleter.KIND_HD), (self.seg_format.format(0), deleter.KIND_LOG)]
+
+  def test_uploaded_hd_in_unuploaded_segment_is_stripped_without_loss_event(self, loss):
+    s = self._seg(0, ["rlog.zst", "fcamera.hevc"], uploaded={"fcamera.hevc"})
+    self.run_until(lambda: not s["fcamera.hevc"].exists(), "HD removed")
+    assert s["rlog.zst"].exists()
+    assert self.records() == []

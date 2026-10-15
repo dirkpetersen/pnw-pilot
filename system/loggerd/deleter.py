@@ -12,7 +12,7 @@ from openpilot.system.hardware.hw import Paths
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.loggerd.config import get_available_bytes, get_available_percent
 from openpilot.system.loggerd.uploader import (listdir_by_creation, FIREHOSE_FILES, UPLOAD_ATTR_NAME,
-                                                UPLOAD_ATTR_VALUE, uploadable_firehose_files)
+                                                UPLOAD_ATTR_VALUE, HD_VIDEO_FILES, uploadable_firehose_files)
 
 MIN_BYTES = 5 * 1024 * 1024 * 1024
 MIN_PERCENT = 10
@@ -101,7 +101,42 @@ def has_unuploaded_firehose(d: str, firehose_files: set[str] | None = None) -> b
   return bool(unuploaded_firehose(d, firehose_files))
 
 
-def report_unuploaded_loss(seg: str, files: list[str], nbytes: int, n_boot: int, bytes_boot: int) -> None:
+# deleterhdfirst2pnw: what the deleterLoss record's "kind" says. HD video is the cheap sacrifice (~70 MB/segment, the bulk
+# of the bytes); the rlog (~10 MB/segment) is the file the analysis needs.
+KIND_HD = "HD sacrificed"
+KIND_LOG = "LOG LOST"
+
+
+def strip_hd_video(d: str, firehose_files: set[str]) -> tuple[list[str], list[str], int]:
+  """deleterhdfirst2pnw: delete ONLY the HD video files (fcamera/ecamera/dcamera) of segment `d`, keeping its logs.
+  Returns (removed names, removed names that were NOT uploaded and the uploader would have sent, their bytes).
+  dcamera is never uploaded by design and a SkipWideCameraUpload ecamera is never sent, so neither is a loss --
+  they are in the first list only. A file that cannot be removed is logged and skipped; the caller then tries the
+  next segment and finally the whole-segment delete, so space still gets freed."""
+  seg_path = os.path.join(Paths.log_root(), d)
+  unuploaded = set(unuploaded_firehose(d))
+  removed: list[str] = []
+  lost: list[str] = []
+  lost_bytes = 0
+  for name in sorted(HD_VIDEO_FILES):
+    fn = os.path.join(seg_path, name)
+    try:
+      size = os.path.getsize(fn)
+      os.remove(fn)
+    except FileNotFoundError:
+      continue
+    except OSError:
+      cloudlog.exception(f"deleterhdfirst2pnw: cannot remove {fn}")
+      continue
+    removed.append(name)
+    if name in unuploaded and name in firehose_files:
+      lost.append(name)
+      lost_bytes += size
+  return removed, lost, lost_bytes
+
+
+def report_unuploaded_loss(seg: str, files: list[str], nbytes: int, n_boot: int, bytes_boot: int,
+                           kind: str = KIND_LOG) -> None:
   """deleterloss2pnw: make a destroyed un-uploaded segment VISIBLE (Rule 2): an offroad alert the
   driver sees once parked, and one ces_events record (first in the metered upload order, rotated into
   the archive at Park). Never raises: recording must never stall on a failed alert or record."""
@@ -114,7 +149,7 @@ def report_unuploaded_loss(seg: str, files: list[str], nbytes: int, n_boot: int,
   try:
     from openpilot.selfdrive.car.accdrop_pnw import append_to_ces_log
     t = round(time.time(), 1)  # noqa: TID251 -- wall clock, the ces_events "t" field is a UTC epoch
-    rec = {"t": t, "ev": "deleterLoss", "seg": seg, "files": files, "bytes": nbytes, "n_boot": n_boot}
+    rec = {"t": t, "ev": "deleterLoss", "seg": seg, "files": files, "bytes": nbytes, "n_boot": n_boot, "kind": kind}
     append_to_ces_log(json.dumps(rec))
   except Exception:
     cloudlog.exception(f"deleterloss2pnw: FAILED to write the ces_events deleterLoss record for {seg}")
@@ -190,9 +225,40 @@ def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_by
     # firehose files haven't left the device yet. If EVERY remaining segment
     # is un-uploaded (truly out of space), the oldest is still deleted so
     # logging never stalls -- and we log that data loss explicitly.
+    # deleterhdfirst2pnw: ...and before the first un-uploaded ORDINARY segment is destroyed whole, the HD video of the
+    # un-uploaded ordinary segments goes first (oldest first), logs kept. Order: 1. uploaded segments, 2. un-uploaded
+    # HD video (KIND_HD), 3. only then whole un-uploaded segments, rlog included (KIND_LOG). The 10-10/10-11 trip lost
+    # 328 rlog while ~70 MB HD files sat next to each; the rlog is what analysis needs and costs 1/7 of the space.
     ordered = sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs, d in unuploaded_dirs))
+    hd_pass_done = False
     for delete_dir in ordered:
       delete_path = os.path.join(Paths.log_root(), delete_dir)
+
+      if (delete_dir in unuploaded_dirs and delete_dir not in DELETE_LAST and delete_dir not in preserved_dirs
+          and not hd_pass_done):
+        hd_pass_done = True
+        stripped = False
+        for hd_dir in (x for x in ordered if x in unuploaded_dirs and x not in DELETE_LAST and x not in preserved_dirs):
+          hd_path = os.path.join(Paths.log_root(), hd_dir)
+          try:
+            if any(name.endswith(".lock") for name in os.listdir(hd_path)):
+              continue
+            removed, hd_lost, hd_lost_bytes = strip_hd_video(hd_dir, firehose_files)
+          except OSError:
+            cloudlog.exception(f"issue stripping HD video from {hd_path}")
+            continue
+          if not removed:
+            continue
+          unup = "UN-UPLOADED " if hd_lost else ""
+          cloudlog.error(f"deleterhdfirst2pnw: {KIND_HD}: deleting {unup}HD video {removed} from {hd_path}, logs kept")
+          if hd_lost:
+            loss_count += 1
+            loss_bytes += hd_lost_bytes
+            report_unuploaded_loss(hd_dir, hd_lost, hd_lost_bytes, loss_count, loss_bytes, KIND_HD)
+          stripped = True
+          break
+        if stripped:
+          break
 
       try:
         # deleterrain2pnw: moved inside the try -- an OSError here (dir vanished, unreadable) used to escape the

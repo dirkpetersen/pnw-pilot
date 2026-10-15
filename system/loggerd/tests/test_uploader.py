@@ -534,6 +534,15 @@ class TestSkipWideListing:
     assert "ecamera.hevc" not in names
     assert names == {"fcamera.hevc", "rlog.zst"}     # nothing else collaterally dropped
 
+  def test_segment_with_logs_but_no_video_is_listed_cleanly(self, tmp_path):
+    # deleterhdfirst2pnw: the deleter now strips fcamera/ecamera/dcamera and keeps the logs. The uploader lists by
+    # os.listdir, so that segment must yield its logs, raise nothing, and never ask for the missing video.
+    seg = self._segment(tmp_path)
+    for n in ("fcamera.hevc", "ecamera.hevc"):
+      (seg / n).unlink()
+    u = self._uploader(tmp_path, skip_wide=False)
+    assert {n for n, _, _ in u.list_upload_files(metered=False, pass2=True)} == {"rlog.zst"}
+
   # NOTE: there is deliberately no "skipped file is never xattr-marked" test here. setxattr runs only
   # on a 2xx inside upload(); a test that merely lists and then asserts the xattr is absent can never
   # fail, and a test that cannot fail is worse than no test. The real contract -- a skipped file is
