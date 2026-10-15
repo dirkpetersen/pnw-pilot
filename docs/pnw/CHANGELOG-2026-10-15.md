@@ -71,3 +71,14 @@ telemetry values, roundabout fixture.
   failure in the closed loop (arrival at the deep node within 0.5 mph of today across a sweep with and without the probe); kept as a precaution.
 - A `restore`-phase tick is no longer a START tick; a lead seen during a Chill interlude now updates the 5 s lead clock.
 
+**Second review round (same day), third commit:**
+- Owner-visible: at highway speed into a tight (<= 30 mph) node the cap now starts EARLIER than today's firm ramp. The old 1.4 m/s2 assumption is not
+  achievable through set taps (large drops average 0.78-0.87), so today the truck arrives too fast; if it brakes harder than 0.8 it reaches the apex
+  speed a bit early instead.
+- A late-started cap now HOLDS its covered candidate (apex <= 30 mph, drop >= knob) while it is ahead: the 350 m tracking cap and an envelope that
+  shrinks when the truck slows faster than 0.8 m/s2 can no longer un-bind it (reviewer repro: 65 mph, 29 mph apex, 1.6 m/s2 = 7 engages, ceiling 65 -> 58;
+  now exactly one engage, unchanged ceiling at 1.2 and 1.6 m/s2).
+- Scope: firm 0, the latch and the hold apply only when the candidate binding at the comfort decel is covered. A 33-43 mph apex keeps today's trace
+  exactly (was starting earlier, e.g. 489 m vs 426 m). The rule's apex bound is its own 30 mph constant: `low_v_mph` (curve.json, up to 80) cannot widen it.
+- `icbmStartWhy` = `trackShallow` only when a deeper covered node exists and was withheld; ordinary small-drop tracking starts stay `track`.
+

@@ -309,6 +309,9 @@ def _load_rain_config() -> dict:
   return cfg
 
 
+LATE_START_APEX_MAX_MPH = 30.0   # icbmlatestart2pnw: its own bound; curve.json may move low_v_mph up to 80, this must not widen with it
+
+
 def _load_curve_config() -> dict:
   """Read /data/pnw/curve.json defensively (os.stat gate: regular file, <= 64 KiB), overlaying only
   known numeric keys onto the defaults, clamping each to sane bounds. NEVER raises (runs in control
@@ -1094,7 +1097,7 @@ class PnwVehicle:
     curve penalty's low_v knee (30 mph: tight nodes / roundabouts, penalty ~1 mph). Above it the penalties lower the target
     after the envelope was sized (+3.5-5 mph over target at 40-47 mph apexes), so those keep the tracking start.
     inf off the Lightning (the rule is off there anyway: icbm_late_start_drop_ms is 0.0)."""
-    return self._curve_cfg["low_v_mph"] * _MPH_TO_MS if self.lightning_curve_slow else float("inf")
+    return min(self._curve_cfg["low_v_mph"], LATE_START_APEX_MAX_MPH) * _MPH_TO_MS if self.lightning_curve_slow else float("inf")
 
   def icbm_map_floor_ms(self, raw_map_v) -> float:
     """icbmslow2pnw: the speed (m/s) the Lightning curve penalty may not push an ICBM MAP/FAR curve

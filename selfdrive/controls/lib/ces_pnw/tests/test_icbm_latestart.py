@@ -350,7 +350,7 @@ class TestConsistency:
     class Bare:
       pass
     veh = _lightning()
-    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0, float("inf"))
+    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0, float("inf"), False)
 
 
 # ---- 7: the knob ---------------------------------------------------------------------------------------------------
@@ -470,7 +470,7 @@ class TestHighwayDoesNotFlap:
     _tick(c, step, clock, 450.0, v, v, map_v=10.0)
     assert c._icbm_ep.phase == "cap" and c._icbm_firm_t == 0.0 and c._icbm_late_latch
     _tick(c, step, clock, 445.0, v, v, map_v=10.0)
-    assert c._icbm_firm_t == 0.0 and c._icbm_late_t == 0.0, "running tick: firm latched, tracking window restored"
+    assert c._icbm_firm_t == 0.0 and c._icbm_late_t == LATE and c._icbm_late_hold_t, "running tick: firm latched, covered candidate held"
     cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
     c._icbm_last_pub = -1e9
     cls._icbm_step.__get__(c)({"v_ego": v}, active=False)
@@ -573,3 +573,70 @@ class TestRestorePhaseIsNotAStartTick:
     c._icbm_last_pub = -1e9
     _tick(c, step, clock, 300.0, 20.2, 20.6, map_v=6.8)
     assert c._icbm_start_why == "trackLead", "a lead seen 0.5 s ago, during Chill, must hold the start to today's rule"
+
+
+class TestHeldPastTheTrackingCap:
+  """Re-review (1): above 350 m only the 0.8 envelope held a latched cap; a truck slowing faster than ~1.1 m/s2 shrank the envelope
+  faster than the distance -> cap, idle, re-start from the lowered set (65 mph, apex 29 mph, 1.6 m/s2: 7 engages, ceiling 65 -> 58)."""
+
+  @pytest.mark.parametrize("mph,map_v,decel", [(60, 13.0, 1.2), (65, 13.0, 1.2), (65, 13.0, 1.6), (70, 12.0, 1.6), (60, 9.0, 1.6),
+                                               (70, 13.0, 1.2)])
+  def test_one_engage_and_the_ceiling_never_moves(self, monkeypatch, mph, map_v, decel):
+    v0 = mph * MPH
+    tr = _closed_loop(monkeypatch, v0, map_v, 700.0, decel=decel, stop=60.0)
+    phases = [t[3] for t in tr]
+    engages = sum(1 for a, b in zip(["idle"] + phases[:-1], phases, strict=True) if b == "cap" and a != "cap")
+    assert engages == 1, f"{engages} engages"
+    assert {round(t[4], 2) for t in tr if t[3] == "cap"} == {round(v0, 2)}, "the restore ceiling moved"
+
+  def test_the_hold_is_what_does_it(self, monkeypatch):
+    # past the 350 m tracking cap, at a distance where a faster-slowing truck's envelope no longer binds
+    clock = [1000.0]
+    c, step = _controller(monkeypatch, clock, _veh())
+    v = 65 * MPH
+    p1 = _tick(c, step, clock, 440.0, v, v, map_v=13.0)
+    assert p1 and p1.get("target") is not None and c._icbm_late_latch
+    p2 = _tick(c, step, clock, 435.0, v - 1.6, v, map_v=13.0)         # 1.6 m/s2 for ~1 s: the envelope shrank 40 m, distance 5 m
+    assert c._icbm_late_hold_t and p2 and p2.get("target") is not None and c._icbm_ep.phase == "cap"
+
+
+class TestScope:
+  """Re-review (2): firm 0 and the latch only when the binding candidate is COVERED (apex <= 30 mph and drop >= knob)."""
+
+  @pytest.mark.parametrize("mph", [65, 70, 75])
+  @pytest.mark.parametrize("apex_mph", [33.0, 38.0, 43.0])
+  def test_an_apex_above_the_cap_keeps_todays_trace_exactly(self, monkeypatch, mph, apex_mph):
+    mv = apex_mph * MPH / (1.1 * 0.92)
+    on = _closed_loop(monkeypatch, mph * MPH, mv, 700.0, knob_on=True, stop=40.0)
+    off = _closed_loop(monkeypatch, mph * MPH, mv, 700.0, knob_on=False, stop=40.0)
+    assert on == off, "an uncovered apex must be byte-identical to today"
+
+  def test_firm_and_latch_stay_off_for_an_uncovered_start(self, monkeypatch):
+    clock = [1000.0]
+    c, step = _controller(monkeypatch, clock, _veh())
+    _tick(c, step, clock, 450.0, 31.3, 31.3, map_v=38.0 * MPH / (1.1 * 0.92))
+    assert c._icbm_firm_t == c._veh.icbm_firm_decel and c._icbm_late_t == 0.0 and not c._icbm_late_latch
+
+  def test_low_v_mph_cannot_widen_the_rule(self, tmp_path, monkeypatch):
+    p = tmp_path / "curve.json"
+    p.write_text('{"lightning": {"low_v_mph": 60}}')
+    monkeypatch.setattr(pv, "CURVE_CONFIG_PATH", str(p))
+    monkeypatch.setattr(pv, "RAIN_CONFIG_PATH", str(tmp_path / "absent-rain.json"))
+    assert PnwVehicle(FakeCP("FORD_F_150_LIGHTNING_MK1", "ford", False)).icbm_late_start_apex_max_ms == pytest.approx(30 * MPH)
+    p.write_text('{"lightning": {"low_v_mph": 20}}')
+    assert PnwVehicle(FakeCP("FORD_F_150_LIGHTNING_MK1", "ford", False)).icbm_late_start_apex_max_ms == pytest.approx(20 * MPH)
+
+
+class TestTrackShallowLabel:
+  """Re-review (3): trackShallow only when a deeper COVERED candidate exists and was withheld."""
+
+  def test_an_ordinary_small_drop_start_is_plain_track(self, monkeypatch):
+    # a single shallow curve (drop < 18 mph): no covered candidate at all
+    on, c = _one(monkeypatch, 150.0, v=20.2, v_set=20.6, map_v=14.0 / (1.1 * 0.92))
+    assert on and on.get("target") is not None
+    assert c._icbm_start_why in ("track", "env") and c._icbm_start_why != "trackShallow"
+
+  def test_with_a_withheld_deep_node_behind_it_it_is_trackShallow(self, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_scene", _two_curve_scene(13.5, 80.0))
+    on, c = _one(monkeypatch, 280.0, map_v=6.8)
+    assert c._icbm_start_why == "trackShallow"
