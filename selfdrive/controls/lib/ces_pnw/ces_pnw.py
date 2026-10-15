@@ -5593,7 +5593,7 @@ class CESController:
       }
       if payload.get("durationS") is not None:
         rec["durationS"] = payload["durationS"]
-      for k in ("demand", "floor", "angErr", "supCount"):  # steersatfloor2pnw: suppressed-alert fields
+      for k in ("demand", "floor", "angErr", "supCount", "peakDemand", "peakAngErr", "escaped"):  # steersatfloor2pnw: suppressed-alert fields
         if payload.get(k) is not None:
           rec[k] = payload[k]
       if clock_bad(now_wall):

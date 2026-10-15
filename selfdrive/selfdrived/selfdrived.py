@@ -44,14 +44,34 @@ TESTING_CLOSET = "TESTING_CLOSET" in os.environ
 STEER_SATURATED_HOLDOFF_S = 1.0
 
 
-def steer_sat_verdict(desired_lat: float, actual_lat: float, saturated: bool, floor: float) -> str | None:
+# steersatfloor2pnw S1 escapes: below the angle-mode demand floor the alert STAYS ON (as stock) when the wheel is far behind or
+# the suppressed condition keeps going, because only the ordinary tracking-lag class may be quiet. Provenance: Sunday 10-11 rlog
+# replay at 100 Hz (drives/2026-10-11/canyon-steersat/data/rlog_rows.jsonl): ordinary suppressed onsets sit at 3.7-8.5 deg wheel
+# error and last <= 1.24 s; the outliers were 13.8 / 20.8 / 39.5 deg.
+STEER_SAT_ESC_ANG_ERR_DEG = 10.0
+STEER_SAT_ESC_DURATION_S = 2.0
+# steersatfloor2pnw B2: poll the lateral path the Ford carcontroller says is live (mem-param FordLatStatus, ~4 Hz, opendbc ford
+# carcontroller) every this many frames; a status older than STALE_S (carcontroller dead / not Ford) counts as "not angle".
+STEER_SAT_MODE_POLL_FRAMES = 25
+STEER_SAT_MODE_STALE_S = 5.0
+
+
+def steer_sat_verdict(desired_lat: float, actual_lat: float, saturated: bool, floor: float,
+                      ang_err_deg: float = 0.0, sup_s: float = 0.0) -> str | None:
   """steersatfloor2pnw: the steerSaturated demand test, unchanged except the 1.0 m/s2 floor is now a parameter.
-  Returns "fire" (alert as stock), "suppressed" (would have fired at the stock 1.0 floor but the demand is not above
-  `floor`; the caller MUST log it, Rule 2) or None. The stock floor is 1.0, so floor=1.0 is exactly the old behaviour."""
+  "fire" = alert as stock; "escape" = below the floor but |ang_err| or the suppression age says it is not ordinary lag, so the alert
+  fires as stock; "suppressed" = would have fired at the stock 1.0 floor but is not above `floor` (the caller MUST log it, Rule 2);
+  None = no alert condition. floor=1.0 is exactly the old behaviour."""
   undershooting = abs(desired_lat) / abs(1e-3 + actual_lat) > 1.2
   if not (undershooting and saturated and abs(desired_lat) > 1.0):
     return None
-  return "fire" if abs(desired_lat) > floor else "suppressed"
+  if abs(desired_lat) > floor:
+    return "fire"
+  if abs(ang_err_deg) >= STEER_SAT_ESC_ANG_ERR_DEG or sup_s >= STEER_SAT_ESC_DURATION_S:
+    return "escape"
+  return "suppressed"
+
+
 # onebutton2pnw: how long an ACC ON/OFF press keeps openpilot out after the driver asked for
 # everything off. MEASURED 2026-09-07: the truck answers that press by engaging ~0.3 s later in
 # about half of the observed cases, so the hold only has to outlast that response and the cancel it
@@ -185,6 +205,19 @@ class SelfdriveD:
     # the onoffgas2pnw accelerator gate (built for a thumb brushing the wheel's ON/OFF button) does not apply to it.
     self.stalk_off_ignores_gas = False
     self.stalk_press_now = False    # teslastalk2b: a stalk push this frame (Raven only); vetoes arming steering-only from a cancel
+    # steersatfloor2pnw: defaults MUST stay above the PnwVehicle try-block below, which sets steer_sat_floor (a reset after it
+    # silently disabled the feature -- review B1). steer_sat_floor = the angle-mode floor capability (1.0 = stock);
+    # steer_sat_floor_now = the floor in force this tick (capability only while the carcontroller reports angle mode).
+    self.steer_sat_floor = 1.0
+    self.steer_sat_floor_now = 1.0
+    self.steer_sat_mode = "unset"           # last FordLatStatus mode seen (logged on every change)
+    self.latstat_mem = None
+    self.steer_sat_sup_count = 0            # suppressed would-be alert episodes this drive
+    self.steer_sat_sup_start = None         # frame the open suppressed episode started (None = none open)
+    self.steer_sat_sup_last = None          # last frame of the open episode
+    self.steer_sat_sup_peak_dem = 0.0
+    self.steer_sat_sup_peak_err = 0.0
+    self.steer_sat_sup_escaped = False
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -195,6 +228,8 @@ class SelfdriveD:
       veh = PnwVehicle(self.CP)
       self.stalk_off_ignores_gas = bool(veh.stalk_cruise_buttons)
       self.steer_sat_floor = float(veh.steer_sat_demand_floor)  # steersatfloor2pnw
+      if self.steer_sat_floor > 1.0:
+        self.latstat_mem = Params("/dev/shm/params")
       if not veh.mads_resume:
         self.mads_resume = None
       else:
@@ -217,11 +252,6 @@ class SelfdriveD:
     # value pre-sm.update, e.g. -1), so any int sentinel risks a false `sm.frame ==
     # last_steer_saturated_frame` match -> a bogus "Take Control" log record on boot before any real
     # alert ever fired. None can never equal an int, so it's sentinel-proof regardless of frame value.
-    # steersatfloor2pnw: demand floor for the steerSaturated check (PnwVehicle capability; 1.0 = stock) and the
-    # state of the suppressed-alert logger. Stays 1.0 (stock) if the PnwVehicle construction below fails.
-    self.steer_sat_floor = 1.0
-    self.steer_sat_sup_count = 0            # suppressed would-be alerts (episodes) this drive
-    self.last_steer_sat_sup_frame = None    # last frame a would-be alert was suppressed
     self.last_steer_saturated_frame = None  # last frame steerSaturated was added to self.events
     self.steer_saturated_open = False       # is a logging "episode" currently open (already logged)?
     self.steer_saturated_start_frame = 0    # frame the currently-open episode's rising edge fired
@@ -609,15 +639,7 @@ class SelfdriveD:
       actual_lateral_accel = controlstate.curvature * (clipped_speed**2)
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
       # TODO: lac.saturated includes speed and other checks, should be pulled out
-      verdict = steer_sat_verdict(desired_lateral_accel, actual_lateral_accel, bool(lac.saturated), self.steer_sat_floor)
-      if verdict == "fire":
-        self.events.add(EventName.steerSaturated)
-        # takecontrol2pnw: PURE OBSERVATION bookkeeping only — records which frame the decision
-        # above fired, for the edge-triggered ces_events logger in step() below. Never read back
-        # into this decision.
-        self.last_steer_saturated_frame = self.sm.frame
-      elif verdict == "suppressed":
-        self._note_steer_sat_suppressed(CS, desired_lateral_accel, lac)
+      self._steer_sat_step(CS, desired_lateral_accel, actual_lateral_accel, lac)
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -866,6 +888,7 @@ class SelfdriveD:
     self.loop_diag.mark("ces")
 
     self._log_take_control_edge(CS)
+    self._steer_sat_sup_close_check(CS)   # steersatfloor2pnw: end record of a suppressed episode
 
     self.publish_selfdriveState(CS)
 
@@ -1010,26 +1033,90 @@ class SelfdriveD:
       if self.mads_resume_fail == 1 or self.mads_resume_fail % 1000 == 0:
         cloudlog.exception(f"madsresume2pnw: _mads_resume_step FAILED ({self.mads_resume_fail} consecutive) -- auto-resume is NOT deciding")
 
-  def _note_steer_sat_suppressed(self, CS, desired_lat: float, lac) -> None:
-    """steersatfloor2pnw (Rule 2): a would-be "Take Control" that the angle-mode demand floor held back is NEVER silent.
-    One cloudlog warning + one ces_events record ({"ev":"alert","phase":"suppressed"}) per episode (a gap of
-    STEER_SATURATED_HOLDOFF_S starts a new one); supCount is the running per-drive episode count."""
+  def _refresh_steer_sat_mode(self) -> None:
+    """steersatfloor2pnw B2: the angle floor applies only while the Ford carcontroller says the angle lateral path is live
+    (FordLatStatus mode "angle"; it can fall back to curvature mid-drive). Unknown / stale / unreadable => stock 1.0.
+    Every change of the observed mode is logged, so the boot log shows which mode the floor assumed."""
+    if self.steer_sat_floor <= 1.0:
+      return
+    if self.steer_sat_mode != "unset" and self.sm.frame % STEER_SAT_MODE_POLL_FRAMES != 0:
+      return
+    mode = None
     try:
-      f = self.sm.frame
-      new = self.last_steer_sat_sup_frame is None or (f - self.last_steer_sat_sup_frame) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S
-      self.last_steer_sat_sup_frame = f
-      if not new:
-        return
-      self.steer_sat_sup_count += 1
-      v_ego = round(float(CS.vEgo), 2)
-      ang_err = round(float(lac.steeringAngleDesiredDeg) - float(lac.steeringAngleDeg), 2) if hasattr(lac, "steeringAngleDeg") else None
-      cloudlog.warning("steersatfloor2pnw: Take Control SUPPRESSED (#%d) demand=%.2f m/s2 <= floor %.2f vEgo=%s angErr=%s",
-                       self.steer_sat_sup_count, desired_lat, self.steer_sat_floor, v_ego, ang_err)
-      self.ces_pnw.log_take_control_alert({"name": "steerSaturated", "phase": "suppressed", "vEgo": v_ego, "otherEvents": [],
-                                           "demand": round(desired_lat, 3), "floor": self.steer_sat_floor,
-                                           "angErr": ang_err, "supCount": self.steer_sat_sup_count})
+      st = self.latstat_mem.get("FordLatStatus") if self.latstat_mem is not None else None
+      if isinstance(st, dict) and time.time() - float(st.get("ts", 0.0)) < STEER_SAT_MODE_STALE_S:  # noqa: TID251 -- carcontroller stamps wall time
+        mode = st.get("mode")
     except Exception:
-      cloudlog.exception("steersatfloor2pnw: _note_steer_sat_suppressed raised")
+      cloudlog.exception("steersatfloor2pnw: FordLatStatus read failed -> stock 1.0 floor")
+    if mode != self.steer_sat_mode:
+      self.steer_sat_mode = mode
+      cloudlog.warning("steersatfloor2pnw: lateral mode now %r -> Take Control demand floor %.2f",
+                       mode, self.steer_sat_floor if mode == "angle" else 1.0)
+    self.steer_sat_floor_now = self.steer_sat_floor if mode == "angle" else 1.0
+
+  def _steer_sat_step(self, CS, desired_lat: float, actual_lat: float, lac) -> None:
+    """The steerSaturated decision (steersatfloor2pnw). Alert-affecting inputs: floor in force, wheel error, suppression age."""
+    self._refresh_steer_sat_mode()
+    f = self.sm.frame
+    try:
+      ang_err = abs(float(lac.steeringAngleDesiredDeg) - float(lac.steeringAngleDeg))
+    except (AttributeError, TypeError, ValueError):
+      ang_err = float("inf")   # no wheel-error signal: never suppress on it
+    open_ep = self.steer_sat_sup_start is not None and (f - self.steer_sat_sup_last) * DT_CTRL < STEER_SATURATED_HOLDOFF_S
+    sup_s = (f - self.steer_sat_sup_start) * DT_CTRL if open_ep else 0.0
+    verdict = steer_sat_verdict(desired_lat, actual_lat, bool(lac.saturated), self.steer_sat_floor_now, ang_err, sup_s)
+    if verdict in ("fire", "escape"):
+      self.events.add(EventName.steerSaturated)
+      # takecontrol2pnw: PURE OBSERVATION bookkeeping only — records which frame the decision
+      # above fired, for the edge-triggered ces_events logger in step() below. Never read back
+      # into this decision.
+      self.last_steer_saturated_frame = f
+      if verdict == "escape":
+        self._steer_sat_sup_touch(CS, desired_lat, ang_err, escaped=True)
+    elif verdict == "suppressed":
+      self._steer_sat_sup_touch(CS, desired_lat, ang_err, escaped=False)
+
+  def _steer_sat_sup_record(self, CS, phase: str, desired_lat: float, ang_err: float, **extra) -> None:
+    """One ces_events record under the DISTINCT name steerSaturatedSuppressed (never counted as an alert)."""
+    try:
+      v_ego = round(float(CS.vEgo), 2)
+      payload = {"name": "steerSaturatedSuppressed", "phase": phase, "vEgo": v_ego, "otherEvents": [],
+                 "demand": round(desired_lat, 3), "floor": self.steer_sat_floor_now,
+                 "angErr": None if ang_err == float("inf") else round(ang_err, 2), "supCount": self.steer_sat_sup_count}
+      payload.update(extra)
+      cloudlog.warning("steersatfloor2pnw: Take Control suppressed episode #%d %s %s", self.steer_sat_sup_count, phase, payload)
+      self.ces_pnw.log_take_control_alert(payload)
+    except Exception:
+      cloudlog.exception("steersatfloor2pnw: suppressed-episode record raised")
+
+  def _steer_sat_sup_touch(self, CS, desired_lat: float, ang_err: float, escaped: bool) -> None:
+    """Open/extend the suppressed-episode bookkeeping (never silent: start record now, end record with peaks at close)."""
+    f = self.sm.frame
+    if self.steer_sat_sup_start is not None and (f - self.steer_sat_sup_last) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S:
+      self._steer_sat_sup_close(CS)
+    if self.steer_sat_sup_start is None:
+      self.steer_sat_sup_count += 1
+      self.steer_sat_sup_start = f
+      self.steer_sat_sup_peak_dem = self.steer_sat_sup_peak_err = 0.0
+      self.steer_sat_sup_escaped = False
+      self._steer_sat_sup_record(CS, "start", desired_lat, ang_err)
+    self.steer_sat_sup_last = f
+    self.steer_sat_sup_peak_dem = max(self.steer_sat_sup_peak_dem, abs(desired_lat))
+    if ang_err != float("inf"):
+      self.steer_sat_sup_peak_err = max(self.steer_sat_sup_peak_err, ang_err)
+    self.steer_sat_sup_escaped = self.steer_sat_sup_escaped or escaped
+
+  def _steer_sat_sup_close_check(self, CS) -> None:
+    if self.steer_sat_sup_start is not None and (self.sm.frame - self.steer_sat_sup_last) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S:
+      self._steer_sat_sup_close(CS)
+
+  def _steer_sat_sup_close(self, CS) -> None:
+    self._steer_sat_sup_record(CS, "end", self.steer_sat_sup_peak_dem, self.steer_sat_sup_peak_err,
+                               peakDemand=round(self.steer_sat_sup_peak_dem, 3), peakAngErr=round(self.steer_sat_sup_peak_err, 2),
+                               durationS=round((self.steer_sat_sup_last - self.steer_sat_sup_start) * DT_CTRL, 2),
+                               escaped=self.steer_sat_sup_escaped)
+    self.steer_sat_sup_start = None
+    self.steer_sat_sup_last = None
 
   def _log_take_control_edge(self, CS) -> None:
     """takecontrol2pnw: PURE OBSERVATION — write the "Take Control" (steerSaturated) alert to
