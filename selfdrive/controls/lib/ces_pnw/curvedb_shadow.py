@@ -242,7 +242,10 @@ CURVEDB_TELE_KEYS = (
   # -- health. Rule 2: "no site here" and "the shadow is dead" must never look alike ------------
   "cdbOn",     # str  : "on" | "loading" | "off" | "noStore" | "noTz" | "err"
   "cdbRows",   # int  : rows in the database loaded at boot (0 while loading, and 0 is a real answer)
-  "cdbObs",    # int  : observations WRITTEN since boot (the write half's liveness)
+  "cdbObs",    # int  : observations WRITTEN since boot (the write half's liveness). With the async
+               #        writer (curvedbasync2pnw) this LAGS the verdicts: "upQueued" is not yet written
+  "cdbDrop",   # int  : observations LOST since boot -- queue full / writer dead / cap-refused / write
+               #        error. 0 = healthy. A queued observation that never lands shows up HERE
   "cdbErr",    # int  : shadow failures since boot. 0 = healthy
   # -- the site this record named --------------------------------------------------------------
   "cdbSite",   # bool : this record named a map candidate the shadow could look up
@@ -264,7 +267,9 @@ CURVEDB_TELE_KEYS = (
   "cdbGive",   # float | None: cdbWould - icbmT (m/s, >= 0). The slowdown it would have cancelled
   "cdbWhy",    # str   | None: the authority reason -- populated on GRANT as well as on refusal
   # -- the write half's verdict on a pass that just completed (one-shot) -------------------------
-  "cdbEv",     # str | None: "up" | "down" | "upDown" | "dirty:drv,blnk" | "noK" | "noBrg" | ...
+  "cdbEv",     # str | None: "upQueued" | "downQueued" (handed to the writer thread, NOT yet on disk;
+               #        "up"/"down" = written synchronously, only without a writer) | "upDropped:why" |
+               #        "dirty:drv,blnk" | "noK" | "noBrg" | ...
 )
 
 _NULL_TELE = dict.fromkeys(CURVEDB_TELE_KEYS)
@@ -374,6 +379,11 @@ class CurveDBShadow:
   params = PROVISIONAL_PARAMS
   err = 0
   obs_written = 0
+  obs_queued = 0                      # curvedbasync2pnw: handed to the writer thread
+  obs_dropped = 0                     # lost: queue full / writer dead / cap-refused / write error
+  _sink = None                        # callable((shadow, line)) -> bool: the ces_events writer's enqueue
+  _queue_refused = False
+  _qdrop_t = None
   _state = "err"
   _db = None
   _tz = None
@@ -394,8 +404,9 @@ class CurveDBShadow:
   _ev_pending = ()
 
   def __init__(self, platform: str, obs_path: str | None = None, config_path: str | None = None,
-               load_async: bool = True):
+               load_async: bool = True, sink=None):
     try:
+      self._sink = sink
       self._init(platform, obs_path, config_path, load_async)
     except Exception as e:
       # ces_pnw constructs this inside CESController.__init__, which selfdrived constructs at
@@ -422,6 +433,8 @@ class CurveDBShadow:
 
     self.err = 0
     self.obs_written = 0
+    self.obs_queued = 0
+    self.obs_dropped = 0
     self._db: CurveDB | None = None
     # "off" and "noTz" are TERMINAL -- `_load` may only promote "loading" to "on", never overwrite a
     # state that records a disabled half. Without that rule a successful load would paper over a
@@ -683,12 +696,13 @@ class CurveDBShadow:
     except Exception as e:
       self._fail("record", e)
       return {**_NULL_TELE, "cdbOn": "err", "cdbRows": self._rows(), "cdbObs": self.obs_written,
-              "cdbErr": self.err, "cdbSite": False}
+              "cdbDrop": self.obs_dropped, "cdbErr": self.err, "cdbSite": False}
 
   def _record(self, *, now_wall, lat, lon, bearing, v_ego, site_pt, posted_ms, hwy_class,
               icbm_src, icbm_target_ms, ref_ms) -> dict:
     out = {**_NULL_TELE, "cdbOn": self._state, "cdbRows": self._rows(),
-           "cdbObs": self.obs_written, "cdbErr": self.err, "cdbSite": False}
+           "cdbObs": self.obs_written, "cdbDrop": self.obs_dropped, "cdbErr": self.err,
+           "cdbSite": False}
     if self._state == "off":
       return out
 
@@ -946,7 +960,7 @@ class CurveDBShadow:
       # The verdict reports whether the observation was actually WRITTEN (Fable S4). Saying "up"
       # while the writer is frozen at its cap -- the very state section 8.1 says must be loud --
       # would make the per-record channel lie about the one thing it exists to report.
-      verdicts.append("up" if self._write(Observation(
+      verdicts.append(self._ok_word("up") if self._write(Observation(
         date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.k_peak, kind="up",
         estimator="kPeak100", source="curvedb_shadow", n_ticks=s.n_ticks,
         dq_state="clean", **common)) else f"upDropped:{self._drop_why()}")
@@ -959,7 +973,7 @@ class CurveDBShadow:
         # measurement, so it is not a disqualifier OF ITSELF. DOWN raises k_eff and therefore only
         # ever LOWERS the derived speed (section 6.2's hard constraint), which is why `CurveRow`
         # can express "DOWN is never overwritten by UP" (D8) as a plain max.
-        verdicts.append("down" if self._write(Observation(
+        verdicts.append(self._ok_word("down") if self._write(Observation(
           date=self._date(s.t), t=s.t, bearing_deg=s.bearing, k=s.down_k, kind="down",
           estimator="slKCmd_at_override", source="curvedb_shadow", n_ticks=1,
           dq_state="clean", **common)) else f"downDropped:{self._drop_why()}")
@@ -977,21 +991,58 @@ class CurveDBShadow:
   def _date(self, t: float) -> str:
     return pt_date(t, self._tz)
 
+  def _ok_word(self, word: str) -> str:
+    """The verdict for an observation `_write` accepted: "queued" when a writer thread owns it (it is
+    NOT on disk yet -- cdbObs/cdbDrop say what became of it), plain when it was written inline."""
+    return word + "Queued" if self._sink is not None else word
+
   def _write(self, obs: Observation) -> bool:
-    """Append one observation. Section 8.1's append-only JSONL: a torn last line is discarded on
-    read, history is never rewritten.
+    """Hand one observation to the writer (curvedbasync2pnw: the selfdrived loop does NO /data I/O).
+    Section 8.1's append-only JSONL: a torn last line is discarded on read, history is never rewritten.
 
     The new observation is deliberately NOT added to the live database. A pass must never be judged
     against itself (section 3.9 item 6), and "the database is as of the last boot" is a property
     that can be stated and checked rather than reasoned about.
 
-    Returns whether it wrote, so the caller's verdict cannot claim an observation that never
-    reached the disk."""
+    Returns whether the observation was ACCEPTED (queued, or written when there is no writer), so the
+    caller's verdict cannot claim an observation that was refused. Accepted is not written: that is
+    `obs_written`, and a queued line that is later lost is counted in `obs_dropped`."""
     if self._tz is None or self._write_stopped:
+      return False
+    self._queue_refused = False
+    try:
+      line = json.dumps(vars(obs)) + "\n"
+    except Exception as e:
+      self._fail("serialize", e)
+      return False
+    if self._sink is None:                  # no writer thread (standalone / tests): inline, as before
+      return self.write_line(line)
+    if self._sink((self, line)):
+      self.obs_queued += 1
+      return True
+    self._queue_refused = True              # the sink counted + logged the drop (note_queue_drop)
+    return False
+
+  def note_queue_drop(self, why: str) -> None:
+    """Called by the ces_pnw writer machinery when it cannot take a curvedb line. Counted always,
+    logged at a bounded rate, distinct from the ces_events drop (it names the file)."""
+    self.obs_dropped += 1
+    now = time.monotonic()
+    if self._qdrop_t is None or now - self._qdrop_t >= 30.0:
+      self._qdrop_t = now
+      cloudlog.error(f"curvedb_shadow: observation(s) DROPPED before reaching {self._obs_path} ({why}); " +
+                     f"{self.obs_dropped} lost in total (cdbDrop)")
+
+  def write_line(self, line: str) -> bool:
+    """Append one serialised observation: the size check and the append, exactly as `_write` did them
+    inline. Runs on the ces_events writer thread (or inline without one). Never raises."""
+    if self._write_stopped:
+      self.obs_dropped += 1                 # queued before the cap hit; the cap error was already logged once
       return False
     try:
       if os.path.getsize(self._obs_path) > OBS_MAX_BYTES:
         self._write_stopped = True
+        self.obs_dropped += 1
         cloudlog.error(f"curvedb_shadow: {self._obs_path} reached the {OBS_MAX_BYTES} B cap -- " +
                        "the WRITE half has STOPPED. Frozen, not rotated: the >= 2-dates history " +
                        "is the whole point of the corpus. Pull it and truncate deliberately.")
@@ -1000,17 +1051,20 @@ class CurveDBShadow:
       pass                                  # no file yet / stat race -> just append
     try:
       with open(self._obs_path, "a") as f:
-        f.write(json.dumps(vars(obs)) + "\n")
+        f.write(line)
       self.obs_written += 1
       return True
     except Exception as e:
-      self._fail("write", e)
+      self.obs_dropped += 1
+      self._fail(f"write to {self._obs_path}", e)
       return False
 
   def _drop_why(self) -> str:
     """Why `_write` refused, in one word, so a dropped pass names its own cause."""
     if self._state == "noStore":
       return "noStore"
+    if self._queue_refused:
+      return "queue"
     return "stopped" if self._write_stopped else "err"
 
   # -- plumbing -------------------------------------------------------------------------------
@@ -1060,7 +1114,7 @@ def curvedb_tele(ctl, *, site_pt, now_wall, v_ego, v_set) -> dict:
   `_event_record`'s record dict.** Enforced by tests/test_curvedb_read_boundary.py."""
   cdb = getattr(ctl, "_cdb", None)
   if cdb is None:
-    return {**_NULL_TELE, "cdbOn": "absent", "cdbRows": 0, "cdbObs": 0, "cdbErr": 0,
+    return {**_NULL_TELE, "cdbOn": "absent", "cdbRows": 0, "cdbObs": 0, "cdbDrop": 0, "cdbErr": 0,
             "cdbSite": False}
   ceiling = getattr(ctl, "_icbm_ceiling", None)
   return cdb.record(

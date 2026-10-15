@@ -352,6 +352,7 @@ class TestL3NobodyElseImportsIt:
       "selfdrive/controls/lib/ces_pnw/ces_pnw.py",
       "selfdrive/controls/lib/ces_pnw/curvedb_shadow.py",
       "selfdrive/controls/lib/ces_pnw/tests/test_curvedb_read_boundary.py",
+      "selfdrive/controls/lib/ces_pnw/tests/test_curvedbasync2pnw.py",
       "selfdrive/controls/lib/ces_pnw/tests/test_curvedbshadow2pnw.py",
     }
     assert importers == expected, f"unexpected references to curvedb_shadow: {importers ^ expected}"

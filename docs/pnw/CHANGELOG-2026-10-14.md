@@ -60,3 +60,26 @@ single ~123 ms stall of the selfdrived loop; loopdiag2pnw put 96-99% of it in th
 - The stock selfdrived lagging check is untouched.
 - Tests: new `ces_pnw/tests/test_cesasyncwrite2pnw.py`; `test_loopdiag_pnw` asserts the stall does not reach the loop and that `run()`'s finally
   calls `close_events`; autouse fixtures stop/join every writer before `CES_EVENT_LOG` is restored (no leftover thread can touch the real file).
+
+## 3. `curvedbasync2pnw` (branch `curvedbasync2pnw`, not yet pushed): the curvedb observation write leaves the selfdrived loop too
+
+The follow-up named in section 2. `CurveDBShadow._write` (reached from `self._cdb.tick`'s passage close, up to 2x per curve pass) did a
+`getsize` + append of `/data/pnw/curvedb_obs.jsonl` on the loop. It now only `json.dumps` + hands `(shadow, line)` to the SAME ces_events
+writer thread via `CESController._enqueue_event` (no new thread). The writer calls `CurveDBShadow.write_line`, which is the old size check +
+append moved verbatim (`OBS_MAX_BYTES` freeze, `_write_stopped`, same file, open-per-append). Per-file order is the queue order.
+
+- NOTE the task text assumed obs rotation/archive; the shipped code has none: the obs file is append-only and FREEZES at `OBS_MAX_BYTES`
+  (never rotated). The `curvedb_archive` hand-off is a per-boot snapshot made in the shadow's constructor, before engagement, so it is not on the
+  loop and was not touched. Thresholds, names and semantics are unchanged.
+- Verdict (`cdbEv`) is now honest: `upQueued` / `downQueued` = handed to the writer, NOT yet on disk; plain `up` / `down` only when there is no
+  writer (standalone construction, tests); `upDropped:<why>` with new why `queue` (full / writer dead). `cdbObs` keeps meaning "WRITTEN" and now
+  lags the verdicts. New telemetry field `cdbDrop` (in `CURVEDB_TELE_KEYS`, all three return paths): observations lost since boot (queue full,
+  writer dead, cap-refused after queueing, write error). Curvedb drops are counted on the shadow, NOT in ces_events `evDrop`.
+- Rule 2: queue drops log `curvedb_shadow: observation(s) DROPPED before reaching <path> (<why>)`, at most once per 30 s with the running count;
+  writer-side append failures go through the shadow's `_fail` and name the file; the cap freeze logs once, lines already queued behind it are
+  counted in `cdbDrop` without per-line log spam. `close_events` flushes curvedb items too (same queue).
+- Other `/data` writes reachable from the selfdrived loop in `ces_pnw/`: none left. `rotate_at_park` is already on the writer; `mem_params.put_nonblocking`
+  (CurveBrain, IcbmTarget, CESStatus) and the 5 Hz SteerEvent read are `/dev/shm`; `curvedb_live` / `curve_brain` / the boot snapshot are reads or
+  construction-time. Not in `ces_pnw/`: other processes still append to ces_events (`append_to_ces_log`), as section 2 notes.
+- Tests: new `ces_pnw/tests/test_curvedbasync2pnw.py` (10); `test_curvedb_read_boundary.py` lists it as an allowed importer.
+- Verify on-car with loopdiag stage times on the first curve passes after install; `cdbDrop` must stay 0.

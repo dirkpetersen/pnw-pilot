@@ -4557,7 +4557,7 @@ class CESController:
     # ANSWER -- `_cdb` is touched in exactly two places below (the 100 Hz `tick` feed, whose return
     # is discarded, and the `**`-splat of `record()` into _event_record's dict) and
     # tests/test_curvedb_read_boundary.py fails if that ever stops being true.
-    self._cdb = CurveDBShadow(self._car)
+    self._cdb = CurveDBShadow(self._car, sink=self._enqueue_event)    # curvedbasync2pnw: obs writes go via the ces_events writer thread
 
   def _set_mode(self, mode: int):
     """Apply a CESMode change: pick the gentle vs default dwell and (re)build the state machine only
@@ -6620,7 +6620,7 @@ class CESController:
   # below, on a /data that was ~90% full with loggerd writing hard. _append_event now only serialises and
   # put_nowait()s on a bounded queue; ONE daemon thread does the size check, rotation, archive hand-off and
   # the append exactly as before (same files, thresholds, open-per-append, no fsync).
-  _ev_q = None                     # queue.Queue of str lines / _EV_PARK_ROTATE / _EV_STOP, built lazily
+  _ev_q = None                     # queue.Queue of str lines / (shadow, line) curvedb items / _EV_PARK_ROTATE / _EV_STOP, built lazily
   _ev_thread = None
   _ev_drops = 0                    # records dropped because the queue was full (writer stalled / dead)
   _ev_drops_logged = 0             # the drop count at the last (rate-limited) log line
@@ -6660,6 +6660,14 @@ class CESController:
       self._ev_drop_log_t = now
       self._ev_drops_logged = self._ev_drops
 
+  def _drop(self, item, why: str) -> None:
+    """curvedbasync2pnw: a (shadow, line) item is a curvedb observation -- counted and logged on the shadow
+    (cdbDrop, names its file), never in ces_events' evDrop."""
+    if isinstance(item, tuple):
+      item[0].note_queue_drop(why)
+    else:
+      self._note_drop(why)
+
   def _enqueue_event(self, item) -> bool:
     """put_nowait; a full queue or any failure of the machinery drops the item, COUNTS it and logs (rate-limited).
     Never blocks and never raises: a raise here would reach the adopt path in the loop and force Chill."""
@@ -6667,14 +6675,14 @@ class CESController:
       self._ensure_event_writer()
       th = self._ev_thread
       if th is None or not th.is_alive():
-        self._note_drop(f"writer thread is DEAD after {self._ev_restarts} restart(s)")
+        self._drop(item, f"writer thread is DEAD after {self._ev_restarts} restart(s)")
         return False
       self._ev_q.put_nowait(item)
       return True
     except queue.Full:
-      self._note_drop(f"queue FULL ({CES_EVENT_QUEUE_MAX}) -- the writer is stalled")
+      self._drop(item, f"queue FULL ({CES_EVENT_QUEUE_MAX}) -- the writer is stalled")
     except Exception as e:
-      self._note_drop(f"enqueue raised {type(e).__name__}: {e}")
+      self._drop(item, f"enqueue raised {type(e).__name__}: {e}")
     return False
 
   def _event_writer_main(self) -> None:
@@ -6691,11 +6699,14 @@ class CESController:
           t0 = time.monotonic()
           if item is _EV_PARK_ROTATE:
             rotate_at_park(CES_EVENT_LOG, CES_EVENT_LOG_GENERATIONS)    # never raises
+          elif isinstance(item, tuple):               # curvedbasync2pnw: (shadow, line) -> the shadow's own file + cap logic
+            item[0].write_line(item[1])               # never raises
           else:
             self._write_event_line(item)
           dt = time.monotonic() - t0
           if dt > CES_EVENT_SLOW_WRITE_S:
-            cloudlog.warning(f"ces_pnw: ces_events write took {dt * 1000:.0f} ms ({'park rotate' if item is _EV_PARK_ROTATE else 'append'}, " +
+            kind = 'park rotate' if item is _EV_PARK_ROTATE else ('curvedb append' if isinstance(item, tuple) else 'append')
+            cloudlog.warning(f"ces_pnw: ces_events write took {dt * 1000:.0f} ms ({kind}, " +
                              f"{q.qsize()} queued) -- disk stall; this used to stall selfdrived")
         finally:
           q.task_done()
