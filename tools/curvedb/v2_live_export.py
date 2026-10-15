@@ -29,6 +29,12 @@ WHAT IS IN IT. Every anchor of the table (not only the ones with authority) with
   store); a flag that matches no row with authority fails the export. A file WITHOUT `--flags` declares nothing, and the car then treats every
   row as unreliable for that purpose.
 
+* curvedbraiseonly2pnw: `--raise-only` exports a branch refused ONLY by the date-spread rule ("dates disagree"; it passed every other owner rule) as a
+  RAISE-ONLY row: k = the SHARPEST single pass on that branch, branch element 5 = 2 (the flag element is a BITMASK: 1 lowerBound, 2 raiseOnly), element 6 =
+  the FASTEST pass speed on the branch in m/s, manifest "flags" "lowerBound,raiseOnly" (the declared ones, comma-joined) and "raise_only_rows". The
+  car may only RAISE with it (never lower, never ADD; capped at that fastest pass + 5 mph); the Tesla treats it exactly like a refused (null) branch.
+  `rows_with_authority` does NOT count them. WITHOUT the option the file is byte-identical to before. A loader without this change refuses the file.
+
 `--exclude-date` builds the same file leave-one-date-out (the replay test's fixture; never shipped).
 
 Run:
@@ -53,10 +59,12 @@ ROWS_NAME = "curvedb_v2_rows.json.zst"   # zstd JSON (owner 2026-09-24); the man
 MANIFEST_NAME = "manifest.json"
 # The keying parameters the car re-implements. Written into the file so the car can refuse a file
 # built with different ones instead of silently matching with its own constants.
+RAISE_ONLY = 2                           # branch flag bitmask: 1 = lowerBound, 2 = raiseOnly
 KEY_PARAMS = ("site_radius_m", "heading_tol_deg", "extent_back_m", "extent_fwd_m", "branch_radius_m")
 
 
-def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound: list | None = None) -> tuple[dict, dict]:
+def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound: list | None = None,
+               raise_only: bool = False) -> tuple[dict, dict]:
   """(document, counts). Pure apart from reading `idx`. `lower_bound`: [[anchor_lat, anchor_lon, end_lat, end_lon], ...] (see the header);
   None = the file declares no flags."""
   p = idx.p
@@ -64,7 +72,8 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
   flagged: dict = {}
   for fl in lower_bound or ():
     flagged.setdefault((round(float(fl[0]), 6), round(float(fl[1]), 6)), []).append([float(fl[2]), float(fl[3]), False])
-  n_flagged = 0
+  n_flagged = n_raise_only = 0
+  ro_refused: dict = {}                 # why a spread-refused branch did not qualify (counted, never dropped silently)
   for a in idx.anchors:
     obs_dates = {o.date for o in a.obs if o.date != exclude_date}
     dates |= obs_dates
@@ -80,6 +89,14 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
       brs.append([round(br[0], 6), round(br[1], 6), k, v.n_dates])
       if v.granted:
         granted.append((len(brs) - 1, br))
+      elif raise_only and v.reason.startswith("dates disagree"):
+        ro = rt.raise_only_info(a, p, v, exclude_date=exclude_date, branch=br)
+        if isinstance(ro, str):
+          ro_refused[ro] = ro_refused.get(ro, 0) + 1
+        else:
+          brs[-1][2] = round(ro[0], 8)
+          brs[-1] += [RAISE_ONLY, round(ro[1], 1)]
+          n_raise_only += 1
     # One-to-one, nearest first: a flag marks the single granted branch it is nearest to (within the branch radius) and a branch takes at most
     # one flag, so two branches 15 m apart can never both be marked by one flag and no flag is "used up" by the wrong branch.
     fls = flagged.get((round(a.lat, 6), round(a.lon, 6)), [])
@@ -98,7 +115,22 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
   counts = {"anchors": len(anchors), "branches": n_branches, "rows_with_authority": n_rows,
             "dates": sorted(dates), "flags": lower_bound is not None, "lower_bound_rows": n_flagged,
             "lower_bound_unmatched": sum(1 for v in flagged.values() for fl in v if not fl[2])}
+  if raise_only:
+    counts.update(raise_only=True, raise_only_rows=n_raise_only, raise_only_not_qualified=ro_refused)
   return doc, counts
+
+
+def _flag_fields(counts: dict) -> dict:
+  """The manifest's `flags` + counts. With neither option this is {} (the file is byte-identical to before curvedbraiseonly2pnw)."""
+  declared = (["lowerBound"] if counts.get("flags") else []) + (["raiseOnly"] if counts.get("raise_only") else [])
+  out: dict = {}
+  if declared:
+    out["flags"] = ",".join(declared)
+  if counts.get("flags"):
+    out["lower_bound_rows"] = counts["lower_bound_rows"]
+  if counts.get("raise_only"):
+    out["raise_only_rows"] = counts["raise_only_rows"]
+  return out
 
 
 def write(doc: dict, counts: dict, out: str, source: str) -> dict:
@@ -118,7 +150,7 @@ def write(doc: dict, counts: dict, out: str, source: str) -> dict:
          "rows_with_authority": counts["rows_with_authority"],
          "first_date": counts["dates"][0] if counts["dates"] else None,
          "last_date": counts["dates"][-1] if counts["dates"] else None, "n_dates": len(counts["dates"]),
-         **({"flags": "lowerBound", "lower_bound_rows": counts["lower_bound_rows"]} if counts.get("flags") else {}),
+         **_flag_fields(counts),
          "exclude_date": doc["exclude_date"], "source_table": os.path.basename(source), "source_sha256": src_sha,
          "built_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}
   mpath = os.path.join(out, MANIFEST_NAME)
@@ -136,13 +168,16 @@ def main(argv=None) -> int:
   ap.add_argument("--exclude-date", help="leave-one-date-out build (test fixture only; never ship it)")
   ap.add_argument("--expect-rows", type=int, help="fail unless exactly this many rows have authority")
   ap.add_argument("--flags", help="dbfirst2pnw: JSON list of [anchor_lat, anchor_lon, end_lat, end_lon] lowerBound branches (see the header)")
+  ap.add_argument("--raise-only", action="store_true", help="curvedbraiseonly2pnw: export spread-refused branches as raise-only rows (see the header)")
   a = ap.parse_args(argv)
   idx = load_table(a.table)
   lower_bound = None
   if a.flags:
     with open(a.flags) as f:
       lower_bound = json.load(f)
-  doc, counts = export_doc(idx, a.exclude_date, lower_bound)
+  doc, counts = export_doc(idx, a.exclude_date, lower_bound, a.raise_only)
+  if a.raise_only:
+    print(f"raise-only rows {counts['raise_only_rows']}; spread-refused but not qualified: {counts['raise_only_not_qualified']}")
   if counts["lower_bound_unmatched"]:
     print(f"{counts['lower_bound_unmatched']} lowerBound flag(s) match no row with authority -- not written (the flag file does not belong to this table)")
     return 2

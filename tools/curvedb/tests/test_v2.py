@@ -417,3 +417,70 @@ def test_extent_classes_sees_the_ramp_ahead():
   assert rt.extent_classes(pts, 2, 25, 150) == (False, True)      # s=0..170 stays on the mainline
   pts[5].hwy = "unknown"
   assert rt.extent_classes(pts, 2, 25, 150) == (False, False)
+
+
+# ---------------------------------------------------------------------------------------------
+# curvedbraiseonly2pnw: raise_only_info (synthetic geometry only)
+# ---------------------------------------------------------------------------------------------
+
+def _vobs(date, k, v=20.0, **kw):
+  o = _obs(date, k, **kw)
+  return replace(o, v_ms=v)
+
+
+def _spread_anchor():
+  """Five dates, one side-road pass: the dates disagree (0.0051 vs 0.0030 and 0.0021) -> refused by the spread rule only."""
+  return _anchor(_vobs("2026-09-01", 0.0051, 21.0), _vobs("2026-09-02", 0.0030, 25.0), _vobs("2026-09-03", 0.0021, 24.0),
+                 _vobs("2026-09-03", 0.0058, 12.0, drive="x"), _vobs("2026-09-04", 0.0022, 22.0))
+
+
+def test_raise_only_k_is_the_sharpest_single_pass_not_the_percentile():
+  a = _spread_anchor()
+  v = rt.row_verdict(a, P)
+  assert not v.granted and v.reason.startswith("dates disagree")
+  k, v_fast = rt.raise_only_info(a, P, v, branch=(45.00135, -122.7))
+  assert k == pytest.approx(0.0058) and v_fast == pytest.approx(25.0)      # max single pass; the FASTEST pass (not the sharpest pass's speed)
+  assert k > v.k, "median would be the old bug"
+
+
+def test_raise_only_honours_exclude_date():
+  a = _spread_anchor()
+  v = rt.row_verdict(a, P, exclude_date="2026-09-03")          # drops the 0.0058 pass and the 0.0021 one
+  k, v_fast = rt.raise_only_info(a, P, v, exclude_date="2026-09-03", branch=(45.00135, -122.7))
+  assert k == pytest.approx(0.0051) and v_fast == pytest.approx(25.0)
+
+
+def test_raise_only_pools_only_the_branch():
+  other = replace(_vobs("2026-09-02", 0.0200, 30.0), end_lat=45.01, end_lon=-122.7)      # a different branch: must not count
+  a = _spread_anchor()
+  a.obs.append(other)
+  v = rt.row_verdict(a, P, branch=(45.00135, -122.7))
+  k, v_fast = rt.raise_only_info(a, P, v, branch=(45.00135, -122.7))
+  assert k == pytest.approx(0.0058) and v_fast == pytest.approx(25.0)
+
+
+@pytest.mark.parametrize("why, anchor", [
+  ("only 1 date", lambda: _anchor(_vobs("2026-09-01", 0.0051), _vobs("2026-09-01", 0.003, drive="x"))),
+  ("tesla-only", lambda: _anchor(_vobs("2026-09-01", 0.0051, car=TESLA), _vobs("2026-09-02", 0.003, car=TESLA))),
+  ("class unknown", lambda: _anchor(_vobs("2026-09-01", 0.0051, hwy="unknown"), _vobs("2026-09-02", 0.003, hwy="unknown"))),
+  ("ramp", lambda: _anchor(_vobs("2026-09-01", 0.0051, hwy="motorwayLink"), _vobs("2026-09-02", 0.003, hwy="motorwayLink"))),
+  ("ext ramp", lambda: _anchor(replace(_vobs("2026-09-01", 0.0051), ext_ramp=True), _vobs("2026-09-02", 0.003))),
+  ("granted", lambda: _anchor(_vobs("2026-09-01", 0.0020), _vobs("2026-09-02", 0.0022))),
+])
+def test_only_a_spread_refusal_ever_qualifies(why, anchor):
+  a = anchor()
+  v = rt.row_verdict(a, P)
+  assert isinstance(rt.raise_only_info(a, P, v, branch=(45.00135, -122.7)), str), why
+
+
+def test_a_branch_with_no_recorded_pass_speed_does_not_qualify():
+  a = _anchor(_obs("2026-09-01", 0.0051), _obs("2026-09-02", 0.0021))     # v_ms NaN (a table built before the field)
+  v = rt.row_verdict(a, P)
+  assert v.reason.startswith("dates disagree")
+  assert rt.raise_only_info(a, P, v, branch=(45.00135, -122.7)) == "no pass speed recorded"
+
+
+def test_granted_rows_are_unchanged_by_the_new_field():
+  a = _anchor(_vobs("2026-09-01", 0.0020), _vobs("2026-09-02", 0.0022), _vobs("2026-09-03", 0.0024))
+  v = rt.row_verdict(a, P)
+  assert v.granted and v.k == pytest.approx(0.0022)

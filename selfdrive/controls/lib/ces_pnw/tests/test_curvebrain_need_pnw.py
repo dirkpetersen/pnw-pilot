@@ -1012,3 +1012,18 @@ class TestOverrideFollowUps:
     note = "Terwilliger left, adverse camber; Tesla failed 2026-06-16 and 2026-09-28"
     assert len(note) > 60 and _fresh([_ovr_entry(note=note)]).entries[0]["note"] == note
     assert len(_fresh([_ovr_entry(note="x" * 500)]).entries[0]["note"]) == cb.NOTE_MAX
+
+
+class TestRaiseOnly:
+  """curvedbraiseonly2pnw: the Tesla's need layer cannot see a raise-only row (scan_ahead and match_at default to 'refused')."""
+
+  def test_a_raise_only_row_changes_nothing_in_the_need_or_the_telemetry(self, tmp_path, monkeypatch, cfgpath, schedule, log):
+    from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvedblive2pnw import _anchor, _ro_anchor
+    outs = {}
+    for name, x in (("ro", _ro_anchor(140.0, 0.02, 25.0)), ("null", _anchor(140.0, None, branches=[(0.0, 290.0, None)]))):
+      b = _brain(tmp_path / name, monkeypatch, anchors=[_anchor(300.0, 0.004), x])
+      outs[name] = (_step(b), b.tele(100.0))
+    assert json.dumps(outs["ro"], sort_keys=True) == json.dumps(outs["null"], sort_keys=True)
+    out, tele = outs["ro"]
+    assert out["row"] == "0:0" and out["k"] == 0.004 and tele["cbRows"] == 1 and tele["cbN"] == 1
+    assert log.errors == [] and log.exceptions == []

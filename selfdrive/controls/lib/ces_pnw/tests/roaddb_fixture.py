@@ -22,21 +22,35 @@ MAPD_SETTINGS = {"personalities": {"aggressive": {"map_curve_target_lat_a": 2.4}
                                    "relaxed": {"map_curve_target_lat_a": 1.9}}}
 
 
+def _today_pt() -> str:
+  """Today's PT date, for a fixture table that must not age past cl.STALE_TABLE_DAYS (a stale-table warning fails every nothing-logged test).
+  NOT write_db's default: tools/curvebrain/golden.py records through write_db and its log lines must not depend on the day it runs."""
+  import datetime
+  import zoneinfo
+  return datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles")).date().isoformat()
+
+
 def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl.FORMAT, exclude_date=None,
-             tamper=None, flags: bool = False) -> str:
+             tamper=None, flags: bool = False, raise_only: bool | None = None, last_date: str | None = None) -> str:
   """Write a rows file + manifest the way tools/curvedb/v2_live_export.py does. `tamper(blob) -> blob`
   corrupts the rows AFTER the manifest hash was taken."""
   os.makedirs(d, exist_ok=True)
   doc = {"format": fmt, "params": params or dict(cl.EXPECTED_PARAMS), "exclude_date": exclude_date,
          "anchors": anchors}
   blob = zstandard.ZstdCompressor().compress(json.dumps(doc).encode())
-  n_rows = sum(1 for a in anchors for b in a[3] if b[2] is not None)
+  n_rows = sum(1 for a in anchors for b in a[3] if b[2] is not None and not (len(b) >= 5 and b[4] == 2))
   man = {"format": fmt, "file": cl.ROWS_NAME, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(),
          "anchors": len(anchors), "rows_with_authority": n_rows, "first_date": "2026-07-13",
-         "last_date": "2026-09-22", "exclude_date": exclude_date}
+         "last_date": last_date or "2026-09-22", "exclude_date": exclude_date}
+  if raise_only is None:                       # None = declare it iff a branch carries a raise-only row; False forces the UNDECLARED case
+    raise_only = any(len(b) == 6 for a in anchors for b in a[3])
+  declared = (["lowerBound"] if flags else []) + (["raiseOnly"] if raise_only else [])
+  if declared:
+    man["flags"] = ",".join(declared)
   if flags:                                    # dbfirst2pnw: the table declares per-row lowerBound flags
-    man["flags"] = "lowerBound"
     man["lower_bound_rows"] = sum(1 for a in anchors for b in a[3] if len(b) == 5)
+  if raise_only:                               # curvedbraiseonly2pnw: raise-only rows (flag 2, a 6th element)
+    man["raise_only_rows"] = sum(1 for a in anchors for b in a[3] if len(b) == 6)
   if tamper is not None:
     blob = tamper(blob)
   with open(os.path.join(d, cl.ROWS_NAME), "wb") as f:
@@ -57,7 +71,7 @@ SHIPPED_LAT_A = pv._CURVE_DEFAULTS["curvedb_v2_lat_a"]   # the shipped Lightning
 
 
 def isolate(monkeypatch, tmp_path_factory):
-  d = write_db(str(tmp_path_factory.mktemp("roaddb")), [FAR_ANCHOR])
+  d = write_db(str(tmp_path_factory.mktemp("roaddb")), [FAR_ANCHOR], last_date=_today_pt())
   monkeypatch.setattr(cl, "DATA_DIR", d)
   monkeypatch.setattr(cl, "READ_PARAMS", [reader()])
   monkeypatch.setattr(cl, "BACKGROUND", [False])     # load in the constructor: no thread, no race

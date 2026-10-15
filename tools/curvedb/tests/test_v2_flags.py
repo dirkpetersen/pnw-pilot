@@ -110,3 +110,72 @@ def test_two_flags_for_one_branch_mark_it_once_and_the_second_is_unmatched():
   assert sorted(len(b) for b in rows) == [4, 5] or sorted(len(b) for b in rows) == [5, 5]     # never a 6-element branch
   assert max(len(b) for b in rows) == 5
   assert counts["lower_bound_rows"] + counts["lower_bound_unmatched"] == 2
+
+
+# ---------------------------------------------------------------------------------------------
+# curvedbraiseonly2pnw: --raise-only
+# ---------------------------------------------------------------------------------------------
+
+def _ro_idx():
+  """Anchor 0: a granted row. Anchor 1: the dates disagree (a side road pooled in) -> spread-refused. Anchor 2: only one date -> refused for another reason."""
+  idx = _idx(2)
+  b = idx.anchors[1]
+  b.obs.clear()
+  for n, (date, k, v) in enumerate((("2026-09-01", 0.0051, 21.0), ("2026-09-02", 0.0021, 25.0), ("2026-09-03", 0.0058, 12.0))):
+    b.obs.append(rt.PassObs(date=date, drive=f"s{n}", car="FORD_F_150_LIGHTNING_MK1", t=float(n), k_ext=k, k_loc=k, way=0, hwy="motorway", road="I 5|",
+                            spl=30.0, mode="op", d_m=1.0, end_lat=END[0] + 0.01, end_lon=END[1], v_ms=v))
+  c = idx.anchors[idx.add(LAT0 + 0.02, LON0, 0.0)]
+  c.obs.append(rt.PassObs(date="2026-09-01", drive="o", car="FORD_F_150_LIGHTNING_MK1", t=0.0, k_ext=0.004, k_loc=0.004, way=0, hwy="motorway",
+                          road="I 5|", spl=30.0, mode="op", d_m=1.0, end_lat=END[0] + 0.02, end_lon=END[1], v_ms=20.0))
+  return idx
+
+
+def _ro_write(tmp_path, **kw):
+  doc, counts = ex.export_doc(_ro_idx(), None, kw.pop("flags", None), **kw)
+  src = tmp_path / "table.json.gz"
+  src.write_bytes(b"x")
+  ex.write(doc, counts, str(tmp_path), str(src))
+  return doc, counts, json.loads((tmp_path / "manifest.json").read_text())
+
+
+def test_without_the_option_the_export_is_byte_identical(tmp_path):
+  doc1, c1 = ex.export_doc(_ro_idx())
+  doc2, c2 = ex.export_doc(_ro_idx(), None, None, False)
+  assert doc1 == doc2 and c1 == c2
+  assert all(len(b) == 4 for a in doc1["anchors"] for b in a[3])           # the spread-refused branch stays k=None, no 5th element
+  assert [b[2] for a in doc1["anchors"] for b in a[3]] == [0.002, None, None]
+  a, b = tmp_path / "a", tmp_path / "b"
+  a.mkdir()
+  b.mkdir()
+  _ro_write(a)
+  _ro_write(b, raise_only=False)
+  assert (a / cl.ROWS_NAME).read_bytes() == (b / cl.ROWS_NAME).read_bytes()
+  m = json.loads((a / "manifest.json").read_text())
+  assert "flags" not in m and "raise_only_rows" not in m
+
+
+def test_with_the_option_the_spread_refused_branch_is_a_raise_only_row(tmp_path):
+  doc, counts, man = _ro_write(tmp_path, raise_only=True)
+  brs = [b for a in doc["anchors"] for b in a[3]]
+  assert brs[0] == [brs[0][0], brs[0][1], 0.002, 3]                               # the granted row is unchanged (4 elements)
+  assert brs[1][2] == pytest.approx(0.0058) and brs[1][3] == 3 and brs[1][4] == 2 and brs[1][5] == pytest.approx(25.0)   # k_worst, flag 2, fastest pass
+  assert brs[2][2] is None and len(brs[2]) == 4                                  # refused for another reason: never raise-only
+  assert counts["raise_only_rows"] == 1 and counts["rows_with_authority"] == 1   # authority count unchanged in meaning
+  assert man["flags"] == "raiseOnly" and man["raise_only_rows"] == 1 and man["rows_with_authority"] == 1
+  idx, _ = cl.load_rows(str(tmp_path))
+  assert idx.n_rows == 1 and idx.n_raise_only == 1 and not idx.has_flags and idx.has_raise_only
+
+
+def test_both_flags_declare_both(tmp_path):
+  doc, counts, man = _ro_write(tmp_path, flags=[[LAT0, LON0, END[0], END[1]]], raise_only=True)
+  assert man["flags"] == "lowerBound,raiseOnly" and man["lower_bound_rows"] == 1 and man["raise_only_rows"] == 1
+  idx, _ = cl.load_rows(str(tmp_path))
+  assert idx.has_flags and idx.has_raise_only and idx.n_lower_bound == 1 and idx.n_raise_only == 1 and idx.n_rows == 1
+
+
+def test_a_branch_without_a_recorded_speed_is_counted_not_dropped():
+  idx = _ro_idx()
+  for o in idx.anchors[1].obs:
+    object.__setattr__(o, "v_ms", float("nan"))
+  _doc, counts = ex.export_doc(idx, None, None, True)
+  assert counts["raise_only_rows"] == 0 and counts["raise_only_not_qualified"].get("no pass speed recorded") == 1

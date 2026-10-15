@@ -22,6 +22,9 @@ and replaces mapd's number for that curve (it does not stack on it):
   30-45 mph city speeds where all four >= 3.5 passes happened.)
 * LOWER (v_db below -- a real sharp curve mapd under-rated or missed): exactly v_db, no margin, no
   penalty on top. "Sharp curves must slow, but only to the level required, never too much" (owner).
+* RAISE-ONLY rows (curvedbraiseonly2pnw): a branch whose dates disagreed (a merging side road pooled into it) is exported with k = the SHARPEST
+  single pass and the fastest pass speed. It may only RAISE a candidate (any lowering is "none"), never above that fastest pass + 5 mph, with every
+  cap above still applying; it never takes part in the ADD scan below, and the vision candidate still bounds the raise.
 * A curve the map missed entirely is found by scanning mapd's path ahead for rows (an ADD). It binds
   through the same envelope a far-map candidate uses, and it is labeled `far` downstream.
 * A vision candidate is never changed; the lowest candidate still wins (DEC always wins).
@@ -52,6 +55,7 @@ curvedbshadow2pnw read boundary (one control-path importer of tools/curvedb: the
 from __future__ import annotations
 
 import bisect
+import datetime
 import hashlib
 import io
 import json
@@ -59,6 +63,7 @@ import math
 import os
 import threading
 import time
+import zoneinfo
 
 from openpilot.common.swaglog import cloudlog
 
@@ -75,6 +80,8 @@ MAX_JSON_BYTES = 64 * 1024 * 1024   # decompressed; the 2026-09-24 table is ~2.9
 # refused rather than matched with these constants.
 # INSTALL ORDER (dbfirst2pnw): a flagged table (5th branch element, manifest "flags") is refused by a loader without this change ("malformed
 # branch" -> DB OFF on both cars). Install this code first; on a code rollback restore the unflagged table first.
+# INSTALL ORDER (curvedbraiseonly2pnw): a table with raise-only rows (a 6-element branch, flag 2, manifest flags "...,raiseOnly") is refused by a
+# loader without this change ("malformed branch" -> DB OFF on both cars). CODE BEFORE TABLE; on a code rollback restore the previous table first.
 EXPECTED_PARAMS = {"site_radius_m": 40.0, "heading_tol_deg": 35.0, "extent_back_m": 25.0,
                    "extent_fwd_m": 150.0, "branch_radius_m": 15.0}
 
@@ -82,6 +89,9 @@ EXPECTED_PARAMS = {"site_radius_m": 40.0, "heading_tol_deg": 35.0, "extent_back_
 # v_db = sqrt(A / k); the caps below are what bounds a raise.
 RAISE_CAP_MS = 15.0 * MPH       # a raise never exceeds ICBM's own target + 15 mph (P1 first cut)
 POSTED_MARGIN_MS = 10.0 * MPH   # ... nor posted + 10 mph (the build replay's bound; the table reproduces with it)
+RAISE_ONLY_OVER_FASTEST_MS = 5.0 * MPH   # curvedbraiseonly2pnw: a raise-only row never raises above its branch's fastest recorded pass + 5 mph
+STALE_TABLE_DAYS = 14           # curvedbraiseonly2pnw: warn when the table's last drive date is older than this
+FLAG_LOWER_BOUND, FLAG_RAISE_ONLY = 1, 2
 ACT_EPS_MS = 0.05               # smaller than this is not a change (telemetry direction only)
 
 # A: mapd's map_curve_target_lat_a for the active personality. Outside these bounds the value is not
@@ -108,7 +118,7 @@ UNKNOWN_CLASSES = ("", "unknown", "None", "none")
 # silently-null column -- that happened four times in ces_pnw.py's history.
 TELE_KEYS = ("cdb2On", "cdb2Err", "cdb2Rows", "cdb2A", "cdb2ASrc", "cdb2N", "cdb2NR", "cdb2NL",
              "cdb2Why", "cdb2Dir", "cdb2Src", "cdb2Base", "cdb2Tgt", "cdb2Row", "cdb2K", "cdb2VDb",
-             "cdb2D", "cdb2Lat", "cdb2Lon", "cdb2WayHold", "cdb2Ovr", "cdb2OvrN")
+             "cdb2D", "cdb2Lat", "cdb2Lon", "cdb2WayHold", "cdb2Ovr", "cdb2OvrN", "cdb2RO", "cdb2Last")
 
 
 class CurveDbFileError(Exception):
@@ -146,7 +156,9 @@ class RowIndex:
   """Immutable spatial index over the exported anchors. Same cell scheme and nearest-anchor rule as
   roadtable.AnchorIndex, so the car picks the anchor the offline replay picked."""
 
-  def __init__(self, anchors: list, params: dict, flags: bool = False):
+  def __init__(self, anchors: list, params: dict, flags: bool = False, raise_only: bool = False):
+    self.has_raise_only = bool(raise_only)   # curvedbraiseonly2pnw: the manifest declares raiseOnly rows (flag bit 2, a 6th branch element)
+    self.n_raise_only = 0
     self.has_flags = bool(flags)   # dbfirst2pnw: the file declares per-row `lowerBound` flags (manifest "flags"); see Match.reliable
     self.radius = float(params["site_radius_m"])
     self.tol = float(params["heading_tol_deg"])
@@ -168,10 +180,21 @@ class RowIndex:
       for b in a[3]:
         # dbfirst2pnw: an OPTIONAL 5th element 1 = `lowerBound` (its passes include saturated ones, so k is only a lower bound of the road's
         # curvature). It may appear only in a file whose manifest declares flags, and only on a row with a curvature.
-        if not (isinstance(b, list) and len(b) in (4, 5)):
+        if not (isinstance(b, list) and len(b) in (4, 5, 6)):
           raise CurveDbFileError(f"anchor {n}: malformed branch")
-        if len(b) == 5 and not (self.has_flags and b[4] == 1 and b[2] is not None):
-          raise CurveDbFileError(f"anchor {n}: a lowerBound flag the manifest does not declare, a value other than 1, or on a row without k")
+        ro, v_fast = False, None
+        if len(b) >= 5:
+          if b[4] == FLAG_RAISE_ONLY:
+            # curvedbraiseonly2pnw: flag 2 = raise-only: a curvature (the sharpest pass) AND the fastest pass speed (m/s), only in a file whose
+            # manifest declares raiseOnly. An undeclared 2 is a file this code must not guess at: LOAD FAILED, DB OFF.
+            if not (self.has_raise_only and len(b) == 6 and b[2] is not None):
+              raise CurveDbFileError(f"anchor {n}: a raiseOnly flag the manifest does not declare, or without k / the fastest-pass speed")
+            v_fast = float(b[5])
+            if not (math.isfinite(v_fast) and 0.0 < v_fast < 100.0):
+              raise CurveDbFileError(f"anchor {n}: raise-only fastest-pass speed {b[5]} out of range")
+            ro = True
+          elif not (len(b) == 5 and self.has_flags and b[4] == FLAG_LOWER_BOUND and b[2] is not None):
+            raise CurveDbFileError(f"anchor {n}: a lowerBound flag the manifest does not declare, a value other than 1 or 2, or on a row without k")
         e_lat, e_lon = float(b[0]), float(b[1])
         k = None if b[2] is None else float(b[2])
         if not (math.isfinite(e_lat) and math.isfinite(e_lon)):
@@ -181,9 +204,13 @@ class RowIndex:
             raise CurveDbFileError(f"anchor {n}: curvature {k} out of range")
           if int(b[3]) < 2:     # the owner's >= 2 dates rule, re-checked on the car
             raise CurveDbFileError(f"anchor {n}: a row with authority on {b[3]} date(s)")
-          self.n_rows += 1
-        self.n_lower_bound += len(b) == 5
-        brs.append((e_lat, e_lon, k, int(b[3]), len(b) == 5))
+          if ro:
+            self.n_raise_only += 1         # NOT a row with authority: n_rows (cdb2Rows / cbRows / the manifest's rows_with_authority) is unchanged
+          else:
+            self.n_rows += 1
+        lb = len(b) >= 5 and b[4] == FLAG_LOWER_BOUND
+        self.n_lower_bound += lb
+        brs.append((e_lat, e_lon, k, int(b[3]), lb, ro, v_fast))
       self.anchors.append((lat, lon, brg, tuple(brs)))
       self._grid.setdefault(self._key(lat, lon), []).append(n)
 
@@ -265,11 +292,17 @@ def load_rows(data_dir: str) -> tuple[RowIndex, dict]:
   if not isinstance(anchors, list) or not anchors:
     raise CurveDbFileError("no anchors")
   try:
-    idx = RowIndex(anchors, params, flags=man.get("flags") == "lowerBound")
+    declared = man.get("flags")
+    names = declared.split(",") if isinstance(declared, str) else []
+    if declared is not None and (not names or any(x not in ("lowerBound", "raiseOnly") for x in names)):
+      raise CurveDbFileError(f"manifest flags {declared!r} not understood")
+    idx = RowIndex(anchors, params, flags="lowerBound" in names, raise_only="raiseOnly" in names)
   except (TypeError, ValueError) as e:
     raise CurveDbFileError(f"rows malformed: {type(e).__name__}: {e}") from e
   if idx.has_flags and man.get("lower_bound_rows") is not None and man["lower_bound_rows"] != idx.n_lower_bound:
     raise CurveDbFileError(f"{idx.n_lower_bound} lowerBound rows != manifest {man['lower_bound_rows']}")
+  if idx.has_raise_only and man.get("raise_only_rows") != idx.n_raise_only:
+    raise CurveDbFileError(f"{idx.n_raise_only} raiseOnly rows != manifest {man.get('raise_only_rows')}")
   if idx.n_rows != man.get("rows_with_authority") or idx.n_rows == 0:
     raise CurveDbFileError(f"{idx.n_rows} rows with authority != manifest {man.get('rows_with_authority')}")
   return idx, man
@@ -342,9 +375,11 @@ class Polyline:
 
 
 class Match:
-  __slots__ = ("why", "anchor", "branch", "k", "s_anchor", "lat", "lon", "s_q", "reliable")
+  __slots__ = ("why", "anchor", "branch", "k", "s_anchor", "lat", "lon", "s_q", "reliable", "raise_only", "v_fast")
 
-  def __init__(self, why, anchor=None, branch=None, k=None, s_anchor=None, lat=None, lon=None, s_q=None, reliable=True):
+  def __init__(self, why, anchor=None, branch=None, k=None, s_anchor=None, lat=None, lon=None, s_q=None, reliable=True,
+               raise_only=False, v_fast=None):
+    self.raise_only, self.v_fast = raise_only, v_fast   # curvedbraiseonly2pnw: set ONLY on a raise-only row handed out under allow_raise_only
     self.why, self.anchor, self.branch, self.k, self.s_anchor, self.lat, self.lon = why, anchor, branch, k, s_anchor, lat, lon
     self.s_q = s_q            # path odometer of the query point
     # dbfirst2pnw: may this row's k replace the OSM notch? False when the row is flagged `lowerBound`, or when the file declares no flags at
@@ -356,14 +391,18 @@ class Match:
     return None if self.anchor is None or self.branch is None else f"{self.anchor}:{self.branch}"
 
 
-def match_at(idx: RowIndex, poly: Polyline, s_q: float, q_lat: float, q_lon: float) -> Match:
+def match_at(idx: RowIndex, poly: Polyline, s_q: float, q_lat: float, q_lon: float, allow_raise_only: bool = False) -> Match:
   """The row for the curve at path odometer s_q (query point q). The offline keying:
 
   * anchor = nearest within 40 m whose approach bearing is within 35 deg of the PATH's bearing at q;
   * branch = where the PATH is 150 m past the anchor (the anchor projected onto the path), which must
     lie within 15 m of exactly one of the anchor's branch end points, and that branch must have
     authority (roadtable.branch_point + row_verdict's branch filter).
-  Anything else is a no-effect Match with the reason."""
+  Anything else is a no-effect Match with the reason.
+
+  curvedbraiseonly2pnw: a RAISE-ONLY branch (refused by the date-spread rule, exported with the sharpest pass) is `noAuthority` -- exactly a
+  refused row -- unless the caller passes allow_raise_only=True. Only the Lightning's per-candidate replacement does; scan_ahead (the ADD half),
+  the Tesla's curve_brain and everything else take the default, so they cannot see one by construction."""
   hdg = poly.heading(s_q)
   ai, d = idx.nearest(q_lat, q_lon, hdg)
   if ai is None:
@@ -385,6 +424,10 @@ def match_at(idx: RowIndex, poly: Polyline, s_q: float, q_lat: float, q_lon: flo
   b = a[3][hits[0]]
   if b[2] is None:
     return Match("noAuthority", anchor=ai, branch=hits[0], s_anchor=s_a, lat=a[0], lon=a[1])
+  if b[5]:
+    if not allow_raise_only:
+      return Match("noAuthority", anchor=ai, branch=hits[0], s_anchor=s_a, lat=a[0], lon=a[1])
+    return Match("ok", anchor=ai, branch=hits[0], k=b[2], s_anchor=s_a, lat=a[0], lon=a[1], reliable=False, raise_only=True, v_fast=b[6])
   return Match("ok", anchor=ai, branch=hits[0], k=b[2], s_anchor=s_a, lat=a[0], lon=a[1], reliable=idx.has_flags and not b[4])
 
 
@@ -412,13 +455,13 @@ def v_db(a_lat: float, k: float) -> float:
   return math.sqrt(a_lat / k)
 
 
-def db_target(today: float, k: float, a_lat: float, ref: float, posted) -> tuple[float, str]:
+def db_target(today: float, k: float, a_lat: float, ref: float, posted, cap_ms: float | None = None) -> tuple[float, str]:
   """The DB's replacement for ONE map/far candidate whose pipeline value is `today` (m/s).
   Returns (value, direction). Pure; the rule of the module docstring:
 
     raise: exactly sqrt(A / k), capped at today + 15 mph and posted + 10 mph ("held" when a cap leaves it at today)
     lower: exactly sqrt(A / k)
-  and never above `ref` (the driver's set / the episode ceiling)."""
+  and never above `ref` (the driver's set / the episode ceiling). `cap_ms` (raise-only rows): one more upper bound on a raise."""
   if not (k > 0.0 and a_lat > 0.0 and math.isfinite(today) and math.isfinite(ref)):
     raise ValueError(f"db_target: bad inputs today={today} k={k} A={a_lat} ref={ref}")
   v = v_db(a_lat, k)
@@ -427,6 +470,8 @@ def db_target(today: float, k: float, a_lat: float, ref: float, posted) -> tuple
     cap = today + RAISE_CAP_MS
     if posted is not None and posted > 0.0:
       cap = min(cap, posted + POSTED_MARGIN_MS)
+    if cap_ms is not None:
+      cap = min(cap, cap_ms)
     r = min(max(today, min(r, cap)), ref)
     return r, ("raise" if r > today + ACT_EPS_MS else "held")
   if v < today - ACT_EPS_MS:
@@ -496,6 +541,26 @@ def parse_a(settings_raw, personality_raw) -> tuple[float | None, str | None, st
   return a, src, "ok"
 
 
+def _wall_now() -> float:
+  return time.time()  # noqa: TID251 -- wall clock: the table's age is a calendar quantity (replay harnesses pin this module's `time`)
+
+
+def table_age_days(last_date, now=None):
+  """Whole days from the table's last drive date (PT calendar date, 'YYYY-MM-DD') to now: an int, or a string saying why it is not known.
+  Only with a valid wall clock (common.time_helpers.wall_time_valid -- the unsynced boot clock is the systemd build date): an invalid
+  clock or an unparsable date is 'age unknown', never a number that could pass for a fresh table."""
+  from openpilot.common.time_helpers import wall_time_valid
+  t = _wall_now() if now is None else now
+  if not wall_time_valid(t):
+    return "wall clock not valid"
+  try:
+    d = datetime.date.fromisoformat(str(last_date))
+  except ValueError:
+    return f"last_date {last_date!r} unparsable"
+  today = datetime.datetime.fromtimestamp(t, zoneinfo.ZoneInfo("America/Los_Angeles")).date()
+  return (today - d).days
+
+
 class CurveDbLive:
   def __init__(self, enabled: bool, data_dir: str | None = None, read_params=None, start: bool = True,
                a_override: float | None = None, overrides=None):
@@ -548,9 +613,14 @@ class CurveDbLive:
     else:
       self.index, self.manifest = idx, man   # one assignment each, after the index is complete
       self.state = "ok"
+      age = table_age_days(man.get("last_date"))
       cloudlog.event("curvedb_v2_loaded", rows=idx.n_rows, anchors=len(idx.anchors), sha256=man.get("sha256"),
-                     flags=man.get("flags"), lower_bound_rows=idx.n_lower_bound, first_date=man.get("first_date"), last_date=man.get("last_date"),
-                     seconds=round(time.monotonic() - t0, 2))
+                     flags=man.get("flags"), lower_bound_rows=idx.n_lower_bound, raise_only_rows=idx.n_raise_only,
+                     first_date=man.get("first_date"), last_date=man.get("last_date"),
+                     age_days=age if isinstance(age, int) else "age unknown", seconds=round(time.monotonic() - t0, 2))
+      if isinstance(age, int) and age > STALE_TABLE_DAYS:   # (an unknown age is in the event as "age unknown": an unsynced boot clock is normal)
+        cloudlog.warning(f"curvedb_v2: the table's newest drive date {man.get('last_date')} is {age} days old (> {STALE_TABLE_DAYS}) -- " +
+                         "the roads driven since are not in it; rebuild and install a new table")
     finally:
       self._loaded.set()
 
@@ -692,7 +762,7 @@ class CurveDbLive:
     way_sel, way_hold = self.way_sel_held(way_sel, self._last_t)
     rec = {"cdb2Src": src, "cdb2Base": _r(today, 2), "cdb2Tgt": _r(today, 2), "cdb2Dir": "none",
            "cdb2Row": None, "cdb2K": None, "cdb2VDb": None, "cdb2D": None, "cdb2Lat": None, "cdb2Lon": None,
-           "cdb2WayHold": way_hold}
+           "cdb2WayHold": way_hold, "cdb2RO": None}
     why = self.gate(way_sel=way_sel, hwy=hwy, posted=posted, plat=plat, plon=plon, allow=allow)
     if why is None:
       poly = self.polyline(points)
@@ -713,11 +783,20 @@ class CurveDbLive:
       if pt is None or pt[0] is None:
         return value, dist, Match("noCandidatePoint"), "none"
       s_q, _ = poly.project(pt[0], pt[1])
-      m = match_at(idx, poly, s_q, pt[0], pt[1])
+      m = match_at(idx, poly, s_q, pt[0], pt[1], allow_raise_only=True)
       m.s_q = s_q
       if m.why != "ok":
         return value, dist, m, "none"
-      v, d = db_target(value, m.k, self.row_a(idx, m, a_lat)[0], ref, posted)
+      if m.raise_only:
+        # curvedbraiseonly2pnw: may ONLY RAISE (its k is the sharpest single pass of a branch the dates disagreed on, so a lowering from it would
+        # slow the truck for a pass-specific artifact), never above its branch's fastest recorded pass + 5 mph; every normal cap still applies.
+        v, d = db_target(value, m.k, self.row_a(idx, m, a_lat)[0], ref, posted, cap_ms=m.v_fast + RAISE_ONLY_OVER_FASTEST_MS)
+        if d not in ("raise", "held"):
+          return value, dist, m, "none"
+        if d == "held":
+          return value, dist, m, "held"
+      else:
+        v, d = db_target(value, m.k, self.row_a(idx, m, a_lat)[0], ref, posted)
       return (None if v >= ref - min_drop else v), dist, m, d
 
     base = {s: c for s, c in cands.items() if c is not None}   # the pipeline, no DB
@@ -755,9 +834,11 @@ class CurveDbLive:
       b = bind_fn(v, dist)
       if b is not None:
         pool.append((b, dist, "add", m, "add"))
+    ro_seen = any(x[3] is not None and x[3].raise_only for x in pool)   # a raise-only row matched a candidate (curvedbraiseonly2pnw)
     live = [x for x in pool if x[0] is not None]
     new = min(live, key=lambda x: x[0], default=None)
     base_min = min((v for v, _d in base.values()), default=None)
+    ro_acted = False
     changed = (new is None) != (base_min is None) or (new is not None and abs(new[0] - base_min) > 1e-9)
     rep_m = own[1] if own is not None else None
     if not changed:
@@ -778,6 +859,8 @@ class CurveDbLive:
       if new is not None and new[3] is not None:
         rep_m = new[3]
       rec["cdb2Why"] = "ok"
+      if new is not None and new[3] is not None and new[3].raise_only:
+        ro_acted = True
       if out[0] is None or (today is not None and out[0] > today + ACT_EPS_MS):
         rec["cdb2Dir"] = "raise"
         self.n_raise += 1
@@ -790,6 +873,7 @@ class CurveDbLive:
       if rep_m.k is not None:
         a_row, ovr = self.row_a(idx, rep_m, a_lat)
         rec.update(cdb2K=round(rep_m.k, 6), cdb2VDb=_r(v_db(a_row, rep_m.k), 2), cdb2Ovr=ovr)
+    rec["cdb2RO"] = "acted" if ro_acted else ("matched" if ro_seen else None)   # raise-only row: matched a candidate / is the one that set the target
     rec["cdb2Tgt"] = _r(out[0], 2)
     self._last = rec
     return out
@@ -799,6 +883,7 @@ class CurveDbLive:
     a, name, why = self.a_lat() if self.enabled else (None, None, "off")
     out = dict.fromkeys(TELE_KEYS)
     out.update(cdb2On=self.state, cdb2Err=self.err, cdb2Rows=self.index.n_rows if self.index is not None else 0,
+               cdb2Last=self.manifest.get("last_date") if self.manifest is not None else None,   # the table's newest drive date: is it stale?
                cdb2A=a, cdb2ASrc=name, cdb2N=self.n, cdb2NR=self.n_raise, cdb2NL=self.n_lower,
                # ovrcar2pnw: entries loaded for THIS car; None = no overrides object (not the capability) OR fail-safe
                cdb2OvrN=(len(self.overrides.entries) if self.overrides is not None and self.overrides.entries is not None else None))

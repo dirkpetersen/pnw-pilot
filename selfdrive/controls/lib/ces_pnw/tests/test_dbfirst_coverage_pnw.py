@@ -283,3 +283,33 @@ def test_the_loaded_event_carries_the_flags_and_the_manifest_count_is_checked(tm
   events.clear()
   cl.CurveDbLive(True, data_dir=str(d2), read_params=lambda: (None, None), start=False).load()
   assert events[0][1]["flags"] is None and events[0][1]["lower_bound_rows"] == 0          # an unflagged table says so
+
+
+# ---------------------------------------------------------------------------------------------
+# curvedbraiseonly2pnw: the Tesla sees a raise-only row EXACTLY as the refused (null) branch it replaces
+# ---------------------------------------------------------------------------------------------
+def _as_null(anchor):
+  """The same anchor with every raise-only branch turned into the refused one (k None, 4 elements) -- what the file held before."""
+  return [*anchor[:3], [[*b[:2], None, b[3]] if len(b) == 6 else b for b in anchor[3]]]
+
+
+def test_a_raise_only_row_is_coverage_3_and_the_whole_output_is_byte_identical_to_a_refused_row(tmp_path, monkeypatch, cfgpath, schedule):
+  from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvedblive2pnw import _ro_anchor
+  ro = _ro_anchor(140.0, 0.0054, 25.0)
+  outs = {}
+  for name, x in (("ro", ro), ("null", _as_null(ro))):
+    b = _brain(tmp_path / name, monkeypatch, anchors=[_anchor(300.0, 0.004), _flag(_anchor(60.0, 0.003)), x])
+    outs[name] = (_step(b), b.tele(100.0))
+  assert json.dumps(outs["ro"], sort_keys=True) == json.dumps(outs["null"], sort_keys=True)
+  assert _cov(outs["ro"][0])[140] == 3 and _cov(outs["ro"][0])[300] in (1, 2)
+
+
+def test_a_raise_only_row_is_never_priced_as_a_need_and_never_unreliable(tmp_path, monkeypatch, cfgpath, schedule):
+  """The sharper raise-only row (v_db far under the real row's) would win most_binding_row if the brain saw it; and as an UNreliable row it would
+  turn the covered vertices around it to 2. Neither may happen."""
+  from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvedblive2pnw import _ro_anchor
+  alone = _step(_brain(tmp_path / "a", monkeypatch, anchors=[_anchor(300.0, 0.003)]))
+  with_ro = _step(_brain(tmp_path / "b", monkeypatch, anchors=[_anchor(300.0, 0.003), _ro_anchor(220.0, 0.02, 25.0)]))
+  assert with_ro["v"] == alone["v"] and with_ro["row"] == "0:0" and with_ro["k"] == 0.003
+  cov = _cov(with_ro)
+  assert cov[300] == 1 and cov[220] == 3

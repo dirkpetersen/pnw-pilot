@@ -757,3 +757,216 @@ def test_the_shipped_default_is_2_5():
   """Owner decision 2026-09-24 11:25 PT: the Lightning's curve DB turns curvature into speed at a fixed 2.5 m/s^2."""
   from openpilot.selfdrive.controls.lib.ces_pnw.tests.roaddb_fixture import SHIPPED_LAT_A as shipped
   assert shipped == 2.5
+
+
+# =====================================================================================================
+# curvedbraiseonly2pnw: RAISE-ONLY rows (a branch the dates disagreed on, exported with its sharpest pass k and its fastest pass speed)
+# Synthetic geometry only: the real rows are private.
+# =====================================================================================================
+def _ro_anchor(y, k, v_fast, brg=0.0):
+  a = _anchor(y, k, brg=brg)
+  a[3][0] += [2, v_fast]                      # branch element 5 = flag 2 (raiseOnly), element 6 = the fastest pass speed, m/s
+  return a
+
+
+def _live(tmp_path, anchors, logs, **kw):
+  db = cl.CurveDbLive(True, data_dir=write_db(str(tmp_path), anchors, **kw), read_params=reader(), start=False)
+  db.load()
+  db.poll_a()
+  return db
+
+
+def _today():
+  from openpilot.selfdrive.controls.lib.ces_pnw.tests.roaddb_fixture import _today_pt
+  return _today_pt()
+
+
+class TestRaiseOnlyLoader:
+  def test_a_declared_file_loads_and_cdb2Rows_does_not_count_the_raise_only_rows(self, tmp_path, logs):
+    db = _live(tmp_path, [FAR_ANCHOR, _anchor(300.0, 0.002), _ro_anchor(600.0, 0.0054, 25.0)], logs, last_date=_today())
+    assert db.state == "ok" and db.index.n_rows == 2 and db.index.n_raise_only == 1 and logs.errors == []
+    assert db.tele()["cdb2Rows"] == 2
+    ev = dict(logs.events)["curvedb_v2_loaded"]
+    assert ev["raise_only_rows"] == 1 and ev["age_days"] == 0
+
+  def test_an_undeclared_flag_2_is_LOAD_FAILED_loudly(self, tmp_path, logs):
+    db = _live(tmp_path, [FAR_ANCHOR, _ro_anchor(600.0, 0.0054, 25.0)], logs, raise_only=False)
+    assert db.state == "err" and db.index is None
+    assert len(logs.errors) == 1 and "LOAD FAILED" in logs.errors[0] and "raiseOnly" in logs.errors[0]
+
+  @pytest.mark.parametrize("case", ["no_speed", "bad_speed", "no_k", "flag3", "count"])
+  def test_a_malformed_raise_only_row_is_LOAD_FAILED(self, tmp_path, logs, case):
+    ro = _ro_anchor(600.0, 0.0054, 25.0)
+    kw = {}
+    if case == "no_speed":
+      ro[3][0].pop()
+    elif case == "bad_speed":
+      ro[3][0][5] = float("inf") if False else -3.0
+    elif case == "no_k":
+      ro[3][0][2] = None
+    elif case == "flag3":
+      ro[3][0][4] = 3
+    db = _live(tmp_path, [FAR_ANCHOR, ro], logs, **kw)
+    if case == "count":
+      man = json.loads((tmp_path / cl.MANIFEST_NAME).read_text())
+      man["raise_only_rows"] = 2
+      (tmp_path / cl.MANIFEST_NAME).write_text(json.dumps(man))
+      db = cl.CurveDbLive(True, data_dir=str(tmp_path), read_params=reader(), start=False)
+      db.load()
+    assert db.state == "err" and "LOAD FAILED" in logs.errors[-1]
+
+  def test_an_unknown_manifest_flag_is_refused(self, tmp_path, logs):
+    _live(tmp_path, [FAR_ANCHOR], logs)
+    man = json.loads((tmp_path / cl.MANIFEST_NAME).read_text())
+    man["flags"] = "lowerBound,sideways"
+    (tmp_path / cl.MANIFEST_NAME).write_text(json.dumps(man))
+    db = cl.CurveDbLive(True, data_dir=str(tmp_path), read_params=reader(), start=False)
+    db.load()
+    assert db.state == "err" and "not understood" in logs.errors[-1]
+
+
+class TestRaiseOnlyMatch:
+  def _idx(self, tmp_path, logs, anchors):
+    return _live(tmp_path, anchors, logs).index
+
+  def test_without_allow_a_raise_only_row_is_exactly_a_refused_row(self, tmp_path, logs):
+    ro = self._idx(tmp_path / "ro", logs, [FAR_ANCHOR, _ro_anchor(300.0, 0.0054, 25.0)])
+    null = self._idx(tmp_path / "null", logs, [FAR_ANCHOR, _anchor(300.0, None, [(0.0, 450.0, None)])])
+    poly = cl.Polyline(_path())
+    la, lo = _ll(0.0, 300.0)
+    s_q = poly.project(la, lo)[0]
+    a, b = cl.match_at(ro, poly, s_q, la, lo), cl.match_at(null, poly, s_q, la, lo)
+    assert (a.why, a.anchor, a.branch, a.k, a.s_anchor, a.reliable, a.raise_only) == (b.why, b.anchor, b.branch, b.k, b.s_anchor, b.reliable, b.raise_only)
+    assert a.why == "noAuthority"
+    m = cl.match_at(ro, poly, s_q, la, lo, allow_raise_only=True)
+    assert m.why == "ok" and m.raise_only and m.k == 0.0054 and m.v_fast == 25.0
+
+  def test_the_scan_ahead_never_finds_a_raise_only_row(self, tmp_path, logs):
+    idx = self._idx(tmp_path, logs, [FAR_ANCHOR, _ro_anchor(300.0, 0.0054, 25.0), _anchor(500.0, 0.003)])
+    found = cl.scan_ahead(idx, cl.Polyline(_path()), 0.0, 700.0)
+    assert [m.row_id for m in found] == ["2:0"]
+
+
+class TestRaiseOnlyTarget:
+  def test_cap_ms_binds_a_raise(self):
+    v, d = cl.db_target(20.0, 0.0004, A, ref=60.0, posted=None, cap_ms=22.0)
+    assert d == "raise" and v == 22.0
+    v, d = cl.db_target(20.0, 0.0004, A, ref=60.0, posted=None, cap_ms=19.0)      # a cap at/below today: held, never a lowering
+    assert d == "held" and v == 20.0
+
+  def test_cap_ms_is_not_applied_to_a_lowering(self):
+    v, d = cl.db_target(30.0, 0.004, A, ref=33.0, posted=None, cap_ms=10.0)
+    assert d == "lower" and v == pytest.approx(math.sqrt(A / 0.004))
+
+
+def _ro_rec(recs, key):
+  return [r for r in recs if r.get(key) is not None]
+
+
+class TestRaiseOnlyController:
+  def test_it_raises_to_row_speed_when_the_fastest_pass_allows(self, monkeypatch, tmp_path):
+    """The spec's case: mapd 17.1 m/s over a curve whose raise-only row (k 0.00543) says ~48 mph at A 2.5."""
+    pts = _path({300.0: 17.1})
+    off, _, _ = _drive(monkeypatch, tmp_path / "off", points=pts, anchors=None, switch=0, read=reader(2.5))
+    on, recs, _ = _drive(monkeypatch, tmp_path / "on", points=pts, anchors=[FAR_ANCHOR, _ro_anchor(300.0, 0.00543, 40.0)], read=reader(2.5))
+    r = [x for x in recs if x["cdb2Dir"] == "raise"][-1]
+    v_row = math.sqrt(2.5 / 0.00543)
+    assert r["cdb2Tgt"] / MPH == pytest.approx(min(v_row, r["cdb2Base"] + 15 * MPH) / MPH, abs=0.02)
+    assert r["cdb2Tgt"] > r["cdb2Base"] + 1.0 and r["cdb2RO"] == "acted" and r["cdb2Row"] == "1:0"
+    assert [t for t in _targets(on) if t is not None][-1] > [t for t in _targets(off) if t is not None][-1] + 1.0
+
+  def test_the_fastest_pass_plus_5_mph_cap_binds_when_lower(self, monkeypatch, tmp_path):
+    pts = _path({300.0: 17.1})
+    _, recs, _ = _drive(monkeypatch, tmp_path / "hi", points=pts, anchors=[FAR_ANCHOR, _ro_anchor(300.0, 0.00543, 40.0)], read=reader(2.5))
+    free = [x for x in recs if x["cdb2Dir"] == "raise"][-1]["cdb2Tgt"]
+    v_fast = free / 1.0 - 4.0                       # a fastest pass 4 m/s under the free raise: the cap (v_fast + 5 mph = free - 1.77) must bind
+    on, recs, _ = _drive(monkeypatch, tmp_path / "cap", points=pts, anchors=[FAR_ANCHOR, _ro_anchor(300.0, 0.00543, v_fast)], read=reader(2.5))
+    r = [x for x in recs if x["cdb2Dir"] == "raise"][-1]
+    assert r["cdb2Tgt"] == pytest.approx(v_fast + 5 * MPH, abs=0.011) and r["cdb2Tgt"] < free - 1.0
+    assert r["cdb2RO"] == "acted"
+
+  def test_a_fastest_pass_at_or_below_today_raises_nothing(self, monkeypatch, tmp_path):
+    pts = _path({300.0: 17.1})
+    off, _, _ = _drive(monkeypatch, tmp_path / "off", points=pts, anchors=None, switch=0, read=reader(2.5))
+    on, recs, _ = _drive(monkeypatch, tmp_path / "on", points=pts, anchors=[FAR_ANCHOR, _ro_anchor(300.0, 0.00543, 8.0)], read=reader(2.5))
+    assert on == off and not [x for x in recs if x["cdb2Dir"] == "raise"]
+    assert {x["cdb2RO"] for x in recs if x["cdb2RO"]} == {"matched"}
+
+  def test_it_never_lowers(self, monkeypatch, tmp_path):
+    """mapd 24 m/s, the row says 19.2 m/s: a granted row lowers (test_a_sharper_road_lowers...); a raise-only row must not."""
+    off, _, _ = _drive(monkeypatch, tmp_path / "off", points=MAPD_LOW, anchors=None, switch=0)
+    on, recs, _ = _drive(monkeypatch, tmp_path / "on", points=MAPD_LOW, anchors=[FAR_ANCHOR, _ro_anchor(300.0, 0.006, 40.0)])
+    assert on == off
+    assert not [x for x in recs if x["cdb2Dir"] in ("lower", "add", "raise")]
+    assert "matched" in {x["cdb2RO"] for x in recs}
+
+  def test_it_never_adds(self, monkeypatch, tmp_path):
+    off, _, _ = _drive(monkeypatch, tmp_path / "off", points=STRAIGHT, anchors=None, switch=0)
+    on, recs, _ = _drive(monkeypatch, tmp_path / "on", points=STRAIGHT, anchors=[FAR_ANCHOR, _ro_anchor(150.0, 0.004, 40.0)])
+    assert on == off and all(t is None for t in _targets(on))
+    assert not [x for x in recs if x["cdb2Dir"] in ("add", "lower")] and {x["cdb2RO"] for x in recs} == {None}
+
+  def test_the_vision_candidate_still_bounds_the_raise(self, tmp_path, logs):
+    """_decide directly: a raised map candidate is bounded by a lower vision candidate (vision stays in the min pool)."""
+    db = _live(tmp_path, [FAR_ANCHOR, _ro_anchor(300.0, 0.0004, 40.0)], logs)
+    pts = _path({300.0: 20.0})
+    la, lo = _ll(0.0, 300.0)
+    kw = dict(today=20.0, src="map", cands_fn=lambda: ({"map": (20.0, 300.0), "far": None, "vis": (21.0, 250.0)}, {"map": (la, lo)}),
+              recand_fn=lambda s, p: None, points=pts, plat=LAT0, plon=LON0, ref=40.0, posted=30.0, horizon_m=500.0,
+              bind_fn=lambda v, d: v, min_drop=0.5, way_sel="current", hwy="motorway", allow=True)
+    t, src, _d = db.decide(**kw)
+    assert (t, src) == (21.0, "vis") and db.tele()["cdb2RO"] == "matched"      # the raise to ~26.7 is bounded by vision's 21.0
+    kw["cands_fn"] = lambda: ({"map": (20.0, 300.0), "far": None, "vis": None}, {"map": (la, lo)})
+    t, src, _d = db.decide(**kw)
+    assert src == "map" and t == pytest.approx(20.0 + 15 * MPH) and db.tele()["cdb2RO"] == "acted"
+
+  def test_the_hidden_curve_behind_a_raised_raise_only_phantom_still_binds(self, monkeypatch, tmp_path):
+    both = _path({220.0: 20.0, 380.0: 15.0})
+    real_only, _, _ = _drive(monkeypatch, tmp_path / "real", points=_path({380.0: 15.0}), anchors=None, switch=0)
+    on, _, _ = _drive(monkeypatch, tmp_path / "on", points=both, anchors=[FAR_ANCHOR, _ro_anchor(220.0, 0.0004, 40.0)])
+    t_real = [t for t in _targets(real_only) if t is not None]
+    t_on = [t for t in _targets(on) if t is not None]
+    assert t_real and t_on and t_on[-1] == pytest.approx(t_real[-1], abs=0.02)
+
+  def test_cdb2RO_and_cdb2Last_are_columns_on_every_tick(self, monkeypatch, tmp_path):
+    assert {"cdb2RO", "cdb2Last"} <= set(cl.TELE_KEYS)
+    _, recs, _ = _drive(monkeypatch, tmp_path / "x", points=STRAIGHT, anchors=[FAR_ANCHOR])
+    assert recs and all("cdb2RO" in r and "cdb2Last" in r for r in recs)
+    assert {r["cdb2Last"] for r in recs} == {"2026-09-22"}
+
+  def test_cdb2Rows_is_unchanged_by_raise_only_rows(self, monkeypatch, tmp_path):
+    _, recs, _ = _drive(monkeypatch, tmp_path / "x", points=PHANTOM, anchors=[_anchor(300.0, 0.002), _ro_anchor(600.0, 0.005, 20.0)])
+    assert {r["cdb2Rows"] for r in recs} == {1}
+
+
+class TestTableAge:
+  NOW = 1_790_000_000.0                      # 2026-09-21 ~14:13 UTC
+
+  def test_days_with_a_valid_clock(self):
+    assert cl.table_age_days("2026-09-21", self.NOW) == 0
+    assert cl.table_age_days("2026-09-01", self.NOW) == 20
+
+  def test_an_invalid_clock_is_age_unknown_never_a_number(self):
+    assert cl.table_age_days("2026-09-21", 1_000_000.0) == "wall clock not valid"       # the unsynced boot clock
+
+  def test_an_unparsable_date_is_age_unknown(self):
+    assert "unparsable" in cl.table_age_days("soon", self.NOW)
+
+  def _load(self, tmp_path, monkeypatch, logs, last_date, now):
+    warnings = []
+    monkeypatch.setattr(cl.cloudlog, "warning", lambda msg, *a, **k: warnings.append(msg), raising=False)
+    monkeypatch.setattr(cl, "_wall_now", lambda: now)
+    _live(tmp_path, [FAR_ANCHOR], logs, last_date=last_date)
+    return warnings
+
+  def test_older_than_14_days_warns(self, tmp_path, monkeypatch, logs):
+    w = self._load(tmp_path, monkeypatch, logs, "2026-09-06", self.NOW)           # 15 days
+    assert len(w) == 1 and "15 days old" in w[0]
+    assert dict(logs.events)["curvedb_v2_loaded"]["age_days"] == 15
+
+  def test_14_days_does_not(self, tmp_path, monkeypatch, logs):
+    assert self._load(tmp_path, monkeypatch, logs, "2026-09-07", self.NOW) == []
+
+  def test_an_invalid_clock_says_age_unknown(self, tmp_path, monkeypatch, logs):
+    w = self._load(tmp_path, monkeypatch, logs, "2026-01-01", 1_000_000.0)
+    assert dict(logs.events)["curvedb_v2_loaded"]["age_days"] == "age unknown" and w == []

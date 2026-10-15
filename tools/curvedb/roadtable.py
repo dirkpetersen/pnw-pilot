@@ -376,6 +376,9 @@ class PassObs:
   # fully known, 461 fully unknown, 4 mixed): whole passes predate mapd v2.2.0's highwayClass. Such a pass
   # still measures curvature, but it is not CLASS evidence -- see row_verdict.
   ext_known: bool = True
+  # curvedbraiseonly2pnw: the pass's speed at the anchor point, m/s (NaN = not recorded: a table built before this field). Only the
+  # raise-only export reads it (the fastest recorded pass on a branch caps what a raise-only row may raise to).
+  v_ms: float = float("nan")
 
 
 @dataclass
@@ -478,7 +481,7 @@ def add_pass(index: AnchorIndex, pts: list[Point], *, date: str, drive: str, car
     index.anchors[ai].obs.append(PassObs(date=date, drive=drive, car=car, t=pt.t, k_ext=k_ext, k_loc=pt.k,
                                          way=pt.way, hwy=pt.hwy, road=pt.road, spl=pt.spl,
                                          mode=pass_mode(pt), d_m=d, end_lat=end[0], end_lon=end[1],
-                                         ext_ramp=ramp, ext_known=known))
+                                         ext_ramp=ramp, ext_known=known, v_ms=pt.v))
     tally["pass admitted"] += 1
 
 
@@ -562,3 +565,28 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
   if lo <= 0 or hi / lo > params.max_date_spread and hi - lo > params.spread_floor_k:
     return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
   return RowVerdict(True, k, n_dates, n_passes, "ok", hwy, spl)
+
+
+def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, exclude_date: str | None = None,
+                    branch: tuple[float, float]) -> tuple[float, float] | str:
+  """curvedbraiseonly2pnw: (k_worst, v_fast_ms) when the branch is refused ONLY by the date-spread rule, else a string naming why not.
+
+  Qualifies only if `verdict` is the refusal "dates disagree" -- row_verdict applies that rule LAST, so every other owner rule (>= 2 dates,
+  never Tesla-only, no ramp, class known, a fully classified pass) already held. k_worst is the SHARPEST single pass pooled into the branch
+  (max k_ext, the same passes row_verdict pools: exclude_date and the branch radius honoured); v_fast_ms the FASTEST pass speed on it. A branch
+  none of whose passes recorded a speed does not qualify (fails closed: the speed cap could not be computed)."""
+  if verdict.granted or not verdict.reason.startswith("dates disagree"):
+    return f"not spread-refused ({verdict.reason})"
+  obs = [o for o in anchor.obs if o.date != exclude_date and math.isfinite(o.end_lat) and
+         haversine_m(o.end_lat, o.end_lon, branch[0], branch[1]) <= params.branch_radius_m]
+  if params.way_check:
+    w = majority([o.way for o in obs])
+    if w is not None:
+      obs = [o for o in obs if o.way in (0, w)]
+  ks = [o.k_ext for o in obs if math.isfinite(o.k_ext)]
+  if not ks or max(ks) <= 0.0 or min(ks) < 0.0:
+    return "no usable curvature"
+  vs = [o.v_ms for o in obs if math.isfinite(o.v_ms) and o.v_ms > 0.0]
+  if not vs:
+    return "no pass speed recorded"
+  return max(ks), max(vs)

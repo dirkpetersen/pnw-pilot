@@ -45,9 +45,28 @@ The table gained an optional 5th element per branch (`1` = lowerBound) and a man
 The `curvedb_v2_loaded` log event carries `flags` and `lower_bound_rows`. A table without the 5th element loads as before, and with it every covered
 row counts as unreliable (`mapCov` `u`), so the notch stays. A table that declares `flags` but has none logs a "declares no lowerBound" warning.
 
+### 3a. Raise-only rows (`curvedbraiseonly2pnw`)
+
+A branch refused ONLY by the date-spread rule ("dates disagree": a merging side road pooled into the branch window; it passed every other owner
+rule - >= 2 dates, not Tesla-only, no ramp, class known) can be exported (`v2_live_export.py --raise-only`) as a **raise-only row**: `k` = the SHARPEST
+single pass on the branch, branch element 5 = `2` (the element is now a bitmask: 1 lowerBound, 2 raiseOnly), element 6 = the fastest recorded pass
+speed (m/s), manifest `"flags":"lowerBound,raiseOnly"` (whichever are declared) and `raise_only_rows`. `rows_with_authority` / `cdb2Rows` /
+`cbRows` do not count them. Without the option the export is byte-identical to before.
+
+- **Lightning:** a raise-only row may only RAISE a map/far candidate: any other direction is "none"; all existing caps apply (+15 mph, posted + 10,
+  <= set) plus fastest recorded pass + 5 mph; vision stays in the min-pool and still bounds the raise. It never takes part in the ADD scan. It ignores
+  `lowerBound`, as granted rows do.
+- **Tesla: no behaviour change.** `match_at` answers `noAuthority` (exactly a refused row) unless the caller passes `allow_raise_only=True`, which only the
+  Lightning's per-candidate replacement does. So the brain's coverage is 3 as before, `scan_ahead` and `extra` never contain one, it never lowers a cap
+  and cannot make db-first drop the notch.
+- Loader: flag 2 without the manifest declaring `raiseOnly`, a missing speed or `k`, an unknown manifest flag or a wrong `raise_only_rows` is LOAD FAILED
+  (DB OFF on both cars). An older loader rejects the whole file (malformed branch), so INSTALL ORDER below applies: code before table.
+- Telemetry: `cdb2RO` (`matched` / `acted` / null), `cdb2Last` (the table's last drive date); `curvedb_v2_loaded` carries `raise_only_rows` and `age_days`
+  (or "age unknown" without a valid clock), and a `cloudlog.warning` when the table is older than 14 days.
+
 ## 4. INSTALL ORDER (critical)
 
-**The code must be on the device before a flagged table.** An older loader fails on a flagged table (`anchor 1: malformed branch`) and the curve
+**The code must be on the device before a flagged table (and before a raise-only table, `curvedbraiseonly2pnw`).** An older loader fails on a flagged table (`anchor 1: malformed branch`) and the curve
 DB goes OFF on **both** cars. A rollback restores the previous unflagged table first, then the code can move. Validate a new table with the
 device's own loader before swapping it in, and keep the previous directory as a backup.
 
