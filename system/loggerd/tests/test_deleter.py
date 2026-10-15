@@ -196,11 +196,12 @@ class TestDeleter(UploaderTestCase):
     size = f.stat().st_size
     self.run_until_deleted([f])
     a = self.alert()
-    assert a is not None and "1 segments" in a["extra"]
+    assert a is not None and a["extra"].startswith("0 segments' logs lost, 1 HD-stripped")
     recs = self.records()
     assert len(recs) == 1
     r = recs[0]
-    assert (r["ev"], r["seg"], r["files"], r["bytes"], r["n_boot"]) == ("deleterLoss", self.seg_dir, [self.f_type], size, 1)
+    assert (r["ev"], r["seg"], r["files"], r["bytes"], r["kind"], r["n_log"], r["n_hd"]) == \
+        ("deleterLoss", self.seg_dir, [self.f_type], size, deleter.KIND_HD, 0, 1)
     assert any("UN-UPLOADED" in m for m in self.log.of("error"))
 
   def test_skip_listed_only_does_not_alert(self, loss):
@@ -366,3 +367,40 @@ class TestDeleter(UploaderTestCase):
     self.run_until(lambda: not s["fcamera.hevc"].exists(), "HD removed")
     assert s["rlog.zst"].exists()
     assert self.records() == []
+
+  # deleterhdfirst2pnw review fixes: separate counters, small-file gap, once-per-boot HD removal failure
+  def test_alert_counts_log_lost_and_hd_stripped_separately(self, loss):
+    a = self._seg(0, ["rlog.zst", "fcamera.hevc"])
+    self.run_until(lambda: not a["rlog.zst"].parent.exists(), "segment destroyed")
+    assert self.alert()["extra"].startswith("1 segments' logs lost, 1 HD-stripped")   # one segment is NOT counted twice as "2 segments"
+    r = self.records()[-1]
+    assert (r["kind"], r["n_log"], r["n_hd"]) == (deleter.KIND_LOG, 1, 1)
+
+  def test_unuploaded_small_files_ride_in_the_record_of_a_log_loss(self, loss):
+    self._seg(0, ["rlog.zst", "qlog.zst", "qcamera.ts"])
+    self.run_until(lambda: not (Path(deleter.Paths.log_root()) / self.seg_format.format(0)).exists(), "segment destroyed")
+    r = self.records()[-1]
+    assert r["kind"] == deleter.KIND_LOG
+    assert sorted(r["files"]) == ["qcamera.ts", "qlog.zst", "rlog.zst"]
+
+  def test_only_small_files_unuploaded_is_an_error_line_but_no_alert(self, loss):
+    self._seg(0, ["rlog.zst", "qlog.zst", "qcamera.ts"], uploaded={"rlog.zst"})
+    self.run_until(lambda: not (Path(deleter.Paths.log_root()) / self.seg_format.format(0)).exists(), "segment destroyed")
+    assert self.alert() is None and self.records() == []
+    msgs = [m for m in self.log.of("error") if "small log file" in m]
+    assert msgs and "qlog.zst" in msgs[0] and "qcamera.ts" in msgs[0]
+
+  def test_unremovable_hd_file_falls_through_and_logs_once(self, monkeypatch, loss):
+    deleter._hd_remove_failed.clear()
+    real_remove = os.remove
+
+    def no_hd(path, *a, **k):
+      if str(path).endswith(".hevc"):
+        raise OSError(errno.EPERM, "nope")
+      return real_remove(path, *a, **k)
+    monkeypatch.setattr(deleter.os, "remove", no_hd)
+    segs = [self._seg(i, ["rlog.zst", "fcamera.hevc"]) for i in range(2)]
+    self.run_until(lambda: not any(s["rlog.zst"].parent.exists() for s in segs), "whole-segment fallthrough")
+    fails = [m for m in self.log.of("exception") if "cannot remove" in m]
+    assert len(fails) == 2, fails          # one per distinct path, not one per 0.1 s sweep
+    assert {r["kind"] for r in self.records()} == {deleter.KIND_LOG}

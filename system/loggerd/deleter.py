@@ -126,7 +126,9 @@ def strip_hd_video(d: str, firehose_files: set[str]) -> tuple[list[str], list[st
     except FileNotFoundError:
       continue
     except OSError:
-      cloudlog.exception(f"deleterhdfirst2pnw: cannot remove {fn}")
+      if fn not in _hd_remove_failed:
+        _hd_remove_failed.add(fn)
+        cloudlog.exception(f"deleterhdfirst2pnw: cannot remove {fn} (logged once per boot; the deleter moves on)")
       continue
     removed.append(name)
     if name in unuploaded and name in firehose_files:
@@ -135,21 +137,34 @@ def strip_hd_video(d: str, firehose_files: set[str]) -> tuple[list[str], list[st
   return removed, lost, lost_bytes
 
 
-def report_unuploaded_loss(seg: str, files: list[str], nbytes: int, n_boot: int, bytes_boot: int,
-                           kind: str = KIND_LOG) -> None:
+# deleterhdfirst2pnw: pass-1 files. Not firehose, so never part of the ordering or the alert on their own, but a whole-segment
+# delete that destroys them un-uploaded must say so (qcamera.ts is legitimately not uploaded on metered links).
+SMALL_LOG_FILES = {"qlog", "qlog.zst", "qcamera.ts"}
+
+# HD files that could not be removed, logged once per boot (a permanent failure must not log every 0.1 s sweep)
+_hd_remove_failed: set[str] = set()
+
+
+def new_loss_totals() -> dict[str, int]:
+  return {"n_log": 0, "b_log": 0, "n_hd": 0, "b_hd": 0}
+
+
+def report_unuploaded_loss(seg: str, files: list[str], nbytes: int, totals: dict[str, int], kind: str = KIND_LOG) -> None:
   """deleterloss2pnw: make a destroyed un-uploaded segment VISIBLE (Rule 2): an offroad alert the
   driver sees once parked, and one ces_events record (first in the metered upload order, rotated into
   the archive at Park). Never raises: recording must never stall on a failed alert or record."""
   try:
     # lazy: alertmanager pulls in selfdrived's event tables; an import failure must not stop the deleter
     from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
-    set_offroad_alert(LOSS_ALERT, True, extra_text=f"{n_boot} segments, {bytes_boot / 1e6:.0f} MB since boot")
+    set_offroad_alert(LOSS_ALERT, True, extra_text=(f"{totals['n_log']} segments' logs lost, {totals['n_hd']} HD-stripped, " +
+                                                          f"{(totals['b_log'] + totals['b_hd']) / 1e6:.0f} MB since boot"))
   except Exception:
     cloudlog.exception(f"deleterloss2pnw: FAILED to raise {LOSS_ALERT} for {seg} -- the driver will not see this loss")
   try:
     from openpilot.selfdrive.car.accdrop_pnw import append_to_ces_log
     t = round(time.time(), 1)  # noqa: TID251 -- wall clock, the ces_events "t" field is a UTC epoch
-    rec = {"t": t, "ev": "deleterLoss", "seg": seg, "files": files, "bytes": nbytes, "n_boot": n_boot, "kind": kind}
+    rec = {"t": t, "ev": "deleterLoss", "seg": seg, "files": files, "bytes": nbytes, "kind": kind,
+           "n_log": totals["n_log"], "n_hd": totals["n_hd"]}
     append_to_ces_log(json.dumps(rec))
   except Exception:
     cloudlog.exception(f"deleterloss2pnw: FAILED to write the ces_events deleterLoss record for {seg}")
@@ -180,14 +195,14 @@ def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
 
 def deleter_thread(exit_event: threading.Event):
   params = Params()          # uploadprio2pnw: one handle, reused for every sweep
-  loss_count = loss_bytes = 0  # deleterloss2pnw: un-uploaded segments/bytes destroyed since boot
+  loss = new_loss_totals()  # deleterloss2pnw: un-uploaded segments/bytes destroyed since boot, split log-lost / HD-stripped
   sweep_err_t: float | None = None
   sweep_err_n = 0
   while not exit_event.is_set():
     # deleterrain2pnw: ANY exception escaping a sweep used to end this thread for good (restart_if_crash=False),
     # after which nothing frees space and loggerd stops. Log it (throttled, with a count), wait, try again.
     try:
-      loss_count, loss_bytes = _sweep(exit_event, params, loss_count, loss_bytes)
+      _sweep(exit_event, params, loss)
     except Exception:
       sweep_err_n += 1
       now = time.monotonic()
@@ -199,9 +214,9 @@ def deleter_thread(exit_event: threading.Event):
       exit_event.wait(SWEEP_ERR_RETRY_S)
 
 
-def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_bytes: int) -> tuple[int, int]:
+def _sweep(exit_event: threading.Event, params: Params, loss: dict[str, int]) -> None:
   # deleterrain2pnw: ONE sweep -- the body of deleter_thread's loop, moved here unchanged (dedented) so the loop can
-  # catch anything that escapes it. Returns the updated since-boot loss counters.
+  # catch anything that escapes it. `loss` (since-boot totals) is updated in place.
   out_of_bytes = get_available_bytes(default=MIN_BYTES + 1) < MIN_BYTES
   out_of_percent = get_available_percent(default=MIN_PERCENT + 1) < MIN_PERCENT
 
@@ -252,9 +267,9 @@ def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_by
           unup = "UN-UPLOADED " if hd_lost else ""
           cloudlog.error(f"deleterhdfirst2pnw: {KIND_HD}: deleting {unup}HD video {removed} from {hd_path}, logs kept")
           if hd_lost:
-            loss_count += 1
-            loss_bytes += hd_lost_bytes
-            report_unuploaded_loss(hd_dir, hd_lost, hd_lost_bytes, loss_count, loss_bytes, KIND_HD)
+            loss["n_hd"] += 1
+            loss["b_hd"] += hd_lost_bytes
+            report_unuploaded_loss(hd_dir, hd_lost, hd_lost_bytes, loss, KIND_HD)
           stripped = True
           break
         if stripped:
@@ -284,12 +299,23 @@ def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_by
             lost_bytes += os.path.getsize(os.path.join(delete_path, n))
           except OSError as e:
             cloudlog.error(f"deleterloss2pnw: cannot size {n} in {delete_path} ({e}) -- not counted in MB lost")
+        # deleterhdfirst2pnw: pass-1 files destroyed un-uploaded are named too. With a firehose loss they ride in the
+        # record; alone they are an error line only (no alert: qcamera.ts is legitimately not uploaded on metered links).
+        small = unuploaded_firehose(delete_dir, SMALL_LOG_FILES)
+        small_bytes = 0
+        for n in small:
+          try:
+            small_bytes += os.path.getsize(os.path.join(delete_path, n))
+          except OSError as e:
+            cloudlog.error(f"deleterloss2pnw: cannot size {n} in {delete_path} ({e}) -- not counted in MB lost")
+        if small and not lost:
+          cloudlog.error(f"deleterhdfirst2pnw: deleting {delete_path} with un-uploaded small log file(s) {small} ({small_bytes} bytes)")
         cloudlog.info(f"deleting {delete_path}")
         shutil.rmtree(delete_path)
         if lost:
-          loss_count += 1
-          loss_bytes += lost_bytes
-          report_unuploaded_loss(delete_dir, lost, lost_bytes, loss_count, loss_bytes)
+          loss["n_log"] += 1
+          loss["b_log"] += lost_bytes + small_bytes
+          report_unuploaded_loss(delete_dir, lost + small, lost_bytes + small_bytes, loss)
         break
       except OSError:
         cloudlog.exception(f"issue deleting {delete_path}")
@@ -302,7 +328,6 @@ def _sweep(exit_event: threading.Event, params: Params, loss_count: int, loss_by
     exit_event.wait(.1)
   else:
     exit_event.wait(30)
-  return loss_count, loss_bytes
 
 
 def main():
