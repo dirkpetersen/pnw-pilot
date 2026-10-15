@@ -82,3 +82,10 @@ telemetry values, roundabout fixture.
   exactly (was starting earlier, e.g. 489 m vs 426 m). The rule's apex bound is its own 30 mph constant: `low_v_mph` (curve.json, up to 80) cannot widen it.
 - `icbmStartWhy` = `trackShallow` only when a deeper covered node exists and was withheld; ordinary small-drop tracking starts stay `track`.
 
+**Final check (same day), fourth commit:** the hold is for the STARTING candidate only. It had bound ANY covered node while the latch was set,
+so between two roundabouts 400-500 m apart the truck crawled at 15 mph for 430-530 m (knob off: back to 37-41 mph). The starting node's
+along-path distance is now dead-reckoned (distance at the last tick - v_ego * dt, re-anchored on the matching candidate within 40 m each tick);
+only a covered candidate within 40 m of it is held, and the latch ends 25 m past it. The next node goes through the normal start logic on its own
+merits. Regression test: two nodes 400/450/500/600 m apart (45 mph, real Ford executor) - the knob is never slower than off between them.
+Still true: highway single node = one engage at 1.2/1.6 m/s2, release after passing, 8 m GPS jitter = one engage, a vanishing node releases.
+

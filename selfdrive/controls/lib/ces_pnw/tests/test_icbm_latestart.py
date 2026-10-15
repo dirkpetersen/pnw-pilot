@@ -6,6 +6,7 @@ the executor then jumps the set to the apex. The truck cannot slow faster than ~
 is WHEN the cap starts, not how fast it walks. Synthetic geometry only (no private coordinates).
 """
 import inspect
+import random
 import sys
 
 import pytest
@@ -350,7 +351,7 @@ class TestConsistency:
     class Bare:
       pass
     veh = _lightning()
-    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0, float("inf"), False)
+    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0, float("inf"), None)
 
 
 # ---- 7: the knob ---------------------------------------------------------------------------------------------------
@@ -470,7 +471,7 @@ class TestHighwayDoesNotFlap:
     _tick(c, step, clock, 450.0, v, v, map_v=10.0)
     assert c._icbm_ep.phase == "cap" and c._icbm_firm_t == 0.0 and c._icbm_late_latch
     _tick(c, step, clock, 445.0, v, v, map_v=10.0)
-    assert c._icbm_firm_t == 0.0 and c._icbm_late_t == LATE and c._icbm_late_hold_t, "running tick: firm latched, covered candidate held"
+    assert c._icbm_firm_t == 0.0 and c._icbm_late_t == LATE and c._icbm_late_hold_t is not None, "running tick: firm latched, covered candidate held"
     cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
     c._icbm_last_pub = -1e9
     cls._icbm_step.__get__(c)({"v_ego": v}, active=False)
@@ -597,7 +598,7 @@ class TestHeldPastTheTrackingCap:
     p1 = _tick(c, step, clock, 440.0, v, v, map_v=13.0)
     assert p1 and p1.get("target") is not None and c._icbm_late_latch
     p2 = _tick(c, step, clock, 435.0, v - 1.6, v, map_v=13.0)         # 1.6 m/s2 for ~1 s: the envelope shrank 40 m, distance 5 m
-    assert c._icbm_late_hold_t and p2 and p2.get("target") is not None and c._icbm_ep.phase == "cap"
+    assert c._icbm_late_hold_t is not None and p2 and p2.get("target") is not None and c._icbm_ep.phase == "cap"
 
 
 class TestScope:
@@ -640,3 +641,102 @@ class TestTrackShallowLabel:
     monkeypatch.setattr(sys.modules[__name__], "_scene", _two_curve_scene(13.5, 80.0))
     on, c = _one(monkeypatch, 280.0, map_v=6.8)
     assert c._icbm_start_why == "trackShallow"
+
+
+# ---- final check: the hold is for the STARTING candidate only (two roundabouts) ------------------------------------------------
+def _world_pts(pos, nodes, total=2500.0, step=40.0):
+  ys = []
+  y = -200.0 + pos - ((pos) % step)
+  while y < total:
+    ys.append((y, 0.0))
+    y += step
+  for (ny, nv) in nodes:
+    for k in (-20.0, -10.0, 0.0, 10.0, 20.0):
+      ys.append((ny + k, nv))
+  ys.sort()
+  out = []
+  for (yy, vv) in ys:
+    la, lo = _ll(0.0, yy - pos)
+    out.append({"latitude": la, "longitude": lo, "velocity": vv})
+  return out
+
+def _world_drive(monkeypatch, knob, v0, nodes, end, a_dec=1.0, a_acc=1.0, jitter=0.0, drop_after=None):
+  clock = [6000.0]
+  c, step = _controller(monkeypatch, clock, _veh(knob))
+  v = stock = v0
+  gov, frame, pressing = PressGovernor(), 0, None
+  pos, tr = 0.0, []
+  rnd = random.Random(1)
+  while pos < end:
+    nn = nodes if drop_after is None or pos < drop_after else [n for n in nodes if n[0] < drop_after]
+    pts = _world_pts(pos + (rnd.uniform(-jitter, jitter) if jitter else 0.0), nn)
+    c._map_targets = pts
+    mtv, mtd = upcoming_curve(pts, 47.0, -122.0, v, 10.0)
+    sig = {"v_ego": v, "v_set": stock, "map_target_v": mtv, "map_target_dist": mtd, "curve_lat_accel_vision": 0.0,
+           "time_to_curve": float("inf"), "lat_accel_now": 0.0, "has_lead": False, "lead_drel": 50.0, "lead_vlead": 20.0,
+           "gas": False, "brake": False, "spd_lim": 0.0, "pitch": None}
+    c._stock_set = stock
+    n = len(c.mem_params.log)
+    step(sig, active=True)
+    new = c.mem_params.log[n:]
+    pub = new[-1] if new else None
+    cmd = None
+    if pub and pub.get("target") is not None:
+      cmd = IcbmCommand(target_ms=pub["target"], ceiling_ms=pub["ceiling"], ts=pub["ts"], dir=pub.get("dir", "dec"))
+    for _ in range(25):
+      chosen = arbitrate([cmd], clock[0])
+      btn = gov.update(frame, decide_press(stock, chosen, clock[0], True, False))
+      if pressing and btn is None:
+        stock += STEP_MS if pressing == "inc" else -STEP_MS
+      pressing = btn
+      frame += 1
+      clock[0] += 0.01
+    if stock < v:
+      v = max(stock, v - a_dec * 0.25)
+    elif stock > v:
+      v = min(stock, v + a_acc * 0.25)
+    pos += v * 0.25
+    tr.append((pos, v, stock, c._icbm_ep.phase, (pub.get("target") if pub else None), (pub.get("dir") if pub else None), getattr(c, "_icbm_late_latch", None)))
+  return tr
+
+def _profile(tr, lo, hi, stepm=50):
+  out = []
+  for x in range(int(lo), int(hi), stepm):
+    t = next((t for t in tr if t[0] >= x), None)
+    if t:
+      out.append(round(t[1] / MPH))
+  return out
+
+
+
+class TestHoldIsForTheStartingCandidateOnly:
+  """A covered node further down the road must go through the normal start logic, not be held because the first cap is running:
+  with the hold on ANY covered candidate the truck crawled at 15 mph for 430-530 m between two roundabouts 400-500 m apart."""
+
+  @pytest.mark.parametrize("gap", [400.0, 450.0, 500.0, 600.0])
+  def test_between_two_nodes_the_knob_is_never_slower(self, monkeypatch, gap):
+    nodes = [(500.0, 6.8), (500.0 + gap, 6.8)]
+    off = _world_drive(monkeypatch, False, 45 * MPH, nodes, 500.0 + gap + 100)
+    on = _world_drive(monkeypatch, True, 45 * MPH, nodes, 500.0 + gap + 100)
+    po, pn = _profile(off, 450, 500 + int(gap) + 50), _profile(on, 450, 500 + int(gap) + 50)
+    assert len(po) == len(pn)
+    assert all(n >= o - 1 for o, n in zip(po, pn, strict=True)), f"knob ON slower than OFF between the nodes: off {po} on {pn}"
+    assert max(pn) >= 37, f"the truck never recovered between the nodes: {pn}"
+
+  def test_a_vanishing_second_node_releases(self, monkeypatch):
+    nodes = [(500.0, 6.8), (900.0, 6.8)]
+    on = _world_drive(monkeypatch, True, 45 * MPH, nodes, 1300.0, drop_after=700.0)
+    off = _world_drive(monkeypatch, False, 45 * MPH, nodes, 1300.0, drop_after=700.0)
+    assert _profile(on, 450, 1300)[-4:] == _profile(off, 450, 1300)[-4:]
+    assert _profile(on, 450, 1300)[-1] >= 38
+
+  def test_gps_jitter_still_one_engage_and_a_release(self, monkeypatch):
+    on = _world_drive(monkeypatch, True, 45 * MPH, [(500.0, 6.8)], 1100.0, jitter=8.0)
+    engages = sum(1 for a, b in zip(on, on[1:], strict=False) if b[3] == "cap" and a[3] != "cap")
+    assert engages == 1 and _profile(on, 400, 1100)[-1] >= 44, "single node: one engage, released after passing"
+
+  @pytest.mark.parametrize("mph,decel,map_v", [(65, 1.6, 13.0), (60, 1.2, 13.0)])
+  def test_highway_single_node_still_one_engage_then_releases(self, monkeypatch, mph, decel, map_v):
+    tr = _world_drive(monkeypatch, True, mph * MPH, [(700.0, map_v)], 1000.0, a_dec=decel)
+    engages = sum(1 for a, b in zip(tr, tr[1:], strict=False) if b[3] == "cap" and a[3] != "cap")
+    assert engages == 1 and _profile(tr, 400, 1000, 100)[-1] >= 45

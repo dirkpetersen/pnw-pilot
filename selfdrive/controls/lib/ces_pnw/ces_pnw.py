@@ -1034,6 +1034,8 @@ ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the f
 # by the 0.8 m/s^2 + 30 m envelope, not by the tracking window (which fired ~50-60 m early; the executor then jumped the
 # set to the apex). "Open road" = no lead seen for this long AND the truck is at its set speed (not lead-bound).
 ICBM_LATE_LEAD_WAIT_S = 5.0
+ICBM_LATE_HOLD_TOL_M = 40.0    # a held candidate must sit within this of the spot that started the cap (GPS / path-sampling slack)
+ICBM_LATE_HOLD_PASS_M = 25.0   # the truck has passed that spot once its distance to it grows this far above the minimum seen
 ICBM_LATE_BOUND_MS = 1.5 * 0.44704   # v_ego below ref by more than this (1.5 mph) = lead/traffic-bound: today's tracking start
 
 
@@ -1256,7 +1258,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
                       far_v=0.0, far_dist=float('inf'),
-                      track=False, eff_fn=None, late_drop=0.0, late_apex_max=float('inf'), late_hold=False):
+                      track=False, eff_fn=None, late_drop=0.0, late_apex_max=float('inf'), late_hold=None):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
   where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
   VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
@@ -1278,9 +1280,10 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   icbmlatestart2pnw: late_drop (m/s, default 0 = byte-identical to before) > 0 withholds the tracking-window start from
   every MAP/FAR candidate whose drop (ref - effective apex) is >= late_drop: such a candidate may start only through the
   v_ego decel envelope. The caller passes it on a START tick only -- a running cap episode keeps the tracking window.
-  late_hold: on a RUNNING late-started cap, a covered candidate (same drop / apex test) stays bound for as long as it is ahead
-  and rated below the ceiling -- the 350 m tracking cap and the (shrinking, if the truck slows faster than 0.8) v_ego envelope
-  must not un-bind a cap that our own faster slowing helped along.
+  late_hold: None, or on a RUNNING late-started cap the distance (m) from the truck to the spot of the candidate that STARTED the cap.
+  A covered candidate (same drop / apex test) within ICBM_LATE_HOLD_TOL_M of that spot stays bound for as long as it is ahead --
+  the 350 m tracking cap and the (shrinking, if the truck slows faster than 0.8) v_ego envelope must not un-bind a cap that our own
+  faster slowing helped along. Any OTHER candidate (the next node down the road) gets the normal start logic.
   late_apex_max (m/s): the rule applies only to candidates whose effective apex is at or below this (the Lightning's low_v:
   tight nodes and roundabouts, where the curve penalty is ~1 mph; a faster apex is lowered further by the penalties AFTER
   this envelope was sized, so it keeps the tracking start).
@@ -1305,7 +1308,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
     eff = scale_fn(map_v) * map_v * map_scale if eff_fn is None else eff_fn(map_v, map_dist)
     a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
     cov = late_drop > 0 and ref - eff >= late_drop and eff <= late_apex_max
-    if a is None and track and late_hold and cov and eff is not None:
+    if a is None and track and late_hold is not None and cov and eff is not None and abs(map_dist - late_hold) <= ICBM_LATE_HOLD_TOL_M:
       a = max(eff, 0.0)
     elif a is None and track and not cov:
       # icbmtrack2pnw: continuous set-tracking — a binding-RATED map curve within the tracking
@@ -1323,7 +1326,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   if far_v and far_v > 0 and far_dist != float('inf'):
     a = _icbm_binding_apex(v_ego, ref, far_v, far_dist, icbm_approach_decel(v_ego, far_v, firm_decel))
     cov = late_drop > 0 and ref - far_v >= late_drop and far_v <= late_apex_max
-    if a is None and track and late_hold and cov:
+    if a is None and track and late_hold is not None and cov and abs(far_dist - late_hold) <= ICBM_LATE_HOLD_TOL_M:
       a = max(far_v, 0.0)
     elif a is None and track and not cov:
       a = _icbm_track_apex(v_ego, ref, far_v, far_dist)   # icbmtrack2pnw (far_v already effective)
@@ -1363,7 +1366,7 @@ def _icbm_tick_params(ctl, veh):
   firm = getattr(ctl, "_icbm_firm_t", None)
   vmax = getattr(ctl, "_icbm_late_vmax_t", None)
   return ((veh.icbm_firm_decel if firm is None else firm), (getattr(ctl, "_icbm_late_t", None) or 0.0),
-          float("inf") if vmax is None else vmax, bool(getattr(ctl, "_icbm_late_hold_t", False)))
+          float("inf") if vmax is None else vmax, getattr(ctl, "_icbm_late_hold_t", None))
 
 
 # ---------------------------------------------------------------------------
@@ -2058,7 +2061,7 @@ def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, e
   the late rule withheld it), else None. Two extra pure calls, only on a START tick with a decision to explain."""
   def decide(**kw):
     args = dict(map_scale=ctl._veh.icbm_map_scale, firm_decel=firm, far_v=far_v, far_dist=far_dist, eff_fn=eff_fn,
-                late_drop=late_drop, late_apex_max=late_vmax, late_hold=False)
+                late_drop=late_drop, late_apex_max=late_vmax, late_hold=None)
     args.update(kw)
     return icbm_curve_target(sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
                              sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
@@ -5768,7 +5771,7 @@ class CESController:
         self._icbm_map_reach = None
         self._icbm_firm_t, self._icbm_late_t, self._icbm_late_vmax_t, self._icbm_start_why = None, None, None, None   # icbmlatestart2pnw: per-tick only
         self._icbm_late_latch = False
-        self._icbm_late_hold_t = False
+        self._icbm_late_hold_t, self._icbm_late_anchor, self._icbm_late_anchor_t = None, None, None
         if sig.get("has_lead", False):
           self._icbm_lead_seen_t = now      # a lead seen during a Chill interlude still counts
         self._icbm_gps_age = None         # gpslag2pnw
@@ -5861,7 +5864,7 @@ class CESController:
         # Scope: the rule (and firm 0 / the latch that go with it) applies only when the candidate that binds at the comfort
         # decel is COVERED (apex <= late_vmax and drop >= knob). A >30 mph apex keeps today's firm ramp and tracking start
         # exactly: the penalties lower its target after the envelope was sized, and an earlier start would only add flapping.
-        cv, _cd, _ = icbm_far_map_candidate(self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
+        cv, cd, _ = icbm_far_map_candidate(self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
                                             self._veh.icbm_map_scale, 0.0)
         if not (cv > 0.0 and ref - cv >= late_knob and cv <= late_vmax):
           late_ok, late_why = False, "uncovered"
@@ -5878,14 +5881,32 @@ class CESController:
           late_ok, late_why = False, "shallow"
       if self._icbm_ep.phase != "cap":
         self._icbm_late_latch = False       # the late-started episode (if any) is over
+        self._icbm_late_anchor = self._icbm_late_anchor_t = None
       # F1: a cap that STARTED late (a covered candidate) keeps the start tick's envelope (firm 0) on its running ticks, and its
       # covered candidates stay bound while ahead (late_hold: neither the 350 m tracking cap nor an envelope that shrinks
       # when the truck slows faster than 0.8 m/s^2 may un-bind it -- that flapped, each re-engage latching the ceiling at our
       # own lowered set).
       latched = bool(getattr(self, "_icbm_late_latch", False)) and self._icbm_ep.phase == "cap" and late_knob > 0.0
+      hold_d = None
+      if latched:
+        # Hold ONLY the candidate that started the cap. Its along-path distance is dead-reckoned from the start tick (distance
+        # at the last tick minus v_ego * dt) and re-anchored on the matching candidate each tick, so GPS jitter and map
+        # refreshes are absorbed and no coordinates are needed. Once the truck is ICBM_LATE_HOLD_PASS_M past it the latch is
+        # over, and the next node goes through the normal start logic on its own merits.
+        a_d, a_t = getattr(self, "_icbm_late_anchor", None), getattr(self, "_icbm_late_anchor_t", None)
+        if a_d is None or a_t is None:
+          cloudlog.warning("icbmlatestart2pnw: the late-start spot is unknown -- hold released, the cap runs on today's rules")
+          latched = False
+        else:
+          hold_d = a_d - max(float(sig["v_ego"]), 0.0) * max(now - a_t, 0.0)
+          if hold_d < -ICBM_LATE_HOLD_PASS_M:
+            latched, hold_d = False, None                   # passed it
+        if not latched:
+          self._icbm_late_latch = False
+          self._icbm_late_anchor = self._icbm_late_anchor_t = None
       firm = 0.0 if (late_ok and late_knob > 0.0) or latched else self._veh.icbm_firm_decel
       late_drop = late_knob if (late_ok or latched) else 0.0
-      late_hold = latched
+      late_hold = hold_d
       self._icbm_firm_t, self._icbm_late_t, self._icbm_late_vmax_t = firm, late_drop, late_vmax
       self._icbm_late_hold_t = late_hold
       self._icbm_start_why = None
@@ -6213,7 +6234,13 @@ class CESController:
                                                  gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas)
       _icbm_rhold_note(self, now, rhold_src)
       if late_ok and late_knob > 0.0 and self._icbm_ep.phase == "cap":
-        self._icbm_late_latch = True        # this tick started the cap (late_ok is a START-tick quantity)
+        # this tick started the cap (late_ok is a START-tick quantity): remember WHERE the starting candidate is (cd, the
+        # along-path distance of the covered candidate that qualified the start)
+        self._icbm_late_latch, self._icbm_late_anchor, self._icbm_late_anchor_t = True, float(cd), now
+      elif hold_d is not None and self._icbm_ep.phase == "cap":
+        # a running held cap: re-anchor on the candidate that matches the dead-reckoned spot, else keep dead-reckoning
+        near = self._icbm_src in ("map", "far") and abs(src_dist - hold_d) <= ICBM_LATE_HOLD_TOL_M
+        self._icbm_late_anchor, self._icbm_late_anchor_t = (src_dist if near else hold_d), now
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
