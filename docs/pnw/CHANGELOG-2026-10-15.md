@@ -58,3 +58,16 @@ unchanged, threshold on the drop), gate, firm=0 on the far scan, lead now / lead
 keeps the tracking window, closed loop through the Ford executor (a truck decelerating faster than 0.8 keeps its cap bound, no clear/restore),
 all call sites of one tick agree (step, shape, curve DB, passed-point gate), knob (default, 0, clamp-up, non-Lightning 0.0, unreadable logged),
 telemetry values, roundabout fixture.
+
+**Review fixes (Opus BLOCK, same day), second commit:**
+- F1 flapping: a cap that started late keeps the start tick's envelope (firm 0) on its running ticks (`_icbm_late_latch`, cleared when the
+  episode leaves the cap phase). Before, the next tick reverted to the firm ramp + the 350 m-capped window, un-bound the cap within 0.6 s and
+  the next tick re-started it (2 Hz engage/clear; each re-engage latched the ceiling at our own lowered set, 70 -> 61 mph lost). Closed-loop test at
+  65/70/75 mph from 520-560 m: exactly one engage, ceiling never moves.
+- F2 penalty gap: the late rule now applies only to apexes at or below `low_v_mph` (30 mph; `PnwVehicle.icbm_late_start_apex_max_ms`). The
+  penalties lower the target AFTER the envelope was sized, so a 40-47 mph apex arrived 3.5-5 mph over target; those keep today's tracking start.
+- F3 shallow-first: on a late-eligible tick, if a shallower curve that is NOT covered by the rule would itself start the episode by the tracking window
+  (`icbm_far_map_candidate(skip_late=...)` probe, unpriced), no late start that tick (`icbmStartWhy` = `trackShallow`). Could not reproduce a
+  failure in the closed loop (arrival at the deep node within 0.5 mph of today across a sweep with and without the probe); kept as a precaution.
+- A `restore`-phase tick is no longer a START tick; a lead seen during a Chill interlude now updates the 5 s lead clock.
+

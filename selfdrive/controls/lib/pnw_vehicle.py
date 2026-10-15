@@ -1088,6 +1088,14 @@ class PnwVehicle:
     path), and the Lightning when curve.json sets it to 0."""
     return self._curve_cfg["icbm_late_start_drop_mph"] * _MPH_TO_MS if self.lightning_curve_slow else 0.0
 
+  @property
+  def icbm_late_start_apex_max_ms(self) -> float:
+    """icbmlatestart2pnw: the late-start rule applies only to curves whose effective apex is at or below this (m/s) -- the
+    curve penalty's low_v knee (30 mph: tight nodes / roundabouts, penalty ~1 mph). Above it the penalties lower the target
+    after the envelope was sized (+3.5-5 mph over target at 40-47 mph apexes), so those keep the tracking start.
+    inf off the Lightning (the rule is off there anyway: icbm_late_start_drop_ms is 0.0)."""
+    return self._curve_cfg["low_v_mph"] * _MPH_TO_MS if self.lightning_curve_slow else float("inf")
+
   def icbm_map_floor_ms(self, raw_map_v) -> float:
     """icbmslow2pnw: the speed (m/s) the Lightning curve penalty may not push an ICBM MAP/FAR curve
     target below -- `icbm_map_floor_frac` times that candidate's OWN raw mapd rating.

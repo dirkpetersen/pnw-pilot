@@ -6,6 +6,7 @@ the executor then jumps the set to the apex. The truck cannot slow faster than ~
 is WHEN the cap starts, not how fast it walks. Synthetic geometry only (no private coordinates).
 """
 import inspect
+import sys
 
 import pytest
 
@@ -14,7 +15,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import (
   ICBM_LATE_BOUND_MS, ICBM_LATE_LEAD_WAIT_S, icbm_curve_target, icbm_late_start_gate, icbm_map_eff_scale,
   icbm_track_window_m, upcoming_curve)
-from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import FakeCP, _controller, _lightning, _scene
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvelead2pnw import FakeCP, _controller, _ll, _lightning, _scene
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from opendbc.car.ford.icbm_pnw import IcbmCommand, PressGovernor, STEP_MS, arbitrate, decide_press
 
@@ -162,6 +163,8 @@ class TestFirmRampIsOffOnLateTicks:
     real = m.icbm_far_map_candidate
 
     def spy(*a, **kw):
+      if kw.get("skip_late") is not None:
+        return real(*a, **kw)
       recorded.append(a[7] if len(a) > 7 else kw.get("firm_decel"))
       return real(*a, **kw)
     monkeypatch.setattr(m, "icbm_far_map_candidate", spy)
@@ -289,9 +292,12 @@ class TestConsistency:
 
     def spy_t(*a, **kw):
       calls["target"].append((kw.get("firm_decel"), kw.get("late_drop")))
+      assert kw.get("late_apex_max") == _veh().icbm_late_start_apex_max_ms, "a call site dropped late_apex_max"
       return rt(*a, **kw)
 
     def spy_f(*a, **kw):
+      if kw.get("skip_late") is not None:     # the shallow-curve probe is deliberately priced with today's firm
+        return rf(*a, **kw)
       calls["far"].append(a[7] if len(a) > 7 else kw.get("firm_decel"))
       return rf(*a, **kw)
     monkeypatch.setattr(m, "icbm_curve_target", spy_t)
@@ -344,7 +350,7 @@ class TestConsistency:
     class Bare:
       pass
     veh = _lightning()
-    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0)
+    assert m._icbm_tick_params(Bare(), veh) == (veh.icbm_firm_decel, 0.0, float("inf"))
 
 
 # ---- 7: the knob ---------------------------------------------------------------------------------------------------
@@ -409,3 +415,161 @@ class TestRoundaboutFixture:
     assert 240 <= on <= 262, f"late start at {on} m, expected the 240-260 m onset"
     assert off - on >= 60, "the start must move at least 60 m closer"
     assert c._icbm_start_why == "env"
+
+
+# ---- review fixes (Opus BLOCK 2026-10-15) ------------------------------------------------------------------------------
+def _closed_loop(monkeypatch, v0, map_v, d0, decel=0.8, knob_on=True, stop=40.0):
+  """Truck at set speed v0 approaching a rated curve d0 m out, following the stock set at `decel`; the Ford executor taps the set."""
+  clock = [6000.0]
+  c, step = _controller(monkeypatch, clock, _veh(knob_on))
+  v = stock = v0
+  gov, frame, pressing = PressGovernor(), 0, False
+  d, trace = d0, []
+  while d > stop and len(trace) < 600:
+    c._stock_set = stock
+    pub = _tick(c, step, clock, d, v, stock, map_v=map_v)
+    clock[0] -= 0.25
+    cmd = None
+    if pub and pub.get("target") is not None:
+      cmd = IcbmCommand(target_ms=pub["target"], ceiling_ms=pub["ceiling"], ts=pub["ts"], dir=pub.get("dir", "dec"))
+    for _ in range(25):
+      btn = gov.update(frame, decide_press(stock, arbitrate([cmd], clock[0]), clock[0], True, False))
+      if pressing and btn is None:
+        stock -= STEP_MS
+      pressing = btn == "dec"
+      frame += 1
+      clock[0] += 0.01
+    v = max(stock, v - decel * 0.25) if stock < v else v
+    d -= v * 0.25
+    trace.append((d, v, stock, c._icbm_ep.phase, c._icbm_ep.ceiling))
+  return trace
+
+
+class TestHighwayDoesNotFlap:
+  """F1: a late-started cap keeps the start tick's envelope on its running ticks. Before the latch the next tick reverted to the
+  firm ramp + the capped tracking window, found nothing binding at 350-480 m, cleared, and the next tick re-started: 2 Hz
+  engage/clear, each re-engage latching the ceiling at our own lowered set (70 -> 22 mph lost 9 mph of set)."""
+
+  @pytest.mark.parametrize("mph,map_v,d0", [(70, 10.0, 560.0), (65, 9.0, 520.0), (75, 12.0, 560.0)])
+  def test_exactly_one_engage_and_the_ceiling_never_moves(self, monkeypatch, mph, map_v, d0):
+    v0 = mph * MPH
+    tr = _closed_loop(monkeypatch, v0, map_v, d0)
+    engages = sum(1 for a, b in zip(tr, tr[1:], strict=False) if b[3] == "cap" and a[3] != "cap")
+    first = next(i for i, t in enumerate(tr) if t[3] == "cap")
+    engages += 1 if first == 0 else 0
+    assert engages == 1, f"{engages} engages (flapping)"
+    ceilings = {round(t[4], 2) for t in tr if t[3] == "cap"}
+    assert ceilings == {round(v0, 2)}, f"ceiling drifted: {sorted(ceilings)}"
+    assert all(t[3] == "cap" for t in tr[first:]), "the cap left its phase before the curve"
+
+  def test_the_latch_is_what_holds_it(self, monkeypatch):
+    """Direct: tick 1 starts late; tick 2 (same truck, 4 m on) must still price at firm 0, and the latch clears when the cap ends."""
+    clock = [1000.0]
+    c, step = _controller(monkeypatch, clock, _veh())
+    v = 31.3
+    _tick(c, step, clock, 450.0, v, v, map_v=10.0)
+    assert c._icbm_ep.phase == "cap" and c._icbm_firm_t == 0.0 and c._icbm_late_latch
+    _tick(c, step, clock, 445.0, v, v, map_v=10.0)
+    assert c._icbm_firm_t == 0.0 and c._icbm_late_t == 0.0, "running tick: firm latched, tracking window restored"
+    cls = next(o for o in vars(m).values() if inspect.isclass(o) and hasattr(o, "_icbm_step"))
+    c._icbm_last_pub = -1e9
+    cls._icbm_step.__get__(c)({"v_ego": v}, active=False)
+    assert c._icbm_late_latch is False
+
+
+class TestApexNarrowing:
+  """F2: the late envelope uses the PRE-penalty apex; the penalties lower the target afterwards, so a faster apex (40-47 mph)
+  would arrive 3.5-5 mph over target. The rule applies only at or below low_v (30 mph)."""
+
+  def test_accessor(self, default_curve_cfg):
+    assert _lightning().icbm_late_start_apex_max_ms == pytest.approx(30 * MPH)
+    assert PnwVehicle(FakeCP("TESLA_MODEL_S_RAVEN", "tesla", True)).icbm_late_start_apex_max_ms == float("inf")
+
+  def test_pure_function_keeps_tracking_above_the_cap(self):
+    v = ref = 24.0                            # 54 mph: the tracking window (311 m) reaches past the envelope (267 m)
+
+    def pair(apex_mph, d):
+      eff = apex_mph * MPH
+      kw = dict(far_v=eff, far_dist=float(d), firm_decel=0.0, track=True)
+      return (icbm_curve_target(v, ref, 0.0, float("inf"), None, icbm_map_eff_scale, late_drop=LATE,
+                                late_apex_max=30 * MPH, **kw)[0],
+              icbm_curve_target(v, ref, 0.0, float("inf"), None, icbm_map_eff_scale, late_drop=0.0, **kw)[0])
+    assert all(a == b for a, b in (pair(31.3, d) for d in range(100, 500, 5))), "a 31 mph apex must keep the tracking start"
+    assert any(a != b for a, b in (pair(29.0, d) for d in range(100, 500, 5))), "a 29 mph apex must be held to the envelope"
+
+  def test_step_above_the_cap_keeps_todays_start(self, monkeypatch):
+    mv = 31.3 * MPH / (1.1 * 0.92)
+    on, c_on = _one(monkeypatch, 290.0, v=24.0, v_set=24.0, map_v=mv)
+    off, c_off = _one(monkeypatch, 290.0, v=24.0, v_set=24.0, knob_on=False, map_v=mv)
+    assert off and off.get("target") is not None, "premise: today starts here (tracking only)"
+    assert on == off
+    assert c_on._icbm_start_why in ("track", "trackShallow"), "a >30 mph apex is itself a tracking starter"
+    # and a 29 mph apex at the same speed IS held back
+    mv29 = 29.0 * MPH / (1.1 * 0.92)
+    held, c_held = _one(monkeypatch, 300.0, v=24.0, v_set=24.0, map_v=mv29)
+    assert (held or {}).get("target") is None and c_held._icbm_start_why == "lateWait"
+
+
+def _two_curve_scene(shallow_v, gap):
+  """straight road with two rated nodes: the DEEP one at `curve_at`, a shallower one `gap` m before it (raw mapd velocities)."""
+  def scene(curve_at, radius, map_v, step=40.0):
+    pts, y = [], -200.0
+    while y < curve_at + 60.0:
+      la, lo = _ll(0.0, y)
+      pts.append({"latitude": la, "longitude": lo, "velocity": 0.0})
+      y += step
+    for yy, vv in ((curve_at - gap, shallow_v), (curve_at, map_v)):
+      la, lo = _ll(0.0, yy)
+      k = min(range(len(pts)), key=lambda i: abs(pts[i]["latitude"] - la))
+      pts[k] = {"latitude": la, "longitude": lo, "velocity": vv}
+    return pts
+  return scene
+
+
+class TestShallowCurveFirst:
+  """F3: a shallower curve that would itself start the episode by the tracking window must not leave the deep node behind it
+  waiting for a late start (and then the ratchet confirmation, which eats the 30 m margin)."""
+
+  def test_shallow_probe_hands_the_start_back_to_today(self, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_scene", _two_curve_scene(13.5, 120.0))
+    on, c_on = _one(monkeypatch, 270.0, map_v=6.8)          # the deep node is the late one (270 m > its 255 m envelope)
+    off, c_off = _one(monkeypatch, 270.0, knob_on=False, map_v=6.8)
+    assert off and off.get("target") is not None, "premise: today starts here"
+    assert on == off, "a shallow starter ahead: the decision must be today's"
+    assert c_on._icbm_start_why == c_off._icbm_start_why
+    assert (c_on._icbm_firm_t, c_on._icbm_late_t) == (c_on._veh.icbm_firm_decel, 0.0), "the tick was priced as a late tick"
+
+  def test_without_a_shallow_curve_the_deep_one_still_waits(self, monkeypatch):
+    on, c_on = _one(monkeypatch, 300.0, map_v=6.8)
+    assert (on or {}).get("target") is None and c_on._icbm_start_why == "lateWait"
+
+  @pytest.mark.parametrize("v0,deep_v,d0,gap,sv", [(20.2, 6.8, 420.0, 60, 13.5), (20.2, 6.8, 420.0, 100, 16.0),
+                                                  (24.0, 8.0, 480.0, 60, 13.5), (31.3, 9.0, 560.0, 120, 24.8)])
+  def test_arrival_at_the_deep_node_is_no_faster_than_today(self, monkeypatch, v0, deep_v, d0, gap, sv):
+    monkeypatch.setattr(sys.modules[__name__], "_scene", _two_curve_scene(sv, float(gap)))
+    arrive = []
+    for knob in (False, True):
+      tr = _closed_loop(monkeypatch, v0, deep_v, d0, knob_on=knob, stop=8.0)
+      arrive.append(next(t[1] for t in tr if t[0] <= 12.0) / MPH)
+    apex = deep_v * 1.1 * 0.92 / MPH
+    assert arrive[1] <= arrive[0] + 0.5, f"late start arrives faster than today: {arrive}"
+    assert arrive[1] <= apex + 3.0 or arrive[0] > apex + 3.0, f"arrival {arrive[1]:.1f} mph vs apex {apex:.1f}"
+
+
+class TestRestorePhaseIsNotAStartTick:
+  def test_a_restoring_episode_gets_todays_inputs(self, monkeypatch):
+    clock = [1000.0]
+    c, step = _controller(monkeypatch, clock, _veh())
+    c._icbm_ep.phase = "restore"
+    c._icbm_ep.ceiling = 20.6
+    _tick(c, step, clock, 300.0, 20.2, 20.6, map_v=6.8)
+    assert (c._icbm_firm_t, c._icbm_late_t) == (c._veh.icbm_firm_decel, 0.0)
+
+  def test_lead_seen_during_chill_still_counts(self, monkeypatch):
+    clock = [1000.0]
+    c, step = _controller(monkeypatch, clock, _veh())
+    step({"v_ego": 20.0, "has_lead": True}, active=False)
+    clock[0] += 0.5
+    c._icbm_last_pub = -1e9
+    _tick(c, step, clock, 300.0, 20.2, 20.6, map_v=6.8)
+    assert c._icbm_start_why == "trackLead", "a lead seen 0.5 s ago, during Chill, must hold the start to today's rule"

@@ -1142,7 +1142,7 @@ def _icbm_binding_apex(v_ego, ref, apex, dist, a_decel=ICBM_A_DECEL):
 
 
 def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_scale=1.0,
-                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M, eff_fn=None):
+                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M, eff_fn=None, skip_late=None):
   """descentcurve2pnw: FULL-horizon map candidate for ICBM. Scans every mapd path point out to
   `horizon_m` (mapd's 500 m publish cap — vs the old 10 s time window, ~400 m at 90 mph) and
   returns (apex_eff m/s, dist m, apex_RAW m/s) of the MOST-BINDING candidate — the one whose decel-limited brake
@@ -1162,7 +1162,11 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
   silently rot the day icbm_map_eff_scale changes again (it already has, 2026-08-11).
 
   curveshape2pnw: eff_fn(tv, dist), when given, prices each point instead of scale_fn(tv) * tv * map_scale (the
-  measured-shape stage's ShapePricer, live mode only). None (the default) is the exact old expression."""
+  measured-shape stage's ShapePricer, live mode only). None (the default) is the exact old expression.
+
+  icbmlatestart2pnw: skip_late=(late_drop, late_apex_max), when given, leaves out every point the late-start rule applies to
+  (drop ref - eff >= late_drop and eff <= late_apex_max), so the result is the most-binding point that would still start by
+  the tracking window -- the "shallow curve that starts the episode first" probe. None = every point (the old behaviour)."""
   if not points or cur_lat is None or cur_lon is None or ref <= 0.0:
     return 0.0, float('inf'), 0.0
   best_cap = float('inf')
@@ -1180,6 +1184,8 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
     eff = scale_fn(tv) * tv * map_scale if eff_fn is None else eff_fn(tv, d)
     if eff >= ref - ICBM_MIN_DROP_MS:
       continue                                  # reduce-only: not meaningfully below the ceiling
+    if skip_late is not None and skip_late[0] > 0 and ref - eff >= skip_late[0] and eff <= skip_late[1]:
+      continue
     a = icbm_approach_decel(v_ego, eff, firm_decel)
     cap = math.sqrt(eff * eff + 2.0 * a * max(d - ICBM_MARGIN_M, 0.0))   # decel envelope from here
     if cap < best_cap:
@@ -1250,7 +1256,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
                       far_v=0.0, far_dist=float('inf'),
-                      track=False, eff_fn=None, late_drop=0.0):
+                      track=False, eff_fn=None, late_drop=0.0, late_apex_max=float('inf')):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
   where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
   VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
@@ -1272,6 +1278,9 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   icbmlatestart2pnw: late_drop (m/s, default 0 = byte-identical to before) > 0 withholds the tracking-window start from
   every MAP/FAR candidate whose drop (ref - effective apex) is >= late_drop: such a candidate may start only through the
   v_ego decel envelope. The caller passes it on a START tick only -- a running cap episode keeps the tracking window.
+  late_apex_max (m/s): the rule applies only to candidates whose effective apex is at or below this (the Lightning's low_v:
+  tight nodes and roundabouts, where the curve penalty is ~1 mph; a faster apex is lowered further by the penalties AFTER
+  this envelope was sized, so it keeps the tracking start).
 
   ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
   capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
@@ -1292,7 +1301,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   if map_v and map_v > 0 and map_dist != float('inf'):
     eff = scale_fn(map_v) * map_v * map_scale if eff_fn is None else eff_fn(map_v, map_dist)
     a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
-    if a is None and track and not (late_drop > 0 and ref - eff >= late_drop):
+    if a is None and track and not (late_drop > 0 and ref - eff >= late_drop and eff <= late_apex_max):
       # icbmtrack2pnw: continuous set-tracking — a binding-RATED map curve within the tracking
       # window starts the walk-down even before the v_ego decel envelope binds (lead-bound case).
       a = _icbm_track_apex(v_ego, ref, eff, map_dist)
@@ -1307,7 +1316,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   # icbm_far_map_candidate). Same binding envelope; catches curves beyond the 10 s window at speed.
   if far_v and far_v > 0 and far_dist != float('inf'):
     a = _icbm_binding_apex(v_ego, ref, far_v, far_dist, icbm_approach_decel(v_ego, far_v, firm_decel))
-    if a is None and track and not (late_drop > 0 and ref - far_v >= late_drop):
+    if a is None and track and not (late_drop > 0 and ref - far_v >= late_drop and far_v <= late_apex_max):
       a = _icbm_track_apex(v_ego, ref, far_v, far_dist)   # icbmtrack2pnw (far_v already effective)
     if a is not None and (best_apex is None or a < best_apex):
       best_apex, best_src = a, "far"
@@ -1339,11 +1348,13 @@ def icbm_late_start_gate(starting, lead_age_s, v_ego, ref):
 
 
 def _icbm_tick_params(ctl, veh):
-  """icbmlatestart2pnw: (firm_decel, late_drop) for THIS tick, as _icbm_step set them, so every icbm_curve_target /
+  """icbmlatestart2pnw: (firm_decel, late_drop, late_apex_max) for THIS tick, as _icbm_step set them, so every icbm_curve_target /
   icbm_far_map_candidate call of the tick (step, passed-point gate, shape stage, curve DB) decides on the same
   inputs. Falls back to today's values (veh.icbm_firm_decel, 0.0) where _icbm_step has not set them (bare test stubs)."""
   firm = getattr(ctl, "_icbm_firm_t", None)
-  return (veh.icbm_firm_decel if firm is None else firm), (getattr(ctl, "_icbm_late_t", None) or 0.0)
+  vmax = getattr(ctl, "_icbm_late_vmax_t", None)
+  return ((veh.icbm_firm_decel if firm is None else firm), (getattr(ctl, "_icbm_late_t", None) or 0.0),
+          float("inf") if vmax is None else vmax)
 
 
 # ---------------------------------------------------------------------------
@@ -2030,7 +2041,7 @@ def _curve_passed_filter(ctl, points, lat, lon, v_ego):
     return points
 
 
-def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop,
+def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop, late_vmax,
                        target, late_why):
   """icbmlatestart2pnw telemetry (Rule 2: a withheld start must be visible). For a START tick: "env" (the decel envelope
   bound), "track" / "trackLead" / "trackBound" (the tracking window started it; the second and third say a lead / a
@@ -2038,7 +2049,7 @@ def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, e
   the late rule withheld it), else None. Two extra pure calls, only on a START tick with a decision to explain."""
   def decide(**kw):
     args = dict(map_scale=ctl._veh.icbm_map_scale, firm_decel=firm, far_v=far_v, far_dist=far_dist, eff_fn=eff_fn,
-                late_drop=late_drop)
+                late_drop=late_drop, late_apex_max=late_vmax)
     args.update(kw)
     return icbm_curve_target(sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
                              sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
@@ -2047,7 +2058,7 @@ def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, e
     if target is not None:
       if decide(track=False) is not None:
         return "env"
-      return {"lead": "trackLead", "bound": "trackBound"}.get(late_why, "track")
+      return {"lead": "trackLead", "bound": "trackBound", "shallow": "trackShallow"}.get(late_why, "track")
     if late_drop > 0.0 and decide(track=True, late_drop=0.0) is not None:
       return "lateWait"
   except Exception:
@@ -2091,7 +2102,7 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     far = (far_v, far_dist, far_raw)
     veh = ctl._veh
     eff_fn = getattr(ctl, "_icbm_eff_fn", None)     # curveshape2pnw: the live pricer, None otherwise
-    firm, late_drop = _icbm_tick_params(ctl, veh)   # icbmlatestart2pnw: this tick's values
+    firm, late_drop, late_vmax = _icbm_tick_params(ctl, veh)   # icbmlatestart2pnw: this tick's values
     if src == "map":
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
       if a_near == near:
@@ -2110,7 +2121,7 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     new_target, _, new_src = icbm_curve_target(
       sig["v_ego"], sig["v_set"], a_near[0], a_near[1], ceiling, icbm_map_eff_scale, vis[0], vis[1],
       map_scale=veh.icbm_map_scale, firm_decel=firm, far_v=a_far[0], far_dist=a_far[1], track=True,
-      eff_fn=eff_fn, late_drop=late_drop)
+      eff_fn=eff_fn, late_drop=late_drop, late_apex_max=late_vmax)
   except Exception:
     try:
       if now - (getattr(ctl, "_icbm_passed_err", None) or -1e9) > ICBM_ERR_LOG_S:
@@ -2480,14 +2491,15 @@ def _icbm_shape_step(ctl, now, sig, plat, plon, gps_state, ref, ep_ceiling, vis_
     v_ego, v_set = sig["v_ego"], sig["v_set"]
     map_v, map_d = sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf"))
 
-    firm, late_drop = _icbm_tick_params(ctl, veh)    # icbmlatestart2pnw: this tick's values
+    firm, late_drop, late_vmax = _icbm_tick_params(ctl, veh)    # icbmlatestart2pnw: this tick's values
 
     def core(eff):
       far_v, far_d, far_raw = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale, veh.icbm_map_scale,
                                                      firm, eff_fn=eff)
       t, _, src = icbm_curve_target(v_ego, v_set, map_v, map_d, ep_ceiling, icbm_map_eff_scale, vis_v, vis_dist,
                                     map_scale=veh.icbm_map_scale, firm_decel=firm,
-                                    far_v=far_v, far_dist=far_d, track=True, eff_fn=eff, late_drop=late_drop)
+                                    far_v=far_v, far_dist=far_d, track=True, eff_fn=eff, late_drop=late_drop,
+                                    late_apex_max=late_vmax)
       if t is not None:
         t = icbm_penalise(veh, pts, t, src, sig, plat, plon, far_d, far_raw, pricer=eff)[0]
       # the candidate the record describes: the one that bound, else the near map candidate, else the far one
@@ -5745,7 +5757,10 @@ class CESController:
         self._icbm_dir = None
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
-        self._icbm_firm_t, self._icbm_late_t, self._icbm_start_why = None, None, None   # icbmlatestart2pnw: per-tick only
+        self._icbm_firm_t, self._icbm_late_t, self._icbm_late_vmax_t, self._icbm_start_why = None, None, None, None   # icbmlatestart2pnw: per-tick only
+        self._icbm_late_latch = False
+        if sig.get("has_lead", False):
+          self._icbm_lead_seen_t = now      # a lead seen during a Chill interlude still counts
         self._icbm_gps_age = None         # gpslag2pnw
         self._icbm_stale_hold = None      # gpsdrgate2pnw
         self._icbm_passed_state = None    # behindgate2pnw: the next verdict after a Chill interlude logs again
@@ -5827,12 +5842,32 @@ class CESController:
       if sig.get("has_lead", False):
         self._icbm_lead_seen_t = now
       lead_seen_t = getattr(self, "_icbm_lead_seen_t", None)
+      # A START tick is a tick with no episode in its cap OR restore phase (a restore is an episode still in progress).
       late_ok, late_why = icbm_late_start_gate(
-        self._icbm_ep.phase != "cap", None if lead_seen_t is None else now - lead_seen_t, sig["v_ego"], ref)
+        self._icbm_ep.phase not in ("cap", "restore"), None if lead_seen_t is None else now - lead_seen_t, sig["v_ego"], ref)
       late_knob = self._veh.icbm_late_start_drop_ms
-      firm = 0.0 if late_ok and late_knob > 0.0 else self._veh.icbm_firm_decel
+      late_vmax = self._veh.icbm_late_start_apex_max_ms
+      if late_ok and late_knob > 0.0:
+        # F3: a shallower curve ahead that would itself start the episode by the tracking window starts it FIRST, and a deeper
+        # tight node behind it would then wait the ratchet confirmation (eating the 30 m margin). Then no late start: today's
+        # decision. Probed with the unpriced (pre-shape) candidates -- the shape stage below needs this tick's values first.
+        sh_v, sh_d, _ = icbm_far_map_candidate(self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
+                                               self._veh.icbm_map_scale, self._veh.icbm_firm_decel,
+                                               skip_late=(late_knob, late_vmax))
+        if sh_v > 0.0 and (_icbm_binding_apex(sig["v_ego"], ref, sh_v, sh_d,
+                                              icbm_approach_decel(sig["v_ego"], sh_v, self._veh.icbm_firm_decel)) is not None
+                           or _icbm_track_apex(sig["v_ego"], ref, sh_v, sh_d) is not None):
+          late_ok, late_why = False, "shallow"
+      if self._icbm_ep.phase != "cap":
+        self._icbm_late_latch = False       # the late-started episode (if any) is over
+      # F1: a cap that STARTED late keeps the start tick's envelope (firm 0) on its running ticks. Reverting to the firm
+      # ramp + the 350 m-capped window un-bound a highway cap within 0.6 s (engage/clear flapping, each re-engage latching
+      # the ceiling at our own lowered set). late_drop stays 0 on running ticks: the tracking window keeps the cap bound.
+      latched = bool(getattr(self, "_icbm_late_latch", False)) and self._icbm_ep.phase == "cap"
+      firm = 0.0 if (late_ok and late_knob > 0.0) or latched else self._veh.icbm_firm_decel
       late_drop = late_knob if late_ok else 0.0
-      self._icbm_firm_t, self._icbm_late_t, self._icbm_start_why = firm, late_drop, None
+      self._icbm_firm_t, self._icbm_late_t, self._icbm_late_vmax_t = firm, late_drop, late_vmax
+      self._icbm_start_why = None
       # curveshape2pnw: the measured-shape stage. Always computes + logs its decision (shp*); hands ICBM a pricer
       # ONLY in live mode. In shadow/off `eff_fn` is None and every call below is the pre-curveshape expression.
       eff_fn = self._icbm_eff_fn = _icbm_shape_step(self, now, sig, plat, plon, gps_state, ref, ep_ceiling,
@@ -5858,10 +5893,10 @@ class CESController:
         sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
         vis_v, vis_dist,
         map_scale=self._veh.icbm_map_scale, firm_decel=firm,
-        far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop)
+        far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop, late_apex_max=late_vmax)
       if starting:
         self._icbm_start_why = _icbm_start_why_of(
-          self, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop, target, late_why)
+          self, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop, late_vmax, target, late_why)
       if target is not None and starting:
         if in_curve:
           # driver rule 2: NEVER begin a new dec episode while already loaded in the curve — hold
@@ -5880,7 +5915,7 @@ class CESController:
             sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
             0.0, float("inf"),
             map_scale=self._veh.icbm_map_scale, firm_decel=firm,
-            far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop)
+            far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop, late_apex_max=late_vmax)
       # behindgate2pnw: a map/far point the truck has already driven past may not START an episode (see
       # icbm_passed_points).
       # behindrun2pnw (owner 2026-09-14, "Behind-curve gate: yes"): nor may it lower a RUNNING cap episode's target or
@@ -6154,6 +6189,8 @@ class CESController:
                                                  hold_ahead=rhold, hold_vsafe=rhold_vsafe,
                                                  gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas)
       _icbm_rhold_note(self, now, rhold_src)
+      if late_ok and late_knob > 0.0 and self._icbm_ep.phase == "cap":
+        self._icbm_late_latch = True        # this tick started the cap (late_ok is a START-tick quantity)
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
@@ -6227,13 +6264,13 @@ class CESController:
       v_ego, v_set = sig["v_ego"], sig["v_set"]
       veh = self._veh
       eff_fn = getattr(self, "_icbm_eff_fn", None)   # curveshape2pnw: the live pricer, None otherwise
-      firm, late_drop = _icbm_tick_params(self, veh)   # icbmlatestart2pnw: this tick's values
+      firm, late_drop, late_vmax = _icbm_tick_params(self, veh)   # icbmlatestart2pnw: this tick's values
 
       def one(map_v=0.0, map_dist=inf, v_vis=0.0, d_vis=inf, v_far=0.0, d_far=inf):
         # a single source through ICBM's own binding rule
         return icbm_curve_target(v_ego, v_set, map_v, map_dist, ep_ceiling, icbm_map_eff_scale, v_vis, d_vis,
                                  map_scale=veh.icbm_map_scale, firm_decel=firm,
-                                 far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn, late_drop=late_drop)[0]
+                                 far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn, late_drop=late_drop, late_apex_max=late_vmax)[0]
 
       # points the truck has already passed never re-enter as a re-derived candidate (behindgate2pnw's own test)
       mask, _why = icbm_passed_points(self._map_targets, plat, plon, getattr(self, "_cur_bearing", None), v_ego)
