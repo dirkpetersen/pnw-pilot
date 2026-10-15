@@ -179,3 +179,34 @@ def test_a_branch_without_a_recorded_speed_is_counted_not_dropped():
     object.__setattr__(o, "v_ms", float("nan"))
   _doc, counts = ex.export_doc(idx, None, None, True)
   assert counts["raise_only_rows"] == 0 and counts["raise_only_not_qualified"].get("no pass speed recorded") == 1
+
+
+def test_the_cli_with_raise_only_exits_nonzero_and_writes_nothing_when_no_row_qualifies(tmp_path, monkeypatch, capsys):
+  """Rule 2: 100% non-qualification (e.g. a table with no pass speeds) is a broken method, and a manifest declaring raiseOnly with zero rows
+  would make the Tesla treat every row as unreliable."""
+  import gzip
+
+  from openpilot.tools.curvedb import v2_replay
+  idx = _ro_idx()
+  for o in idx.anchors[1].obs:
+    object.__setattr__(o, "v_ms", float("nan"))
+  monkeypatch.setattr(v2_replay, "load_table", lambda path: idx)
+  monkeypatch.setattr(ex, "load_table", lambda path: idx)
+  with gzip.open(tmp_path / "t.json.gz", "wb") as f:
+    f.write(b"{}")
+  out = tmp_path / "o"
+  assert ex.main(["--table", str(tmp_path / "t.json.gz"), "--out", str(out), "--raise-only"]) == 2
+  assert not out.exists() and "ZERO raise-only rows" in capsys.readouterr().out
+
+
+def test_the_cli_with_raise_only_writes_when_a_row_qualifies(tmp_path, monkeypatch):
+  import gzip
+
+  from openpilot.tools.curvedb import v2_replay
+  monkeypatch.setattr(v2_replay, "load_table", lambda path: _ro_idx())
+  monkeypatch.setattr(ex, "load_table", lambda path: _ro_idx())
+  with gzip.open(tmp_path / "t.json.gz", "wb") as f:
+    f.write(b"{}")
+  assert ex.main(["--table", str(tmp_path / "t.json.gz"), "--out", str(tmp_path / "o"), "--raise-only"]) == 0
+  man = json.loads((tmp_path / "o" / "manifest.json").read_text())
+  assert man["flags"] == "raiseOnly" and man["raise_only_rows"] == 1

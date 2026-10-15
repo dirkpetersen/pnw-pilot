@@ -346,6 +346,14 @@ def extent_peak(pts: list[Point], i: int, back_m: float, fwd_m: float):
   return peak, "ok"
 
 
+def extent_min_speed(pts: list[Point], i: int, back_m: float, fwd_m: float) -> float:
+  """curvedbraiseonly2pnw: the MINIMUM speed over the same extent extent_peak measured k_ext on -- the speed the pass actually drove the curve at
+  (a pass that braked into it is recorded at its in-curve speed, not its entry speed). NaN when no point has a finite speed."""
+  s0 = pts[i].s
+  vs = [p.v for p in pts if s0 - back_m <= p.s <= s0 + fwd_m and p.v is not None and math.isfinite(p.v)]
+  return min(vs) if vs else float("nan")
+
+
 # ---------------------------------------------------------------------------------------------
 # anchors: the road table's keys
 # ---------------------------------------------------------------------------------------------
@@ -376,7 +384,7 @@ class PassObs:
   # fully known, 461 fully unknown, 4 mixed): whole passes predate mapd v2.2.0's highwayClass. Such a pass
   # still measures curvature, but it is not CLASS evidence -- see row_verdict.
   ext_known: bool = True
-  # curvedbraiseonly2pnw: the pass's speed at the anchor point, m/s (NaN = not recorded: a table built before this field). Only the
+  # curvedbraiseonly2pnw: the pass's MINIMUM speed over the extent k_ext was measured on, m/s (NaN = not recorded: a table built before this field). Only the
   # raise-only export reads it (the fastest recorded pass on a branch caps what a raise-only row may raise to).
   v_ms: float = float("nan")
 
@@ -481,7 +489,8 @@ def add_pass(index: AnchorIndex, pts: list[Point], *, date: str, drive: str, car
     index.anchors[ai].obs.append(PassObs(date=date, drive=drive, car=car, t=pt.t, k_ext=k_ext, k_loc=pt.k,
                                          way=pt.way, hwy=pt.hwy, road=pt.road, spl=pt.spl,
                                          mode=pass_mode(pt), d_m=d, end_lat=end[0], end_lon=end[1],
-                                         ext_ramp=ramp, ext_known=known, v_ms=pt.v))
+                                         ext_ramp=ramp, ext_known=known,
+                                         v_ms=extent_min_speed(pts, i, p.extent_back_m, p.extent_fwd_m)))
     tally["pass admitted"] += 1
 
 
@@ -573,7 +582,8 @@ def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, ex
 
   Qualifies only if `verdict` is the refusal "dates disagree" -- row_verdict applies that rule LAST, so every other owner rule (>= 2 dates,
   never Tesla-only, no ramp, class known, a fully classified pass) already held. k_worst is the SHARPEST single pass pooled into the branch
-  (max k_ext, the same passes row_verdict pools: exclude_date and the branch radius honoured); v_fast_ms the FASTEST pass speed on it. A branch
+  (max k_ext, the same passes row_verdict pools: exclude_date and the branch radius honoured); v_fast_ms the FASTEST non-Tesla, known-car
+  pass's in-extent MINIMUM speed (PassObs.v_ms). A branch
   none of whose passes recorded a speed does not qualify (fails closed: the speed cap could not be computed)."""
   if verdict.granted or not verdict.reason.startswith("dates disagree"):
     return f"not spread-refused ({verdict.reason})"
@@ -586,7 +596,9 @@ def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, ex
   ks = [o.k_ext for o in obs if math.isfinite(o.k_ext)]
   if not ks or max(ks) <= 0.0 or min(ks) < 0.0:
     return "no usable curvature"
-  vs = [o.v_ms for o in obs if math.isfinite(o.v_ms) and o.v_ms > 0.0]
+  # The speed cap is "what the road has been driven at": a Tesla pass (a different car, other tuning) or a pass of unknown car never sets it.
+  # row_verdict already guarantees at least one non-Tesla, known-car pass among the pooled ones.
+  vs = [o.v_ms for o in obs if math.isfinite(o.v_ms) and o.v_ms > 0.0 and o.car != "unknown" and not o.car.startswith(TESLA_PREFIX)]
   if not vs:
     return "no pass speed recorded"
   return max(ks), max(vs)

@@ -181,6 +181,10 @@ def main(argv=None) -> int:
   if counts["lower_bound_unmatched"]:
     print(f"{counts['lower_bound_unmatched']} lowerBound flag(s) match no row with authority -- not written (the flag file does not belong to this table)")
     return 2
+  if a.raise_only and counts["raise_only_rows"] == 0:
+    print(f"--raise-only found ZERO raise-only rows (not qualified: {counts['raise_only_not_qualified']}) -- not written: a table that declares raiseOnly " +
+          "with none would make the Tesla treat every row as unreliable, and a 100% non-qualification means the build is broken (no pass speeds?)")
+    return 2
   if counts["rows_with_authority"] == 0:
     print("ZERO rows with authority -- refusing to write a file the car would load as an empty DB")
     return 2

@@ -484,3 +484,33 @@ def test_granted_rows_are_unchanged_by_the_new_field():
   a = _anchor(_vobs("2026-09-01", 0.0020), _vobs("2026-09-02", 0.0022), _vobs("2026-09-03", 0.0024))
   v = rt.row_verdict(a, P)
   assert v.granted and v.k == pytest.approx(0.0022)
+
+
+def test_a_pass_that_braked_into_the_curve_is_recorded_at_its_in_curve_minimum_speed():
+  """curvedbraiseonly2pnw: v_ms = the MINIMUM speed over the extent k_ext was measured on, not the speed at the anchor point (entry)."""
+  pts = []
+  for i in range(60):                               # 10 m points, s = 0..590 m; 30 m/s at the start, braking to 12 m/s from s=200 on
+    v = 30.0 if i < 20 else 12.0
+    pts.append(rt.Point(s=i * 10.0, t=float(i), lat=45.0 + i * 10.0 / 111194.0, lon=-122.7, brg=0.0, v=v, k=0.002, fix_ok=True, drv=False,
+                        lat_active=True, way=1, hwy="motorway", road="I 5|I 5", spl=26.8, mcs=0.0))
+  idx = rt.AnchorIndex(P)
+  ai = idx.add(45.0 + 100.0 / 111194.0, -122.7, 0.0)      # anchor at s=100: extent [75, 250] contains the braking
+  rt.add_pass(idx, pts, date="2026-09-01", drive="r", car=LIGHTNING, in_scope=lambda p: False, tally=Counter())
+  o = idx.anchors[ai].obs[0]
+  assert pts[10].v == 30.0 and o.v_ms == pytest.approx(12.0)
+  # a pass whose extent never slows keeps its (constant) speed
+  idx2 = rt.AnchorIndex(P)
+  ai2 = idx2.add(45.0 + 300.0 / 111194.0, -122.7, 0.0)     # extent [275, 450]: all 12 m/s
+  rt.add_pass(idx2, pts, date="2026-09-01", drive="r", car=LIGHTNING, in_scope=lambda p: False, tally=Counter())
+  assert idx2.anchors[ai2].obs[0].v_ms == pytest.approx(12.0)
+
+
+def test_a_fast_tesla_or_unknown_car_pass_never_sets_the_raise_only_speed_cap():
+  a = _spread_anchor()                              # Lightning passes: fastest 25 m/s
+  a.obs.append(_vobs("2026-09-05", 0.0040, 40.0, car=TESLA, drive="t"))
+  a.obs.append(_vobs("2026-09-05", 0.0040, 45.0, car="unknown", drive="u"))
+  v = rt.row_verdict(a, P)
+  assert v.reason.startswith("dates disagree")
+  k, v_fast = rt.raise_only_info(a, P, v, branch=(45.00135, -122.7))
+  assert v_fast == pytest.approx(25.0)
+  assert k == pytest.approx(0.0058)                 # (k_worst still counts every pass: the sharpest is the safe direction)

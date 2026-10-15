@@ -586,6 +586,7 @@ class CurveDbLive:
     self._last: dict = {}
     self._last_t = -1e9
     self._way_cur_t = -1e9           # monotonic time of the last decision that saw waySel == "current"
+    self._age_done = False           # the table's age has been evaluated with a valid clock (at load or by the first valid poll)
     self._way_holding = False        # change-only log of a WAYSEL_HOLD_S ride-through
     if not self.enabled:
       self._loaded.set()
@@ -613,18 +614,43 @@ class CurveDbLive:
     else:
       self.index, self.manifest = idx, man   # one assignment each, after the index is complete
       self.state = "ok"
-      age = table_age_days(man.get("last_date"))
+      age = self._safe_age(man.get("last_date"))
       cloudlog.event("curvedb_v2_loaded", rows=idx.n_rows, anchors=len(idx.anchors), sha256=man.get("sha256"),
                      flags=man.get("flags"), lower_bound_rows=idx.n_lower_bound, raise_only_rows=idx.n_raise_only,
                      first_date=man.get("first_date"), last_date=man.get("last_date"),
                      age_days=age if isinstance(age, int) else "age unknown", seconds=round(time.monotonic() - t0, 2))
-      if isinstance(age, int) and age > STALE_TABLE_DAYS:   # (an unknown age is in the event as "age unknown": an unsynced boot clock is normal)
-        cloudlog.warning(f"curvedb_v2: the table's newest drive date {man.get('last_date')} is {age} days old (> {STALE_TABLE_DAYS}) -- " +
-                         "the roads driven since are not in it; rebuild and install a new table")
+      if isinstance(age, int):
+        self._age_done = True
+        self._warn_if_stale(age)
+      # else: an unsynced boot clock is normal -- poll_a re-evaluates once the clock is valid
     finally:
       self._loaded.set()
 
+  def _safe_age(self, last_date):
+    """table_age_days that can never kill the load thread: a crash is logged and reads as 'age unknown'."""
+    try:
+      return table_age_days(last_date)
+    except Exception:
+      cloudlog.exception("curvedb_v2: table age check CRASHED -- age unknown")
+      return "age check crashed"
+
+  def _warn_if_stale(self, age: int) -> None:
+    if age > STALE_TABLE_DAYS:
+      cloudlog.warning(f"curvedb_v2: the table's newest drive date {(self.manifest or {}).get('last_date')} is {age} days old (> {STALE_TABLE_DAYS}) -- " +
+                       "the roads driven since are not in it; rebuild and install a new table")
+
+  def _recheck_age(self) -> None:
+    """The table's age, evaluated ONCE when the wall clock first becomes valid (the load usually runs before it syncs): one event + the stale warning."""
+    if self._age_done or self.manifest is None:
+      return
+    age = self._safe_age(self.manifest.get("last_date"))
+    if isinstance(age, int):
+      self._age_done = True
+      cloudlog.event("curvedb_v2_age", age_days=age, last_date=self.manifest.get("last_date"))
+      self._warn_if_stale(age)
+
   def poll_a(self) -> None:
+    self._recheck_age()
     if self.a_override is not None:
       a, name, why = self.a_override, "curve.json", "ok"
       self._a = (a, name, why, time.monotonic())

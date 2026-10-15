@@ -50,7 +50,7 @@ row counts as unreliable (`mapCov` `u`), so the notch stays. A table that declar
 A branch refused ONLY by the date-spread rule ("dates disagree": a merging side road pooled into the branch window; it passed every other owner
 rule - >= 2 dates, not Tesla-only, no ramp, class known) can be exported (`v2_live_export.py --raise-only`) as a **raise-only row**: `k` = the SHARPEST
 single pass on the branch, branch element 5 = `2` (the element is now a bitmask: 1 lowerBound, 2 raiseOnly), element 6 = the fastest recorded pass
-speed (m/s), manifest `"flags":"lowerBound,raiseOnly"` (whichever are declared) and `raise_only_rows`. `rows_with_authority` / `cdb2Rows` /
+speed (m/s; each pass's MINIMUM speed over its 175 m extent, non-Tesla known-car passes only), manifest `"flags":"lowerBound,raiseOnly"` (whichever are declared) and `raise_only_rows`. `rows_with_authority` / `cdb2Rows` /
 `cbRows` do not count them. Without the option the export is byte-identical to before.
 
 - **Lightning:** a raise-only row may only RAISE a map/far candidate: any other direction is "none"; all existing caps apply (+15 mph, posted + 10,
@@ -62,7 +62,7 @@ speed (m/s), manifest `"flags":"lowerBound,raiseOnly"` (whichever are declared) 
 - Loader: flag 2 without the manifest declaring `raiseOnly`, a missing speed or `k`, an unknown manifest flag or a wrong `raise_only_rows` is LOAD FAILED
   (DB OFF on both cars). An older loader rejects the whole file (malformed branch), so INSTALL ORDER below applies: code before table.
 - Telemetry: `cdb2RO` (`matched` / `acted` / null), `cdb2Last` (the table's last drive date); `curvedb_v2_loaded` carries `raise_only_rows` and `age_days`
-  (or "age unknown" without a valid clock), and a `cloudlog.warning` when the table is older than 14 days.
+  (or "age unknown" without a valid clock; then the age is evaluated once on the first poll with a valid clock, event `curvedb_v2_age`), and a `cloudlog.warning` when the table is older than 14 days. `--raise-only` exits non-zero (nothing written) when no row qualifies.
 
 ## 4. INSTALL ORDER (critical)
 

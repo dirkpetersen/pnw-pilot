@@ -970,3 +970,37 @@ class TestTableAge:
   def test_an_invalid_clock_says_age_unknown(self, tmp_path, monkeypatch, logs):
     w = self._load(tmp_path, monkeypatch, logs, "2026-01-01", 1_000_000.0)
     assert dict(logs.events)["curvedb_v2_loaded"]["age_days"] == "age unknown" and w == []
+
+  def test_the_age_is_evaluated_once_when_the_clock_first_becomes_valid(self, tmp_path, monkeypatch, logs):
+    """The load usually runs before the wall clock syncs ('age unknown', no warning); the first poll with a valid clock warns once."""
+    warnings, clock = [], [1_000_000.0]
+    monkeypatch.setattr(cl.cloudlog, "warning", lambda msg, *a, **k: warnings.append(msg), raising=False)
+    monkeypatch.setattr(cl, "_wall_now", lambda: clock[0])
+    db = _live(tmp_path, [FAR_ANCHOR], logs, last_date="2026-08-01")
+    assert warnings == [] and db._age_done is False
+    db.poll_a()
+    assert warnings == [] and db._age_done is False                  # still no valid clock
+    clock[0] = self.NOW
+    db.poll_a()
+    assert len(warnings) == 1 and "51 days old" in warnings[0] and db._age_done
+    assert dict(logs.events)["curvedb_v2_age"]["age_days"] == 51
+    db.poll_a()
+    db.poll_a()
+    assert len(warnings) == 1 and [n for n, _ in logs.events].count("curvedb_v2_age") == 1       # once, not every poll
+
+  def test_a_fresh_table_gets_the_event_but_no_warning_on_the_late_clock(self, tmp_path, monkeypatch, logs):
+    warnings, clock = [], [1_000_000.0]
+    monkeypatch.setattr(cl.cloudlog, "warning", lambda msg, *a, **k: warnings.append(msg), raising=False)
+    monkeypatch.setattr(cl, "_wall_now", lambda: clock[0])
+    db = _live(tmp_path, [FAR_ANCHOR], logs, last_date="2026-09-20")
+    clock[0] = self.NOW
+    db.poll_a()
+    assert warnings == [] and dict(logs.events)["curvedb_v2_age"]["age_days"] == 1
+
+  def test_a_crashing_age_check_is_logged_and_never_kills_the_load(self, tmp_path, monkeypatch, logs):
+    def boom(*a, **k):
+      raise RuntimeError("x")
+    monkeypatch.setattr(cl, "table_age_days", boom)
+    db = _live(tmp_path, [FAR_ANCHOR], logs)
+    assert db.state == "ok" and len(logs.exceptions) >= 1 and "CRASHED" in logs.exceptions[0]
+    assert dict(logs.events)["curvedb_v2_loaded"]["age_days"] == "age unknown"
