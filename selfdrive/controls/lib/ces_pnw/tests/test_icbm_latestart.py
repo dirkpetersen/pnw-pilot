@@ -660,9 +660,10 @@ def _world_pts(pos, nodes, total=2500.0, step=40.0):
     out.append({"latitude": la, "longitude": lo, "velocity": vv})
   return out
 
-def _world_drive(monkeypatch, knob, v0, nodes, end, a_dec=1.0, a_acc=1.0, jitter=0.0, drop_after=None):
+def _world_drive(monkeypatch, knob, v0, nodes, end, a_dec=1.0, a_acc=1.0, jitter=0.0, drop_after=None, bearing=0.0):
   clock = [6000.0]
   c, step = _controller(monkeypatch, clock, _veh(knob))
+  c._cur_bearing = bearing
   v = stock = v0
   gov, frame, pressing = PressGovernor(), 0, None
   pos, tr = 0.0, []
@@ -740,3 +741,23 @@ class TestHoldIsForTheStartingCandidateOnly:
     tr = _world_drive(monkeypatch, True, mph * MPH, [(700.0, map_v)], 1000.0, a_dec=decel)
     engages = sum(1 for a, b in zip(tr, tr[1:], strict=False) if b[3] == "cap" and a[3] != "cap")
     assert engages == 1 and _profile(tr, 400, 1000, 100)[-1] >= 45
+
+
+class TestPassedNodeReleases:
+  """Map-node distances are unsigned: past the node it reads as a positive distance again. When the passed-point gate cannot call it
+  passed (slow < 5 m/s on a tight roundabout, no heading) the re-anchor used to pull the tracked distance back up, the 25 m pass exit never
+  fired and the latch lived until the node left the horizon (the crawl ~150 m LONGER than origin)."""
+
+  @pytest.mark.parametrize("raw", [3.5, 4.5, 5.5])
+  @pytest.mark.parametrize("bearing", [0.0, None])
+  def test_the_latch_ends_just_past_the_node_and_the_cap_ends_no_later_than_today(self, monkeypatch, raw, bearing):
+    node = 500.0
+    off = _world_drive(monkeypatch, False, 45 * MPH, [(node, raw)], 1200.0, bearing=bearing)
+    on = _world_drive(monkeypatch, True, 45 * MPH, [(node, raw)], 1200.0, bearing=bearing)
+
+    def cap_end(tr):
+      return [t[0] for t in tr if t[3] == "cap"][-1]
+
+    latch_end = [t[0] for t in on if t[6]][-1]
+    assert latch_end <= node + 45.0, f"latch alive until {latch_end:.0f} m (node at {node:.0f})"
+    assert cap_end(on) <= cap_end(off) + 5.0, f"cap ends {cap_end(on):.0f} m vs today {cap_end(off):.0f} m"

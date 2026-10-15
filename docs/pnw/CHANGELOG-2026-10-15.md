@@ -89,3 +89,9 @@ only a covered candidate within 40 m of it is held, and the latch ends 25 m past
 merits. Regression test: two nodes 400/450/500/600 m apart (45 mph, real Ford executor) - the knob is never slower than off between them.
 Still true: highway single node = one engage at 1.2/1.6 m/s2, release after passing, 8 m GPS jitter = one engage, a vanishing node releases.
 
+
+**Final check, round 2 (same day), fifth commit:** map-node distances are unsigned, so past the start node a node the passed-point gate cannot call passed (slow
+< 5 m/s on a tight roundabout, no heading) read as a positive distance again and the re-anchor pulled the tracked distance back up: the 25 m pass exit never fired
+and the latch lived until the node left the 500 m horizon (cap ~150 m longer than origin). The re-anchor can now raise the tracked distance by at most 5 m per
+tick and stops within 5 m of the node. Tests: roundabout rated 3.5 / 4.5 / 5.5 m/s with and without a heading - the latch ends within 45 m past the node
+and the cap ends no later than origin's.

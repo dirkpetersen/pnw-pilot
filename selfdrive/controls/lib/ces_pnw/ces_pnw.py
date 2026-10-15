@@ -1035,6 +1035,8 @@ ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the f
 # set to the apex). "Open road" = no lead seen for this long AND the truck is at its set speed (not lead-bound).
 ICBM_LATE_LEAD_WAIT_S = 5.0
 ICBM_LATE_HOLD_TOL_M = 40.0    # a held candidate must sit within this of the spot that started the cap (GPS / path-sampling slack)
+ICBM_LATE_REANCHOR_SLACK_M = 5.0   # the tracked distance may be re-anchored UP by at most this per tick (unsigned node distances)
+ICBM_LATE_REANCHOR_STOP_M = 5.0    # no re-anchoring once the tracked distance is this close to the node
 ICBM_LATE_HOLD_PASS_M = 25.0   # the truck has passed that spot once its distance to it grows this far above the minimum seen
 ICBM_LATE_BOUND_MS = 1.5 * 0.44704   # v_ego below ref by more than this (1.5 mph) = lead/traffic-bound: today's tracking start
 
@@ -6239,8 +6241,14 @@ class CESController:
         self._icbm_late_latch, self._icbm_late_anchor, self._icbm_late_anchor_t = True, float(cd), now
       elif hold_d is not None and self._icbm_ep.phase == "cap":
         # a running held cap: re-anchor on the candidate that matches the dead-reckoned spot, else keep dead-reckoning
-        near = self._icbm_src in ("map", "far") and abs(src_dist - hold_d) <= ICBM_LATE_HOLD_TOL_M
-        self._icbm_late_anchor, self._icbm_late_anchor_t = (src_dist if near else hold_d), now
+        # Map-node distances are UNSIGNED: past the node it reads as a positive distance again. So the re-anchor may never move the
+        # tracked distance UP by more than ICBM_LATE_REANCHOR_SLACK_M, and stops within ICBM_LATE_REANCHOR_STOP_M of the node --
+        # otherwise a node the passed-point gate cannot call passed (slow < 5 m/s, no heading, off path) would keep the latch alive
+        # until it left the horizon, and the pass exit would never fire.
+        near = (self._icbm_src in ("map", "far") and abs(src_dist - hold_d) <= ICBM_LATE_HOLD_TOL_M
+                and hold_d > ICBM_LATE_REANCHOR_STOP_M)
+        new_a = min(src_dist, hold_d + ICBM_LATE_REANCHOR_SLACK_M) if near else hold_d
+        self._icbm_late_anchor, self._icbm_late_anchor_t = new_a, now
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
       if direction == "inc":
