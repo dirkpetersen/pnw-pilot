@@ -1,8 +1,8 @@
 # CHANGELOG — 2026-10-14 (Wednesday)
 
-All times PT. Branch work, not yet shipped.
+All times PT. Both sections shipped to 3devpnw, Opus-reviewed, not yet installed.
 
-## 1. `deleterhdfirst2pnw` (branch, not yet shipped)
+## 1. `deleterhdfirst2pnw` (shipped 3devpnw `43f7021e78`, Opus-reviewed, not yet installed)
 
 On the 10-10/10-11 Lightning road trip (no signal, disk ~90% full) the deleter destroyed ~77 GB of NOT-uploaded data (513 `deleterLoss`
 events: 507 ecamera, 506 fcamera, 328 rlog), so a whole day of drives lost its rlog, the file analysis needs most (~10 MB/segment vs ~70 MB
@@ -35,7 +35,7 @@ boot/crash and `user.preserve` segments keep their existing, later place.
   only when no HD is left, uploaded HD stripped without a loss event); `test_uploader.py` +1 (segment without video lists cleanly).
 - Mutation check: HD pass disabled (4 fail), un-uploaded sorted before uploaded (2), HD loss event suppressed (4), small-file scan removed (2), remove-failure logged every sweep (1).
 
-## cesasyncwrite2pnw: the selfdrived loop never does ces_events file I/O
+## 2. `cesasyncwrite2pnw` (shipped 3devpnw `2025540286`, Opus-reviewed, not yet installed): the selfdrived loop never does ces_events file I/O
 
 Cause (drives/2026-10-11/system-lagging): the two `selfdrivedLagging` soft-disables (TAKE CONTROL IMMEDIATELY at 56 and 64 mph) were each a
 single ~123 ms stall of the selfdrived loop; loopdiag2pnw put 96-99% of it in the synchronous append to `/data/pnw/ces_events.jsonl`
