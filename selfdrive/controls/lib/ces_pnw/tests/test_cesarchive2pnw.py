@@ -312,6 +312,7 @@ class TestTheControllerRotatesOncePerPark:
     for i in range(10, 1000):
       c._gear, c._v_ego_raw = GearShifter.park, 0.0
       c._park_decision(float(i))
+    c.flush_events()                                    # cesasyncwrite2pnw: the rotation runs on the writer thread
     assert len(calls) == 1
     assert len(list(arc.iterdir())) == 1
 
@@ -323,4 +324,5 @@ class TestTheControllerRotatesOncePerPark:
     assert c._park_decision(0.0) == m.PARK_LOG
     c._gear, c._v_ego_raw = GearShifter.park, 0.0
     assert c._park_decision(1.0) == m.PARK_LOG          # inside the 30 s debounce: still logging
+    c.flush_events()                                    # cesasyncwrite2pnw: the rotation runs on the writer thread
     assert (tmp_path / f"{BASE}.1").exists()

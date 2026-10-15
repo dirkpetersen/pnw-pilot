@@ -532,6 +532,7 @@ def _drive(monkeypatch, tmp_path, *, points, anchors, fp=LIGHTNING, brand="ford"
                 leftBlindspot=False, rightBlindspot=False, cruiseState=NS(speed=stock, enabled=True),
                 yawRate=0.0, steeringTorque=0.0)
     c.experimental_request(cstate, sm)
+  c.flush_events()                              # cesasyncwrite2pnw: the ces_events file is written by the writer thread
   icbm = [v for k, v in c.mem_params.puts if k == "IcbmTarget"]
   return icbm, recs, c
 

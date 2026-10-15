@@ -124,6 +124,7 @@ def test_ces_event_write_time_is_recorded_and_windowed(tmp_path, monkeypatch):
   ctl._append_event({"ev": "x"})
   w = ctl.event_write_timing(t0)
   assert w["ces_event_writes"] == 1.0 and w["ces_event_write_total"] > 0.0
+  assert ctl.flush_events()                                                 # cesasyncwrite2pnw: written by the writer thread
   assert (tmp_path / "ces_events.jsonl").read_text().count("\n") == 1     # the write itself is unchanged
   assert ctl.event_write_timing(time.monotonic())["ces_event_writes"] == 0.0   # nothing since: window excludes old writes
 
@@ -135,9 +136,10 @@ def test_ces_event_write_timing_is_bounded(tmp_path, monkeypatch):
   assert len(ctl._event_writes) == 16
 
 
-def test_a_slow_ces_event_write_is_named_in_the_slow_loop_line(tmp_path, monkeypatch):
-  """The 2026-09-28 hypothesis end to end: a synchronous ces_events append (here a slow stat, as a stalled
-  filesystem or the rotation would be) inside the loop shows up as ces_event_write_max in the slow-loop line."""
+def test_a_slow_ces_event_write_no_longer_stalls_the_loop(tmp_path, monkeypatch):
+  """cesasyncwrite2pnw (the 2026-10-11 'System Lagging' fix): the 2026-09-28 hypothesis made real -- a stalled
+  filesystem (here a 40 ms stat in the append) used to land inside the loop and show up as ces_event_write_max in
+  the slow-loop line. The append now runs on the writer thread, so the loop iteration stays under the threshold."""
   ctl = _ces(tmp_path, monkeypatch)
   real_getsize = ces_pnw.os.path.getsize
 
@@ -152,11 +154,12 @@ def test_a_slow_ces_event_write_is_named_in_the_slow_loop_line(tmp_path, monkeyp
   d.begin()
   monkeypatch.setattr(ces_pnw.os.path, "getsize", slow_getsize)
   ctl._append_event({"ev": "x"})
-  monkeypatch.setattr(ces_pnw.os.path, "getsize", real_getsize)
   d.mark("ces")
   d.end(ctl.event_write_timing)
-  assert len(lines) == 1, lines
-  assert "ces_event_writes=1" in lines[0] and "ces_event_write_max=4" in lines[0] and "ces=4" in lines[0]
+  assert lines == [], lines                                    # no slow-loop line: the stall is on the writer thread
+  assert ctl.flush_events()                                    # ... and the record still lands (the writer eats the 40 ms)
+  monkeypatch.setattr(ces_pnw.os.path, "getsize", real_getsize)
+  assert (tmp_path / "ces_events.jsonl").read_text().count("\n") == 1
 
 
 def test_selfdrived_is_wired_to_the_diagnostic():

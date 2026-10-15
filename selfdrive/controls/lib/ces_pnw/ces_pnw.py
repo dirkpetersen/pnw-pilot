@@ -19,8 +19,12 @@ touches panda safety. The decision core (`decide_active`) takes primitives and i
 import collections
 import json
 import math
+import atexit
 import os
+import queue
+import threading
 import time
+import weakref
 from collections import deque
 
 from openpilot.common.constants import CV
@@ -98,6 +102,25 @@ CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
 # >=147 MB of ROTATED history: 8 generations x 20 MB = 160 MB clears it, 7 would NOT (140 MB).
 # Worst case 180 MB including the live file — 0.2% of the 89 GB /data.
 CES_EVENT_LOG_GENERATIONS = 8
+
+# cesasyncwrite2pnw: bounded hand-off to the ces_events writer thread (see CESController._append_event).
+CES_EVENT_QUEUE_MAX = 2000           # ~1-2 records/s normally: >15 min of a fully stalled disk before anything drops
+CES_EVENT_DROP_LOG_S = 30.0          # rate limit for the "queue full / writer dead" error lines
+CES_EVENT_SLOW_WRITE_S = 0.05        # the writer warns when one append (or park rotate) takes longer
+CES_EVENT_WRITER_MAX_RESTARTS = 5
+# Bound at import: tests swap this module's `time` for a fake clock, and flush_events must really wait.
+_REAL_MONOTONIC, _REAL_SLEEP = time.monotonic, time.sleep
+_EV_STOP = object()
+_EV_PARK_ROTATE = object()
+_EV_CONTROLLERS = weakref.WeakSet()
+
+
+def _flush_all_event_writers() -> None:
+  for c in list(_EV_CONTROLLERS):
+    c.flush_events()
+
+
+atexit.register(_flush_all_event_writers)
 # curvedbtel2pnw (docs/CURVEDB2PNW.md section 3.8): WITHOUT THIS DIRECTORY PHASE 1 IS POINTLESS.
 # The rotation above retains 8 x 20 MB = 160 MB, i.e. ~17.6 driving hours at the measured 9.1 MB/h.
 # The Phase-1 exit criteria (section 3.9 item 3) need 6-8 WEEKS of corridor driving RETAINED, so as
@@ -6343,7 +6366,7 @@ class CESController:
     if self._park_gate.park_edge:
       # cesarchive2pnw: end of a drive -> rotate (and so archive) the drive's tail tonight, not days
       # from now. One tick per edge, so once per park transition. Never raises (see rotate_at_park).
-      rotate_at_park(CES_EVENT_LOG, CES_EVENT_LOG_GENERATIONS)
+      self._enqueue_event(_EV_PARK_ROTATE)    # cesasyncwrite2pnw: the writer thread rotates; never the loop
     return decision
 
   def _event_record(self, kind: str, tele: dict) -> dict:
@@ -6590,23 +6613,88 @@ class CESController:
     ws = [dt for (t, dt) in (self._event_writes or ()) if t >= since]
     return {"ces_event_writes": float(len(ws)), "ces_event_write_total": sum(ws), "ces_event_write_max": max(ws, default=0.0)}
 
-  def _append_event(self, rec: dict) -> None:
-    t0 = time.monotonic()
-    try:
-      self._append_event_impl(rec)
-    finally:
-      t1 = time.monotonic()
-      if self._event_writes is None:
-        self._event_writes = collections.deque(maxlen=16)
-      self._event_writes.append((t1, t1 - t0))
+  # cesasyncwrite2pnw: the selfdrived loop NEVER does ces_events file I/O. 2026-10-11: two selfdrivedLagging
+  # soft-disables (56 and 64 mph) were each one ~123 ms stall of which 96-99% was the synchronous append
+  # below, on a /data that was ~90% full with loggerd writing hard. _append_event now only serialises and
+  # put_nowait()s on a bounded queue; ONE daemon thread does the size check, rotation, archive hand-off and
+  # the append exactly as before (same files, thresholds, open-per-append, no fsync).
+  _ev_q = None                     # queue.Queue of str lines / _EV_PARK_ROTATE / _EV_STOP, built lazily
+  _ev_thread = None
+  _ev_drops = 0                    # records dropped because the queue was full (writer stalled / dead)
+  _ev_drops_logged = 0             # the drop count at the last (rate-limited) log line
+  _ev_drop_log_t = None
+  _ev_restarts = 0                 # writer restarts after a death
+  _ev_dead_log_t = None
 
-  def _append_event_impl(self, rec: dict) -> None:
-    """Append one JSON line to the persistent CES_EVENT_LOG (append-only, outside the overlay so it
-    survives reboot + swaglog rotation). Best-effort; never breaks control — but repeated failure
-    is no longer SILENT (stophold2pnw C: the 07-12 investigation burned hours proving a silence
-    that wasn't; a genuinely dying writer must announce itself in swaglog)."""
-    if not self._event_log_ok:
+  def _ensure_event_writer(self) -> None:
+    """Start the writer on first use; if it died, say so loudly and restart it (bounded). Cheap: one is_alive()."""
+    th = self._ev_thread
+    if th is not None and th.is_alive():
       return
+    now = time.monotonic()
+    if th is not None:                                       # it HAD been started, so it died
+      if self._ev_restarts >= CES_EVENT_WRITER_MAX_RESTARTS:
+        if self._ev_dead_log_t is None or now - self._ev_dead_log_t >= CES_EVENT_DROP_LOG_S:
+          self._ev_dead_log_t = now
+          cloudlog.error(f"ces_pnw: ces_events writer thread is DEAD and was restarted {self._ev_restarts}x already -- " +
+                         "NOT restarting again; every ces_events record is being dropped")
+        return
+      self._ev_restarts += 1
+      cloudlog.error(f"ces_pnw: ces_events writer thread DIED -- restarting it ({self._ev_restarts}/{CES_EVENT_WRITER_MAX_RESTARTS})")
+    if self._ev_q is None:
+      self._ev_q = queue.Queue(maxsize=CES_EVENT_QUEUE_MAX)
+      _EV_CONTROLLERS.add(self)
+    self._ev_thread = threading.Thread(target=self._event_writer_main, name="ces_events_writer", daemon=True)
+    self._ev_thread.start()
+
+  def _enqueue_event(self, item) -> bool:
+    """put_nowait; a full queue drops the item, COUNTS it and logs (rate-limited). Never blocks."""
+    self._ensure_event_writer()
+    try:
+      self._ev_q.put_nowait(item)
+      return True
+    except queue.Full:
+      self._ev_drops += 1
+      now = time.monotonic()
+      if self._ev_drop_log_t is None or now - self._ev_drop_log_t >= CES_EVENT_DROP_LOG_S:
+        cloudlog.error(f"ces_pnw: ces_events queue FULL ({CES_EVENT_QUEUE_MAX}) -- the writer is stalled; " +
+                       f"{self._ev_drops} record(s) dropped in total ({self._ev_drops - self._ev_drops_logged} since the last log)")
+        self._ev_drop_log_t = now
+        self._ev_drops_logged = self._ev_drops
+      return False
+
+  def _event_writer_main(self) -> None:
+    q = self._ev_q
+    try:
+      while True:
+        item = q.get()
+        try:
+          if item is _EV_STOP:
+            return
+          t0 = time.monotonic()
+          if item is _EV_PARK_ROTATE:
+            rotate_at_park(CES_EVENT_LOG, CES_EVENT_LOG_GENERATIONS)    # never raises
+          else:
+            self._write_event_line(item)
+          dt = time.monotonic() - t0
+          if dt > CES_EVENT_SLOW_WRITE_S:
+            cloudlog.warning(f"ces_pnw: ces_events write took {dt * 1000:.0f} ms ({'park rotate' if item is _EV_PARK_ROTATE else 'append'}, " +
+                             f"{q.qsize()} queued) -- disk stall; this used to stall selfdrived")
+        finally:
+          q.task_done()
+    except BaseException as e:      # the loop detects is_alive() and restarts; this makes the death visible
+      cloudlog.exception(f"ces_pnw: ces_events writer thread exiting on {type(e).__name__}")
+
+  def _note_append_fail(self) -> None:
+    # ~1-2 writes/s: warn once at 10 consecutive failures, then re-warn every ~600 (~5-10 min) --
+    # loud enough to see, throttled enough to never flood swaglog. The write stays best-effort.
+    self._append_fail += 1
+    if self._append_fail == 10 or self._append_fail % 600 == 0:
+      cloudlog.error(f"ces_pnw: ces_events append FAILING ({self._append_fail} consecutive) — telemetry trail is dark ({CES_EVENT_LOG})")
+
+  def _write_event_line(self, line: str) -> None:
+    """Writer thread: append one JSON line to the persistent CES_EVENT_LOG (append-only, outside the overlay so it
+    survives reboot + swaglog rotation). Best-effort; repeated failure is not SILENT (stophold2pnw C)."""
     try:
       try:
         if os.path.getsize(CES_EVENT_LOG) > CES_EVENT_LOG_MAX_BYTES:
@@ -6614,14 +6702,40 @@ class CESController:
       except OSError:
         pass                                                # no file yet / stat race -> just append
       with open(CES_EVENT_LOG, "a") as f:
-        f.write(json.dumps(rec) + "\n")
+        f.write(line)
       self._append_fail = 0
     except Exception:
-      # ~1-2 writes/s: warn once at 10 consecutive failures, then re-warn every ~600 (~5-10 min) —
-      # loud enough to see, throttled enough to never flood swaglog. The write stays best-effort.
-      self._append_fail += 1
-      if self._append_fail == 10 or self._append_fail % 600 == 0:
-        try:
-          cloudlog.error(f"ces_pnw: ces_events append FAILING ({self._append_fail} consecutive) — telemetry trail is dark ({CES_EVENT_LOG})")
-        except Exception:
-          pass
+      self._note_append_fail()
+
+  def _append_event(self, rec: dict) -> None:
+    """selfdrived-loop side: serialise + enqueue only (loopdiag2pnw times this, now ~0). Best-effort; never breaks control."""
+    t0 = time.monotonic()
+    try:
+      if not self._event_log_ok:
+        return
+      try:
+        line = json.dumps(rec) + "\n"
+      except Exception:
+        self._note_append_fail()
+        return
+      self._enqueue_event(line)
+    finally:
+      t1 = time.monotonic()
+      if self._event_writes is None:
+        self._event_writes = collections.deque(maxlen=16)
+      self._event_writes.append((t1, t1 - t0))
+
+  def flush_events(self, timeout: float = 2.0) -> bool:
+    """Best-effort wait for the writer to drain (atexit / tests). False = timed out with records still queued (logged)."""
+    q = self._ev_q
+    if q is None:
+      return True
+    deadline = _REAL_MONOTONIC() + timeout
+    while q.unfinished_tasks and _REAL_MONOTONIC() < deadline:
+      if self._ev_thread is None or not self._ev_thread.is_alive():
+        break
+      _REAL_SLEEP(0.002)
+    if q.unfinished_tasks:
+      cloudlog.error(f"ces_pnw: ces_events flush gave up with {q.unfinished_tasks} item(s) unwritten")
+      return False
+    return True
