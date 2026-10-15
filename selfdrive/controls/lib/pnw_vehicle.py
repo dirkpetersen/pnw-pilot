@@ -143,6 +143,11 @@ _CURVE_DEFAULTS = {
   # restorehold2pnw (owner 2026-09-24, fewer false holds): the MAP POLYLINE triggers a hold only at this higher load --
   # it is the noisier witness (31 % of its fires at 2.8 land on roads measured below 2.0 m/s^2). 0.0 = polyline off.
   "icbm_restore_hold_poly_lat_accel": 2.8,
+  # icbmlatestart2pnw (owner 2026-10-15, roundabout "crawl"): for a LARGE drop (>= this many mph from the ceiling to the
+  # curve's rated speed) on an open road, a new slowdown may START only by the 0.8 m/s^2 + 30 m envelope, not by the
+  # tracking window (which fired ~50-60 m early and made the set jump to the apex). 18 = on; 0 = off (today's behaviour).
+  # A value in (0, 18) is clamped UP to 18, so a bad config can only drift toward the same rule, never apply it to small drops.
+  "icbm_late_start_drop_mph": 18.0,
   # standstillsoft2pnw (2026-07-14): gentle standstill LAUNCH accel ramp — the red-light follow-launch
   # "lurch" fix. Cap the accel out of a dead stop to launch_accel, ramping to the normal envelope by
   # launch_v. (Root cause: a lead crept forward at a red, op-long launched to follow at ~2.0 m/s^2.)
@@ -215,6 +220,7 @@ _CURVE_BOUNDS = {
   # never let a restore accelerate toward a curve predicted past the point where steering saturates.
   "icbm_restore_hold_lat_accel": (0.0, 3.2),
   "icbm_restore_hold_poly_lat_accel": (0.0, 3.2),   # same ceiling, same reason
+  "icbm_late_start_drop_mph": (0.0, 60.0),   # icbmlatestart2pnw: (0, 18) is clamped up to 18 after the loop; 0 = off
   # launch_accel in [0.2, 2.0]: never so low the truck can't move, never above the stock ~2.0 max ->
   # this cap can only ever SOFTEN a launch, never make it harsher. launch_v [3, 25] mph.
   "launch_accel": (0.2, 2.0),
@@ -356,6 +362,12 @@ def _load_curve_config() -> dict:
     if v != cfg[k]:
       clamped.append(f"{k}={cfg[k]}->{v}")
     cfg[k] = v
+  # icbmlatestart2pnw: 0 is the off switch; anything between 0 and the default is a malformed attempt at it and is
+  # raised to the default (never a smaller drop threshold, which would apply the rule to small drops).
+  late, late_dflt = cfg["icbm_late_start_drop_mph"], _CURVE_DEFAULTS["icbm_late_start_drop_mph"]
+  if 0.0 < late < late_dflt:
+    clamped.append(f"icbm_late_start_drop_mph={late}->{late_dflt}")
+    cfg["icbm_late_start_drop_mph"] = late_dflt
   if clamped:
     cloudlog.warning(f"pnw_vehicle: {path}: out-of-bounds value(s) clamped: {', '.join(clamped)}")
   return cfg
@@ -1068,6 +1080,13 @@ class PnwVehicle:
     """Assumed approach decel (m/s^2) ICBM may plan with for LARGE speed drops (stock ACC does the
     actual braking). 0.0 on non-Lightning -> callers fall back to the base comfort decel."""
     return self._curve_cfg["icbm_firm_decel"] if self.lightning_curve_slow else 0.0
+
+  @property
+  def icbm_late_start_drop_ms(self) -> float:
+    """icbmlatestart2pnw: required drop (m/s) at or above which a new ICBM slowdown may not start by the tracking window
+    (see icbm_curve_target late_drop). 0.0 = off -- every non-Lightning car (ICBM runs only under the Lightning shadow
+    path), and the Lightning when curve.json sets it to 0."""
+    return self._curve_cfg["icbm_late_start_drop_mph"] * _MPH_TO_MS if self.lightning_curve_slow else 0.0
 
   def icbm_map_floor_ms(self, raw_map_v) -> float:
     """icbmslow2pnw: the speed (m/s) the Lightning curve penalty may not push an ICBM MAP/FAR curve

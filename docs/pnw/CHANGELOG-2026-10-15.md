@@ -21,3 +21,40 @@ All times PT. `curvedbraiseonly2pnw` shipped to `3devpnw` at `e1d905a986` (`2d76
   differs, on the lines carrying the `curvedb_v2_loaded` event (new fields `age_days`, `raise_only_rows`). The goldens need a re-record.
 - **Test fixture.** `roaddb_fixture.isolate` writes today's date as `last_date` so the stale-table warning cannot fail nothing-logged tests; `write_db`'s default
   stays constant (the golden records through it).
+
+All times PT.
+
+## `icbmlatestart2pnw` (branch `icbmlatestart2pnw`, not yet pushed): a roundabout slows later and arrives at an appropriate speed
+
+Owner 2026-10-15: "the roundabout should slow later and arrive at an appropriate speed, not crawl".
+
+**Cause.** Not the 0.8 m/s2 start envelope. The icbmtrack2pnw TRACKING WINDOW start rule (`_icbm_track_apex` / `icbm_track_window_m`: window =
+max(ref, v) x (steps x 0.4 s + 4 s), capped 350 m) also fires on an open road, so the cap started ~50-60 m before the envelope would; the executor
+then jumped the set to the apex (truck minimum set 15 mph). The truck cannot slow faster through set taps (large drops average 0.78-0.87 m/s2), so
+the decel assumption is NOT raised and there is no walk-down: only WHEN the cap starts changes.
+
+**Change.**
+- `icbm_curve_target(..., late_drop=0.0)`: when > 0 and `ref - effective apex >= late_drop`, the tracking-window start is skipped for the MAP and
+  FAR candidates; they may start only through the v_ego decel envelope (0.8 m/s2 + 30 m). Default 0 = byte-identical to before.
+- `_icbm_step`: `late_ok` = START tick only (episode not in its cap phase) AND no lead seen for 5 s (`ICBM_LATE_LEAD_WAIT_S`) AND not lead-bound
+  (`v_ego >= ref - 1.5 mph`), pure `icbm_late_start_gate`. On a late tick `firm = 0.0` (the far scan and the start rule both price at the comfort
+  decel, so the firm-ramp ranking cannot hide a tighter point) and `late_drop = knob`. The tick's two values are stored (`_icbm_firm_t`,
+  `_icbm_late_t`) and read back (`_icbm_tick_params`) by the far scan, both main calls, the passed-point gate, the shape stage and the curve-DB
+  path, so every call of one tick decides on the same inputs. A running cap episode, a lead / lead-bound start, vision, restore and the penalties are
+  unchanged (the running-cap exemption matters: a truck decelerating faster than 0.8 would otherwise un-bind its own cap and restore mid-approach).
+- Knob `icbm_late_start_drop_mph` in `/data/pnw/curve.json` `lightning` section: default **18**; `0` = off; a value in (0, 18) is clamped UP to 18
+  with a logged warning (a bad config can only drift toward the default rule); > 60 clamps to 60; an unreadable file is logged and the default
+  stays. `PnwVehicle.icbm_late_start_drop_ms` returns 0.0 off the Lightning (ICBM runs only under the Lightning shadow path; the Tesla is untouched).
+- Telemetry `icbmStartWhy` (ces_events tick records, and `IcbmTarget` state): `env` (the envelope started it), `track` (tracking window, small
+  drop or knob off), `trackLead` / `trackBound` (tracking window, and a lead / lead-bound truck is why it was not held to the envelope),
+  `lateWait` (the tracking window WOULD have started it and the late rule withheld it), `err` (classification itself failed; logged), else null.
+  START ticks only.
+
+**Effect (synthetic roundabout, v 20.2 m/s, set 20.6, rated curve 6.8 m/s):** first start moves from ~330 m (tracking window) to ~255 m (envelope).
+In the 51 -> 14 mph geometry a late tick starts on the 0.8 envelope (~330 m) instead of the firm-ramp distance (~286 m).
+
+**Tests** `ces_pnw/tests/test_icbm_latestart.py` (34): pure function (no start at 300 m, start at 250 m, default 0 regression, small drops
+unchanged, threshold on the drop), gate, firm=0 on the far scan, lead now / lead 3 s ago / lead-bound byte-identical to knob off, running cap
+keeps the tracking window, closed loop through the Ford executor (a truck decelerating faster than 0.8 keeps its cap bound, no clear/restore),
+all call sites of one tick agree (step, shape, curve DB, passed-point gate), knob (default, 0, clamp-up, non-Lightning 0.0, unreadable logged),
+telemetry values, roundabout fixture.

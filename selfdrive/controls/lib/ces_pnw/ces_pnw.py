@@ -1030,6 +1030,11 @@ ICBM_VISION_EPS = 0.05                          # m/s^2 floor inside the sqrt (n
 ICBM_MAP_HORIZON_M = MAP_SOURCE_HORIZON_M   # m; scan the FULL published map path
 ICBM_FIRM_DROP_LO = 13.4    # m/s (~30 mph) required drop where the approach decel starts firming
 ICBM_FIRM_DROP_HI = 26.8    # m/s (~60 mph) required drop where it reaches the firm ceiling
+# icbmlatestart2pnw (owner 2026-10-15, roundabout "crawl"): a LARGE-drop curve on an open road may START its slowdown only
+# by the 0.8 m/s^2 + 30 m envelope, not by the tracking window (which fired ~50-60 m early; the executor then jumped the
+# set to the apex). "Open road" = no lead seen for this long AND the truck is at its set speed (not lead-bound).
+ICBM_LATE_LEAD_WAIT_S = 5.0
+ICBM_LATE_BOUND_MS = 1.5 * 0.44704   # v_ego below ref by more than this (1.5 mph) = lead/traffic-bound: today's tracking start
 
 
 ICBM_ERR_LOG_S = 30.0   # rule-2: throttle the _icbm_step failure log (it runs at ~4 Hz)
@@ -1245,7 +1250,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
                       vis_v=0.0, vis_dist=float('inf'),
                       map_scale=1.0, firm_decel=0.0,
                       far_v=0.0, far_dist=float('inf'),
-                      track=False, eff_fn=None):
+                      track=False, eff_fn=None, late_drop=0.0):
   """Pure ICBM brain step (unit-tested). Returns (target_ms or None, new_ceiling or None, src or None)
   where src is "map" / "vis" / "far". Considers a MAP candidate (pfeiferj target, tiered-scaled like
   VTSC/MTSC), a VISION candidate (from icbm_vision_apex), and descentcurve2pnw's FAR-MAP candidate
@@ -1263,6 +1268,10 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   icbmtrack2pnw: track=True additionally lets MAP/FAR candidates START via the tracking window
   (_icbm_track_apex — set walks down early, e.g. while lead-bound) instead of only the v_ego decel
   envelope. VISION candidates are never tracked. track=False (default) is byte-identical to before.
+
+  icbmlatestart2pnw: late_drop (m/s, default 0 = byte-identical to before) > 0 withholds the tracking-window start from
+  every MAP/FAR candidate whose drop (ref - effective apex) is >= late_drop: such a candidate may start only through the
+  v_ego decel envelope. The caller passes it on a START tick only -- a running cap episode keeps the tracking window.
 
   ceiling = the driver's own set speed latched when a cap first engages (None when uncapped); while
   capped, v_set follows the button-lowered stock set, so the latched ceiling is the only memory of
@@ -1283,7 +1292,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   if map_v and map_v > 0 and map_dist != float('inf'):
     eff = scale_fn(map_v) * map_v * map_scale if eff_fn is None else eff_fn(map_v, map_dist)
     a = _icbm_binding_apex(v_ego, ref, eff, map_dist)
-    if a is None and track:
+    if a is None and track and not (late_drop > 0 and ref - eff >= late_drop):
       # icbmtrack2pnw: continuous set-tracking — a binding-RATED map curve within the tracking
       # window starts the walk-down even before the v_ego decel envelope binds (lead-bound case).
       a = _icbm_track_apex(v_ego, ref, eff, map_dist)
@@ -1298,7 +1307,7 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   # icbm_far_map_candidate). Same binding envelope; catches curves beyond the 10 s window at speed.
   if far_v and far_v > 0 and far_dist != float('inf'):
     a = _icbm_binding_apex(v_ego, ref, far_v, far_dist, icbm_approach_decel(v_ego, far_v, firm_decel))
-    if a is None and track:
+    if a is None and track and not (late_drop > 0 and ref - far_v >= late_drop):
       a = _icbm_track_apex(v_ego, ref, far_v, far_dist)   # icbmtrack2pnw (far_v already effective)
     if a is not None and (best_apex is None or a < best_apex):
       best_apex, best_src = a, "far"
@@ -1309,6 +1318,32 @@ def icbm_curve_target(v_ego, v_set, map_v, map_dist, ceiling, scale_fn,
   # (Gemini-hardened 2026-07-11); icbmrestore2pnw layers the GUARDED restore as a separate
   # episode phase in IcbmEpisode below — this function itself never commands an increase.
   return None, None, None
+
+
+def icbm_late_start_gate(starting, lead_age_s, v_ego, ref):
+  """icbmlatestart2pnw: may THIS tick's new slowdown be forced to start late (envelope only, no tracking window)?
+  Returns (ok, why_not): why_not is None when ok, else "running" (an episode already caps -- keeps the window, which is
+  what stops a faster-decelerating truck from un-binding its own cap), "lead" (a lead was seen within
+  ICBM_LATE_LEAD_WAIT_S) or "bound" (v_ego more than 1.5 mph under the ceiling: lead/traffic-bound). lead_age_s None =
+  never seen. Unreadable inputs -> not ok ("bound"): never late on a guess. Pure."""
+  try:
+    if not starting:
+      return False, "running"
+    if lead_age_s is not None and float(lead_age_s) < ICBM_LATE_LEAD_WAIT_S:
+      return False, "lead"
+    if not float(v_ego) >= float(ref) - ICBM_LATE_BOUND_MS:
+      return False, "bound"
+    return True, None
+  except (TypeError, ValueError):
+    return False, "bound"
+
+
+def _icbm_tick_params(ctl, veh):
+  """icbmlatestart2pnw: (firm_decel, late_drop) for THIS tick, as _icbm_step set them, so every icbm_curve_target /
+  icbm_far_map_candidate call of the tick (step, passed-point gate, shape stage, curve DB) decides on the same
+  inputs. Falls back to today's values (veh.icbm_firm_decel, 0.0) where _icbm_step has not set them (bare test stubs)."""
+  firm = getattr(ctl, "_icbm_firm_t", None)
+  return (veh.icbm_firm_decel if firm is None else firm), (getattr(ctl, "_icbm_late_t", None) or 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1995,6 +2030,35 @@ def _curve_passed_filter(ctl, points, lat, lon, v_ego):
     return points
 
 
+def _icbm_start_why_of(ctl, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop,
+                       target, late_why):
+  """icbmlatestart2pnw telemetry (Rule 2: a withheld start must be visible). For a START tick: "env" (the decel envelope
+  bound), "track" / "trackLead" / "trackBound" (the tracking window started it; the second and third say a lead / a
+  lead-bound truck is why it was NOT held to the envelope), "lateWait" (the tracking window WOULD have started it and
+  the late rule withheld it), else None. Two extra pure calls, only on a START tick with a decision to explain."""
+  def decide(**kw):
+    args = dict(map_scale=ctl._veh.icbm_map_scale, firm_decel=firm, far_v=far_v, far_dist=far_dist, eff_fn=eff_fn,
+                late_drop=late_drop)
+    args.update(kw)
+    return icbm_curve_target(sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
+                             sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
+                             vis_v, vis_dist, **args)[0]
+  try:
+    if target is not None:
+      if decide(track=False) is not None:
+        return "env"
+      return {"lead": "trackLead", "bound": "trackBound"}.get(late_why, "track")
+    if late_drop > 0.0 and decide(track=True, late_drop=0.0) is not None:
+      return "lateWait"
+  except Exception:
+    now = time.monotonic()
+    if now - (getattr(ctl, "_icbm_why_err", None) or -1e9) > ICBM_ERR_LOG_S:
+      ctl._icbm_why_err = now
+      cloudlog.exception("icbmlatestart2pnw: icbmStartWhy classification FAILED -- telemetry only, control unaffected")
+    return "err"
+  return None
+
+
 def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, far_raw, vis, ceiling=None, running=False):
   """behindgate2pnw: the passed-point gate. Called whenever a map/far candidate would bind. Returns
   (target, sig, far_v, far_dist, far_raw), updating ctl._icbm_src / _icbm_gate. icbmslow2pnw carries
@@ -2027,16 +2091,17 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     far = (far_v, far_dist, far_raw)
     veh = ctl._veh
     eff_fn = getattr(ctl, "_icbm_eff_fn", None)     # curveshape2pnw: the live pricer, None otherwise
+    firm, late_drop = _icbm_tick_params(ctl, veh)   # icbmlatestart2pnw: this tick's values
     if src == "map":
       a_near = upcoming_curve(ahead, plat, plon, sig["v_ego"], C.CURVE_MAP_LOOKAHEAD_S)
       if a_near == near:
         _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist, far_raw
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-                                     veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
+                                     veh.icbm_map_scale, firm, eff_fn=eff_fn)
     else:
       a_far = icbm_far_map_candidate(ahead, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-                                     veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
+                                     veh.icbm_map_scale, firm, eff_fn=eff_fn)
       if a_far == far:
         _icbm_passed_log(ctl, "clear", src=src, **run)
         return target, sig, far_v, far_dist, far_raw
@@ -2044,8 +2109,8 @@ def _icbm_passed_gate(ctl, now, target, sig, plat, plon, ref, far_v, far_dist, f
     new_sig = {**sig, "map_target_v": a_near[0], "map_target_dist": a_near[1]}
     new_target, _, new_src = icbm_curve_target(
       sig["v_ego"], sig["v_set"], a_near[0], a_near[1], ceiling, icbm_map_eff_scale, vis[0], vis[1],
-      map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel, far_v=a_far[0], far_dist=a_far[1], track=True,
-      eff_fn=eff_fn)
+      map_scale=veh.icbm_map_scale, firm_decel=firm, far_v=a_far[0], far_dist=a_far[1], track=True,
+      eff_fn=eff_fn, late_drop=late_drop)
   except Exception:
     try:
       if now - (getattr(ctl, "_icbm_passed_err", None) or -1e9) > ICBM_ERR_LOG_S:
@@ -2415,12 +2480,14 @@ def _icbm_shape_step(ctl, now, sig, plat, plon, gps_state, ref, ep_ceiling, vis_
     v_ego, v_set = sig["v_ego"], sig["v_set"]
     map_v, map_d = sig.get("map_target_v", 0.0), sig.get("map_target_dist", float("inf"))
 
+    firm, late_drop = _icbm_tick_params(ctl, veh)    # icbmlatestart2pnw: this tick's values
+
     def core(eff):
       far_v, far_d, far_raw = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale, veh.icbm_map_scale,
-                                                     veh.icbm_firm_decel, eff_fn=eff)
+                                                     firm, eff_fn=eff)
       t, _, src = icbm_curve_target(v_ego, v_set, map_v, map_d, ep_ceiling, icbm_map_eff_scale, vis_v, vis_dist,
-                                    map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
-                                    far_v=far_v, far_dist=far_d, track=True, eff_fn=eff)
+                                    map_scale=veh.icbm_map_scale, firm_decel=firm,
+                                    far_v=far_v, far_dist=far_d, track=True, eff_fn=eff, late_drop=late_drop)
       if t is not None:
         t = icbm_penalise(veh, pts, t, src, sig, plat, plon, far_d, far_raw, pricer=eff)[0]
       # the candidate the record describes: the one that bound, else the near map candidate, else the far one
@@ -5678,6 +5745,7 @@ class CESController:
         self._icbm_dir = None
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
+        self._icbm_firm_t, self._icbm_late_t, self._icbm_start_why = None, None, None   # icbmlatestart2pnw: per-tick only
         self._icbm_gps_age = None         # gpslag2pnw
         self._icbm_stale_hold = None      # gpsdrgate2pnw
         self._icbm_passed_state = None    # behindgate2pnw: the next verdict after a Chill interlude logs again
@@ -5752,6 +5820,19 @@ class CESController:
       # judges its candidates against the set it interrupted, exactly as when the ceiling was re-latched there.
       ep_ceiling = self._icbm_ep.bind_ceiling if self._icbm_ep.phase == "cap" else None
       ref = ep_ceiling if ep_ceiling is not None else sig["v_set"]
+      # icbmlatestart2pnw: on a START tick of an open-road, at-set-speed truck a large-drop curve may start only through
+      # the 0.8 m/s^2 envelope (late_drop > 0) and the far scan prices it at the comfort decel (firm 0), so the far
+      # scan's ranking and the start rule agree. Running episodes, lead / lead-bound starts keep today's inputs exactly.
+      # The tick's values are stored for the passed-point gate, shape stage and curve DB, which re-decide on the same inputs.
+      if sig.get("has_lead", False):
+        self._icbm_lead_seen_t = now
+      lead_seen_t = getattr(self, "_icbm_lead_seen_t", None)
+      late_ok, late_why = icbm_late_start_gate(
+        self._icbm_ep.phase != "cap", None if lead_seen_t is None else now - lead_seen_t, sig["v_ego"], ref)
+      late_knob = self._veh.icbm_late_start_drop_ms
+      firm = 0.0 if late_ok and late_knob > 0.0 else self._veh.icbm_firm_decel
+      late_drop = late_knob if late_ok else 0.0
+      self._icbm_firm_t, self._icbm_late_t, self._icbm_start_why = firm, late_drop, None
       # curveshape2pnw: the measured-shape stage. Always computes + logs its decision (shp*); hands ICBM a pricer
       # ONLY in live mode. In shadow/off `eff_fn` is None and every call below is the pre-curveshape expression.
       eff_fn = self._icbm_eff_fn = _icbm_shape_step(self, now, sig, plat, plon, gps_state, ref, ep_ceiling,
@@ -5760,7 +5841,7 @@ class CESController:
       # inflated a raw 64.9 mph curve to an effective 107 mph, so it never bound vs set 90).
       far_v, far_dist, far_raw = icbm_far_map_candidate(
         self._map_targets, plat, plon, sig["v_ego"], ref, icbm_map_eff_scale,
-        self._veh.icbm_map_scale, self._veh.icbm_firm_decel, eff_fn=eff_fn)
+        self._veh.icbm_map_scale, firm, eff_fn=eff_fn)
       # icbmmapfirst2pnw start-policy gates (drive 2026-07-12): apply ONLY when a decision would
       # START a new episode — a running cap episode (phase 'cap', incl. its S-gap clear debounce)
       # continues with the full candidate set exactly as before ("an episode may continue").
@@ -5776,8 +5857,11 @@ class CESController:
         sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
         sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
         vis_v, vis_dist,
-        map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-        far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn)
+        map_scale=self._veh.icbm_map_scale, firm_decel=firm,
+        far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop)
+      if starting:
+        self._icbm_start_why = _icbm_start_why_of(
+          self, sig, ep_ceiling, vis_v, vis_dist, far_v, far_dist, eff_fn, firm, late_drop, target, late_why)
       if target is not None and starting:
         if in_curve:
           # driver rule 2: NEVER begin a new dec episode while already loaded in the curve — hold
@@ -5795,8 +5879,8 @@ class CESController:
             sig["v_ego"], sig["v_set"], sig.get("map_target_v", 0.0),
             sig.get("map_target_dist", float("inf")), ep_ceiling, icbm_map_eff_scale,
             0.0, float("inf"),
-            map_scale=self._veh.icbm_map_scale, firm_decel=self._veh.icbm_firm_decel,
-            far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn)
+            map_scale=self._veh.icbm_map_scale, firm_decel=firm,
+            far_v=far_v, far_dist=far_dist, track=True, eff_fn=eff_fn, late_drop=late_drop)
       # behindgate2pnw: a map/far point the truck has already driven past may not START an episode (see
       # icbm_passed_points).
       # behindrun2pnw (owner 2026-09-14, "Behind-curve gate: yes"): nor may it lower a RUNNING cap episode's target or
@@ -6143,12 +6227,13 @@ class CESController:
       v_ego, v_set = sig["v_ego"], sig["v_set"]
       veh = self._veh
       eff_fn = getattr(self, "_icbm_eff_fn", None)   # curveshape2pnw: the live pricer, None otherwise
+      firm, late_drop = _icbm_tick_params(self, veh)   # icbmlatestart2pnw: this tick's values
 
       def one(map_v=0.0, map_dist=inf, v_vis=0.0, d_vis=inf, v_far=0.0, d_far=inf):
         # a single source through ICBM's own binding rule
         return icbm_curve_target(v_ego, v_set, map_v, map_dist, ep_ceiling, icbm_map_eff_scale, v_vis, d_vis,
-                                 map_scale=veh.icbm_map_scale, firm_decel=veh.icbm_firm_decel,
-                                 far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn)[0]
+                                 map_scale=veh.icbm_map_scale, firm_decel=firm,
+                                 far_v=v_far, far_dist=d_far, track=True, eff_fn=eff_fn, late_drop=late_drop)[0]
 
       # points the truck has already passed never re-enter as a re-derived candidate (behindgate2pnw's own test)
       mask, _why = icbm_passed_points(self._map_targets, plat, plon, getattr(self, "_cur_bearing", None), v_ego)
@@ -6169,7 +6254,7 @@ class CESController:
           ahead = [p for p in self._map_targets if id(p) not in passed]
           m_v, md = upcoming_curve(ahead, plat, plon, v_ego, C.CURVE_MAP_LOOKAHEAD_S)
           f_v, f_d, f_r = icbm_far_map_candidate(ahead, plat, plon, v_ego, ref, icbm_map_eff_scale,
-                                                 veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
+                                                 veh.icbm_map_scale, firm, eff_fn=eff_fn)
           sig_c = {**sig, "map_target_v": m_v, "map_target_dist": md}
         pre = {"map": (one(map_v=m_v, map_dist=md), md),
                "far": (one(v_far=f_v, d_far=f_d), f_d),
@@ -6190,7 +6275,7 @@ class CESController:
           sig2, fd, fr = {**sig, "map_target_v": tv, "map_target_dist": td}, far_dist, far_raw
         else:
           fv, td, fr = icbm_far_map_candidate(pts, plat, plon, v_ego, ref, icbm_map_eff_scale,
-                                              veh.icbm_map_scale, veh.icbm_firm_decel, eff_fn=eff_fn)
+                                              veh.icbm_map_scale, firm, eff_fn=eff_fn)
           a = one(v_far=fv, d_far=td)
           sig2, fd = sig, td
         if a is None:
@@ -6304,6 +6389,7 @@ class CESController:
       tele["icbmSet"] = self._stock_set
       tele["icbmOn"] = self._stock_on
       tele["icbmGate"] = self._icbm_gate         # icbmmapfirst2pnw: start suppressed & why (or None)
+      tele["icbmStartWhy"] = getattr(self, "_icbm_start_why", None)   # icbmlatestart2pnw: env/track/trackLead/trackBound/lateWait
       tele["mapReach"] = self._icbm_map_reach    # icbmmapfirst2pnw: map coverage m (0/None = blind)
 
     # (a) transition ("adopt") — one record per chill<->experimental change, cloudlog + event file.
@@ -6595,6 +6681,7 @@ class CESController:
       # icbmmapfirst2pnw: start-gate + map coverage forensics (why vision did NOT initiate; whether
       # mapd was alive — mapReach 0/None with mapPts 0 = the mapd-outage signature).
       "icbmGate": self._icbm_gate, "mapReach": self._icbm_map_reach,
+      "icbmStartWhy": getattr(self, "_icbm_start_why", None),   # icbmlatestart2pnw
       # greenlead2pnw: detector state per record ("idle"/"armed"/"fired" — the arming trail) plus
       # a ONE-SHOT event marker ("green"/"lead"/"leadMoving") on the record that follows an actual
       # firing, else None. Replaces the old "greenLight" field, which logged the (always-truthy)
