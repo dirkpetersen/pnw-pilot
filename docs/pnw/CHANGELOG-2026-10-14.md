@@ -83,3 +83,17 @@ append moved verbatim (`OBS_MAX_BYTES` freeze, `_write_stopped`, same file, open
   construction-time. Not in `ces_pnw/`: other processes still append to ces_events (`append_to_ces_log`), as section 2 notes.
 - Tests: new `ces_pnw/tests/test_curvedbasync2pnw.py` (10); `test_curvedb_read_boundary.py` lists it as an allowed importer.
 - Verify on-car with loopdiag stage times on the first curve passes after install; `cdbDrop` must stay 0.
+
+## steersatfloor2pnw (owner decision 2026-10-14)
+
+- "Take Control" (steerSaturated) on the Lightning in ANGLE steering mode now needs desired lateral accel > **2.2 m/s2** instead of 1.0
+  (`STEER_SAT_ANGLE_FLOOR` in `pnw_vehicle.py`, exposed as the capability `PnwVehicle.steer_sat_demand_floor`). Alert text, the 2.5 deg / 1 s
+  timer and the ratio 1.2 test are unchanged. Capability = Lightning AND `CP.steerControlType == angle`; the Tesla (also angle-steered) and the
+  Lightning in curvature mode (`NoFordAngleSteering`) keep 1.0. No per-car JSON was added: the only lateral JSON (`lataccel_limits.json`) is the
+  clip schedule, not an alert setting. Panda safety, steering commands and the lateral controller are untouched.
+- Floor chosen from the 56 trip episodes (episode demand = max of start/end/sat-tick demand): floor 1.0 keeps 51 / 1.5 -> 36 / 2.0 -> 19 /
+  **2.2 -> 14 (all 7 genuine over-demand cases kept, min 2.33)** / 2.3 -> 11 (margin 0.03) / 2.4 -> 7 (loses 2 genuine). 42 ordinary alerts dropped.
+- Rule 2: a suppressed would-be alert is logged, one per episode: cloudlog warning plus a ces_events record
+  `{"ev":"alert","name":"steerSaturated","phase":"suppressed","demand","floor","angErr","supCount","vEgo",...}`.
+- Tests: `selfdrive/selfdrived/tests/test_steersatfloor_pnw.py` (6, with a 56-episode fixture in `tests/data/`).
+- Verify on-car: `phase:"suppressed"` records appear on canyon curves; genuine over-demand still alerts.

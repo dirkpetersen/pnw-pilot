@@ -42,6 +42,16 @@ TESTING_CLOSET = "TESTING_CLOSET" in os.environ
 # open (no new ces_events record) through any gap in the alert shorter than this; only a continuous
 # absence at least this long closes it and re-arms the next rising edge for a new record.
 STEER_SATURATED_HOLDOFF_S = 1.0
+
+
+def steer_sat_verdict(desired_lat: float, actual_lat: float, saturated: bool, floor: float) -> str | None:
+  """steersatfloor2pnw: the steerSaturated demand test, unchanged except the 1.0 m/s2 floor is now a parameter.
+  Returns "fire" (alert as stock), "suppressed" (would have fired at the stock 1.0 floor but the demand is not above
+  `floor`; the caller MUST log it, Rule 2) or None. The stock floor is 1.0, so floor=1.0 is exactly the old behaviour."""
+  undershooting = abs(desired_lat) / abs(1e-3 + actual_lat) > 1.2
+  if not (undershooting and saturated and abs(desired_lat) > 1.0):
+    return None
+  return "fire" if abs(desired_lat) > floor else "suppressed"
 # onebutton2pnw: how long an ACC ON/OFF press keeps openpilot out after the driver asked for
 # everything off. MEASURED 2026-09-07: the truck answers that press by engaging ~0.3 s later in
 # about half of the observed cases, so the hold only has to outlast that response and the cancel it
@@ -184,6 +194,7 @@ class SelfdriveD:
       # never a fingerprint test (driver directive).
       veh = PnwVehicle(self.CP)
       self.stalk_off_ignores_gas = bool(veh.stalk_cruise_buttons)
+      self.steer_sat_floor = float(veh.steer_sat_demand_floor)  # steersatfloor2pnw
       if not veh.mads_resume:
         self.mads_resume = None
       else:
@@ -206,6 +217,11 @@ class SelfdriveD:
     # value pre-sm.update, e.g. -1), so any int sentinel risks a false `sm.frame ==
     # last_steer_saturated_frame` match -> a bogus "Take Control" log record on boot before any real
     # alert ever fired. None can never equal an int, so it's sentinel-proof regardless of frame value.
+    # steersatfloor2pnw: demand floor for the steerSaturated check (PnwVehicle capability; 1.0 = stock) and the
+    # state of the suppressed-alert logger. Stays 1.0 (stock) if the PnwVehicle construction below fails.
+    self.steer_sat_floor = 1.0
+    self.steer_sat_sup_count = 0            # suppressed would-be alerts (episodes) this drive
+    self.last_steer_sat_sup_frame = None    # last frame a would-be alert was suppressed
     self.last_steer_saturated_frame = None  # last frame steerSaturated was added to self.events
     self.steer_saturated_open = False       # is a logging "episode" currently open (already logged)?
     self.steer_saturated_start_frame = 0    # frame the currently-open episode's rising edge fired
@@ -592,15 +608,16 @@ class SelfdriveD:
       clipped_speed = max(CS.vEgo, 0.3)
       actual_lateral_accel = controlstate.curvature * (clipped_speed**2)
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
-      undershooting = abs(desired_lateral_accel) / abs(1e-3 + actual_lateral_accel) > 1.2
-      turning = abs(desired_lateral_accel) > 1.0
       # TODO: lac.saturated includes speed and other checks, should be pulled out
-      if undershooting and turning and lac.saturated:
+      verdict = steer_sat_verdict(desired_lateral_accel, actual_lateral_accel, bool(lac.saturated), self.steer_sat_floor)
+      if verdict == "fire":
         self.events.add(EventName.steerSaturated)
         # takecontrol2pnw: PURE OBSERVATION bookkeeping only — records which frame the decision
         # above fired, for the edge-triggered ces_events logger in step() below. Never read back
         # into this decision.
         self.last_steer_saturated_frame = self.sm.frame
+      elif verdict == "suppressed":
+        self._note_steer_sat_suppressed(CS, desired_lateral_accel, lac)
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -992,6 +1009,27 @@ class SelfdriveD:
       # Loud on the first failure, then throttled -- this runs at 100 Hz.
       if self.mads_resume_fail == 1 or self.mads_resume_fail % 1000 == 0:
         cloudlog.exception(f"madsresume2pnw: _mads_resume_step FAILED ({self.mads_resume_fail} consecutive) -- auto-resume is NOT deciding")
+
+  def _note_steer_sat_suppressed(self, CS, desired_lat: float, lac) -> None:
+    """steersatfloor2pnw (Rule 2): a would-be "Take Control" that the angle-mode demand floor held back is NEVER silent.
+    One cloudlog warning + one ces_events record ({"ev":"alert","phase":"suppressed"}) per episode (a gap of
+    STEER_SATURATED_HOLDOFF_S starts a new one); supCount is the running per-drive episode count."""
+    try:
+      f = self.sm.frame
+      new = self.last_steer_sat_sup_frame is None or (f - self.last_steer_sat_sup_frame) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S
+      self.last_steer_sat_sup_frame = f
+      if not new:
+        return
+      self.steer_sat_sup_count += 1
+      v_ego = round(float(CS.vEgo), 2)
+      ang_err = round(float(lac.steeringAngleDesiredDeg) - float(lac.steeringAngleDeg), 2) if hasattr(lac, "steeringAngleDeg") else None
+      cloudlog.warning("steersatfloor2pnw: Take Control SUPPRESSED (#%d) demand=%.2f m/s2 <= floor %.2f vEgo=%s angErr=%s",
+                       self.steer_sat_sup_count, desired_lat, self.steer_sat_floor, v_ego, ang_err)
+      self.ces_pnw.log_take_control_alert({"name": "steerSaturated", "phase": "suppressed", "vEgo": v_ego, "otherEvents": [],
+                                           "demand": round(desired_lat, 3), "floor": self.steer_sat_floor,
+                                           "angErr": ang_err, "supCount": self.steer_sat_sup_count})
+    except Exception:
+      cloudlog.exception("steersatfloor2pnw: _note_steer_sat_suppressed raised")
 
   def _log_take_control_edge(self, CS) -> None:
     """takecontrol2pnw: PURE OBSERVATION — write the "Take Control" (steerSaturated) alert to

@@ -14,7 +14,7 @@ import os
 import stat
 import time
 
-from cereal import log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
+from cereal import car, log  # tightfollow2pnw: LongitudinalPersonality enum for the aggressive-only check
 from openpilot.common.swaglog import cloudlog  # rule2fixes2pnw: _load_curve_config failures are logged
 from openpilot.selfdrive.controls.lib.ces_pnw.icbm_shape import MODES as SHAPE_MODES   # curveshape2pnw
 from openpilot.selfdrive.controls.lib.drive_helpers import lat_accel_target_source   # curvebrain2pnw: curve_lat_a's clip
@@ -240,6 +240,11 @@ _RAIN_CONFIG_MAX_BYTES = 64 * 1024
 _RAIN_DEFAULTS = {"light_mph": 3.0, "heavy_mph": 5.0}
 # clamp [0,15] mph: a bad config can only ever be a small reduction — never a speed-up, never a huge brake.
 _RAIN_BOUNDS = {"light_mph": (0.0, 15.0), "heavy_mph": (0.0, 15.0)}
+
+
+# steersatfloor2pnw: see PnwVehicle.steer_sat_demand_floor. Replay table (episode demand, 56 episodes): floor 1.0 keeps 51,
+# 1.5 -> 36, 2.0 -> 19, 2.2 -> 14, 2.3 -> 11 (but only 0.03 above the two 2.33 genuine cases), 2.4 -> 7 (loses 2 genuine).
+STEER_SAT_ANGLE_FLOOR = 2.2
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -883,6 +888,15 @@ class PnwVehicle:
     # gate the shadow would run there too and pollute the Lightning's cp* telemetry (actuation-inert
     # either way -- the Ford carcontroller consumes actuators.curvature, never steeringAngleDeg).
     self.coop_steer: bool = fp == "TESLA_MODEL_S_HW3"
+
+    # steersatfloor2pnw (owner 2026-10-14): in ANGLE steering mode the Lightning delivers only ~0.87-0.93 of the commanded
+    # curvature at 25-45 mph, so the stock "Take Control" test (desired lat accel > 1.0) fires on ordinary canyon curves
+    # (56 episodes on the 10-09..10-11 trip, median peak demand 1.76; drives/2026-10-11/canyon-steersat/DRIVE_REPORT.md).
+    # Floor 2.2 m/s2 is chosen from those 56: it keeps all 7 genuine over-demand cases (episode demand 2.33-3.48) and
+    # drops 42 of 56. The Tesla is also angle-steered but does not show this tracking error: capability = the Lightning
+    # AND CarParams angle mode (curvature mode, NoFordAngleSteering, keeps the stock 1.0).
+    angle_mode = CP is not None and getattr(CP, 'steerControlType', None) == car.CarParams.SteerControlType.angle
+    self.steer_sat_demand_floor: float = STEER_SAT_ANGLE_FLOOR if (fp == "FORD_F_150_LIGHTNING_MK1" and angle_mode) else 1.0
 
     # toggles2pnw: does the capability view know what car this is? False when nothing was ever fingerprinted (CP None), the
     # fingerprint is empty, or it is the MOCK brand. The settings UI uses it to leave EVERY car-gated toggle enabled in
