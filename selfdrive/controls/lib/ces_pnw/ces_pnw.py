@@ -5593,6 +5593,8 @@ class CESController:
       }
       if payload.get("durationS") is not None:
         rec["durationS"] = payload["durationS"]
+      if payload.get("ev"):
+        rec["ev"] = payload["ev"]   # steersatfloor2pnw: suppressed episodes are "alertSuppressed", never counted as "alert"
       for k in ("demand", "floor", "angErr", "supCount", "peakDemand", "peakAngErr", "escaped"):  # steersatfloor2pnw: suppressed-alert fields
         if payload.get(k) is not None:
           rec[k] = payload[k]

@@ -218,6 +218,7 @@ class SelfdriveD:
     self.steer_sat_sup_peak_dem = 0.0
     self.steer_sat_sup_peak_err = 0.0
     self.steer_sat_sup_escaped = False
+    self.steer_sat_sup_seen = False         # the open episode had >= 1 genuinely suppressed frame (so it gets Suppressed records)
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -1044,7 +1045,7 @@ class SelfdriveD:
     mode = None
     try:
       st = self.latstat_mem.get("FordLatStatus") if self.latstat_mem is not None else None
-      if isinstance(st, dict) and time.time() - float(st.get("ts", 0.0)) < STEER_SAT_MODE_STALE_S:  # noqa: TID251 -- carcontroller stamps wall time
+      if isinstance(st, dict) and 0.0 <= time.time() - float(st.get("ts", 0.0)) < STEER_SAT_MODE_STALE_S:  # noqa: TID251 -- carcontroller stamps wall time
         mode = st.get("mode")
     except Exception:
       cloudlog.exception("steersatfloor2pnw: FordLatStatus read failed -> stock 1.0 floor")
@@ -1080,7 +1081,7 @@ class SelfdriveD:
     """One ces_events record under the DISTINCT name steerSaturatedSuppressed (never counted as an alert)."""
     try:
       v_ego = round(float(CS.vEgo), 2)
-      payload = {"name": "steerSaturatedSuppressed", "phase": phase, "vEgo": v_ego, "otherEvents": [],
+      payload = {"ev": "alertSuppressed", "name": "steerSaturatedSuppressed", "phase": phase, "vEgo": v_ego, "otherEvents": [],
                  "demand": round(desired_lat, 3), "floor": self.steer_sat_floor_now,
                  "angErr": None if ang_err == float("inf") else round(ang_err, 2), "supCount": self.steer_sat_sup_count}
       payload.update(extra)
@@ -1095,10 +1096,14 @@ class SelfdriveD:
     if self.steer_sat_sup_start is not None and (f - self.steer_sat_sup_last) * DT_CTRL >= STEER_SATURATED_HOLDOFF_S:
       self._steer_sat_sup_close(CS)
     if self.steer_sat_sup_start is None:
-      self.steer_sat_sup_count += 1
       self.steer_sat_sup_start = f
       self.steer_sat_sup_peak_dem = self.steer_sat_sup_peak_err = 0.0
       self.steer_sat_sup_escaped = False
+      self.steer_sat_sup_seen = False
+    if not escaped and not self.steer_sat_sup_seen:
+      # only an episode with at least one genuinely suppressed frame gets Suppressed records (an escape-opened one is a real alert)
+      self.steer_sat_sup_seen = True
+      self.steer_sat_sup_count += 1
       self._steer_sat_sup_record(CS, "start", desired_lat, ang_err)
     self.steer_sat_sup_last = f
     self.steer_sat_sup_peak_dem = max(self.steer_sat_sup_peak_dem, abs(desired_lat))
@@ -1111,10 +1116,11 @@ class SelfdriveD:
       self._steer_sat_sup_close(CS)
 
   def _steer_sat_sup_close(self, CS) -> None:
-    self._steer_sat_sup_record(CS, "end", self.steer_sat_sup_peak_dem, self.steer_sat_sup_peak_err,
-                               peakDemand=round(self.steer_sat_sup_peak_dem, 3), peakAngErr=round(self.steer_sat_sup_peak_err, 2),
-                               durationS=round((self.steer_sat_sup_last - self.steer_sat_sup_start) * DT_CTRL, 2),
-                               escaped=self.steer_sat_sup_escaped)
+    if self.steer_sat_sup_seen:
+      self._steer_sat_sup_record(
+        CS, "end", self.steer_sat_sup_peak_dem, self.steer_sat_sup_peak_err,
+        peakDemand=round(self.steer_sat_sup_peak_dem, 3), peakAngErr=round(self.steer_sat_sup_peak_err, 2),
+        durationS=round((self.steer_sat_sup_last - self.steer_sat_sup_start) * DT_CTRL, 2), escaped=self.steer_sat_sup_escaped)
     self.steer_sat_sup_start = None
     self.steer_sat_sup_last = None
 

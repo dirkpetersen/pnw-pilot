@@ -193,3 +193,38 @@ def test_replay_stock_floor_keeps_all():
           n += 1
           break
     assert n == 21
+
+
+def test_escape_opened_episode_writes_no_suppressed_records():
+  with OpenpilotPrefix():
+    sd = lightning_sd()
+    rec = Recorder()
+    sd.ces_pnw = rec
+    prime(sd)
+    assert run_frame(sd, 1, 1.8, 12.0)          # the very first frame is an escape: a real alert
+    assert run_frame(sd, 2, 1.8, 12.0)
+    sd.sm.frame = 400
+    sd._steer_sat_sup_close_check(SimpleNamespace(vEgo=15.0))
+    assert rec.records == [] and sd.steer_sat_sup_count == 0
+    assert not run_frame(sd, 500, 1.8, 5.0)     # a later genuinely suppressed frame does log
+    assert [r["phase"] for r in rec.records] == ["start"] and sd.steer_sat_sup_count == 1
+
+
+def test_suppressed_records_have_distinct_ev():
+  with OpenpilotPrefix():
+    sd = lightning_sd()
+    rec = Recorder()
+    sd.ces_pnw = rec
+    prime(sd)
+    run_frame(sd, 1, 1.8, 5.0)
+    assert rec.records[0]["ev"] == "alertSuppressed"
+
+
+def test_backward_clock_jump_does_not_make_old_status_fresh():
+  with OpenpilotPrefix():
+    sd = lightning_sd()
+    prime(sd, "angle")
+    live_mode(sd, "angle", ts=time.time() + 3600)  # noqa: TID251 -- status stamped in the "future" (clock stepped back)
+    sd.sm.frame = 25
+    sd._refresh_steer_sat_mode()
+    assert sd.steer_sat_floor_now == 1.0 and sd.steer_sat_mode is None

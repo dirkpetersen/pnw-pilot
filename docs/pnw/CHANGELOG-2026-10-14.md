@@ -100,7 +100,7 @@ append moved verbatim (`OBS_MAX_BYTES` freeze, `_write_stopped`, same file, open
   2.4 -> 4 / 7 | 2.5 -> 3 / 7. The 4 episodes with runtime peak >= 2.4 (2.41-3.39) all still alert at 2.2 (margin 0.2-0.3). One day / 21
   episodes is a small sample: 2.2 is a conservative first value. (The first cut of this change tuned on CES `slLatDem`, a different quantity; superseded.)
 - Rule 2: a suppressed episode is logged, never silent, under the DISTINCT name `steerSaturatedSuppressed` (so alert counts cannot mix): a
-  `phase:"start"` record and a `phase:"end"` record with `peakDemand`, `peakAngErr`, `durationS`, `escaped`, plus `supCount`, plus cloudlog warnings.
+  `phase:"start"` record and a `phase:"end"` record (`ev:"alertSuppressed"`, only for episodes with at least one genuinely suppressed frame) with `peakDemand`, `peakAngErr`, `durationS`, `escaped`, plus `supCount`, plus cloudlog warnings.
 - Not changed: panda safety, steering commands, the lateral controller. Pre-existing and left alone: `log_take_control_alert` in `ces_pnw.py`
   ends in a bare `except Exception: pass` (and the CES stub's version is a no-op), so if CES failed to construct only the cloudlog line survives.
 - Tests: `selfdrive/selfdrived/tests/test_steersatfloor_pnw.py` (9; real `SelfdriveD.__init__`, 100 Hz replay fixture `tests/data/steersat_rlog_runtime_2026-10-11.json`).
