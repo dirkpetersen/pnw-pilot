@@ -226,7 +226,7 @@ def test_a_slow_append_is_warned_on_the_writer_side(ctl, tmp_path, monkeypatch, 
   monkeypatch.setattr(m.os.path, "getsize", lambda p: (time.sleep(0.03), real(p) if m.os.path.exists(p) else 0)[1])
   ctl._append_event({"ev": "x"})
   assert ctl.flush_events(2.0)
-  assert any("ces_events write took" in w for w in log.warnings)
+  assert any("ces_pnw writer: write took" in w for w in log.warnings)
 
 
 def test_event_log_not_ok_enqueues_nothing(ctl):

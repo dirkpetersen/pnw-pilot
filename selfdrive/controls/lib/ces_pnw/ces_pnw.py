@@ -4555,8 +4555,10 @@ class CESController:
     # curvedbshadow2pnw (CURVEDB2PNW.md Phase 2, SHADOW ONLY): the learned curve database says what
     # it WOULD have done on every ICBM map/far decision and writes a log line. NOTHING READS THE
     # ANSWER -- `_cdb` is touched in exactly two places below (the 100 Hz `tick` feed, whose return
-    # is discarded, and the `**`-splat of `record()` into _event_record's dict) and
-    # tests/test_curvedb_read_boundary.py fails if that ever stops being true.
+    # is discarded, and the `**`-splat of `record()` into _event_record's dict). The one other
+    # path is the writer queue: `_event_writer_main` calls write_line and `_drop` calls note_queue_drop
+    # on the queued shadow, as discarded statements. tests/test_curvedb_read_boundary.py fails if
+    # that ever stops being true.
     self._cdb = CurveDBShadow(self._car, sink=self._enqueue_event)    # curvedbasync2pnw: obs writes go via the ces_events writer thread
 
   def _set_mode(self, mode: int):
@@ -6706,7 +6708,7 @@ class CESController:
           dt = time.monotonic() - t0
           if dt > CES_EVENT_SLOW_WRITE_S:
             kind = 'park rotate' if item is _EV_PARK_ROTATE else ('curvedb append' if isinstance(item, tuple) else 'append')
-            cloudlog.warning(f"ces_pnw: ces_events write took {dt * 1000:.0f} ms ({kind}, " +
+            cloudlog.warning(f"ces_pnw writer: write took {dt * 1000:.0f} ms ({kind}, " +
                              f"{q.qsize()} queued) -- disk stall; this used to stall selfdrived")
         finally:
           q.task_done()
@@ -6764,8 +6766,17 @@ class CESController:
     pending = q.unfinished_tasks
     ok = self.flush_events(timeout)
     lost = q.unfinished_tasks
+    cdb_left = 0                                            # curvedbasync2pnw: leftover observations (counted + named via _drop)
+    if lost:
+      with q.mutex:
+        leftover = [it for it in q.queue if isinstance(it, tuple)]
+      for it in leftover:
+        self._drop(it, "LOST at stop")
+      cdb_left = len(leftover)
+    lost -= cdb_left
     (cloudlog.info if ok else cloudlog.error)(
-      f"ces_pnw: ces_events stop: {pending} record(s) queued, {pending - lost} flushed, {lost} LOST, {self._ev_drops} dropped earlier")
+      f"ces_pnw: ces_events stop: {pending} item(s) queued, {pending - lost - cdb_left} flushed, {lost} other item(s) LOST (ces_events records, or the one write in flight), " +
+      f"{cdb_left} curvedb observation(s) LOST, {self._ev_drops} dropped earlier")
     try:
       q.put_nowait(_EV_STOP)
     except queue.Full:

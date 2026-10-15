@@ -176,3 +176,36 @@ def test_the_real_controller_wires_the_shadow_to_its_own_writer():
     assert c._cdb._sink == c._enqueue_event
   finally:
     c.close_events(2.0)
+
+
+def test_a_stale_queue_refusal_does_not_mislabel_a_later_cap_refusal(rig, monkeypatch):
+  c, sh, _, _ = rig
+  monkeypatch.setattr(c, "_enqueue_event", lambda item: (item[0].note_queue_drop("test"), False)[1])
+  sh._sink = c._enqueue_event
+  assert sh._write(_obs()) is False and sh._drop_why() == "queue"
+  sh._write_stopped = True                                         # then the cap freeze hits
+  assert sh._write(_obs()) is False
+  assert sh._drop_why() == "stopped"
+
+
+def test_close_events_names_the_file_for_leftover_curvedb_lines(rig):
+  c, sh, obs_path, lg = rig
+  release, started = threading.Event(), threading.Event()
+
+  def stuck(line):
+    started.set()
+    release.wait(5.0)
+    return True
+  sh.write_line = stuck
+  assert sh._write(_obs(t=T0))
+  assert started.wait(2.0)
+  for i in range(1, 4):
+    assert sh._write(_obs(t=T0 + i))
+  try:
+    assert c.close_events(0.05) is False
+  finally:
+    release.set()
+  assert any("LOST at stop" in e and str(obs_path) in e for e in lg.errors)
+  stop = [e for e in lg.errors if "ces_events stop:" in e][0]
+  assert "3 curvedb observation(s) LOST" in stop and "1 other item(s) LOST" in stop, stop   # 1 = the write in flight
+  assert sh.obs_dropped == 3

@@ -74,7 +74,7 @@ append moved verbatim (`OBS_MAX_BYTES` freeze, `_write_stopped`, same file, open
 - Verdict (`cdbEv`) is now honest: `upQueued` / `downQueued` = handed to the writer, NOT yet on disk; plain `up` / `down` only when there is no
   writer (standalone construction, tests); `upDropped:<why>` with new why `queue` (full / writer dead). `cdbObs` keeps meaning "WRITTEN" and now
   lags the verdicts. New telemetry field `cdbDrop` (in `CURVEDB_TELE_KEYS`, all three return paths): observations lost since boot (queue full,
-  writer dead, cap-refused after queueing, write error). Curvedb drops are counted on the shadow, NOT in ces_events `evDrop`.
+  writer dead, cap-refused AFTER queueing, write error, lost at stop; loop-side refusals after the cap freeze show only as the `upDropped:stopped` verdict). Curvedb drops are counted on the shadow, NOT in ces_events `evDrop`.
 - Rule 2: queue drops log `curvedb_shadow: observation(s) DROPPED before reaching <path> (<why>)`, at most once per 30 s with the running count;
   writer-side append failures go through the shadow's `_fail` and name the file; the cap freeze logs once, lines already queued behind it are
   counted in `cdbDrop` without per-line log spam. `close_events` flushes curvedb items too (same queue).

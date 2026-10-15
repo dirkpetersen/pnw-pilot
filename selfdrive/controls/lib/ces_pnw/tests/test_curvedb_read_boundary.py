@@ -207,6 +207,29 @@ class TestL1CesPnwSyntacticPositions:
       if isinstance(node, ast.Attribute) and node.attr in keys:
         pytest.fail(f"ces_pnw.py reads .{node.attr} at line {node.lineno}")
 
+  def test_the_writer_queue_may_call_exactly_two_shadow_methods_as_statements(self):
+    """curvedbasync2pnw: queued items are `(shadow, line)`, so the writer machinery holds a reference to the
+    shadow. It may reach it ONLY as `item[0].write_line(item[1])` in `_event_writer_main` and
+    `item[0].note_queue_drop(why)` in `_drop` -- discarded statements, no result read -- and `item[0]`
+    may appear nowhere else in ces_pnw.py."""
+    tree = _tree(CES_PNW_PATH)
+    parents = _parents(tree)
+    allowed = {"_event_writer_main": "write_line", "_drop": "note_queue_drop"}
+    seen = {}
+    for node in ast.walk(tree):
+      if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "item"
+              and isinstance(node.slice, ast.Constant) and node.slice.value == 0):
+        continue
+      fn = _enclosing_def(node, parents)
+      attr = parents[id(node)]
+      call = parents.get(id(attr))
+      stmt = parents.get(id(call))
+      ok = (fn in allowed and isinstance(attr, ast.Attribute) and attr.attr == allowed[fn]
+            and isinstance(call, ast.Call) and call.func is attr and isinstance(stmt, ast.Expr))
+      assert ok, f"item[0] (the queued shadow) is reached in {fn} at line {node.lineno}: {ast.unparse(attr)}"
+      seen[fn] = seen.get(fn, 0) + 1
+    assert seen == {"_event_writer_main": 1, "_drop": 1}, seen
+
   def test_the_shadow_is_not_called_from_the_icbm_decision_at_all(self):
     """`_icbm_step` -- the function that computes and publishes `IcbmTarget` -- never mentions it.
 

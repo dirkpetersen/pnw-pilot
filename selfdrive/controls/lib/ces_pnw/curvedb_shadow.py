@@ -244,8 +244,9 @@ CURVEDB_TELE_KEYS = (
   "cdbRows",   # int  : rows in the database loaded at boot (0 while loading, and 0 is a real answer)
   "cdbObs",    # int  : observations WRITTEN since boot (the write half's liveness). With the async
                #        writer (curvedbasync2pnw) this LAGS the verdicts: "upQueued" is not yet written
-  "cdbDrop",   # int  : observations LOST since boot -- queue full / writer dead / cap-refused / write
-               #        error. 0 = healthy. A queued observation that never lands shows up HERE
+  "cdbDrop",   # int  : observations LOST since boot -- queue full / writer dead / cap-refused AFTER
+               #        queueing / write error / lost at stop. Loop-side refusals after the cap freeze
+               #        show only as the upDropped:stopped verdict, not here. 0 = healthy. A queued observation that never lands shows up HERE
   "cdbErr",    # int  : shadow failures since boot. 0 = healthy
   # -- the site this record named --------------------------------------------------------------
   "cdbSite",   # bool : this record named a map candidate the shadow could look up
@@ -1007,9 +1008,9 @@ class CurveDBShadow:
     Returns whether the observation was ACCEPTED (queued, or written when there is no writer), so the
     caller's verdict cannot claim an observation that was refused. Accepted is not written: that is
     `obs_written`, and a queued line that is later lost is counted in `obs_dropped`."""
+    self._queue_refused = False             # BEFORE the early return, or a stale refusal mislabels later verdicts
     if self._tz is None or self._write_stopped:
       return False
-    self._queue_refused = False
     try:
       line = json.dumps(vars(obs)) + "\n"
     except Exception as e:
@@ -1063,9 +1064,9 @@ class CurveDBShadow:
     """Why `_write` refused, in one word, so a dropped pass names its own cause."""
     if self._state == "noStore":
       return "noStore"
-    if self._queue_refused:
-      return "queue"
-    return "stopped" if self._write_stopped else "err"
+    if self._write_stopped:
+      return "stopped"
+    return "queue" if self._queue_refused else "err"
 
   # -- plumbing -------------------------------------------------------------------------------
 
