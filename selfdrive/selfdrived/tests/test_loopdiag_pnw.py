@@ -2,6 +2,8 @@
 import inspect
 import time
 
+import pytest
+
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import CESController
 from openpilot.selfdrive.selfdrived import selfdrived as sd
@@ -110,6 +112,14 @@ def test_a_failing_extra_does_not_raise():
   assert d.fail == 1 and len(excs) == 1
 
 
+@pytest.fixture(autouse=True)
+def _ces_event_writers_stopped(monkeypatch):
+  """cesasyncwrite2pnw: stop/join every ces_events writer before CES_EVENT_LOG is restored (never the real /data file)."""
+  yield
+  for c in list(ces_pnw._EV_CONTROLLERS):
+    c.close_events(2.0)
+
+
 def _ces(tmp_path, monkeypatch):
   ctl = CESController.__new__(CESController)
   ctl._event_log_ok = True
@@ -169,3 +179,26 @@ def test_selfdrived_is_wired_to_the_diagnostic():
   run = inspect.getsource(sd.SelfdriveD.run)
   assert "self.loop_diag.begin()" in run and "self.loop_diag.end(" in run
   assert "self.rk.monitor_time()" in run
+
+
+def test_drops_and_queue_depth_are_in_the_slow_loop_extras(tmp_path, monkeypatch):
+  ctl = _ces(tmp_path, monkeypatch)
+  ctl._ev_drops = 7
+  w = ctl.event_write_timing(0.0)
+  assert w["ces_event_drops"] == 7.0 and w["ces_event_qdepth"] == 0.0
+
+
+def test_run_finally_drains_ces_events_at_stop():
+  """cesasyncwrite2pnw: atexit never runs in the forked selfdrived child, so run()'s finally must flush the writer."""
+  calls = []
+  s = sd.SelfdriveD.__new__(sd.SelfdriveD)
+  s.params_thread = lambda evt: None
+  s.loop_diag = LoopDiag()
+  s.ces_pnw = type("C", (), {"close_events": lambda self, t: calls.append(t)})()
+
+  def boom():
+    raise KeyboardInterrupt
+  s.step = boom
+  with pytest.raises(KeyboardInterrupt):
+    s.run()
+  assert calls == [1.0]

@@ -1085,6 +1085,13 @@ class SelfdriveD:
     finally:
       e.set()
       t.join()
+      # cesasyncwrite2pnw: atexit does not run in this forked child (os._exit after SIGINT) -- drain ces_events here
+      close = getattr(self.ces_pnw, "close_events", None)
+      if close is not None:
+        try:
+          close(1.0)
+        except Exception:
+          cloudlog.exception("ces_pnw: close_events raised at selfdrived stop -- queued ces_events records may be lost")
 
 
 def main():

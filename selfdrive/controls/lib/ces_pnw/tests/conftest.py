@@ -18,3 +18,14 @@ def _curve_overrides_valid(monkeypatch, tmp_path_factory):
   p.write_text('{"overrides": []}')
   monkeypatch.setattr(cb, "OVERRIDES_PATH", str(p))
   return p
+
+
+@pytest.fixture(autouse=True)
+def _ces_event_writers_stopped(monkeypatch):
+  """cesasyncwrite2pnw: a controller's ces_events writer is a daemon thread that outlives its test. Stop and join every one
+  BEFORE monkeypatch undoes CES_EVENT_LOG (this fixture requests monkeypatch, so it tears down first) -- otherwise a leftover
+  writer could append to the real /data/pnw/ces_events.jsonl on a device (tici)."""
+  yield
+  from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
+  for c in list(m._EV_CONTROLLERS):
+    c.close_events(2.0)

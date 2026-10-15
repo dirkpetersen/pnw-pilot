@@ -6611,7 +6611,9 @@ class CESController:
 
   def event_write_timing(self, since: float) -> dict:
     ws = [dt for (t, dt) in (self._event_writes or ()) if t >= since]
-    return {"ces_event_writes": float(len(ws)), "ces_event_write_total": sum(ws), "ces_event_write_max": max(ws, default=0.0)}
+    q = self._ev_q
+    return {"ces_event_writes": float(len(ws)), "ces_event_write_total": sum(ws), "ces_event_write_max": max(ws, default=0.0),
+            "ces_event_drops": float(self._ev_drops), "ces_event_qdepth": float(q.qsize() if q is not None else 0)}
 
   # cesasyncwrite2pnw: the selfdrived loop NEVER does ces_events file I/O. 2026-10-11: two selfdrivedLagging
   # soft-disables (56 and 64 mph) were each one ~123 ms stall of which 96-99% was the synchronous append
@@ -6644,27 +6646,42 @@ class CESController:
     if self._ev_q is None:
       self._ev_q = queue.Queue(maxsize=CES_EVENT_QUEUE_MAX)
       _EV_CONTROLLERS.add(self)
-    self._ev_thread = threading.Thread(target=self._event_writer_main, name="ces_events_writer", daemon=True)
-    self._ev_thread.start()
+    th = threading.Thread(target=self._event_writer_main, name="ces_events_writer", daemon=True)
+    th.start()                       # may raise (RuntimeError: can't start new thread): _enqueue_event turns that into a counted drop
+    self._ev_thread = th
+
+  def _note_drop(self, why: str) -> None:
+    """Count a dropped record and log it, rate-limited (never blocks, never raises into the loop)."""
+    self._ev_drops += 1
+    now = time.monotonic()
+    if self._ev_drop_log_t is None or now - self._ev_drop_log_t >= CES_EVENT_DROP_LOG_S:
+      cloudlog.error(f"ces_pnw: ces_events record(s) DROPPED ({why}); {self._ev_drops} dropped in total " +
+                     f"({self._ev_drops - self._ev_drops_logged} since the last log)")
+      self._ev_drop_log_t = now
+      self._ev_drops_logged = self._ev_drops
 
   def _enqueue_event(self, item) -> bool:
-    """put_nowait; a full queue drops the item, COUNTS it and logs (rate-limited). Never blocks."""
-    self._ensure_event_writer()
+    """put_nowait; a full queue or any failure of the machinery drops the item, COUNTS it and logs (rate-limited).
+    Never blocks and never raises: a raise here would reach the adopt path in the loop and force Chill."""
     try:
+      self._ensure_event_writer()
+      th = self._ev_thread
+      if th is None or not th.is_alive():
+        self._note_drop(f"writer thread is DEAD after {self._ev_restarts} restart(s)")
+        return False
       self._ev_q.put_nowait(item)
       return True
     except queue.Full:
-      self._ev_drops += 1
-      now = time.monotonic()
-      if self._ev_drop_log_t is None or now - self._ev_drop_log_t >= CES_EVENT_DROP_LOG_S:
-        cloudlog.error(f"ces_pnw: ces_events queue FULL ({CES_EVENT_QUEUE_MAX}) -- the writer is stalled; " +
-                       f"{self._ev_drops} record(s) dropped in total ({self._ev_drops - self._ev_drops_logged} since the last log)")
-        self._ev_drop_log_t = now
-        self._ev_drops_logged = self._ev_drops
-      return False
+      self._note_drop(f"queue FULL ({CES_EVENT_QUEUE_MAX}) -- the writer is stalled")
+    except Exception as e:
+      self._note_drop(f"enqueue raised {type(e).__name__}: {e}")
+    return False
 
   def _event_writer_main(self) -> None:
     q = self._ev_q
+    bind = getattr(cloudlog, "bind", None)
+    if bind is not None:
+      bind(daemon="selfdrived")            # swaglog bind is per-thread: without it this thread's lines are unattributed
     try:
       while True:
         item = q.get()
@@ -6714,6 +6731,8 @@ class CESController:
       if not self._event_log_ok:
         return
       try:
+        if self._ev_drops:
+          rec = dict(rec, evDrop=self._ev_drops)     # cumulative drops so far, visible in the data and not only swaglog
         line = json.dumps(rec) + "\n"
       except Exception:
         self._note_append_fail()
@@ -6724,6 +6743,25 @@ class CESController:
       if self._event_writes is None:
         self._event_writes = collections.deque(maxlen=16)
       self._event_writes.append((t1, t1 - t0))
+
+  def close_events(self, timeout: float = 1.0) -> bool:
+    """Process stop (SelfdriveD.run's finally; the manager SIGKILLs ~5 s after SIGINT and atexit does not run in a
+    forked child): drain the queue within `timeout`, say how many records were queued / flushed / lost, stop the writer."""
+    q = self._ev_q
+    if q is None:
+      return True
+    pending = q.unfinished_tasks
+    ok = self.flush_events(timeout)
+    lost = q.unfinished_tasks
+    (cloudlog.info if ok else cloudlog.error)(
+      f"ces_pnw: ces_events stop: {pending} record(s) queued, {pending - lost} flushed, {lost} LOST, {self._ev_drops} dropped earlier")
+    try:
+      q.put_nowait(_EV_STOP)
+    except queue.Full:
+      pass                                                  # writer is stalled; it is a daemon and dies with the process
+    if self._ev_thread is not None:
+      self._ev_thread.join(timeout)
+    return ok
 
   def flush_events(self, timeout: float = 2.0) -> bool:
     """Best-effort wait for the writer to drain (atexit / tests). False = timed out with records still queued (logged)."""

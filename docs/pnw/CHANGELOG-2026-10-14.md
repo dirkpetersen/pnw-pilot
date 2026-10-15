@@ -41,17 +41,22 @@ Cause (drives/2026-10-11/system-lagging): the two `selfdrivedLagging` soft-disab
 single ~123 ms stall of the selfdrived loop; loopdiag2pnw put 96-99% of it in the synchronous append to `/data/pnw/ces_events.jsonl`
 (`CESController._append_event`: the ces stage 112/116 ms, the write 107.5/114.8 ms) on a ~90% full `/data` with loggerd writing hard.
 
-- `_append_event` now only `json.dumps` + `put_nowait()` on a bounded `queue.Queue` (2000). ONE daemon thread (`ces_events_writer`) does the
-  size check, `rotate_event_log`, archive hand-off and the append, unchanged (same file names, 20 MB rotation, 8 generations, open-per-append,
-  no fsync). The park-edge `rotate_at_park` is enqueued to the same thread (it was the only other disk call on the loop's path).
-- Rule 2: queue full -> record dropped, counted (`_ev_drops`), `cloudlog.error` at most once per 30 s with the running count; never blocks.
-  Writer death -> logged by the thread, detected by `is_alive()` in the next `_append_event`, restarted (max 5, then a loud once-per-30 s line).
-  The writer warns when one append or rotate takes > 50 ms, so disk stalls stay visible. `flush_events()` runs at atexit (best effort; a SIGKILL or
-  an unhandled SIGTERM loses the queue, <= ~2 records/s). The loopdiag `ces_event_write*` fields now time the enqueue (~0 ms).
-- Other `/data` I/O reachable from the loop in `ces_pnw/`: `curvedb_shadow._write` (appends one observation line to `curvedb_obs.jsonl`
-  per curve pass, with a `getsize` first) is STILL synchronous: its caller's verdict depends on the write result, so it was not moved; it is
-  per-observation, not per-tick. JSON reads (`curvedb_live`, `curve_brain`, `curvedb_shadow` load) are load-time/reload, not writes. The
-  `SteerEvent` read is `/dev/shm`. Writers in other processes (`accdrop_pnw`/`pscmlim_pnw`/`epsref_pnw` via `append_to_ces_log`, the deleter) are
-  threaded or not in selfdrived and unchanged; they still append to the same file.
+- `_append_event` now only `json.dumps` + `put_nowait()` on a bounded `queue.Queue` (2000). ONE daemon thread (`ces_events_writer`, log context
+  bound to `daemon=selfdrived`) does the size check, `rotate_event_log`, archive hand-off and the append, unchanged (same file names, 20 MB
+  rotation, 8 generations, open-per-append, no fsync). The park-edge `rotate_at_park` goes through the same thread.
+- Rule 2: queue full or any enqueue failure (e.g. `Thread.start()` RuntimeError) -> the record is dropped and counted, never raised into the loop
+  (a raise on the adopt path would force Chill), `cloudlog.error` at most once per 30 s with the running count; the message says "writer DEAD"
+  once the restart cap is hit, "stalled" only for a live-but-slow writer. The cumulative drop count rides in the data as `evDrop` on every record
+  written after the first drop, and the loopdiag slow-loop line shows `ces_event_drops` / `ces_event_qdepth`.
+  Writer death -> logged by the thread, detected by `is_alive()` on the next `_append_event`, restarted (max 5, then loud). The writer warns when one
+  append or rotate takes > 50 ms, so disk stalls stay visible. NOTE the loopdiag `ces_event_write*` fields now time the ENQUEUE (~0 ms), not the disk.
+- Stop: `atexit` does NOT run in selfdrived (a forked child that exits via `os._exit`), so `SelfdriveD.run()`'s `finally` calls
+  `ces_pnw.close_events(1.0)` (the manager SIGKILLs ~5 s after SIGINT): it drains the queue and logs how many records were queued / flushed / LOST.
+  `atexit` stays as a harmless extra. A SIGKILL or a stalled disk can still lose the queue (<= ~2 records/s).
+- STILL SYNCHRONOUS on the loop (same stall class, follow-up): `curvedb_shadow._write` appends one observation to the curvedb obs jsonl per curve
+  pass, with up to 2 `getsize` + an append on `/data`. Its caller's verdict depends on the write result, so it was not moved here. Other
+  `/data` I/O reachable from the loop in `ces_pnw/` is read-only (`curvedb_live`, `curve_brain`, load/reload) or `/dev/shm`. Writers in other
+  processes (`accdrop_pnw`/`pscmlim_pnw`/`epsref_pnw` via `append_to_ces_log`, the deleter) still append to the same file.
 - The stock selfdrived lagging check is untouched.
-- Tests: new `ces_pnw/tests/test_cesasyncwrite2pnw.py` (+15); `test_loopdiag_pnw` slow-write test now asserts the stall does not reach the loop.
+- Tests: new `ces_pnw/tests/test_cesasyncwrite2pnw.py`; `test_loopdiag_pnw` asserts the stall does not reach the loop and that `run()`'s finally
+  calls `close_events`; autouse fixtures stop/join every writer before `CES_EVENT_LOG` is restored (no leftover thread can touch the real file).

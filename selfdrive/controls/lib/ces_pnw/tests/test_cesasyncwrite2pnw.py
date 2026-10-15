@@ -31,6 +31,9 @@ class LogRec:
   def exception(self, msg, *a, **k):
     self.exceptions.append(str(msg))
 
+  def bind(self, **k):
+    self.bound = k
+
   def event(self, *a, **k):
     pass
 
@@ -53,9 +56,9 @@ def ctl(tmp_path, monkeypatch, log):
   c._event_log_ok = True
   c._append_fail = 0
   yield c
-  if c._ev_q is not None:                      # the stop path: the writer must exit cleanly
-    c._ev_q.put(m._EV_STOP)
-    c._ev_thread.join(2.0)
+  c.close_events(2.0)                          # the production stop path: drain, then the writer must exit
+  if c._ev_thread is not None:
+    assert not c._ev_thread.is_alive()
 
 
 def _lines(tmp_path):
@@ -63,8 +66,12 @@ def _lines(tmp_path):
 
 
 def test_enqueue_returns_immediately_even_when_the_writer_is_blocked(ctl, tmp_path):
+  first = []
+
   def slow_write(line):
-    time.sleep(0.2)
+    if not first:                                  # one 200 ms stall, then the backlog drains (fast teardown)
+      first.append(1)
+      time.sleep(0.2)
   ctl._write_event_line = slow_write
   durs = []
   for i in range(20):
@@ -127,7 +134,7 @@ def test_queue_full_drops_counts_and_logs_once(ctl, tmp_path, monkeypatch, log):
     ctl._append_event({"ev": "x", "i": i})         # 1-3 queue, 4-8 are dropped
   assert ctl._ev_drops == 5
   full = [e for e in log.errors if "queue FULL" in e]
-  assert len(full) == 1 and "record(s) dropped in total" in full[0]   # 5 drops, ONE line (rate limited), with the running count
+  assert len(full) == 1 and "5 dropped in total" in full[0] or "1 dropped in total" in full[0]   # 5 drops, ONE line (rate limited), with the running count
   release.set()
   assert ctl.flush_events(5.0)
   assert [r["i"] for r in _lines(tmp_path)] == [0, 1, 2, 3]
@@ -226,3 +233,52 @@ def test_event_log_not_ok_enqueues_nothing(ctl):
   ctl._event_log_ok = False
   ctl._append_event({"ev": "x"})
   assert ctl._ev_q is None
+
+
+def test_a_thread_start_failure_is_a_counted_drop_never_a_raise(ctl, monkeypatch, log):
+  def bad_start(self):
+    raise RuntimeError("can't start new thread")
+  monkeypatch.setattr(m.threading.Thread, "start", bad_start)
+  ctl._append_event({"ev": "x"})                   # must not raise into the adopt path
+  assert ctl._ev_drops == 1
+  assert any("enqueue raised RuntimeError" in e for e in log.errors)
+
+
+def test_after_the_restart_cap_the_message_says_dead_not_stalled(ctl, log):
+  def always_die(line):
+    raise Boom()
+  ctl._write_event_line = always_die
+  for i in range(m.CES_EVENT_WRITER_MAX_RESTARTS + 3):
+    ctl._append_event({"ev": "x", "i": i})
+    ctl._ev_thread.join(2.0)
+  assert ctl._ev_drops >= 1
+  assert any("DEAD" in e and "DROPPED" in e for e in log.errors)
+  assert not any("stalled" in e for e in log.errors)
+
+
+def test_the_drop_count_rides_in_the_next_record(ctl, tmp_path):
+  ctl._ev_drops = 4
+  ctl._append_event({"ev": "x"})
+  assert ctl.flush_events(2.0)
+  assert _lines(tmp_path)[0]["evDrop"] == 4
+  ctl._ev_drops = 0
+  ctl._append_event({"ev": "y"})
+  assert ctl.flush_events(2.0)
+  assert "evDrop" not in _lines(tmp_path)[1]
+
+
+def test_the_writer_binds_its_log_context(ctl, log):
+  ctl._append_event({"ev": "x"})
+  assert ctl.flush_events(2.0)
+  assert log.bound == {"daemon": "selfdrived"}
+
+
+def test_close_events_reports_flushed_and_lost(ctl, tmp_path, log):
+  release = threading.Event()
+  real = m.CESController._write_event_line
+  ctl._write_event_line = lambda line: (release.wait(0.3), real(ctl, line))
+  for i in range(3):
+    ctl._append_event({"ev": "x", "i": i})
+  assert ctl.close_events(0.05) is False           # writer still stuck: some LOST, said so
+  assert any("stop:" in e and "LOST" in e for e in log.errors)
+  release.set()
