@@ -95,3 +95,15 @@ Still true: highway single node = one engage at 1.2/1.6 m/s2, release after pass
 and the latch lived until the node left the 500 m horizon (cap ~150 m longer than origin). The re-anchor can now raise the tracked distance by at most 5 m per
 tick and stops within 5 m of the node. Tests: roundabout rated 3.5 / 4.5 / 5.5 m/s with and without a heading - the latch ends within 45 m past the node
 and the cap ends no later than origin's.
+
+## `uploadauth2pnw` (branch `uploadauth2pnw`, not yet pushed): uploader is ready for the gateway's signature check to go to `enforce`
+Owner-approved security fix (Opus review findings F1/F2). Files: `system/loggerd/uploader.py`, `system/loggerd/tests/test_uploader.py`.
+- **F1 non-200 was invisible.** `do_upload` returned early only on 412; a 401 (body `Unauthorized`) went into `json.loads`, which threw -> `stat=None, code=None`
+  -> `_record_upload_error(None)` is silent by design -> uploads would have stopped with no sign. Now ANY non-200 `upload_url` response is returned to the caller
+  (file stays un-marked, per-file cooldown, `LastUploadError = "HTTP <code>"` so the overlay shows `UP ERR HTTP 401`) and `cloudlog.error` logs the status +
+  reason + key (never the token or body). The 412 path is untouched.
+- **F2 dead-RTC clock.** Before NTP/GPS the 3X clock sits at the systemd build date (~79 days behind), so every token is expired and `enforce` would 401 every
+  request. `Uploader.step()` (all passes) and the locator ping in `main()` now wait on `wall_time_valid(time.time())` (the helper the metered path uses), logging
+  `uploader: waiting for a valid clock` once per wait. Pass ordering, metered rules, deleter and retry cooldown unchanged.
+- Tests: `TestUploadAuthPnw` (6): 401/403/500/502 recorded + not marked + cooled down; token never logged; 412 unchanged; invalid clock -> zero `upload_url`
+  calls and one log line; locator ping gated; valid clock uploads.

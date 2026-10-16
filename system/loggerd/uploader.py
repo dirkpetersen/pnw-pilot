@@ -471,6 +471,7 @@ class Uploader:
     self._412_streak_start: float | None = None
     self._pnw_log_state: dict = {}   # ceslogup2pnw: change-only state for _pnw_log_note, per channel
     self._metered_full_day: str | None = None   # cesarchive2pnw: PT date the metered budget ran out
+    self._clock_wait_logged = False   # uploadauth2pnw: 'waiting for a valid clock' logged once per wait
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -548,6 +549,19 @@ class Uploader:
         self.params.remove("LastUploadError")
     except Exception:
       cloudlog.exception("failed to clear upload error")
+
+  def clock_valid(self) -> bool:
+    # uploadauth2pnw (finding F2): the 3X's RTC is dead, so before NTP/GPS the clock sits at the systemd
+    # build date and every device token is already expired -- the signature-checking gateway would 401
+    # each request. Hold ALL uploader traffic (and the locator ping) until the clock is real; say so once
+    # per wait, not per loop.
+    if wall_time_valid(time.time()):  # noqa: TID251 -- wall clock by definition (token expiry)
+      self._clock_wait_logged = False
+      return True
+    if not self._clock_wait_logged:
+      self._clock_wait_logged = True
+      cloudlog.warning("uploader: waiting for a valid clock (tokens would be expired) -- no uploads or locator ping yet")
+    return False
 
   def _pnw_log_note(self, state: str, **kw) -> None:
     """ceslogup2pnw (Rule 2): change-only note about the pnw-log source. The listing runs many times a
@@ -925,6 +939,16 @@ class Uploader:
     if url_resp.status_code == 412:
       return url_resp
 
+    # uploadauth2pnw (finding F1): ANY other non-200 is an error the CALLER must see. A 401 from the
+    # signature-checking gateway carries a non-JSON body ('Unauthorized'); json.loads used to throw, the
+    # caller got stat=None/code=None, _record_upload_error(None) is deliberately silent, and uploads
+    # stopped with no sign. Returning the response makes upload() cool the file down, leave it un-marked
+    # and record 'HTTP <code>' for the UP ERR overlay. Status + reason only: never the token or the body.
+    if url_resp.status_code != 200:
+      cloudlog.error("upload_url refused: HTTP %s %s (key=%s)", url_resp.status_code,
+                     str(getattr(url_resp, "reason", "") or "")[:60], key)
+      return url_resp
+
     url_resp_json = json.loads(url_resp.text)
     url = url_resp_json['url']
     headers = url_resp_json['headers']
@@ -1042,6 +1066,8 @@ class Uploader:
   def step(self, network_type: int, metered: bool, pass2: bool = False) -> bool | None:
     # connect2xnor: pass2 picks the next large firehose file; pass1 (default) is
     # unchanged stock behavior.
+    if not self.clock_valid():
+      return None
     d = self.next_pass2_file_to_upload(metered) if pass2 else self.next_file_to_upload(metered)
     if d is None:
       return None
@@ -1141,7 +1167,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     # uploadgate2pnw: keep the CloudWatch device locator alive on EVERY connection, incl. metered
     # (driver: location services are never gated). A bare upload_url GET (~1 KB, no file follows)
     # carries the local_ip param the Lambda logs. Best-effort; never blocks the loop on failure.
-    if time.monotonic() - last_locator_ping >= LOCATOR_PING_S:
+    if time.monotonic() - last_locator_ping >= LOCATOR_PING_S and uploader.clock_valid():
       last_locator_ping = time.monotonic()
       try:
         uploader.api.get("v1.4/" + dongle_id + "/upload_url/", timeout=5, path="locator/ping",

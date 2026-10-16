@@ -736,3 +736,130 @@ class TestUploadGate3Pnw:
                 p1 = pass1_allowed(network_type, metered, at_home)
                 assert not (p2 and not p1), \
                   f"pass2 allowed but pass1 blocked: {network_type=} {metered=} {at_home=} {onroad=} {parked=} {defer_hd=}"
+
+
+class _StatusApi:
+  """upload_url answers with a fixed status and a non-JSON body, like the signature-checking gateway's 401."""
+  def __init__(self, status, text="Unauthorized"):
+    self.status, self.text, self.gets = status, text, 0
+
+  def get(self, *args, **kwargs):
+    from openpilot.system.loggerd.tests.loggerd_tests_common import MockResponse
+    self.gets += 1
+    r = MockResponse(self.text, self.status)
+    r.reason = "Unauthorized"
+    return r
+
+  def get_token(self):
+    return "SECRET-TOKEN"
+
+
+class TestUploadAuthPnw(UploaderTestCase):
+  """uploadauth2pnw: a non-200 upload_url must be a visible, retried error (F1), and nothing may go to the
+  signature-checking gateway before the clock is real (F2)."""
+
+  def _uploader(self, api):
+    up = Uploader("0000000000000000", str(Path(Paths.log_root())))
+    up.api = api
+    return up
+
+  def _one_file(self):
+    return str(self.make_file_with_data(self.seg_dir, "qlog", 1))
+
+  def _upload(self, up, fn):
+    return up.upload("qlog", f"{self.seg_dir}/qlog.zst", fn, WIFI, False)
+
+  def test_non_200_is_a_recorded_error_and_not_success(self):
+    for status in (401, 403, 500, 502):
+      self.params.remove("LastUploadError")
+      up = self._uploader(_StatusApi(status))
+      fn = self._one_file()
+      assert self._upload(up, fn) is False
+      assert UPLOAD_ATTR_NAME not in os.listxattr(fn), f"{status}: file marked uploaded without reaching S3"
+      assert up._retry_after.get(fn, 0) > time.monotonic(), f"{status}: no retry cooldown applied"
+      err = self.params.get("LastUploadError")
+      err = err.decode() if isinstance(err, bytes) else err
+      assert err == f"HTTP {status}", f"{status}: UP ERR not recorded (got {err!r})"
+
+  def test_401_is_logged_with_status_but_never_the_token(self):
+    records = []
+
+    class H(logging.Handler):
+      def emit(self, r):
+        records.append(r)
+    h = H()
+    cloudlog.addHandler(h)
+    try:
+      up = self._uploader(_StatusApi(401))
+      self._upload(up, self._one_file())
+    finally:
+      cloudlog.removeHandler(h)
+    msgs = [r.getMessage() for r in records if r.levelno >= logging.ERROR]
+    assert any("401" in m and "refused" in m for m in msgs), msgs
+    assert not any("SECRET-TOKEN" in r.getMessage() for r in records)
+
+  def test_412_path_unchanged(self):
+    up = self._uploader(_StatusApi(412, ""))
+    fn = self._one_file()
+    assert self._upload(up, fn) is False
+    assert UPLOAD_ATTR_NAME not in os.listxattr(fn)
+    assert up._retry_after.get(fn, 0) > time.monotonic()
+    assert not self.params.get("LastUploadError"), "a lone 412 must stay quiet (dedupe)"
+
+  def test_invalid_clock_attempts_nothing_and_logs_once(self, monkeypatch):
+    import openpilot.system.loggerd.uploader as upl
+    monkeypatch.setattr(upl, "wall_time_valid", lambda t: False)
+    api = _StatusApi(200)
+    up = self._uploader(api)
+    self._one_file()
+    warned = []
+
+    class H(logging.Handler):
+      def emit(self, r):
+        if "valid clock" in r.getMessage():
+          warned.append(r)
+    h = H()
+    cloudlog.addHandler(h)
+    try:
+      for _ in range(5):
+        assert up.step(WIFI, False) is None
+        assert up.step(WIFI, False, pass2=True) is None
+    finally:
+      cloudlog.removeHandler(h)
+    assert api.gets == 0, "upload_url was called with an invalid clock"
+    assert len(warned) == 1, f"expected one 'waiting for a valid clock' line, got {len(warned)}"
+
+  def test_invalid_clock_blocks_locator_ping_valid_clock_allows(self, monkeypatch):
+    import openpilot.system.loggerd.uploader as upl
+    pings = []
+
+    class PingApi:
+      def __init__(self, dongle_id):
+        pass
+
+      def get(self, *a, **kw):
+        if kw.get("path") == "locator/ping":
+          pings.append(1)
+        from openpilot.system.loggerd.tests.loggerd_tests_common import MockResponse
+        return MockResponse('{"url": "http://localhost/x", "headers": {}}', 200)
+
+      def get_token(self):
+        return "t"
+
+    upl.Api = PingApi
+    for valid, want in ((False, 0), (True, 1)):
+      pings.clear()
+      monkeypatch.setattr(upl, "wall_time_valid", lambda t, v=valid: v)
+      end_event = threading.Event()
+      t = threading.Thread(target=main, args=[end_event], daemon=True)
+      t.start()
+      time.sleep(0.4)
+      end_event.set()
+      t.join()
+      assert (len(pings) >= 1) == bool(want), f"valid={valid}: pings={len(pings)}"
+
+  def test_valid_clock_uploads_proceed(self):
+    up = self._uploader(_StatusApi(200, '{"url": "http://localhost/x", "headers": {}}'))
+    fn = self._one_file()
+    assert up.step(WIFI, False) is True
+    assert UPLOAD_ATTR_NAME in os.listxattr(fn)
