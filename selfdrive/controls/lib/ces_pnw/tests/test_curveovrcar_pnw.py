@@ -348,7 +348,7 @@ class TestTeslaConsumer:
 # the real seed file against the real table
 # =====================================================================================================
 _SEED = pathlib.Path(os.path.expanduser("~/gh/comma/workdir/data/curve_overrides.json"))
-_TABLE = pathlib.Path(os.path.expanduser("~/gh/comma/workdir/data/curvedb_v2"))
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.curvedb_pin import TABLE as _TABLE, load_pinned_rows as _load_pinned_rows
 _OR34_WB = (44.5604, -123.1210)
 _OR34_EB = (44.5606, -123.1217)
 # The Lightning OR-34 EB right: 2.2 was measured to sit INSIDE the PSCM limit band (achLat 2.37-2.46 at k 0.00256 -> ~2.39), so the
@@ -366,7 +366,7 @@ def _seed_a(plat):
 class TestTheSeedAgainstTheRealTable:
   @pytest.fixture(scope="class")
   def idx(self):
-    return cl.load_rows(str(_TABLE))[0]
+    return _load_pinned_rows()
 
   def _lim(self, plat, a):
     return cb.Overrides(str(_SEED), platform=plat).limit(a[0], a[1], a[2])

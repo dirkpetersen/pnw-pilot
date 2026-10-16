@@ -856,7 +856,7 @@ import os as _os
 import pathlib as _pl
 
 _SEED = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curve_overrides.json"))
-_TABLE = _pl.Path(_os.path.expanduser("~/gh/comma/workdir/data/curvedb_v2"))
+from openpilot.selfdrive.controls.lib.ces_pnw.tests.curvedb_pin import TABLE as _TABLE, load_pinned_rows as _load_pinned_rows
 
 
 def _seed_is_v2() -> bool:
@@ -868,7 +868,7 @@ def _seed_is_v2() -> bool:
     return False
 
 
-_SEED_SKIP = "private data (the v2 seed override file + the curve DB) not present, or the seed is not schema v2"
+_SEED_SKIP = f"private data (the v2 seed override file, or the frozen curve DB table at {_TABLE}) not present, or the seed is not schema v2"
 
 
 @pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists() and _seed_is_v2()), reason=_SEED_SKIP)
@@ -877,8 +877,7 @@ class TestTheSeedFileAgainstTheRealTable:
   northbound rows are not (owner: no override on the right curve)."""
 
   def _rows(self):
-    idx, _ = cl.load_rows(str(_TABLE))
-    return idx
+    return _load_pinned_rows()
 
   def test_the_seed_is_valid_and_has_the_two_entries(self):
     o = cb.Overrides(str(_SEED))
@@ -909,8 +908,7 @@ class TestTheOr34SeedEntryAgainstTheRealTable:
   car took well), does not overlap the Terwilliger entry, and only ever lowers a speed."""
 
   def _rows(self):
-    idx, _ = cl.load_rows(str(_TABLE))
-    return idx
+    return _load_pinned_rows()
 
   def _or34(self, o, a):
     return o.limit(a[0], a[1], a[2])[0]
