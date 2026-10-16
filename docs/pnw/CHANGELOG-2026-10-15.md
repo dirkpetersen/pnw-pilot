@@ -103,7 +103,8 @@ Owner-approved security fix (Opus review findings F1/F2). Files: `system/loggerd
   (file stays un-marked, per-file cooldown, `LastUploadError = "HTTP <code>"` so the overlay shows `UP ERR HTTP 401`) and `cloudlog.error` logs the status +
   reason + key (never the token or body). The 412 path is untouched.
 - **F2 dead-RTC clock.** Before NTP/GPS the 3X clock sits at the systemd build date (~79 days behind), so every token is expired and `enforce` would 401 every
-  request. `Uploader.step()` (all passes) and the locator ping in `main()` now wait on `wall_time_valid(time.time())` (the helper the metered path uses), logging
-  `uploader: waiting for a valid clock` once per wait. Pass ordering, metered rules, deleter and retry cooldown unchanged.
+  request. `Uploader.step()` (all passes) now waits on `wall_time_valid(time.time())` (the helper the metered path uses), logging
+  `uploader: waiting for a valid clock` once per wait; after 10 min `LastUploadError` = `CLOCK` (UP ERR CLOCK), cleared when valid. The locator ping is NOT gated
+  (the gateway logs CLIENT_IP before auth). Only a 2xx upload_url proceeds to parse; 3xx/4xx/5xx are errors. Pass ordering, metered rules, deleter and retry cooldown unchanged.
 - Tests: `TestUploadAuthPnw` (6): 401/403/500/502 recorded + not marked + cooled down; token never logged; 412 unchanged; invalid clock -> zero `upload_url`
-  calls and one log line; locator ping gated; valid clock uploads.
+  calls and one log line; locator ping still fires; 201/204 not short-circuited; CLOCK error set/cleared; valid clock uploads.

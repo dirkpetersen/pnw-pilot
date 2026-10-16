@@ -445,6 +445,10 @@ def clear_locks(root: str) -> None:
       cloudlog.exception("clear_locks failed")
 
 
+CLOCK_ERR = "CLOCK"          # uploadauth2pnw: LastUploadError shown (UP ERR CLOCK) when the clock stays invalid
+CLOCK_ERR_AFTER_S = 600.0
+
+
 class Uploader:
   def __init__(self, dongle_id: str, root: str):
     self.dongle_id = dongle_id
@@ -472,6 +476,7 @@ class Uploader:
     self._pnw_log_state: dict = {}   # ceslogup2pnw: change-only state for _pnw_log_note, per channel
     self._metered_full_day: str | None = None   # cesarchive2pnw: PT date the metered budget ran out
     self._clock_wait_logged = False   # uploadauth2pnw: 'waiting for a valid clock' logged once per wait
+    self._clock_wait_start: float | None = None   # monotonic start of the current invalid-clock wait
     # clear any stale hard-error tag from a previous process run so the CES overlay never shows a ghost
     try:
       self.params.remove("LastUploadError")
@@ -557,7 +562,20 @@ class Uploader:
     # per wait, not per loop.
     if wall_time_valid(time.time()):  # noqa: TID251 -- wall clock by definition (token expiry)
       self._clock_wait_logged = False
+      self._clock_wait_start = None
+      if self._upload_err_desc == CLOCK_ERR:
+        self._clear_upload_error()
       return True
+    now = time.monotonic()
+    if self._clock_wait_start is None:
+      self._clock_wait_start = now
+    elif now - self._clock_wait_start >= CLOCK_ERR_AFTER_S and self._upload_err_desc != CLOCK_ERR:
+      # Rule 2: a stuck clock must not look like an idle uploader. Change-only; cleared when the clock is valid.
+      try:
+        self._upload_err_desc = CLOCK_ERR
+        self.params.put("LastUploadError", CLOCK_ERR)
+      except Exception:
+        cloudlog.exception("failed to record clock error")
     if not self._clock_wait_logged:
       self._clock_wait_logged = True
       cloudlog.warning("uploader: waiting for a valid clock (tokens would be expired) -- no uploads or locator ping yet")
@@ -944,7 +962,7 @@ class Uploader:
     # caller got stat=None/code=None, _record_upload_error(None) is deliberately silent, and uploads
     # stopped with no sign. Returning the response makes upload() cool the file down, leave it un-marked
     # and record 'HTTP <code>' for the UP ERR overlay. Status + reason only: never the token or the body.
-    if url_resp.status_code != 200:
+    if not 200 <= url_resp.status_code < 300:   # 2xx proceeds exactly as before; a 3xx/4xx/5xx never reaches the success path
       cloudlog.error("upload_url refused: HTTP %s %s (key=%s)", url_resp.status_code,
                      str(getattr(url_resp, "reason", "") or "")[:60], key)
       return url_resp
@@ -1167,7 +1185,7 @@ def main(exit_event: threading.Event | None = None) -> None:
     # uploadgate2pnw: keep the CloudWatch device locator alive on EVERY connection, incl. metered
     # (driver: location services are never gated). A bare upload_url GET (~1 KB, no file follows)
     # carries the local_ip param the Lambda logs. Best-effort; never blocks the loop on failure.
-    if time.monotonic() - last_locator_ping >= LOCATOR_PING_S and uploader.clock_valid():
+    if time.monotonic() - last_locator_ping >= LOCATOR_PING_S:
       last_locator_ping = time.monotonic()
       try:
         uploader.api.get("v1.4/" + dongle_id + "/upload_url/", timeout=5, path="locator/ping",

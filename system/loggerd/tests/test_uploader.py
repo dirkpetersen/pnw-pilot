@@ -829,7 +829,8 @@ class TestUploadAuthPnw(UploaderTestCase):
     assert api.gets == 0, "upload_url was called with an invalid clock"
     assert len(warned) == 1, f"expected one 'waiting for a valid clock' line, got {len(warned)}"
 
-  def test_invalid_clock_blocks_locator_ping_valid_clock_allows(self, monkeypatch):
+  def test_locator_ping_proceeds_with_an_invalid_clock(self, monkeypatch):
+    # the gateway logs CLIENT_IP before auth, so the locator must keep working even with an expired token
     import openpilot.system.loggerd.uploader as upl
     pings = []
 
@@ -846,17 +847,52 @@ class TestUploadAuthPnw(UploaderTestCase):
       def get_token(self):
         return "t"
 
-    upl.Api = PingApi
-    for valid, want in ((False, 0), (True, 1)):
-      pings.clear()
-      monkeypatch.setattr(upl, "wall_time_valid", lambda t, v=valid: v)
-      end_event = threading.Event()
-      t = threading.Thread(target=main, args=[end_event], daemon=True)
-      t.start()
-      time.sleep(0.4)
-      end_event.set()
-      t.join()
-      assert (len(pings) >= 1) == bool(want), f"valid={valid}: pings={len(pings)}"
+    monkeypatch.setattr(upl, "Api", PingApi)
+    monkeypatch.setattr(upl, "LOCATOR_PING_S", 0.0)   # independent of host uptime
+    monkeypatch.setattr(upl, "wall_time_valid", lambda t: False)
+    end_event = threading.Event()
+    t = threading.Thread(target=main, args=[end_event], daemon=True)
+    t.start()
+    time.sleep(0.4)
+    end_event.set()
+    t.join()
+    assert pings, "locator ping was gated on the clock"
+
+  def test_2xx_other_than_200_is_not_short_circuited(self):
+    # 201/204 must keep the old path (parse the body -> PUT), never be returned early: upload() would
+    # read a returned 201 as success and mark the file uploaded without any S3 PUT.
+    import openpilot.system.loggerd.uploader as upl
+    for status in (201, 204):
+      up = self._uploader(_StatusApi(status, '{"url": "http://localhost/x", "headers": {}}'))
+      fn = self._one_file()
+      assert isinstance(up.do_upload(f"{self.seg_dir}/qlog.zst", fn), upl.FakeResponse), f"{status} short-circuited"
+
+  def test_3xx_is_an_error(self):
+    up = self._uploader(_StatusApi(302, ""))
+    fn = self._one_file()
+    assert self._upload(up, fn) is False
+    assert UPLOAD_ATTR_NAME not in os.listxattr(fn)
+
+  def test_clock_stuck_10_min_sets_up_err_clock_then_clears(self, monkeypatch):
+    import openpilot.system.loggerd.uploader as upl
+    valid = [False]
+    monkeypatch.setattr(upl, "wall_time_valid", lambda t: valid[0])
+    now = [1000.0]
+    monkeypatch.setattr(upl.time, "monotonic", lambda: now[0])
+    self.params.remove("LastUploadError")
+    up = self._uploader(_StatusApi(200))
+    up.clock_valid()
+    now[0] += 599
+    up.clock_valid()
+    assert not self.params.get("LastUploadError"), "UP ERR CLOCK raised before 10 minutes"
+    now[0] += 2
+    up.clock_valid()
+    err = self.params.get("LastUploadError")
+    assert (err.decode() if isinstance(err, bytes) else err) == "CLOCK"
+    valid[0] = True
+    assert up.clock_valid() is True
+    assert not self.params.get("LastUploadError"), "UP ERR CLOCK not cleared when the clock became valid"
+    assert up._clock_wait_start is None
 
   def test_valid_clock_uploads_proceed(self):
     up = self._uploader(_StatusApi(200, '{"url": "http://localhost/x", "headers": {}}'))
