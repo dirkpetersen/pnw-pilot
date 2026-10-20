@@ -43,3 +43,20 @@ dec-only, so the set stayed at 47 for 15 more seconds (limit 50). Evidence: `dri
   died silently; the clear snapshot now follows our own upward taps (inside the grace window of our last raise tap, at most `ICBM_HOLD_LATE_TAPS` taps in total). (2) The raise is
   published with `why: "dbRaise"` and SpeedAdjustController reads those SET+ taps as ICBM's own even while it holds a cap (before: a police/zone cap was dismissed as a driver override).
   Closed loop through the real Ford executor + SpeedAdjustController in `speedadjust_pnw/tests/test_icbmdbraise_closed_loop.py`; mutation-checked (4 mutants killed).
+
+## `curvedbramps2pnw` (branch `curvedbramps2pnw`, not yet pushed): ramp/link branches get curve-DB rows
+
+Owner 2026-10-19 ("ramp option A"): a ramp curve (the I-84 to I-5 ramp, where ICBM used mapd's cautious 38 to 45 mph and the curve needs ~49 at 2.5 m/s2) must be able to get a row.
+
+- **Build** (`tools/curvedb`): new `V2Params.allow_ramps`, **default OFF in code**, set by `v2_build.py --allow-ramps` (the private pipeline passes it when `CURVEDB_ALLOW_RAMPS=1`).
+  With it: motorwayLink/trunkLink/primaryLink points may seed anchors (still >= 40 mph), and `row_verdict` no longer refuses `ramp (...)` or `extent reaches a ramp`.
+  **Every other refusal stays**: >= 2 PT dates, spread, never Tesla-only, unknown class, classified extent, taint. Without the flag the table, rows and export bytes are unchanged.
+- **Pricing**: a granted **link-class** row is exported with `k` = the **sharpest single pass** on the branch (`roadtable.k_worst`, the same passes the verdict pools, `exclude_date`
+  honoured), not the median across dates. Mainline rows keep the median. Reason: ramp curvature varies along the ramp; in the first replay 31 % of the new link curve rows had a pass at
+  >= 2.8 m/s2 at the row speed (16 % for existing rows). Replay after the change: **0** (every link row now sits at exactly 2.5 at its sharpest pass); link-row speed drop median 3.5 %,
+  p90 12 %, 11 of 77 rows more than 10 mph slower.
+- **Export**: manifest `flags` gains `ramps` and `ramp_rows`. **Car**: `CurveDbLive.gate` and `CurveBrain._gate` lift the ramp-class refusal only for a file that declares `ramps`; unknown
+  class is still refused. `icbm_shape.tick_gate` (polyline shape) is untouched.
+- **Install order**: code first, then table. A loader without this change refuses a `ramps` file ("flags not understood", DB OFF on both cars).
+- **On-ramp vs off-ramp**: the build cannot tell them apart (no OSM link direction; a pass stores only its minimum extent speed), so all links are allowed.
+- Tests: `tools/curvedb/tests/test_v2_ramps.py` (20), car side in `test_curvedblive2pnw.py` and `test_curvebrain_need_pnw.py`. Mutation-checked.

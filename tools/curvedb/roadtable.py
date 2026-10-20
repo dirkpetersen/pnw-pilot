@@ -587,6 +587,22 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
   return RowVerdict(True, k, n_dates, n_passes, "ok", hwy, spl)
 
 
+def _pooled(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: tuple[float, float]) -> list:
+  """The passes row_verdict pools for this branch (exclude_date, branch radius, way check)."""
+  obs = [o for o in anchor.obs if o.date != exclude_date and math.isfinite(o.end_lat) and
+         haversine_m(o.end_lat, o.end_lon, branch[0], branch[1]) <= params.branch_radius_m]
+  if params.way_check:
+    w = majority([o.way for o in obs])
+    if w is not None:
+      obs = [o for o in obs if o.way in (0, w)]
+  return obs
+
+
+def k_worst(anchor: Anchor, params: V2Params, *, exclude_date: str | None = None, branch: tuple[float, float]) -> float:
+  """curvedbramps2pnw: the SHARPEST single pass pooled into the branch (max k_ext), the value a link-class row is priced on."""
+  return max(o.k_ext for o in _pooled(anchor, params, exclude_date, branch))
+
+
 def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, exclude_date: str | None = None,
                     branch: tuple[float, float]) -> tuple[float, float] | str:
   """curvedbraiseonly2pnw: (k_worst, v_fast_ms) when the branch is refused ONLY by the date-spread rule, else a string naming why not.
@@ -598,12 +614,7 @@ def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, ex
   none of whose passes recorded a speed does not qualify (fails closed: the speed cap could not be computed)."""
   if verdict.granted or not verdict.reason.startswith("dates disagree"):
     return f"not spread-refused ({verdict.reason})"
-  obs = [o for o in anchor.obs if o.date != exclude_date and math.isfinite(o.end_lat) and
-         haversine_m(o.end_lat, o.end_lon, branch[0], branch[1]) <= params.branch_radius_m]
-  if params.way_check:
-    w = majority([o.way for o in obs])
-    if w is not None:
-      obs = [o for o in obs if o.way in (0, w)]
+  obs = _pooled(anchor, params, exclude_date, branch)
   ks = [o.k_ext for o in obs if math.isfinite(o.k_ext)]
   if not ks or max(ks) <= 0.0 or min(ks) < 0.0:
     return "no usable curvature"

@@ -36,7 +36,11 @@ WHAT IS IN IT. Every anchor of the table (not only the ones with authority) with
   `rows_with_authority` does NOT count them. WITHOUT the option the file is byte-identical to before. A loader without this change refuses the file.
 
 * curvedbramps2pnw: a table built with `--allow-ramps` (roadtable.V2Params.allow_ramps) has rows on ramp/link branches. The manifest then declares
-  flags "...,ramps" and "ramp_rows"; the car skips its ramp-class gate ONLY for a file that declares it. A loader without this change refuses the
+  flags "...,ramps" and "ramp_rows". A granted LINK-class row (motorwayLink/trunkLink/primaryLink) is exported with k = the SHARPEST single pass
+  on the branch (roadtable.k_worst, the passes the verdict pools, exclude_date honoured), not the median across dates: ramp curvature varies along
+  the ramp, and the median row read gentler than the worst pass on 31 % of the first replay's link curve rows. Other rows are unchanged.
+  The car skips its ramp-class gate ONLY for a file that declares it.
+  A loader without this change refuses the
   file ("manifest flags not understood" -> DB OFF on both cars): CODE BEFORE TABLE. WITHOUT the option the file is byte-identical to before.
 
 `--exclude-date` builds the same file leave-one-date-out (the replay test's fixture; never shipped).
@@ -89,6 +93,8 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
       v = rt.row_verdict(a, p, exclude_date=exclude_date, branch=br)
       n_branches += 1
       k = round(v.k, 8) if v.granted else None
+      if v.granted and p.allow_ramps and v.hwy in rt.RAMP_CLASSES:    # curvedbramps2pnw: a link row is priced on its sharpest pass
+        k = round(rt.k_worst(a, p, exclude_date=exclude_date, branch=br), 8)
       n_rows += v.granted
       n_ramp += v.granted and v.hwy in rt.RAMP_CLASSES
       brs.append([round(br[0], 6), round(br[1], 6), k, v.n_dates])
