@@ -29,3 +29,11 @@ def _ces_event_writers_stopped(monkeypatch):
   from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw as m
   for c in list(m._EV_CONTROLLERS):
     c.close_events(2.0)
+
+
+@pytest.fixture(autouse=True)
+def _device_floor(monkeypatch):
+  """clockvalid2pnw: fixed 'good clock' dates in these tests must not depend on when THIS host's systemd was upgraded
+  (wall_time_floor = systemd mtime + 1 day, so an October upgrade made every September fixture read as pre-sync)."""
+  from openpilot.common.tests.test_clockvalid2pnw import pin_device_floor
+  pin_device_floor(monkeypatch)
