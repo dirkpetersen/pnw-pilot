@@ -263,6 +263,14 @@ class TestStep:
     assert out["v"] is None and out["ts"] == 100.0
     assert b.tele(100.0)["cbWhy"] == why and log.exceptions == []
 
+  def test_a_ramp_class_gets_a_need_only_from_a_file_that_declares_ramps(self, tmp_path, monkeypatch, cfgpath, schedule, log):
+    assert _step(_brain(tmp_path, monkeypatch), hwy="motorwayLink")["v"] is None          # undeclared: refused, as before
+    d = tmp_path / "ramps"
+    write_db(str(d), ROW, ramps=True)
+    monkeypatch.setattr(cl, "DATA_DIR", str(d))
+    b = cb.CurveBrain(tesla())
+    assert _step(b, hwy="motorwayLink")["v"] is not None and _step(b, hwy="unknown")["v"] is None
+
   def test_a_raw_position_without_a_fix_time_is_accepted_like_the_lightnings(self, tmp_path, monkeypatch, cfgpath, schedule):
     assert _step(_brain(tmp_path, monkeypatch), gps="raw")["v"] is not None
 

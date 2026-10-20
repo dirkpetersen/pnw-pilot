@@ -80,6 +80,8 @@ MAX_JSON_BYTES = 64 * 1024 * 1024   # decompressed; the 2026-09-24 table is ~2.9
 # refused rather than matched with these constants.
 # INSTALL ORDER (dbfirst2pnw): a flagged table (5th branch element, manifest "flags") is refused by a loader without this change ("malformed
 # branch" -> DB OFF on both cars). Install this code first; on a code rollback restore the unflagged table first.
+# INSTALL ORDER (curvedbramps2pnw): a table with ramp/link rows (manifest flags "...,ramps") is refused by a loader without this change ("flags not
+# understood" -> DB OFF on both cars). CODE BEFORE TABLE. Only such a file lifts the ramp-class gate; every other file keeps refusing ramps.
 # INSTALL ORDER (curvedbraiseonly2pnw): a table with raise-only rows (a 6-element branch, flag 2, manifest flags "...,raiseOnly") is refused by a
 # loader without this change ("malformed branch" -> DB OFF on both cars). CODE BEFORE TABLE; on a code rollback restore the previous table first.
 EXPECTED_PARAMS = {"site_radius_m": 40.0, "heading_tol_deg": 35.0, "extent_back_m": 25.0,
@@ -156,7 +158,8 @@ class RowIndex:
   """Immutable spatial index over the exported anchors. Same cell scheme and nearest-anchor rule as
   roadtable.AnchorIndex, so the car picks the anchor the offline replay picked."""
 
-  def __init__(self, anchors: list, params: dict, flags: bool = False, raise_only: bool = False):
+  def __init__(self, anchors: list, params: dict, flags: bool = False, raise_only: bool = False, ramps: bool = False):
+    self.has_ramps = bool(ramps)   # curvedbramps2pnw: the manifest declares ramp/link rows; ONLY then is the ramp-class gate lifted
     self.has_raise_only = bool(raise_only)   # curvedbraiseonly2pnw: the manifest declares raiseOnly rows (flag bit 2, a 6th branch element)
     self.n_raise_only = 0
     self.has_flags = bool(flags)   # dbfirst2pnw: the file declares per-row `lowerBound` flags (manifest "flags"); see Match.reliable
@@ -294,9 +297,9 @@ def load_rows(data_dir: str) -> tuple[RowIndex, dict]:
   try:
     declared = man.get("flags")
     names = declared.split(",") if isinstance(declared, str) else []
-    if declared is not None and (not names or any(x not in ("lowerBound", "raiseOnly") for x in names)):
+    if declared is not None and (not names or any(x not in ("lowerBound", "raiseOnly", "ramps") for x in names)):
       raise CurveDbFileError(f"manifest flags {declared!r} not understood")
-    idx = RowIndex(anchors, params, flags="lowerBound" in names, raise_only="raiseOnly" in names)
+    idx = RowIndex(anchors, params, flags="lowerBound" in names, raise_only="raiseOnly" in names, ramps="ramps" in names)
   except (TypeError, ValueError) as e:
     raise CurveDbFileError(f"rows malformed: {type(e).__name__}: {e}") from e
   if idx.has_flags and man.get("lower_bound_rows") is not None and man["lower_bound_rows"] != idx.n_lower_bound:
@@ -725,7 +728,7 @@ class CurveDbLive:
       return "noGps"
     if way_sel != "current":
       return "waySel"
-    if hwy in UNKNOWN_CLASSES or hwy in RAMP_CLASSES or hwy is None:
+    if hwy in UNKNOWN_CLASSES or hwy is None or (hwy in RAMP_CLASSES and not self.index.has_ramps):
       return "class"
     if not (posted and posted > 0.0):   # both directions for now: no posted limit = no raise cap (owner call pending)
       return "noPosted"

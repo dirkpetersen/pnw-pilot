@@ -27,7 +27,7 @@ from __future__ import annotations
 import bisect
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from openpilot.tools.curvedb.store import bearing_diff_deg, haversine_m, initial_bearing_deg
 
@@ -54,6 +54,9 @@ class V2Params:
   spread_floor_k: float      # ... AND by more than this absolute curvature (1/m)
   way_check: bool            # drop passes whose wayId at the anchor disagrees with the anchor majority
   branch_radius_m: float     # a row pools only passes whose extent ENDS within this of the query's end point
+  # curvedbramps2pnw (owner 2026-10-19, "ramp option A"): ramp/link branches are treated like any other road -- links may seed anchors and
+  # row_verdict no longer refuses "ramp" / "extent reaches a ramp". EVERY other refusal stays. OFF in code; the pipeline turns it on.
+  allow_ramps: bool = False
 
 
 PROVISIONAL_V2 = V2Params(
@@ -87,6 +90,14 @@ PROVISIONAL_V2 = V2Params(
   # separation of a ramp 150 m after its gore.
   branch_radius_m=15.0,
 )
+
+
+def params_doc(p: V2Params) -> dict:
+  """asdict(p) for the table/rows files. allow_ramps is written only when True, so a build without it is byte-identical to before."""
+  d = asdict(p)
+  if not p.allow_ramps:
+    del d["allow_ramps"]
+  return d
 
 
 # ---------------------------------------------------------------------------------------------
@@ -561,12 +572,12 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
     return RowVerdict(False, k, n_dates, n_passes, "tesla-only evidence", hwy, spl)
   if hwy in UNKNOWN_CLASSES:
     return RowVerdict(False, k, n_dates, n_passes, "highway class unknown", hwy, spl)
-  if hwy in RAMP_CLASSES:
+  if hwy in RAMP_CLASSES and not params.allow_ramps:
     return RowVerdict(False, k, n_dates, n_passes, f"ramp ({hwy})", hwy, spl)
   # R8 over the extent (see PassObs.ext_ramp). ANY pass pooled into this row reaching a ramp refuses it:
   # the branch key already separates mainline from exit, so what is left here is a genuinely mixed site.
   # Class EVIDENCE comes only from passes whose whole extent was classified; a row with none is refused.
-  if any(o.ext_ramp for o in obs):
+  if any(o.ext_ramp for o in obs) and not params.allow_ramps:
     return RowVerdict(False, k, n_dates, n_passes, "extent reaches a ramp", hwy, spl)
   if not any(o.ext_known for o in obs):
     return RowVerdict(False, k, n_dates, n_passes, "no pass with a fully classified extent", hwy, spl)

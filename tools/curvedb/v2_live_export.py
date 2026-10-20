@@ -35,6 +35,10 @@ WHAT IS IN IT. Every anchor of the table (not only the ones with authority) with
   car may only RAISE with it (never lower, never ADD; capped at that fastest pass + 5 mph); the Tesla treats it exactly like a refused (null) branch.
   `rows_with_authority` does NOT count them. WITHOUT the option the file is byte-identical to before. A loader without this change refuses the file.
 
+* curvedbramps2pnw: a table built with `--allow-ramps` (roadtable.V2Params.allow_ramps) has rows on ramp/link branches. The manifest then declares
+  flags "...,ramps" and "ramp_rows"; the car skips its ramp-class gate ONLY for a file that declares it. A loader without this change refuses the
+  file ("manifest flags not understood" -> DB OFF on both cars): CODE BEFORE TABLE. WITHOUT the option the file is byte-identical to before.
+
 `--exclude-date` builds the same file leave-one-date-out (the replay test's fixture; never shipped).
 
 Run:
@@ -72,7 +76,7 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
   flagged: dict = {}
   for fl in lower_bound or ():
     flagged.setdefault((round(float(fl[0]), 6), round(float(fl[1]), 6)), []).append([float(fl[2]), float(fl[3]), False])
-  n_flagged = n_raise_only = 0
+  n_flagged = n_raise_only = n_ramp = 0
   ro_refused: dict = {}                 # why a spread-refused branch did not qualify (counted, never dropped silently)
   for a in idx.anchors:
     obs_dates = {o.date for o in a.obs if o.date != exclude_date}
@@ -86,6 +90,7 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
       n_branches += 1
       k = round(v.k, 8) if v.granted else None
       n_rows += v.granted
+      n_ramp += v.granted and v.hwy in rt.RAMP_CLASSES
       brs.append([round(br[0], 6), round(br[1], 6), k, v.n_dates])
       if v.granted:
         granted.append((len(brs) - 1, br))
@@ -115,6 +120,8 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
   counts = {"anchors": len(anchors), "branches": n_branches, "rows_with_authority": n_rows,
             "dates": sorted(dates), "flags": lower_bound is not None, "lower_bound_rows": n_flagged,
             "lower_bound_unmatched": sum(1 for v in flagged.values() for fl in v if not fl[2])}
+  if p.allow_ramps:
+    counts.update(ramps=True, ramp_rows=n_ramp)
   if raise_only:
     counts.update(raise_only=True, raise_only_rows=n_raise_only, raise_only_not_qualified=ro_refused)
   return doc, counts
@@ -122,7 +129,8 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
 
 def _flag_fields(counts: dict) -> dict:
   """The manifest's `flags` + counts. With neither option this is {} (the file is byte-identical to before curvedbraiseonly2pnw)."""
-  declared = (["lowerBound"] if counts.get("flags") else []) + (["raiseOnly"] if counts.get("raise_only") else [])
+  declared = (["lowerBound"] if counts.get("flags") else []) + (["raiseOnly"] if counts.get("raise_only") else []) + \
+             (["ramps"] if counts.get("ramps") else [])
   out: dict = {}
   if declared:
     out["flags"] = ",".join(declared)
@@ -130,6 +138,8 @@ def _flag_fields(counts: dict) -> dict:
     out["lower_bound_rows"] = counts["lower_bound_rows"]
   if counts.get("raise_only"):
     out["raise_only_rows"] = counts["raise_only_rows"]
+  if counts.get("ramps"):
+    out["ramp_rows"] = counts["ramp_rows"]
   return out
 
 

@@ -31,23 +31,24 @@ import json
 import os
 import sys
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from openpilot.tools.curvedb import roadtable as rt
 from openpilot.tools.curvedb import v2_io
 
 SCOPE_CLASSES = ("motorway", "trunk", "primary")   # mapd highwayClass values that may seed anchors
+SCOPE_LINK_CLASSES = ("motorwayLink", "trunkLink", "primaryLink")   # curvedbramps2pnw: the links of those, in scope only with allow_ramps
 SCOPE_MIN_V_MS = 40 * 0.44704                      # owner 2026-09-24: "driven at >= 40 mph on the pass"
 
 
-def scope_class(hwy: str) -> bool:
-  """Is this a class the table covers? Links and unknown are not in the set (mirrors the live gate)."""
-  return hwy in SCOPE_CLASSES
+def scope_class(hwy: str, allow_ramps: bool = False) -> bool:
+  """Is this a class the table covers? Links and unknown are not in the set (mirrors the live gate) unless allow_ramps."""
+  return hwy in SCOPE_CLASSES or (allow_ramps and hwy in SCOPE_LINK_CLASSES)
 
 
-def in_scope(pt) -> bool:
+def in_scope(pt, allow_ramps: bool = False) -> bool:
   """May this point CREATE an anchor: a scope class, driven at >= SCOPE_MIN_V_MS."""
-  return scope_class(pt.hwy) and pt.v >= SCOPE_MIN_V_MS
+  return scope_class(pt.hwy, allow_ramps) and pt.v >= SCOPE_MIN_V_MS
 
 
 def car_of(fp) -> str:
@@ -73,7 +74,7 @@ def build(tracks: str, params: rt.V2Params, tally: Counter):
     tally[f"route loaded ({'tesla' if car.startswith(rt.TESLA_PREFIX) else car})"] += 1
     for pts in rt.resample(samples, params, tally=tally):
       passes.append((route, car, pts))
-      tally["anchors seeded"] += rt.seed_anchors(index, pts, in_scope=in_scope)
+      tally["anchors seeded"] += rt.seed_anchors(index, pts, in_scope=lambda pt: in_scope(pt, params.allow_ramps))
   for route, car, pts in passes:     # phase 2: attach only -- every anchor already exists
     rt.add_pass(index, pts, date=v2_io.pt_date(pts[0].t), drive=route, car=car, in_scope=lambda _pt: False,
                 tally=tally)
@@ -82,7 +83,7 @@ def build(tracks: str, params: rt.V2Params, tally: Counter):
 
 def dump(index: rt.AnchorIndex, params: rt.V2Params, out: str, tally: Counter) -> list[str]:
   os.makedirs(out, exist_ok=True)
-  doc = {"params": asdict(params), "anchors": [
+  doc = {"params": rt.params_doc(params), "anchors": [
     {"lat": a.lat, "lon": a.lon, "brg": a.brg, "obs": [asdict(o) for o in a.obs]} for a in index.anchors]}
   with gzip.open(os.path.join(out, "table.json.gz"), "wt") as f:
     json.dump(doc, f, separators=(",", ":"))
@@ -115,7 +116,7 @@ def dump(index: rt.AnchorIndex, params: rt.V2Params, out: str, tally: Counter) -
     by_class[(cls, ">=3 dates")] += best.n_dates >= 3
     by_class[(cls, "authority")] += granted_any
   with open(os.path.join(out, "rows.json"), "w") as f:
-    json.dump({"params": asdict(params), "rows": rows}, f, separators=(",", ":"))
+    json.dump({"params": rt.params_doc(params), "rows": rows}, f, separators=(",", ":"))
   lines.append(f"anchors: {len(index.anchors)}   (anchor, branch) rows with authority (all dates): {len(rows)}")
   lines.append("anchors by majority class:")
   for cls in sorted({c for c, _ in by_class}, key=lambda c: -by_class[(c, "anchors")]):
@@ -134,13 +135,15 @@ def main(argv=None) -> int:
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--tracks", required=True)
   ap.add_argument("--out", required=True)
+  ap.add_argument("--allow-ramps", action="store_true", help="curvedbramps2pnw: ramp/link branches get rows like any other road (see roadtable.V2Params)")
   a = ap.parse_args(argv)
   tally: Counter = Counter()
-  index = build(a.tracks, rt.PROVISIONAL_V2, tally)
+  params = replace(rt.PROVISIONAL_V2, allow_ramps=True) if a.allow_ramps else rt.PROVISIONAL_V2
+  index = build(a.tracks, params, tally)
   if not index.anchors:
     print("ZERO anchors built -- the scope or the tracks are wrong; refusing to write an empty table")
     return 2
-  print("\n".join(dump(index, rt.PROVISIONAL_V2, a.out, tally)))
+  print("\n".join(dump(index, params, a.out, tally)))
   return 0
 
 

@@ -31,7 +31,8 @@ def _today_pt() -> str:
 
 
 def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl.FORMAT, exclude_date=None,
-             tamper=None, flags: bool = False, raise_only: bool | None = None, last_date: str | None = None) -> str:
+             tamper=None, flags: bool = False, raise_only: bool | None = None, last_date: str | None = None,
+             ramps: bool = False) -> str:
   """Write a rows file + manifest the way tools/curvedb/v2_live_export.py does. `tamper(blob) -> blob`
   corrupts the rows AFTER the manifest hash was taken."""
   os.makedirs(d, exist_ok=True)
@@ -44,7 +45,7 @@ def write_db(d: str, anchors: list, *, params: dict | None = None, fmt: str = cl
          "last_date": last_date or "2026-09-22", "exclude_date": exclude_date}
   if raise_only is None:                       # None = declare it iff a branch carries a raise-only row; False forces the UNDECLARED case
     raise_only = any(len(b) == 6 for a in anchors for b in a[3])
-  declared = (["lowerBound"] if flags else []) + (["raiseOnly"] if raise_only else [])
+  declared = (["lowerBound"] if flags else []) + (["raiseOnly"] if raise_only else []) + (["ramps"] if ramps else [])   # curvedbramps2pnw
   if declared:
     man["flags"] = ",".join(declared)
   if flags:                                    # dbfirst2pnw: the table declares per-row lowerBound flags

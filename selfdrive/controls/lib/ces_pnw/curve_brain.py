@@ -460,7 +460,7 @@ class CurveBrain:
       return "gps" + str(gps_state)
     if ws != "current":                                 # (a 2 s flicker is ridden through, as on the Lightning)
       return "waySel"
-    if hwy in UNKNOWN_CLASSES or hwy in RAMP_CLASSES or hwy is None:
+    if hwy in UNKNOWN_CLASSES or hwy is None or (hwy in RAMP_CLASSES and not self.db.index.has_ramps):
       return "class"
     if not self.db.polyline(points).ok:
       return "noPath"

@@ -197,7 +197,7 @@ def replay(idx: rt.AnchorIndex, passes, eps: list[Episode], a_mapd: float, tally
     r["region"] = pt.hwy
     # a KNOWN class the table does not cover; an unknown class (pre-08-15 passes) goes on to the lookup,
     # whose class gate refuses it unless the row itself carries a class
-    if not scope_class(pt.hwy) and pt.hwy not in rt.UNKNOWN_CLASSES:
+    if not scope_class(pt.hwy, p.allow_ramps) and pt.hwy not in rt.UNKNOWN_CLASSES:
       r["status"] = "out of scope"
       rows.append(r)
       continue
@@ -224,7 +224,7 @@ def replay(idx: rt.AnchorIndex, passes, eps: list[Episode], a_mapd: float, tally
       if w not in (None, pt.way):
         v = rt.RowVerdict(False, v.k, v.n_dates, v.n_passes, "way mismatch at query", v.hwy, v.spl)
     hc = ep.hwy if ep.hwy is not None else v.hwy
-    if v.granted and (hc in rt.UNKNOWN_CLASSES or hc in rt.RAMP_CLASSES):
+    if v.granted and (hc in rt.UNKNOWN_CLASSES or (hc in rt.RAMP_CLASSES and not p.allow_ramps)):
       v = rt.RowVerdict(False, v.k, v.n_dates, v.n_passes, f"episode class {hc!r}", v.hwy, v.spl)
     if v.granted and not (ep.posted and ep.posted > 0):
       v = rt.RowVerdict(False, v.k, v.n_dates, v.n_passes, "no posted limit", v.hwy, v.spl)
@@ -404,7 +404,7 @@ def main(argv=None) -> int:
           f.write(json.dumps(r) + "\n")
     if a.adds:
       dates = {e.date for e in eps if not e.car.startswith(rt.TESLA_PREFIX) and e.date >= a.adds_from}
-      adds = scan_adds(idx, passes, eps, amap, dates, lambda pt: scope_class(pt.hwy))
+      adds = scan_adds(idx, passes, eps, amap, dates, lambda pt: scope_class(pt.hwy, idx.p.allow_ramps))
       print(f"  ADDS (v2 would slow where ICBM did not; Lightning passes on {len(dates)} episode dates): "
             + ", ".join(f"{k} {v}" for k, v in Counter(e["cls"] for e in adds).most_common()))
       for e in sorted(adds, key=lambda e: -(e["a_app"] or 0))[:40]:

@@ -1004,3 +1004,26 @@ class TestTableAge:
     db = _live(tmp_path, [FAR_ANCHOR], logs)
     assert db.state == "ok" and len(logs.exceptions) >= 1 and "CRASHED" in logs.exceptions[0]
     assert dict(logs.events)["curvedb_v2_loaded"]["age_days"] == "age unknown"
+
+
+# =====================================================================================================
+# curvedbramps2pnw: the ramp-class gate is lifted ONLY by a file that declares "ramps". Synthetic geometry only.
+# =====================================================================================================
+class TestRampsDeclared:
+  def _gate(self, db, hwy):
+    return db.gate(way_sel="current", hwy=hwy, posted=30.0, plat=LAT0, plon=LON0, allow=True)
+
+  @pytest.mark.parametrize("hwy", ["motorwayLink", "trunkLink", "primaryLink", "secondaryLink", "tertiaryLink"])
+  def test_an_undeclared_file_still_refuses_every_ramp_class(self, tmp_path, logs, hwy):
+    db = _live(tmp_path, [FAR_ANCHOR, _anchor(300.0, 0.002)], logs, last_date=_today())
+    assert self._gate(db, hwy) == "class" and self._gate(db, "motorway") != "class"
+
+  @pytest.mark.parametrize("hwy", ["motorwayLink", "trunkLink", "primaryLink"])
+  def test_a_declared_file_lifts_the_ramp_gate(self, tmp_path, logs, hwy):
+    db = _live(tmp_path, [FAR_ANCHOR, _anchor(300.0, 0.002)], logs, last_date=_today(), ramps=True)
+    assert db.state == "ok" and db.index.has_ramps and self._gate(db, hwy) != "class"
+
+  @pytest.mark.parametrize("hwy", ["unknown", "", None])
+  def test_a_declared_file_still_refuses_an_unknown_class(self, tmp_path, logs, hwy):
+    db = _live(tmp_path, [FAR_ANCHOR, _anchor(300.0, 0.002)], logs, last_date=_today(), ramps=True)
+    assert self._gate(db, hwy) == "class"
