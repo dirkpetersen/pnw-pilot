@@ -9,6 +9,7 @@ from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
 from openpilot.system.tailscale import status as ts_status
+from openpilot.system.curvedb import status as cdb_status
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -79,6 +80,13 @@ DESCRIPTIONS = {
     "downloads about 36 MB (never while driving), so set it up on Wi-Fi. Status: connected, disconnected (switched " +
     "off here, or no network link), unconfigured, connecting, installing, or error with the reason. " +
     "Your SSH keys still decide who can log in. Turn this ON to disable Remote SSH: the Tailscale daemon is stopped."
+  ),
+  # curvedbpull2pnw: the device pulls the approved curve-DB table; ON by default, this is the opt-OUT toggle. Live status appended.
+  "DisableCurveDbAutoInstall": tr_noop(
+    "Curve DB auto-install is ON by default: when the device is on an unmetered network and parked or off, it checks once an hour " +
+    "for a newer approved curve table, downloads it (under 1 MB) and swaps it in. The old table is kept as a backup, the new one " +
+    "takes effect at the next drive start, and the device never reboots for it. If the table was changed by hand, auto-install " +
+    "holds and never overwrites it. Applies to both cars. Turn this ON to disable auto-install."
   ),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
   # mapdstate2pnw: repurposed from the old "Get map for this location" on-demand-download toggle.
@@ -272,6 +280,8 @@ class TogglesLayout(Widget):
     self._params = Params()
     self._ts_read_at = -1e9  # tailscale2pnw: throttle for the status line
     self._ts_text = ts_status.DISABLED_TEXT
+    self._cdb_read_at = -1e9  # curvedbpull2pnw: throttle for the status line
+    self._cdb_text_v = cdb_status.STARTING_TEXT
     self._grey_reason: dict[str, str | None] = {}   # toggles2pnw: param -> why it is greyed on this car (None = operable)
     self._is_release = self._params.get_bool("IsReleaseBranch")
 
@@ -401,6 +411,13 @@ class TogglesLayout(Widget):
       "DisableTailscale": (
         lambda: tr("Disable Remote SSH (Tailscale)") + self._tailscale_title_suffix(),
         DESCRIPTIONS["DisableTailscale"],
+        "warning.png",
+        False,
+      ),
+      # curvedbpull2pnw: opt-OUT, device-wide (never greyed), no restart; the daemon follows the param.
+      "DisableCurveDbAutoInstall": (
+        lambda: tr("Disable Curve DB Auto-Install"),
+        DESCRIPTIONS["DisableCurveDbAutoInstall"],
         "warning.png",
         False,
       ),
@@ -611,6 +628,9 @@ class TogglesLayout(Widget):
       if param == "DisableTailscale":
         toggle.set_description(lambda: tr(DESCRIPTIONS["DisableTailscale"]) + "\n\nStatus: " + self._tailscale_text())
 
+      if param == "DisableCurveDbAutoInstall":
+        toggle.set_description(lambda: tr(DESCRIPTIONS["DisableCurveDbAutoInstall"]) + "\n\nStatus: " + self._curvedb_text())
+
       # track for engaged state updates
       if locked:
         self._locked_toggles.add(param)
@@ -653,6 +673,19 @@ class TogglesLayout(Widget):
       except UnknownKeyName as e:
         self._ts_text = f"error status unavailable ({e})"
     return self._ts_text
+
+  def _curvedb_text(self) -> str:
+    """Status shown under the Curve DB auto-install toggle, re-read from params at most every 2 s."""
+    now = time.monotonic()
+    if now - self._cdb_read_at > 2.0:
+      self._cdb_read_at = now
+      try:
+        raw = self._params.get("CurveDbAutoInstallStatus")
+        raw = raw.decode() if isinstance(raw, bytes) else (raw or "")
+        self._cdb_text_v = cdb_status.ui_text(self._params.get_bool("DisableCurveDbAutoInstall"), raw, time.time())  # noqa: TID251 -- wall clock vs the daemon's epoch
+      except UnknownKeyName as e:
+        self._cdb_text_v = f"error status unavailable ({e})"
+    return self._cdb_text_v
 
   def _tailscale_title_suffix(self) -> str:
     word = ts_status.title_word(self._tailscale_text())

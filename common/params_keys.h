@@ -355,6 +355,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // written by system/tailscale/tailscale_pnw.py (change-only) and shown under the toggle in settings.
     {"DisableTailscale", {PERSISTENT, BOOL, "0"}},
     {"TailscaleStatus", {CLEAR_ON_MANAGER_START, STRING}},
+    // curvedbpull2pnw: the device pulls the approved curve-DB table (system/curvedb/curvedb_updated.py). ON by default, so this is the
+    // opt-OUT toggle. CurveDbAutoInstallStatus is the daemon's one-line state ("<text> @<epoch of last check>"), shown under the toggle.
+    {"DisableCurveDbAutoInstall", {PERSISTENT, BOOL, "0"}},
+    {"CurveDbAutoInstallStatus", {CLEAR_ON_MANAGER_START, STRING}},
     {"UbloxAvailable", {PERSISTENT, BOOL}},
     {"UpdateAvailable", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"UpdateFailedCount", {CLEAR_ON_MANAGER_START, INT}},

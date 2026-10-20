@@ -145,6 +145,7 @@ procs = [
   # restart_if_crash -- non-control daemon; a crash would otherwise leave remote access dead until reboot
   # (the daemon also publishes the crash to TailscaleStatus). Not tied to IsOnroad or gear.
   PythonProcess("tailscale_pnw", "system.tailscale.tailscale_pnw", always_run, enabled=TICI, restart_if_crash=True),
+  PythonProcess("curvedb_updated", "system.curvedb.curvedb_updated", always_run, enabled=TICI, restart_if_crash=True),  # curvedbpull2pnw
   PythonProcess("location_servicesd", "system.location_services.location_servicesd", always_run, enabled=TICI),  # location2pnw: display-only, NON_ESSENTIAL
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   # update2pnw: run the updater onroad too (stock is only_offroad) — downloads/finalize only STAGE
