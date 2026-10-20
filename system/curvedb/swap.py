@@ -67,8 +67,7 @@ def read_param(name: str) -> str:
     return "?"
 
 
-def selfd_uptime() -> str:
-  """Seconds selfdrived has been up; '' = not running; '?' = ps failed."""
+def _selfd_pid() -> str | None:
   me = str(os.getpid())
   for pid in sorted((p for p in os.listdir("/proc") if p.isdigit() and p != me), key=int):
     try:
@@ -77,9 +76,21 @@ def selfd_uptime() -> str:
     except OSError:
       continue
     if "selfdrive.selfdrived.selfdrived" in cmd:
-      r = subprocess.run(["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True, timeout=10)
-      return r.stdout.strip() or "?"
-  return ""
+      return pid
+  return None
+
+
+def selfd_uptime() -> str:
+  """Seconds selfdrived has been up; '' = not running; '?' = could not be read (decide() then refuses and says so)."""
+  try:
+    pid = _selfd_pid()
+    if pid is None:
+      return ""
+    r = subprocess.run(["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True, timeout=10)
+  except (OSError, subprocess.SubprocessError):   # TimeoutExpired is a SubprocessError
+    return "?"
+  out = r.stdout.strip()
+  return out if r.returncode == 0 and out.isdigit() else "?"
 
 
 def free_mb() -> int:
@@ -272,27 +283,48 @@ def swap(sha: str) -> str:
   return os.path.basename(bak)
 
 
+VERIFY_MAX_FILES = 50
+VERIFY_MAX_BYTES = 20 * 1024 * 1024
+_LOADED_RE = re.compile(r'"event\$s":\s*"curvedb_v2_loaded".*?"sha256\$s":\s*"([0-9a-f]{64})"')
+
+
 def verify(sha: str) -> tuple[str, str]:
-  """Did a selfdrived start since the install log curvedb_v2_loaded? -> ('pending'|'loaded'|'mismatch', last sha8)."""
+  """Did a selfdrived start since the install log curvedb_v2_loaded? -> ('pending'|'loaded'|'mismatch', last sha8) or
+  ('unknown', reason). HEAVY DISK I/O: the caller runs it only when the car is safe (offroad, or Park with a settled
+  selfdrived). Reads only swaglog files modified since the install, newest first, at most VERIFY_MAX_FILES / VERIFY_MAX_BYTES;
+  past a cap, or on any OSError, the answer is 'unknown' with the reason, never a silent 'pending'."""
   p = f"{LIVE}/{ROWS}"
   if not os.path.exists(p):
     raise Failed("no live table")
-  since = os.path.getmtime(p)
-  last = None
-  if os.path.isdir(SWAGLOG):
-    pat = re.compile(r'"event\$s":\s*"curvedb_v2_loaded".*?"sha256\$s":\s*"([0-9a-f]{64})"')
-    for n in sorted(os.listdir(SWAGLOG)):
-      if not n.startswith("swaglog.") or os.path.getmtime(f"{SWAGLOG}/{n}") < since:
-        continue
-      with open(f"{SWAGLOG}/{n}", errors="replace") as f:
+  try:
+    since = os.path.getmtime(p)
+    with os.scandir(SWAGLOG) as it:
+      files = sorted(((e.stat().st_mtime, e.name) for e in it if e.name.startswith("swaglog.")), reverse=True)
+    files = [f for f in files if f[0] >= since]
+    if len(files) > VERIFY_MAX_FILES:
+      newest, capped = files[:VERIFY_MAX_FILES], True
+    else:
+      newest, capped = files, False
+    read = 0
+    for _, n in newest:
+      path = f"{SWAGLOG}/{n}"
+      read += os.path.getsize(path)
+      if read > VERIFY_MAX_BYTES:
+        return "unknown", f"swaglog scan cap ({VERIFY_MAX_BYTES >> 20} MB) reached before a load line was found"
+      last = None
+      with open(path, errors="replace") as f:
         for ln in f:
           if "curvedb_v2_loaded" in ln:
-            m = pat.search(ln)
+            m = _LOADED_RE.search(ln)
             if m:
               last = m.group(1)
-  if last is None:
-    return "pending", ""
-  return ("loaded" if last == sha else "mismatch"), last[:8]
+      if last is not None:    # the newest file with a load line holds the latest load
+        return ("loaded" if last == sha else "mismatch"), last[:8]
+  except OSError as e:
+    return "unknown", f"swaglog unreadable: {type(e).__name__}: {e}"
+  if capped:
+    return "unknown", f"swaglog scan cap ({VERIFY_MAX_FILES} files) reached before a load line was found"
+  return "pending", ""
 
 
 def recover() -> str:

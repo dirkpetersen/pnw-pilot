@@ -65,6 +65,7 @@ class Updater:
     self.params, self.net_fn, self.http, self.token_fn, self.wall, self.mono = params, net_fn, http, token_fn, wall, mono
     self.fail_n = 0
     self._state_err: str | None = None
+    self._param_errs: dict[str, str] = {}
     self.net_ok = False
     self.ctx: dict = {}
     self.rep_key = None
@@ -88,7 +89,25 @@ class Updater:
     cloudlog.event("curvedb_autoinstall", step=step, result=result, reason=clean(reason), error=loud)
 
   def set_status(self, text: str) -> None:
-    self.params.put("CurveDbAutoInstallStatus", st.pack(text, self.wall()))
+    try:
+      self.params.put("CurveDbAutoInstallStatus", st.pack(text, self.wall()))
+    except Exception as e:   # the row would go stale: say so, keep running
+      self._param_problem("CurveDbAutoInstallStatus", e)
+
+  def _param_problem(self, name: str, e: Exception) -> None:
+    """Log a Params failure once per distinct message (not per tick)."""
+    msg = f"{name}: {type(e).__name__}: {clean(e, 80)}"
+    if self._param_errs.get(name) != msg:
+      self._param_errs[name] = msg
+      self.log("param", "unreadable", msg, loud=True)
+
+  def _bool(self, name: str, on_error: bool) -> bool:
+    """A Params bool that cannot be read never crashes the daemon: log once, answer the SAFE value for this cycle."""
+    try:
+      return self.params.get_bool(name)
+    except Exception as e:
+      self._param_problem(name, e)
+      return on_error
 
   # ---- the install record ---------------------------------------------------------------------------------------
   def read_record(self) -> dict:
@@ -181,18 +200,22 @@ class Updater:
   def _run(self) -> Stop:
     from openpilot.system.hardware.base import NetworkType
     from openpilot.system.loggerd.uploader import effective_metered
-    if self.params.get_bool("DisableCurveDbAutoInstall"):
+    if self._bool("DisableCurveDbAutoInstall", True):    # unreadable toggle = treat as disabled
       raise Stop("disabled", "disabled", "toggle Disable Curve DB Auto-Install is ON", delay=30.0)
     if not wall_time_valid(self.wall()):
       raise Stop("waiting", "waiting for a valid clock", delay=60.0)
     net = self.net_fn()
     if net is None or net[0] == int(NetworkType.none):
       raise Stop("waiting", "waiting for a network", delay=60.0)
-    if effective_metered(net[0], net[1], self.params.get_bool("OnPriorityNetwork")):
+    if effective_metered(net[0], net[1], self._bool("OnPriorityNetwork", False)):
       raise Stop("waiting", "waiting for unmetered network", delay=300.0)
     self.net_ok = True
     from openpilot.common.api import API_HOST
-    dongle = self.params.get("DongleId")
+    try:
+      dongle = self.params.get("DongleId")
+    except Exception as e:
+      self._param_problem("DongleId", e)
+      dongle = None
     dongle = dongle.decode() if isinstance(dongle, bytes) else (dongle or "")
     if not re.fullmatch(r"[0-9a-f]{16}", dongle):
       raise Stop("error", "error: no dongle id", f"DongleId unusable: {clean(dongle, 40)!r}", loud=True)
@@ -242,25 +265,41 @@ class Updater:
       raise Stop("error", f"error: {clean(e, 100)}", f"install failed: {e}", loud=True) from e
     finally:
       lk.close()
-    self.write_record(sha)
     self.ctx["live_sha"] = sha
+    try:
+      self.write_record(sha)
+    except OSError as e:   # installed, but unrecorded: the next cycle would call it a hand change, so say so loudly
+      raise Stop("error", "error: installed but the install record could not be written", f"write_record failed: {type(e).__name__}: {e}", loud=True) from e
     self.log("swap", "ok", f"installed {sha[:8]}, backup {bak}")
     self.ctx["loaded"] = False
     raise Stop("installed", f"installed {sha[:8]} ({_md(self.wall())})", "installed; the loader runs at the next drive start")
 
   def _current(self, live: str, rec: dict) -> Stop:
     if rec.get("last_auto_sha") != live:
-      self.write_record(live)
+      try:
+        self.write_record(live)
+      except OSError as e:
+        raise Stop("error", "error: could not update the install record", f"write_record failed: {type(e).__name__}: {e}", loud=True) from e
       self.log("record", "adopted", f"live {live[:8]} equals the approved table; install record updated")
-    try:
-      v, got = swap.verify(live)
-    except swap.Failed as e:
-      raise Stop("error", f"error: {clean(e, 100)}", f"verify failed: {e}", loud=True) from e
+    ok, why = swap.decide(*swap.now_state())      # the swaglog scan is disk I/O: never while driving (System Lagging)
+    if not ok:
+      v, got = "unknown", f"not checked, {why}"
+    else:
+      try:
+        v, got = swap.verify(live)
+      except swap.Failed as e:
+        raise Stop("error", f"error: {clean(e, 100)}", f"verify failed: {e}", loud=True) from e
+    if v == "unknown" and ok:
+      self.log("verify", "unknown", got, loud=True)
     self.ctx["loaded"] = v == "loaded"
     if v == "mismatch":
       raise Stop("error", f"error: selfdrived loaded {got}, not {live[:8]}", f"loaded sha {got} != live {live[:8]}", loud=True)
-    return Stop("current", f"installed {live[:8]} ({_md(os.path.getmtime(f'{swap.LIVE}/{swap.ROWS}'))})",
-                f"live table is the approved table (selfdrived load: {v})")
+    try:
+      date = _md(os.path.getmtime(f"{swap.LIVE}/{swap.ROWS}"))
+    except OSError as e:
+      raise Stop("error", "error: live table unreadable", f"getmtime failed: {type(e).__name__}: {e}", loud=True) from e
+    return Stop("current", f"installed {live[:8]} ({date})",
+                f"live table is the approved table (selfdrived load: {v}{'' if v != 'unknown' else ', ' + got})")
 
   def cycle(self) -> float:
     self.ctx, self.net_ok = {}, False
@@ -338,6 +377,10 @@ def main() -> None:
     sys.exit(adopt())
   from cereal import messaging
   from openpilot.common.params import Params
+  try:
+    os.nice(10)   # background work: never compete with the driving processes for CPU
+  except OSError as e:
+    cloudlog.warning(f"curvedb_updated: cannot renice: {e}")
   params = Params()
   sm = messaging.SubMaster(["deviceState"])
 

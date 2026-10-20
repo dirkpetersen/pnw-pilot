@@ -17,3 +17,6 @@ Owner 2026-10-19: "remove the laptop and run only on cloud in prod". Full descri
 - Phase 3 switch (owner decision D12): after the first cloud pointer, run `--adopt` on the device once, so the laptop's last install counts as ours.
 - Follow-up: the report body now matches the deployed gateway (state enum, `auto_utc` ISO string, null for empty shas); a 400 is logged loudly and not retried in a loop;
   an unreadable `IsOnroad`/`GearPark` param refuses and logs instead of crashing the daemon; `test_report_contract.py` pins the gateway's rules.
+- Review fixes (Gemini 4 Argon): a vanished live file or a failed record write is an `error` status, not a daemon crash; the swaglog load check runs only when offroad or in Park with a settled
+  selfdrived, reads only logs newer than the install, newest first, at most 50 files / 20 MB, and answers `unknown` (logged) past a cap or on an I/O error; the selfdrived uptime probe cannot throw
+  (unknown makes `decide()` refuse); an unreadable toggle counts as disabled and an unreadable `OnPriorityNetwork` as metered, each logged once.
