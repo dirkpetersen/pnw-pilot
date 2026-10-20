@@ -116,7 +116,8 @@ def test_report_payload_schema(env):
   p = [c for c in env.http.calls if c[0] == "POST"][0][2]["json"]
   assert set(p) == {"live_sha", "pointer_sha", "last_auto_sha", "auto_utc", "loaded", "state", "reason", "free_mb", "git_sha"}
   assert p["live_sha"] == p["pointer_sha"] == p["last_auto_sha"] == env.new_sha
-  assert isinstance(p["auto_utc"], int) and p["loaded"] is False and p["state"] == "installed" and p["free_mb"] == 2000 and p["git_sha"] == "abc123"
+  assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", p["auto_utc"]) and p["loaded"] is False
+  assert p["state"] == "installed" and p["free_mb"] == 2000 and p["git_sha"] == "abc123"
   assert len(p["reason"]) <= 200 and re.fullmatch(r"[\x20-\x7e]*", p["reason"])
 
 
@@ -241,7 +242,7 @@ def test_table_changed_by_hand_holds_and_never_overrides(env):
   env.record("e" * 64)                               # we installed something else last: the live table is not ours
   env.u.cycle()
   assert text(env) == "held: table changed by hand" and env.live_sha() == env.old_sha and env.http.n("GET", "SECRETROWS?sig=abc") == 0
-  assert [c for c in env.http.calls if c[0] == "POST"][0][2]["json"]["state"] == "held"
+  assert [c for c in env.http.calls if c[0] == "POST"][0][2]["json"]["state"] == "held_hand_change"
 
 
 def test_no_install_record_holds_until_adopt_then_resumes(env):
@@ -351,3 +352,12 @@ def test_params_registered_with_default_off():
   p = Params()
   assert p.get_bool("DisableCurveDbAutoInstall") is False        # opt-out toggle: default OFF = feature runs
   assert p.get("CurveDbAutoInstallStatus") in (None, b"", "")    # no persistent stale state
+
+
+def test_unreadable_gear_or_ignition_param_refuses_and_logs_instead_of_crashing(env):
+  class Boom(type(env.params)):
+    def get_bool(self, k):
+      raise OSError("params store gone")
+  env.u.params = Boom()
+  assert env.u.safe_now() is False and env.u.safe_now() is False
+  assert pathlib.Path(cu.LOG_FILE).read_text().count(" state unreadable ") == 1          # said once, not per tick

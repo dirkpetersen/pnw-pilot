@@ -50,9 +50,13 @@ Runs at boot (after a valid clock), on each offroad/Park transition, then hourly
 Pointer response (200, JSON, at most 16 KB): `sha256` (64 hex), `rows_bytes` (int, 1..4194304), `manifest_sha256` (64 hex),
 `manifest_bytes` (int, 1..65536), `rows_url`, `manifest_url` (https, presigned GET, short lifetime). Extra fields are ignored.
 
-Report: `POST {API_HOST}/v1/curvedb/{dongle}/report`, JSON `{live_sha, pointer_sha, last_auto_sha, auto_utc, loaded, state, reason, free_mb, git_sha}`.
-`state` is one of `current`, `installed`, `none`, `held`, `retry`, `error`, `waiting` (reports are sent only when the network check passed).
-`reason` is at most 200 printable ASCII characters. Sent after each state change and at least daily; a failed report is logged and retried next cycle.
+Report: `POST {API_HOST}/v1/curvedb/{dongle}/report`, JSON keys `live_sha`, `pointer_sha`, `last_auto_sha` (64 hex or null), `auto_utc`
+(ISO-8601 UTC string like `2026-10-19T21:00:00Z`, or null), `loaded` (bool), `state`, `reason` (at most 200 printable ASCII),
+`free_mb` (int >= 0), `git_sha` (at most 64 chars of `[A-Za-z0-9:._+-]`). Body at most 2 KB. `state` is `none_published`, `current`,
+`installed`, `held_hand_change`, `refused` (a safety wait) or `error`; `disabled`, `waiting_clock` and `waiting_unmetered` are in the gateway enum
+but the device never sends them (no report goes out until the clock and network checks passed). Sent after each state change and at least daily.
+A 400 is logged loudly as our own schema bug and not retried until the next change or day; any other failure is logged and retried next cycle.
+`test_report_contract.py` validates every reachable report against the gateway's rules.
 
 ## Rollback
 

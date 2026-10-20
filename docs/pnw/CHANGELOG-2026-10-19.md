@@ -15,3 +15,5 @@ Owner 2026-10-19: "remove the laptop and run only on cloud in prod". Full descri
 - Tests: `system/curvedb/tests` (new directory, 73 tests) and `selfdrive/ui/tests/test_curvedb_toggle.py` (2). Mutation-checked: 21 mutants of the safety gates, all killed.
 - Inactive until the gateway serves `GET /v1/curvedb/{dongle}/approved` (404 reads `none published`).
 - Phase 3 switch (owner decision D12): after the first cloud pointer, run `--adopt` on the device once, so the laptop's last install counts as ours.
+- Follow-up: the report body now matches the deployed gateway (state enum, `auto_utc` ISO string, null for empty shas); a 400 is logged loudly and not retried in a loop;
+  an unreadable `IsOnroad`/`GearPark` param refuses and logs instead of crashing the daemon; `test_report_contract.py` pins the gateway's rules.

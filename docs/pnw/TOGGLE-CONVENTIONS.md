@@ -154,6 +154,7 @@ Bool toggles in `TogglesLayout._toggle_defs`. "Default" is the `params_keys.h` v
 | `DeferHDVideoUpload` | 0 | both | yes | opt-in |
 | `DisableMapdCarGps` (mapdcargpsdefault2pnw, 2026-10-04) | 0 | Lightning only (greyed elsewhere, `car_gps`) | yes | opt-out of the truck-GPS-for-maps relay, which is ON by default; replaces `MapdUseCarGps` (default 0, no UI); gates only the START of the relay, applies at the next start of the comma |
 | `DisableFordConvenience` (new, phase 3) | 0 | Lightning only, but operable on EVERY car (owner exception 2026-10-04, never greyed) | yes | troubleshooting switch, see below |
+| `DisableCurveDbAutoInstall` (curvedbpull2pnw, 2026-10-19) | 0 | both, device-wide (never greyed) | yes | opt-out of the device pulling the approved curve-DB table; the row shows the live `CurveDbAutoInstallStatus`; see CURVEDB-AUTOINSTALL.md |
 
 ### Stock openpilot toggles (stock semantics, NOT changed)
 

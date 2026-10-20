@@ -33,6 +33,10 @@ REPORT_EVERY_S = 86400.0
 POINTER_MAX = 16 * 1024
 HEX64 = re.compile(r"[0-9a-f]{64}")
 PT = zoneinfo.ZoneInfo("America/Los_Angeles")
+# our internal cycle state -> the gateway's report enum (waiting_clock / waiting_unmetered / disabled are never sent: no report
+# goes out until the clock and network checks passed, and never while the toggle is ON)
+REPORT_STATE = {"installed": "installed", "current": "current", "none": "none_published", "held": "held_hand_change",
+                "waiting": "refused", "retry": "error", "error": "error"}
 
 
 class Stop(Exception):
@@ -60,6 +64,7 @@ class Updater:
                  mono=time.monotonic):
     self.params, self.net_fn, self.http, self.token_fn, self.wall, self.mono = params, net_fn, http, token_fn, wall, mono
     self.fail_n = 0
+    self._state_err: str | None = None
     self.net_ok = False
     self.ctx: dict = {}
     self.rep_key = None
@@ -164,7 +169,14 @@ class Updater:
   # ---- one cycle ------------------------------------------------------------------------------------------------
   def safe_now(self) -> bool:
     """Offroad, or in Park (GearPark param). Cheap; for edge-triggering a cycle only -- decide() is the gate."""
-    return not self.params.get_bool("IsOnroad") or self.params.get_bool("GearPark")
+    try:
+      return not self.params.get_bool("IsOnroad") or self.params.get_bool("GearPark")
+    except Exception as e:   # an unreadable gear/ignition param REFUSES (like the gate's '?'): no edge trigger, said once per change
+      msg = f"{type(e).__name__}: {clean(e, 80)}"
+      if msg != self._state_err:
+        self._state_err = msg
+        self.log("state", "unreadable", f"IsOnroad/GearPark unreadable ({msg}); refusing to treat the car as safe", loud=True)
+      return False
 
   def _run(self) -> Stop:
     from openpilot.system.hardware.base import NetworkType
@@ -271,14 +283,18 @@ class Updater:
     if self.git_sha is None:
       try:
         from openpilot.common.git import get_commit
-        self.git_sha = get_commit() or ""
+        self.git_sha = re.sub(r"[^A-Za-z0-9:._+-]", "", get_commit() or "")[:64] or "unknown"
       except Exception as e:
         self.log("report", "git_sha_unavailable", f"{type(e).__name__}: {e}")
-        self.git_sha = ""
-    return {"live_sha": self.ctx.get("live_sha", ""), "pointer_sha": self.ctx.get("pointer_sha", ""),
-            "last_auto_sha": rec.get("last_auto_sha", ""), "auto_utc": int(rec.get("auto_utc", 0)),
-            "loaded": bool(self.ctx.get("loaded", False)), "state": res.state, "reason": clean(res.reason),
-            "free_mb": int(self.ctx.get("free_mb", swap.free_mb())), "git_sha": self.git_sha}
+        self.git_sha = "unknown"
+    def sha(x):
+      return x if isinstance(x, str) and HEX64.fullmatch(x) else None
+    auto = rec.get("auto_utc")
+    auto = dt.datetime.fromtimestamp(auto, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(auto, int) and auto > 0 else None
+    return {"live_sha": sha(self.ctx.get("live_sha")), "pointer_sha": sha(self.ctx.get("pointer_sha")),
+            "last_auto_sha": sha(rec.get("last_auto_sha")), "auto_utc": auto,
+            "loaded": bool(self.ctx.get("loaded", False)), "state": REPORT_STATE[res.state], "reason": clean(res.reason),
+            "free_mb": max(0, int(self.ctx.get("free_mb", swap.free_mb()))), "git_sha": self.git_sha}
 
   def maybe_report(self, res: Stop) -> None:
     if not self.net_ok:   # disabled / no clock / no network / metered: nothing is sent, the status already says why
@@ -292,13 +308,17 @@ class Updater:
       dongle = dongle.decode() if isinstance(dongle, bytes) else dongle
       r = self.http.request("POST", f"{API_HOST}/v1/curvedb/{dongle}/report", json=self.payload(res), timeout=(10, 30),
                             headers={"Authorization": "JWT " + self.token_fn(dongle)})
+      if r.status_code == 400:   # the gateway's schema check: OUR bug. Say so loudly and do not retry-spin (next try on a state change / daily)
+        self.rep_key, self.rep_at = key, self.mono()
+        self.log("report", "REJECTED", "gateway answered 400 to the report: schema mismatch, fix the daemon", loud=True)
+        return
       if r.status_code // 100 != 2:
         raise RuntimeError(f"HTTP {r.status_code}")
     except Exception as e:  # a report that did not go out is logged and retried next cycle, never fatal
       self.log("report", "failed", f"{type(e).__name__}: {clean(e, 100)} (retry next cycle)", loud=True)
       return
     self.rep_key, self.rep_at = key, self.mono()
-    self.log("report", "sent", res.state)
+    self.log("report", "sent", REPORT_STATE[res.state])
 
 
 def adopt() -> int:
