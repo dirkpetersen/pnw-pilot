@@ -39,3 +39,7 @@ dec-only, so the set stayed at 47 for 15 more seconds (limit 50). Evidence: `dri
 - **Lightning only:** through the existing curve-DB capability gate (`curvedb_v2_live`). The Tesla has no curve DB, so its ICBM/VTSC path is unchanged.
 - Tests: `ces_pnw/tests/test_icbmdbraise2pnw.py` (14): the Terwilliger replay, the C bound, the limit + 5 bound, mapd/vision raise refused, left curve unchanged, flapping, unknown limit,
   the `backed` flag per DB direction, Tesla. Mutation-checked: no C bound, no limit + 5, no DB-only rule (step and flag), no confirmation each fail a test.
+- **Review fixes (Gemini 4 Argon):** (1) a DB-raise SET+ tap still in flight when the curve clears used to move the set after the restore baseline was snapped, and the restore
+  died silently; the clear snapshot now follows our own upward taps (inside the grace window of our last raise tap, at most `ICBM_HOLD_LATE_TAPS` taps in total). (2) The raise is
+  published with `why: "dbRaise"` and SpeedAdjustController reads those SET+ taps as ICBM's own even while it holds a cap (before: a police/zone cap was dismissed as a driver override).
+  Closed loop through the real Ford executor + SpeedAdjustController in `speedadjust_pnw/tests/test_icbmdbraise_closed_loop.py`; mutation-checked (4 mutants killed).

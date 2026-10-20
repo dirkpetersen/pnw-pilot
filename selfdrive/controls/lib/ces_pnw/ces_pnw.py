@@ -2893,6 +2893,7 @@ class IcbmEpisode:
     self.restore_why = None             # "curve" / "afterGas" while in the restore phase (icbmRestoreWhy)
     self.gas_res = None                 # "hold" / "resumed" / "no:<why>" -- latest gas-resume outcome (icbmGas)
     self._dbr_t0 = None                 # icbmdbraise2pnw (also cleared in reset()): when the DB raise last became eligible
+    self._hold_up_base = None           # icbmdbraise2pnw (also cleared in reset()): set at the clear snapshot while a raise tap was in flight
     self._dbr_prev = None               # icbmdbraise2pnw: last tick's bound (the published raise is the min of two ticks)
     self.db_raise = None                # icbmdbraise2pnw: "wait" / "acted" / "capped" / "noLimit" / "gas" / None (icbmDbRaise)
 
@@ -2935,6 +2936,7 @@ class IcbmEpisode:
     self._dbr_t0 = None                 # icbmdbraise2pnw
     self._dbr_prev = None
     self.db_raise = None
+    self._hold_up_base = None
 
   @property
   def bind_ceiling(self):
@@ -3455,6 +3457,7 @@ class IcbmEpisode:
           self._last_cap_dist = None
           self._last_cap_vego = 0.0
       if up is not None:
+        self._last_inc_t = now            # icbmdbraise2pnw: our SET+ taps are in flight for the set-report lag (see the clear block)
         return up, "inc"
       return publish_target, "dec"
 
@@ -3479,6 +3482,8 @@ class IcbmEpisode:
           return None, None
         self._clear_t0 = now
         self._hold_set0 = stock_set     # snapshot: we go SILENT now, so nothing of ours moves the set
+        # icbmdbraise2pnw: unless a DB-raise SET+ tap of ours is still in flight -- then it lands inside the debounce and moves the set UP.
+        self._hold_up_base = stock_set if (self._last_inc_t is not None and now - self._last_inc_t < ICBM_LATE_TAP_GRACE_S) else None
         self._late_tap_set = None       # fresh clear window: any previous absorbed tap is void
         # icbmratchet2pnw (Fable review catch): a candidate awaiting confirmation must NOT survive
         # a gap in cap ticks. _ratchet_confirm measures WALL TIME, not contiguous low readings, so
@@ -3506,6 +3511,13 @@ class IcbmEpisode:
           and (now - self._clear_t0) <= ICBM_LATE_TAP_GRACE_S
           and 0.0 < self._hold_set0 - stock_set <= ICBM_LATE_TAP_TOL):
         self._late_tap_set = stock_set
+      # icbmdbraise2pnw: the same absorption for our own UPWARD taps (a DB raise stopped by the curve clearing). Walks the snapshot up, but
+      # only inside the grace window of our last raise tap and by at most ICBM_HOLD_LATE_TAPS taps in total: a SET+ run beyond that is the driver.
+      if (stock_set is not None and self._hold_up_base is not None and self._hold_set0 is not None
+          and now - self._last_inc_t <= ICBM_LATE_TAP_GRACE_S
+          and 0.0 < stock_set - self._hold_set0 <= ICBM_LATE_TAP_TOL
+          and stock_set - self._hold_up_base <= ICBM_HOLD_LATE_TAPS * ICBM_EXEC_STEP_MS + ICBM_RESTORE_DONE_TOL):
+        self._hold_set0 = stock_set
       # icbmmapfirst2pnw early restore (driver rule 3): when the curve is provably BEHIND us, begin
       # the restore after a short drive-out instead of the full flicker-proof hold. A dropout-style
       # clear (candidate still far ahead) keeps the original 3 s debounce unchanged.
@@ -6343,6 +6355,8 @@ class CESController:
         payload = {"target": round(pub_target, 2), "ceiling": round(ceil_pub, 2), "ts": time.time()}  # noqa: TID251 -- wall clock heartbeat shared with the executor
         if direction == "inc":
           payload["dir"] = "inc"        # explicit marker: executor's inc path is ONLY reachable via this
+          if getattr(self._icbm_ep, "db_raise", None) == "acted":
+            payload["why"] = "dbRaise"  # icbmdbraise2pnw: speedadjust must read these SET+ taps as ours, not the driver's
         self.mem_params.put_nonblocking("IcbmTarget", payload)
       else:
         self.mem_params.put_nonblocking("IcbmTarget", {})

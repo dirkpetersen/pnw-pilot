@@ -84,14 +84,17 @@ def _cmd(d):
   return None
 
 
-def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0, sa_restart_at=None):
+def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0, sa_restart_at=None, db_script=None):
   """script(t) -> (limit_mph, curve_target_mph or None, police or None). Returns (final set mph, trace, controller).
   tele_phase (0..99 frames) shifts ICBM's ~1 Hz status read against the brains' ticks. sa_restart_at (s) replaces
-  speedadjust with a fresh instance mid-run -- plannerd restarting while selfdrived (ICBM) keeps its episode."""
+  speedadjust with a fresh instance mid-run -- plannerd restarting while selfdrived (ICBM) keeps its episode.
+  db_script (icbmdbraise2pnw) t -> mph or None: the curve DB's own raise this tick (ep.step's db_raise_t); c._ovr_seen = every
+  override verdict speedadjust reached."""
   _Clock.t = 1000.0
   monkeypatch.setattr(sa, "time", _Clock)
   c = sa.SpeedAdjustController(types.SimpleNamespace(openpilotLongitudinalControl=False), params=_P(mode))
   c.mem_params = _Mem()
+  c._ovr_seen = set()
   sm, ep, guard, gov = _SM(), IcbmEpisode(), RestoreGuard(), PressGovernor()
   stock, pending, rcap_state = v0_mph * MPH, [], None
   sa_cmd = icbm_cmd = None
@@ -107,25 +110,30 @@ def simulate(monkeypatch, script, T, v0_mph=75, mode=2, tele_phase=0, sa_restart
         pending.remove(p)
     sm.cs.cruiseState.speed = stock
     if sa_restart_at is not None and abs(now - 1000.0 - sa_restart_at) < 0.005:
-      mem = c.mem_params
+      mem, seen = c.mem_params, c._ovr_seen
       c = sa.SpeedAdjustController(types.SimpleNamespace(openpilotLongitudinalControl=False), params=_P(mode))
       c.mem_params = mem
+      c._ovr_seen = seen
     if frame % 100 == tele_phase:                         # ces_pnw re-reads SpeedAdjustStatus at ~1 Hz
       st = next((v for k, v in reversed(c.mem_params.calls) if k == "SpeedAdjustStatus"), None) or {}
       sa_tele = {"sa" + k[0].upper() + k[1:]: st.get(k) for k in SA_TELE_KEYS}
     if frame % 25 == 0:                                   # both brains at 4 Hz
       c.mem_params.sl, c.mem_params.police = lim * MPH, pol
       c.cap(sm, stock, stock, stock, True)
+      c._ovr_seen.add(c._ovr)
       c._sa_pub_t = -1e9                                  # it publishes status at 5 Hz from a 20 Hz loop on the car
       rl, rcap_state = C.icbm_restore_limit(lim * MPH, rcap_state, now)
       icbm_note_speedadjust(ep, sa_tele, rl)
       tgt, d = ep.step(now, curve * MPH if curve else None, stock, stock, True, False,
-                       restore_cap=ep.zone_cap, limit_now=rl if rl > 0 else None)
+                       restore_cap=ep.zone_cap, limit_now=rl if rl > 0 else None,
+                       db_raise_t=(db_script(now - 1000.0) or 0.0) * MPH or None if db_script else None)
       pub = {}
       if tgt is not None:
         pub = {"target": tgt, "ceiling": ep.ceiling if ep.ceiling is not None else stock, "ts": now}
         if d == "inc":
           pub["dir"] = "inc"
+          if ep.db_raise == "acted":
+            pub["why"] = "dbRaise"                     # as _icbm_step publishes it
       c.mem_params.icbm = pub
       icbm_cmd = _cmd(pub)
       tc = [v for k, v in c.mem_params.calls if k == "SpeedAdjustTarget"]

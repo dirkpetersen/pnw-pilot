@@ -176,3 +176,15 @@ class TestController:
     _, recs, _ = _drive(monkeypatch, tmp_path / "f", points=PHANTOM, anchors=RAISE_ROW)
     assert recs and all("icbmDbRaise" in r for r in recs)
     assert m.IcbmEpisode().db_raise is None
+
+
+def test_a_db_raise_is_published_with_its_marker_and_a_restore_is_not(monkeypatch, tmp_path):
+  """speedadjust tells the curve brain's DB-raise SET+ from the driver's by IcbmTarget `why` (icbmdbraise2pnw review fix 2)."""
+  from openpilot.selfdrive.controls.lib.ces_pnw.tests.test_curvedbtel2pnw import _icbm_stub_at, _run, _sig
+  mgr, step = _icbm_stub_at(monkeypatch, tmp_path)
+  _run(mgr, step, _sig(25.0, 60 * MPH))
+  for acted, want in (("acted", "dbRaise"), (None, None)):
+    mgr._icbm_ep.db_raise = acted
+    monkeypatch.setattr(mgr._icbm_ep, "step", lambda *a, **k: (20.0, "inc"))
+    _run(mgr, step, _sig(25.0, 60 * MPH))
+    assert mgr.mem_params.last.get("dir") == "inc" and mgr.mem_params.last.get("why") == want

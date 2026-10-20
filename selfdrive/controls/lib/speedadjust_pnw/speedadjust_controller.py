@@ -387,6 +387,8 @@ class SpeedAdjustController:
     self._icbm_read_warned = False
     self._icbm_dec_t = -1e9      # monotonic time a fresh ICBM dec was last seen on the bus
     self._icbm_inc_t = -1e9      # zonefollow2pnw: ...and a fresh ICBM inc (its restore)
+    self._icbm_dbr_t = -1e9      # icbmdbraise2pnw: ...and a fresh ICBM inc that is a curve-DB raise during a cap (why == dbRaise)
+    self._icbm_why = None
     self._inst = round(time.monotonic(), 3)  # zonefollow2pnw: identifies this process start (ICBM detects a restart)
     self._icbm_hold = False      # the set is lowered by ICBM: the limit-drop ratio keeps the pre-curve set
     self._restore_deadline = None  # monotonic deadline for the bounded restore window
@@ -1221,6 +1223,7 @@ class SpeedAdjustController:
     if not math.isfinite(age) or age > SA_ICBM_FRESH_S:
       return None
     d = c.get("dir", "dec")
+    self._icbm_why = c.get("why")
     return d if d in ("dec", "inc") else None
 
   def _end_zone(self, now: float, why: str, target: float, stock_now: float, v_cruise: float) -> float:
@@ -1436,6 +1439,8 @@ class SpeedAdjustController:
       self._icbm_dec_t = now
     elif icbm_dir == "inc":
       self._icbm_inc_t = now
+      if self._icbm_why == "dbRaise":
+        self._icbm_dbr_t = now
 
     # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either
     # direction) is an explicit "resume — don't slow me for this" override. Must run BEFORE
@@ -1480,12 +1485,14 @@ class SpeedAdjustController:
         # set and the zone never trimmed. Same known limitation as FIX C: a driver SET- in that window is not an
         # override (an opposite-direction SET+ still is).
         self._ovr = "icbmTap"
-      elif (not self._long_ok and v_cruise_set > self._last_v_set and self._cap_out is None
-            and now - self._icbm_inc_t < SA_ACTUATION_GRACE_S):
+      elif (not self._long_ok and v_cruise_set > self._last_v_set and now - self._icbm_inc_t < SA_ACTUATION_GRACE_S
+            and (self._cap_out is None or now - self._icbm_dbr_t < SA_ACTUATION_GRACE_S)):
         # zonefollow2pnw (Fable review of sazoneset2pnw, measured): the same for the curve RESTORE's SET+. Read as the
         # driver's, each one re-anchored the ratio to the half-restored set, so a limit drop mid-restore trimmed from
         # it (47/50/54 mph instead of 56). Only while speedadjust is not capping: arbitrate() runs no inc while any
         # dec is on the bus, so a SET+ during our own cap is the driver's (e.g. dismissing a police slowdown).
+        # icbmdbraise2pnw: EXCEPT the curve brain's DB raise (IcbmTarget why == dbRaise), which is its own SET+ whatever speedadjust is
+        # doing: read as the driver's it cancelled the police/zone cap and re-anchored the ratio to the raised set.
         self._ovr = "icbmTap"
       else:
         self._ovr = "applied"
