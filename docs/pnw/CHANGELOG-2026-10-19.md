@@ -51,8 +51,8 @@ Owner 2026-10-19 ("ramp option A"): a ramp curve (the I-84 to I-5 ramp, where IC
 - **Build** (`tools/curvedb`): new `V2Params.allow_ramps`, **default OFF in code**, set by `v2_build.py --allow-ramps` (the private pipeline passes it when `CURVEDB_ALLOW_RAMPS=1`).
   With it: motorwayLink/trunkLink/primaryLink points may seed anchors (still >= 40 mph), and `row_verdict` no longer refuses `ramp (...)` or `extent reaches a ramp`.
   **Every other refusal stays**: >= 2 PT dates, spread, never Tesla-only, unknown class, classified extent, taint. Without the flag the table, rows and export bytes are unchanged.
-- **Pricing**: a granted **link-class** row is exported with `k` = the **sharpest single pass** on the branch (`roadtable.k_worst`, the same passes the verdict pools, `exclude_date`
-  honoured), not the median across dates. Mainline rows keep the median. Reason: ramp curvature varies along the ramp; in the first replay 31 % of the new link curve rows had a pass at
+- **Pricing**: a granted row that touches a link (a **link-class anchor, or a mainline anchor whose extent reaches a link**) is priced with `k` = the **sharpest single pass** on the branch (`roadtable.k_worst`, the same passes the verdict pools, `exclude_date`
+  honoured), not the median across dates. Rows touching no link keep the median. Done inside `row_verdict`, so the export, `v2_replay.py` and `rows.json` use one k. Reason: ramp curvature varies along the ramp; in the first replay 31 % of the new link curve rows had a pass at
   >= 2.8 m/s2 at the row speed (16 % for existing rows). Replay after the change: **0** (every link row now sits at exactly 2.5 at its sharpest pass); link-row speed drop median 3.5 %,
   p90 12 %, 11 of 77 rows more than 10 mph slower.
 - **Export**: manifest `flags` gains `ramps` and `ramp_rows`. **Car**: `CurveDbLive.gate` and `CurveBrain._gate` lift the ramp-class refusal only for a file that declares `ramps`; unknown

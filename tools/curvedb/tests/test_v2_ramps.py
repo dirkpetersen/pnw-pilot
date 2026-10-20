@@ -130,10 +130,29 @@ def _export_k(p, hwy, ks, exclude_date=None):
   return doc["anchors"][0][3][0][2]
 
 
+def _passes(hwy, ks, ext=False):
+  return [replace(_obs(f"2026-09-0{n + 1}", k, hwy=hwy), ext_ramp=ext) for n, k in enumerate(ks)]
+
+
 def test_a_link_row_is_exported_at_its_sharpest_pass_with_the_flag():
   assert _export_k(PR, "motorwayLink", [0.010, 0.012, 0.015]) == pytest.approx(0.015)
-  assert rt.row_verdict(_anchor(*[_obs(f"2026-09-0{n + 1}", k, hwy="motorwayLink") for n, k in enumerate([0.010, 0.012, 0.015])]), PR).k == \
-    pytest.approx(0.012)                                  # the verdict (median) is not what is exported
+  # the verdict itself carries it, so the replay and rows.json (which read v.k) see the same k as the export
+  assert rt.row_verdict(_anchor(*_passes("motorwayLink", [0.010, 0.012, 0.015])), PR).k == pytest.approx(0.015)
+
+
+def test_a_mainline_anchor_whose_extent_reaches_a_ramp_is_priced_on_the_sharpest_pass_too():
+  a = _anchor(*_passes("motorway", [0.010, 0.012, 0.015], ext=True))
+  assert rt.row_verdict(a, PR).granted and rt.row_verdict(a, PR).k == pytest.approx(0.015)
+  idx = rt.AnchorIndex(PR)
+  idx.anchors[idx.add(45.0, -122.7, 0.0)].obs = a.obs
+  assert ex.export_doc(idx)[0]["anchors"][0][3][0][2] == pytest.approx(0.015)
+
+
+def test_build_rows_json_uses_the_same_k(tmp_path):
+  idx = rt.AnchorIndex(PR)
+  idx.anchors[idx.add(45.0, -122.7, 0.0)].obs = _passes("motorwayLink", [0.010, 0.012, 0.015])
+  v2_build.dump(idx, PR, str(tmp_path), Counter())
+  assert json.loads((tmp_path / "rows.json").read_text())["rows"][0]["k"] == pytest.approx(0.015)
 
 
 @pytest.mark.parametrize("hwy", ["trunkLink", "primaryLink"])
@@ -141,13 +160,14 @@ def test_every_link_class_is_priced_on_the_sharpest_pass(hwy):
   assert _export_k(PR, hwy, [0.010, 0.012, 0.015]) == pytest.approx(0.015)
 
 
-def test_a_mainline_row_keeps_the_median_with_the_flag():
+def test_a_mainline_row_that_touches_no_ramp_keeps_the_median_with_the_flag():
   assert _export_k(PR, "motorway", [0.010, 0.012, 0.015]) == pytest.approx(0.012)
 
 
 def test_without_the_flag_nothing_changes():
   assert _export_k(P, "motorway", [0.010, 0.012, 0.015]) == pytest.approx(0.012)
   assert _export_k(P, "motorwayLink", [0.010, 0.012, 0.015]) is None     # refused, as before
+  assert rt.row_verdict(_anchor(*_passes("motorway", [0.010, 0.012, 0.015], ext=True)), P).reason == "extent reaches a ramp"
 
 
 def test_the_sharpest_pass_honours_exclude_date():

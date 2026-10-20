@@ -584,6 +584,11 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
   lo, hi = min(per_date.values()), max(per_date.values())
   if lo <= 0 or hi / lo > params.max_date_spread and hi - lo > params.spread_floor_k:
     return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
+  # curvedbramps2pnw: a row that touches a link (link-class anchor, or a mainline anchor whose extent reaches one) is priced on its SHARPEST pass, not the
+  # median across dates: ramp curvature varies along the ramp. HERE, so the export, the replay and rows.json all see the same k. The spread rule above
+  # (and every refusal) is decided on the medians, unchanged.
+  if params.allow_ramps and (hwy in RAMP_CLASSES or any(o.ext_ramp for o in obs)):
+    k = max(getattr(o, which) for o in obs)
   return RowVerdict(True, k, n_dates, n_passes, "ok", hwy, spl)
 
 
@@ -596,11 +601,6 @@ def _pooled(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: 
     if w is not None:
       obs = [o for o in obs if o.way in (0, w)]
   return obs
-
-
-def k_worst(anchor: Anchor, params: V2Params, *, exclude_date: str | None = None, branch: tuple[float, float]) -> float:
-  """curvedbramps2pnw: the SHARPEST single pass pooled into the branch (max k_ext), the value a link-class row is priced on."""
-  return max(o.k_ext for o in _pooled(anchor, params, exclude_date, branch))
 
 
 def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, exclude_date: str | None = None,
