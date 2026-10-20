@@ -2708,6 +2708,11 @@ ICBM_RATCHET_OUTLIER_DROP_MS = 3.0   # m/s (~6.7 mph). Defined directly in m/s, 
                                       # far above this — comfortably gates it while staying well clear
                                       # of ordinary tick-to-tick source/tiering jitter (a few mph at
                                       # most).
+# icbmdbraise2pnw (drive 2026-10-19, Terwilliger right curve): a RUNNING cap may be lifted back up by a CURVE-DB raise
+# (cdb2Dir raise/add, the DB's own number -- never mapd's or vision's), at most to the episode ceiling C and to the posted limit
+# plus this margin (owner: ICBM restore <= limit + 5 mph), once it has read stable for ICBM_RATCHET_CONFIRM_S. The cap itself
+# stays dec-only; this is a bounded "inc" the executor already knows (same RestoreGuard / ceiling clamp as the restore).
+ICBM_DB_RAISE_OVER_MS = 5.0 * CV.MPH_TO_MS
 ICBM_RATCHET_CONFIRM_S = 0.6                             # s; ~2-3 ticks at 4 Hz. Worst-case added
                                                           # travel before a genuine large drop is
                                                           # honored: v_ego * this (e.g. ~24 m at
@@ -2887,6 +2892,9 @@ class IcbmEpisode:
     self._after_gas = False             # this episode resumed after a gas press (the restore is labelled afterGas)
     self.restore_why = None             # "curve" / "afterGas" while in the restore phase (icbmRestoreWhy)
     self.gas_res = None                 # "hold" / "resumed" / "no:<why>" -- latest gas-resume outcome (icbmGas)
+    self._dbr_t0 = None                 # icbmdbraise2pnw (also cleared in reset()): when the DB raise last became eligible
+    self._dbr_prev = None               # icbmdbraise2pnw: last tick's bound (the published raise is the min of two ticks)
+    self.db_raise = None                # icbmdbraise2pnw: "wait" / "acted" / "capped" / "noLimit" / "gas" / None (icbmDbRaise)
 
   def reset(self) -> None:
     self.phase = "idle"
@@ -2924,6 +2932,9 @@ class IcbmEpisode:
     self._gas_absorbed = False
     self._after_gas = False
     self.restore_why = None
+    self._dbr_t0 = None                 # icbmdbraise2pnw
+    self._dbr_prev = None
+    self.db_raise = None
 
   @property
   def bind_ceiling(self):
@@ -3012,6 +3023,39 @@ class IcbmEpisode:
       return None
     return (self.ceiling, self.latch_limit, self.zone_cap, self.zone_why, self.zone_n0, self._sa_inst0,
             self._sa_restart_logged)
+
+  def _db_raise(self, now, db_t, stock_set, limit_now, restore_cap):
+    """icbmdbraise2pnw: the speed (m/s) a RUNNING cap may lift the stock set to this tick, or None. `db_t` is the curve DB's own
+    target (min'd with the final cap) when the DB's raise/add is what binds, else None. Bounded by the episode ceiling C, the
+    posted limit + ICBM_DB_RAISE_OVER_MS and the restore cap; must clear the set by one tap and hold for ICBM_RATCHET_CONFIRM_S
+    (the published value is the lower of two ticks, so a single high tick never taps). The reason it is NOT acting is in
+    self.db_raise (icbmDbRaise). A resumed-after-gas episode never raises: its driverSet guard would read our tap as the driver."""
+    self.db_raise = None
+    if db_t is None:
+      self._dbr_t0 = self._dbr_prev = None
+      return None
+    if self._after_gas:
+      self.db_raise = "gas"
+      self._dbr_t0 = self._dbr_prev = None
+      return None
+    if limit_now is None or stock_set is None or self.ceiling is None:
+      self.db_raise = "noLimit"          # Rule 2: an unknown limit is "no raise", said out loud
+      self._dbr_t0 = self._dbr_prev = None
+      return None
+    bound = min(db_t, self.ceiling, limit_now + ICBM_DB_RAISE_OVER_MS, restore_cap if restore_cap is not None else db_t)
+    if bound < stock_set + ICBM_RESTORE_DONE_TOL:
+      self.db_raise = "capped" if db_t >= stock_set + ICBM_RESTORE_DONE_TOL else None
+      self._dbr_t0 = self._dbr_prev = None
+      return None
+    if self._dbr_t0 is None:
+      self._dbr_t0 = now
+    out = bound if self._dbr_prev is None else min(bound, self._dbr_prev)
+    self._dbr_prev = bound
+    if now - self._dbr_t0 < ICBM_RATCHET_CONFIRM_S or out < stock_set + ICBM_RESTORE_DONE_TOL:
+      self.db_raise = "wait"
+      return None
+    self.db_raise = "acted"
+    return out
 
   def _ratchet_confirm(self, now: float, cap_target: float, baseline: float) -> tuple:
     """icbmratchet2pnw: the robustness gate on the DOWNWARD ratchet. `baseline` is the reference an
@@ -3264,7 +3308,7 @@ class IcbmEpisode:
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
            cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None, hold_ahead=False,
-           hold_vsafe=None, gas_resume=False, driver_gas=False):
+           hold_vsafe=None, gas_resume=False, driver_gas=False, db_raise_t=None):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -3294,6 +3338,10 @@ class IcbmEpisode:
                    exactly as before. The one cap-side effect is (c): a cap that interrupts a HELD restore keeps the
                    original ceiling for the restore after it (_carry_on_cap). Default False = byte-identical.
       hold_vsafe   the curve's safe speed (m/s) from icbm_restore_ahead_hold; None = hold at the current speed.
+
+    icbmdbraise2pnw optional input (None = the previous behaviour exactly):
+      db_raise_t   m/s: this tick's target IS a curve-DB raise/add (not mapd's or vision's own number). A RUNNING cap then
+                   returns (bound, "inc") instead of its dec-only target once the raise reads stable -- see _db_raise.
 
     terwilliger2pnw optional inputs (defaults = the previous behaviour exactly):
       gas_resume   the car resumes an episode after a driver gas press (PnwVehicle.lightning_curve_slow);
@@ -3343,6 +3391,7 @@ class IcbmEpisode:
       cap_target = float(cap_target)
       # DEC ALWAYS WINS. A cap during RESTORE cancels the restore episode entirely and re-latches
       # at the CURRENT set; a cap during CAP just continues the episode (ceiling untouched).
+      fresh = self.phase != "cap"
       if self.phase != "cap":
         carry = self._carry_on_cap(now, stock_set)   # restorehold2pnw (c): read BEFORE reset() wipes it
         self.reset()
@@ -3390,6 +3439,8 @@ class IcbmEpisode:
       self._min_published = (publish_target if self._min_published is None
                               else min(self._min_published, publish_target))
       self._clear_t0 = None             # curve (re)bound: reset the clear debounce
+      up = None if fresh else self._db_raise(now, None if db_raise_t is None else min(db_raise_t, cap_target),
+                                             stock_set, limit_now, restore_cap)
       # icbmmapfirst2pnw: remember where the binding candidate sits — used at clear to tell
       # "passed the curve" (early restore) from "detection dropout" (full debounce).
       # icbmratchet2pnw (Fable review catch): only snapshot from a CONFIRMED/accepted reading — an
@@ -3403,8 +3454,11 @@ class IcbmEpisode:
         except (TypeError, ValueError):
           self._last_cap_dist = None
           self._last_cap_vego = 0.0
+      if up is not None:
+        return up, "inc"
       return publish_target, "dec"
 
+    self._dbr_t0 = self._dbr_prev = self.db_raise = None   # icbmdbraise2pnw: no cap this tick, no raise window
     if self.phase == "cap":
       # clear DEBOUNCE: hold silent (ceiling retained, executor stale-stops within 2 s) until the
       # curve has stayed clear for clear_delay_s. A detection flicker or an S-curve gap therefore
@@ -6009,9 +6063,12 @@ class CESController:
       # penalties and before the posted-limit floor, so it compares against the target ICBM would have used.
       # Every gate is in curvedb_live.py; a failed gate is no effect at all. Lightning only (capability).
       roaddb = getattr(self, "_roaddb", None)      # getattr: the ICBM tests bind this method onto bare stubs
+      db_raise_t = None                            # icbmdbraise2pnw: set only when the DB's own raise/add is what binds
       if roaddb is not None and roaddb.enabled:
         target, far_dist = self._icbm_roaddb(target, sig, plat, plon, ref, ep_ceiling, starting, in_curve,
                                              vis_v, vis_dist, ttc, far_v, far_dist, far_raw)
+        if target is not None and getattr(roaddb, "backed", False) and self._icbm_src in ("map", "far"):
+          db_raise_t = target
       # curvefloor2pnw: POSTED-LIMIT FLOOR for the ICBM path, low limits only.
       # 2026-08-11 06:52: spdLim 11.2 (25 mph), map target 7.3 m/s sustained 12 s, stock set tapped
       # 23.7 -> 7.15 (16 mph). icbmratchet2pnw only confirms single-tick OUTLIER drops, so nothing
@@ -6233,7 +6290,8 @@ class CESController:
                                                  restore_cap=self._icbm_rcap if self._icbm_rcap > 0.0 else None,
                                                  limit_now=rcap_lim if rcap_lim > 0.0 else None,
                                                  hold_ahead=rhold, hold_vsafe=rhold_vsafe,
-                                                 gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas)
+                                                 gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas,
+                                                 db_raise_t=db_raise_t)
       _icbm_rhold_note(self, now, rhold_src)
       if late_ok and late_knob > 0.0 and self._icbm_ep.phase == "cap":
         # this tick started the cap (late_ok is a START-tick quantity): remember WHERE the starting candidate is (cd, the
@@ -6251,7 +6309,7 @@ class CESController:
         self._icbm_late_anchor, self._icbm_late_anchor_t = new_a, now
       self._icbm_ceiling = self._icbm_ep.ceiling
       self._icbm_dir = direction
-      if direction == "inc":
+      if direction == "inc" and getattr(self._icbm_ep, "db_raise", None) != "acted":   # icbmdbraise2pnw: a DB raise in a cap keeps its source label
         self._icbm_src = "restore"      # telemetry: the restore phase is its own source label
       # curvedbtel2pnw section 3.4 (Fable I1) -- TELEMETRY ONLY, nothing below reads it. Latched AFTER
       # the restore relabel so it can never name a distance for a source that is no longer a map
@@ -6479,6 +6537,7 @@ class CESController:
       tele["icbmZoneWhy"] = getattr(getattr(self, "_icbm_ep", None), "zone_why", None)      # sazoneset2pnw
       tele["icbmRestoreWhy"] = getattr(getattr(self, "_icbm_ep", None), "restore_why", None)  # terwilliger2pnw
       tele["icbmGas"] = getattr(getattr(self, "_icbm_ep", None), "gas_res", None)             # terwilliger2pnw
+      tele["icbmDbRaise"] = getattr(getattr(self, "_icbm_ep", None), "db_raise", None)         # icbmdbraise2pnw
       tele["icbmLatchLim"] = getattr(getattr(self, "_icbm_ep", None), "latch_limit", None)  # sazoneset2pnw
       tele["icbmFlrHit"] = bool(self._icbm_floor_hit)
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
@@ -6771,6 +6830,7 @@ class CESController:
       # ("hold" / "resumed" / "no:<why>", until the next episode latches) -- ces_icbm_gas_resume logs each transition
       "icbmRestoreWhy": getattr(getattr(self, "_icbm_ep", None), "restore_why", None),
       "icbmGas": getattr(getattr(self, "_icbm_ep", None), "gas_res", None),
+      "icbmDbRaise": getattr(getattr(self, "_icbm_ep", None), "db_raise", None),   # icbmdbraise2pnw: wait/acted/capped/noLimit/gas
       "icbmLatchLim": getattr(getattr(self, "_icbm_ep", None), "latch_limit", None),  # sazoneset2pnw: limit at latch
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,

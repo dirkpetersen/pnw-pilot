@@ -585,6 +585,7 @@ class CurveDbLive:
     self.n = self.n_raise = self.n_lower = 0
     self._last: dict = {}
     self._last_t = -1e9
+    self.backed = False     # icbmdbraise2pnw: the LAST decision's winning candidate was a DB raise/add (not mapd's / vision's own number)
     self._way_cur_t = -1e9           # monotonic time of the last decision that saw waySel == "current"
     self._age_done = False           # the table's age has been evaluated with a valid clock (at load or by the first valid poll)
     self._way_holding = False        # change-only log of a WAYSEL_HOLD_S ride-through
@@ -736,6 +737,7 @@ class CurveDbLive:
     try:
       return self._decide(**kw)
     except Exception:
+      self.backed = False
       self._last = {"cdb2Src": kw.get("src"), "cdb2Base": _r(kw.get("today"), 2), "cdb2Tgt": _r(kw.get("today"), 2),
                     "cdb2Dir": "none", "cdb2Why": "crash"}
       self._last_t = time.monotonic()
@@ -782,6 +784,7 @@ class CurveDbLive:
     or a row found by the scan ahead, carries the raise caps (db_target). Only a value below `today`
     -- or any value when ICBM has no target at all -- is used exactly."""
     self.n += 1
+    self.backed = False
     self._last_t = time.monotonic()
     if self.overrides is not None:
       self.overrides.refresh(self._last_t)             # 1 s stat poll; never raises; says so itself when the file is bad
@@ -885,6 +888,7 @@ class CurveDbLive:
       if new is not None and new[3] is not None:
         rep_m = new[3]
       rec["cdb2Why"] = "ok"
+      self.backed = new is not None and new[4] in ("raise", "add")   # icbmdbraise2pnw: the minimum is a DB number, not mapd's / vision's
       if new is not None and new[3] is not None and new[3].raise_only:
         ro_acted = True
       if out[0] is None or (today is not None and out[0] > today + ACT_EPS_MS):
