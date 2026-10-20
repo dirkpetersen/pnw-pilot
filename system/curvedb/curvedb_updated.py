@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import zoneinfo
@@ -227,7 +228,10 @@ class Updater:
     self.fail_n = 0
     sha = ptr["sha256"]
     self.ctx["pointer_sha"] = sha
-    live = swap.live_sha()
+    try:
+      live = swap.live_sha()
+    except OSError as e:
+      raise Stop("error", "error: live table unreadable", f"live sha unreadable: {type(e).__name__}: {e}", loud=True) from e
     self.ctx["live_sha"] = live
     rec = self.read_record()
     if live == sha:
@@ -236,7 +240,9 @@ class Updater:
       try:
         with swap.lock():
           src = swap.recover()
-      except (swap.Failed, swap.Refused, OSError) as e:
+      except swap.Refused as e:   # driving: leave /data alone; the next offroad/Park transition retries
+        raise Stop("waiting", f"waiting: live table missing, {e}", f"live table missing, recover refused: {e}") from e
+      except (swap.Failed, OSError, subprocess.CalledProcessError) as e:
         raise Stop("error", "error: live table missing", f"live table missing and recover failed: {clean(e)}", loud=True) from e
       raise Stop("held", "held: live table was missing, restored from backup", f"restored from {src}; run --adopt to resume", loud=True)
     if rec.get("last_auto_sha") != live:
@@ -245,7 +251,10 @@ class Updater:
     ok, why = swap.decide(*swap.now_state())
     if not ok:
       raise Stop("waiting", f"waiting: {why}", why, delay=150.0 if "selfdrived up only" in why else HOURLY_S)
-    free = swap.free_mb()
+    try:
+      free = swap.free_mb()
+    except OSError as e:
+      raise Stop("error", "error: cannot read free space", f"statvfs failed: {type(e).__name__}: {e}", loud=True) from e
     self.ctx["free_mb"] = free
     if free < swap.MIN_FREE_MB:
       raise Stop("waiting", f"waiting: only {free} MB free", f"only {free} MB free on /data (need {swap.MIN_FREE_MB})")
@@ -263,6 +272,8 @@ class Updater:
       raise Stop("waiting", f"waiting: {e}", f"swap refused: {e}", delay=300.0) from e
     except swap.Failed as e:
       raise Stop("error", f"error: {clean(e, 100)}", f"install failed: {e}", loud=True) from e
+    except (OSError, subprocess.CalledProcessError) as e:   # makedirs / fsync / rm / cp / rename / utime
+      raise Stop("error", f"error: install I/O failed ({type(e).__name__})", f"install failed: {type(e).__name__}: {clean(e, 120)}", loud=True) from e
     finally:
       lk.close()
     self.ctx["live_sha"] = sha
@@ -338,7 +349,7 @@ class Updater:
   def maybe_report(self, res: Stop) -> None:
     if not self.net_ok:   # disabled / no clock / no network / metered: nothing is sent, the status already says why
       return
-    key = (res.state, res.text, self.ctx.get("live_sha"), self.ctx.get("pointer_sha"))
+    key = (res.state, res.text, self.ctx.get("live_sha"), self.ctx.get("pointer_sha"), self.ctx.get("loaded"))   # loaded flips -> report now
     if key == self.rep_key and self.mono() - self.rep_at < REPORT_EVERY_S:
       return
     try:

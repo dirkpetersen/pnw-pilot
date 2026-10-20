@@ -190,3 +190,52 @@ def test_unreadable_dongle_and_status_param_do_not_crash(env):
   env.u.params = Flaky(env.params, ["DongleId", "CurveDbAutoInstallStatus"])
   env.u.cycle()                                        # no dongle -> error status; the failing put is logged, not raised
   assert env.http.calls == [] and "CurveDbAutoInstallStatus: RuntimeError" in log(env)
+
+
+# ---- re-review: recover is gated; I/O errors in the install path end the cycle, never crash it ---------------------------------
+def test_missing_live_table_is_not_recovered_while_driving(env):
+  env.record(env.old_sha)
+  env.route({**env.ptr, "sha256": "d" * 64})
+  swap.stage(env.new_sha, env.new_rows, env.new_man)
+  swap.swap(env.new_sha)                              # leaves an -auto backup to restore from
+  import shutil
+  shutil.rmtree(env.live)
+  env.state = ("0", "1", "900")                       # driving
+  env.u.cycle()
+  assert text(env).startswith("waiting: live table missing, driving") and not os.path.exists(env.live)
+  assert [c[2]["json"]["state"] for c in env.http.calls if c[0] == "POST"] == ["refused"]
+  env.state = ("1", "1", "900")                       # parked: the next cycle restores it (and holds)
+  env.u.cycle()
+  assert text(env).startswith("held: live table was missing") and env.live_sha() == env.old_sha
+
+
+def test_swap_recover_itself_refuses_while_driving(env):
+  import shutil
+  shutil.rmtree(env.live)
+  env.state = ("0", "1", "900")
+  with pytest.raises(swap.Refused, match="driving"):
+    swap.recover()
+
+
+@pytest.mark.parametrize("where,exc", [("live_sha", PermissionError("EIO")), ("free_mb", OSError("statvfs")),
+                                       ("stage", OSError("disk full")), ("swap", subprocess.CalledProcessError(1, "cp")),
+                                       ("swap", PermissionError("rename"))])
+def test_io_errors_end_the_cycle_with_an_error_and_a_report(env, monkeypatch, where, exc):
+  env.record(env.old_sha)
+
+  def boom(*a, **k):
+    raise exc
+  monkeypatch.setattr(swap, where, boom)
+  assert env.u.cycle() > 0                            # returned, did not raise
+  assert text(env).startswith("error: ")
+  assert env.live_sha() == env.old_sha if where != "live_sha" else True
+
+
+def test_report_resent_when_loaded_flips(env):
+  env.route({**env.ptr, "sha256": env.old_sha})
+  env.record(env.old_sha)
+  env.u.cycle()
+  n = env.http.n("POST")
+  pathlib.Path(swap.SWAGLOG, "swaglog.1").write_text(LOADED % env.old_sha)
+  env.u.cycle()
+  assert env.http.n("POST") == n + 1 and [c[2]["json"]["loaded"] for c in env.http.calls if c[0] == "POST"][-1] is True

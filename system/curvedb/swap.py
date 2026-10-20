@@ -329,6 +329,7 @@ def verify(sha: str) -> tuple[str, str]:
 
 def recover() -> str:
   """The live table is missing: put back the interrupted swap's copy, or the newest -auto backup."""
+  _require_safe_state()    # rm/cp/rename on /data: never while the car is being driven
   if os.path.exists(f"{LIVE}/{ROWS}"):
     raise Failed("the live table exists; nothing to recover")
   if os.path.exists(REPL):
