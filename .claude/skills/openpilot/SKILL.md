@@ -96,10 +96,10 @@ actually cost time or nearly bricked hardware (kept additive; newest era at the 
 
 ## Operating principles (the habits that keep this safe)
 
-- **Fable-review every change that ships** (`Agent`, `model: "fable"`) — the ONLY reviewer; no Gemini
-  reviews even though the `gemini` skill is installed (owner directive 2026-09-13). Opus architects and
+- **Gemini-4-Argon-review every change that ships** (`scripts/gemini-review.sh --repo <path> --range <sha|range>`) — the
+  ONLY reviewer; no more Fable (owner directive 2026-10-19, supersedes "Fable only" of 2026-09-13). Opus architects and
   implements via the background `coder` agent (Opus, medium effort) — never Sonnet, never in the foreground (2026-09-24). Full policy: `~/gh/comma/docs/CODING-POLICY.md`. Give
-  Fable evidence (telemetry, mutation results), apply or refute every finding, and record the verdict
+  the reviewer evidence (telemetry, mutation results), apply or refute every finding, and record the verdict
   in the commit message.
 
 - **Telemetry-driven tuning loop.** The car logs a per-second CES event stream

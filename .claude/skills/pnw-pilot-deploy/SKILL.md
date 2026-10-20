@@ -196,11 +196,12 @@ is the real car (see Verification).
 **A review agent MUST have run before code is pushed.** Not before deploy, not before reboot —
 **before `git push`**. Pushing to a channel branch is the ship action; the device auto-updates from it.
 
-**The reviewer is FABLE — and only Fable** (`Agent` tool, `model: "fable"`, background). **No Gemini
-reviews**, even though the `gemini` skill is installed (owner directive 2026-09-13: too many false
-positives). Full policy — including Opus/Sonnet roles — in `~/gh/comma/docs/CODING-POLICY.md`.
+**The reviewer is GEMINI 4 ARGON — and only it** (owner directive 2026-10-19; supersedes "Fable only",
+2026-09-13): `scripts/gemini-review.sh --repo <path> --range <sha|range> [--focus "<text>"]`, run in the
+background. **No more Fable reviews.** The script fails loudly if another model answers or the CLI errors;
+a review that did not run is not a pass. Full policy — including Opus/Sonnet roles — in `~/gh/comma/docs/CODING-POLICY.md`.
 
-**Fable's review may complete asynchronously**: you may start the next coding task while it runs. What
+**The review may complete asynchronously**: you may start the next coding task while it runs. What
 you may NOT do is push before it has reported. Its verdict is final.
 
 ### Why this rule exists
@@ -209,7 +210,7 @@ you may NOT do is push before it has reported. Its verdict is final.
 - **2026-09-05:** SIX commits shipped unreviewed in one session (`overlayassert2pnw`, `lcramp2pnw`,
   `uploadanywifi2pnw`, `curvefloor2pnw`, `parkedlog2pnw`, `cargps2pnw`) — including C++ in the
   logging path and a change to a CAR PORT where a mistake makes `canValid` false and the vehicle
-  undriveable. The driver had to ask "did you use a fable background review?" That is the failure
+  undriveable. The driver had to ask "did you use a fable background review?" (the reviewer was Fable then; it is Gemini 4 Argon since 2026-10-19) That is the failure
   this rule prevents.
 
 ### What to give the reviewer
@@ -278,7 +279,7 @@ through GitHub (push to `3devpnw`) followed by a reboot.** Do not scp/patch file
 try code out; the git checkout must stay == origin/3devpnw so every on-car state is reproducible and
 the updater never fights manual edits. Path 2 below is for RECOVERY, not for shipping.
 
-1. Commit on `3devpnw`, **Fable-review** (see REVIEW BEFORE PUSH above; no Gemini), push.
+1. Commit on `3devpnw`, **Gemini-review** (see REVIEW BEFORE PUSH above), push.
 2. The updater checks ~every **1.5 h**. Immediate: `pkill -HUP -f system.updated.updated`
    (SIGHUP = user-requested fetch; SIGUSR1 = check only).
 3. Watch: `UpdaterState` → `checking...` → `finalizing update...` → `idle`.
@@ -406,7 +407,7 @@ against the superproject origin → `github.com/dirkpetersen/pnw-{opendbc,panda}
      mid-update.
   2. Bump the pin in pnw-pilot: `cd opendbc_repo && git fetch origin && git checkout <sha> && cd ..
      && git add opendbc_repo` (checking out the intended commit first avoids the add-clobbers-pin
-     gotcha above). Commit on `3devpnw`, Fable-review, push.
+     gotcha above). Commit on `3devpnw`, Gemini-review, push.
 - The updater runs `git submodule sync` + `update --init --recursive` + `foreach reset --hard` on
   every fetch (`system/updated/updated.py:397`), so URL changes AND pin bumps flow through
   auto-update with no manual step.
@@ -437,7 +438,7 @@ opendbc-only safety edit still reflashes the panda.
      BLOCKS the bad case (e.g. `test_reset_latch_blocked_when_disengaged` — arm latch engaged,
      disengage, prove a nonzero steer command is still blocked). Never write a test that pins a hole
      ("allowed even with controls_allowed=False") — rewrite the C.
-  4. Fable adversarial review of the safety diff.
+  4. Gemini 4 Argon adversarial review of the safety diff.
 - **Ported safety is NOT validated safety.** BluePilot's road-validated `ford.h` FAILS its own CI
   suite and shipped a `controls_allowed` bypass (the reset latch, ~permanently armed when disengaged
   because openpilot sends neutral frames continuously while off). We hardened it (gate the latch on
