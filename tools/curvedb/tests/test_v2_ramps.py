@@ -320,11 +320,40 @@ def test_the_cross_anchor_rule_closes_the_chain_gap(tmp_path):
   assert m.why == "noAuthority"                                   # the branch is exported null: no effect on the mainline car
 
 
-def test_the_cross_anchor_reach_is_the_full_65_m_not_one_grid_cell():
-  """The mainline end sits just below a grid-cell edge (longitude cell frac .98) and the query is 60 m east: two cells away."""
+@pytest.mark.parametrize("lat0, lon0", [(44.55632, -123.26681), (47.97923, -122.19012), (45.52, -122.66), (58.0, -122.7), (64.0, -122.7), (75.0, -122.7)])
+@pytest.mark.parametrize("bearing_deg", [0, 45, 90, 135, 180, 225, 270, 315])
+def test_the_cross_anchor_search_finds_a_mainline_end_just_inside_65_m_in_every_direction_and_cell_alignment(lat0, lon0, bearing_deg):
+  """Negative longitudes, several latitudes (cos(lat) scaling), diagonal and east-west offsets, many alignments to the grid edge."""
+  kx = 111194.0 * math.cos(math.radians(lat0))
+  for step in range(40):
+    la = lat0 + step * 1.3e-5
+    lo = lon0 + step * 2.9e-5
+    idx = rt.AnchorIndex(PR)
+    idx.anchors[idx.add(la, lo, 0.0)].obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=(la, lo)) for n in range(3)]
+    for dist, expect in ((64.0, True), (66.0, False)):
+      q = (la + dist * math.cos(math.radians(bearing_deg)) / 111194.0, lo + dist * math.sin(math.radians(bearing_deg)) / kx)
+      got = rt.mainline_ends(idx, None).nearest(q[0], q[1], 0.0, -1)
+      assert (got is not None) == expect, (step, dist, got)
+
+
+def _spread_ramp_anchor(sep_m):
+  """A mainline branch (3 dates, k 0.004) and a ramp branch sep_m north of it whose dates DISAGREE (0.004 / 0.007), pass speeds recorded."""
+  main_end = (45.00135, -122.7)
+  ramp_end = _north(main_end, sep_m)
+  obs = [replace(_obs(f"2026-09-0{n + 1}", 0.004, end=main_end), v_ms=20.0) for n in range(3)]
+  ks = (0.004, 0.007, 0.007)
+  obs += [replace(_obs(f"2026-09-0{n + 1}", ks[n], hwy="motorwayLink", drive=f"ramp{n}", end=ramp_end), ext_ramp=True, v_ms=15.0) for n in range(3)]
   idx = rt.AnchorIndex(PR)
-  lon = -122.70001
-  idx.anchors[idx.add(45.0, lon, 0.0)].obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=(45.00135, lon)) for n in range(3)]
-  east = 60.0 / (111194.0 * math.cos(math.radians(45.0)))
-  assert rt.mainline_ends(idx, None).nearest(45.00135, lon + east, 0.0, -1) == pytest.approx(60.0, abs=1.0)
-  assert rt.mainline_ends(idx, None).nearest(45.00135, lon + 70.0 / (111194.0 * math.cos(math.radians(45.0))), 0.0, -1) is None
+  idx.anchors[idx.add(45.0, -122.7, 0.0)].obs = obs
+  return idx
+
+
+def test_the_separation_refusal_wins_over_raise_only():
+  doc, counts = ex.export_doc(_spread_ramp_anchor(19.0), raise_only=True)
+  assert counts["raise_only_rows"] == 0
+  assert sorted(len(b) for b in doc["anchors"][0][3]) == [4, 4] and sorted(b[2] is None for b in doc["anchors"][0][3]) == [False, True]
+
+
+def test_a_far_spread_refused_ramp_branch_is_still_a_raise_only_row():
+  doc, counts = ex.export_doc(_spread_ramp_anchor(70.0), raise_only=True)
+  assert counts["raise_only_rows"] == 1

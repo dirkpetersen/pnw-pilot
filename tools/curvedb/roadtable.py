@@ -588,14 +588,16 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
     return RowVerdict(False, k, n_dates, n_passes, "extent reaches a ramp", hwy, spl)
   if not any(o.ext_known for o in obs):
     return RowVerdict(False, k, n_dates, n_passes, "no pass with a fully classified extent", hwy, spl)
-  lo, hi = min(per_date.values()), max(per_date.values())
-  if lo <= 0 or hi / lo > params.max_date_spread and hi - lo > params.spread_floor_k:
-    return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
+  # The separation refusal comes BEFORE the date-spread rule: a branch the spread rule refuses is a raise-only CANDIDATE, and a raise-only ramp row matched
+  # from the mainline would raise the car's speed there.
   touches = hwy in RAMP_CLASSES or any(o.ext_ramp for o in obs)
   if params.allow_ramps and touches and branch is not None:
     near = ramp_near_mainline(anchor, params, exclude_date, branch, index)
     if near is not None:
       return RowVerdict(False, k, n_dates, n_passes, f"ramp end {near:.0f} m from a mainline branch end", hwy, spl)
+  lo, hi = min(per_date.values()), max(per_date.values())
+  if lo <= 0 or hi / lo > params.max_date_spread and hi - lo > params.spread_floor_k:
+    return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
   # curvedbramps2pnw: a row that touches a link (link-class anchor, or a mainline anchor whose extent reaches one) is priced on its SHARPEST pass, not the
   # median across dates: ramp curvature varies along the ramp. HERE, so the export, the replay and rows.json all see the same k. The spread rule above
   # (and every refusal) is decided on the medians, unchanged.
@@ -632,7 +634,11 @@ def _centers(anchor: Anchor, params: V2Params, exclude_date: str | None):
 class MainlineEnds:
   """curvedbramps2pnw: every NON-ramp branch end of every anchor of an index (one exclude_date), in a ~55 m grid. A ramp pass can seed an anchor of its own
   just past the gore (mainline passes never attached to it), so the same-anchor sibling test cannot see the mainline there; this can."""
-  CELL = 0.0005
+  CELL = 0.0005          # degrees: 55.6 m of latitude; 55.6 * cos(lat) m of longitude (the search window below widens with the latitude)
+
+  @classmethod
+  def _cell(cls, lat: float, lon: float) -> tuple[int, int]:
+    return math.floor(lat / cls.CELL), math.floor(lon / cls.CELL)      # floor, not int(): negative coordinates
 
   def __init__(self, index: AnchorIndex, exclude_date: str | None):
     self.p = index.p
@@ -640,7 +646,7 @@ class MainlineEnds:
     for ai, a in enumerate(index.anchors):
       for c, ob in _centers(a, index.p, exclude_date):
         if ob and not _ramp_like(ob):
-          self.grid.setdefault((int(c[0] / self.CELL), int(c[1] / self.CELL)), []).append((c[0], c[1], ai, a.brg))
+          self.grid.setdefault(self._cell(c[0], c[1]), []).append((c[0], c[1], ai, a.brg))
 
   def nearest(self, lat: float, lon: float, brg: float, skip_anchor: int) -> float | None:
     """Distance to the nearest mainline branch end of ANOTHER anchor whose bearing is within 2 x the match tolerance (a mainline car and either anchor
@@ -648,9 +654,12 @@ class MainlineEnds:
     The extra site_radius_m (40 m): anchors are first-come, so consecutive mainline anchors can be up to 2 x site_radius_m = 80 m apart and the mainline end
     nearest to where a mainline path ends can be up to 40 m away ALONG the road (tests: test_a_mainline_chain_gap_...)."""
     best = None
-    ky, kx = int(lat / self.CELL), int(lon / self.CELL)
-    for dy in (-2, -1, 0, 1, 2):          # 2 cells = 110 m >= RAMP_MAINLINE_SEP_M + site_radius_m
-      for dx in (-2, -1, 0, 1, 2):
+    ky, kx = self._cell(lat, lon)
+    reach_m = RAMP_MAINLINE_SEP_M + self.p.site_radius_m
+    ny = math.ceil(reach_m / (self.CELL * 111194.0)) + 1                                              # +1: the point may sit at a cell edge
+    nx = math.ceil(reach_m / (self.CELL * 111194.0 * max(math.cos(math.radians(lat)), 0.05))) + 1     # longitude cells are narrower by cos(lat)
+    for dy in range(-ny, ny + 1):
+      for dx in range(-nx, nx + 1):
         for la, lo, ai, b in self.grid.get((ky + dy, kx + dx), ()):
           if ai == skip_anchor or bearing_diff_deg(b, brg) > 2 * self.p.heading_tol_deg:
             continue
