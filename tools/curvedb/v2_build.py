@@ -102,7 +102,7 @@ def dump(index: rt.AnchorIndex, params: rt.V2Params, out: str, tally: Counter) -
       continue
     best, granted_any = None, False
     for br in brs:
-      v = rt.row_verdict(a, params, branch=br)
+      v = rt.row_verdict(a, params, branch=br, index=index)
       reasons[v.reason if v.granted else v.reason.split(" (")[0]] += 1
       best = v if best is None or v.n_dates > best.n_dates else best
       if v.granted:

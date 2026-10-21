@@ -545,7 +545,7 @@ def majority(xs, default=None):
 
 
 def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = None,
-                which: str = "k_ext", branch: tuple[float, float] | None = None) -> RowVerdict:
+                which: str = "k_ext", branch: tuple[float, float] | None = None, index: AnchorIndex | None = None) -> RowVerdict:
   """The owner's rule set, in order. `exclude_date` is leave-one-date-out. `branch` is where the QUERY's
   path is at the end of the extent; only passes that ended within `branch_radius_m` of it are pooled.
   With no branch (the table export) every pass is pooled and a split shows up as `dates disagree`."""
@@ -593,7 +593,7 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
     return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
   touches = hwy in RAMP_CLASSES or any(o.ext_ramp for o in obs)
   if params.allow_ramps and touches and branch is not None:
-    near = ramp_near_mainline(anchor, params, exclude_date, branch)
+    near = ramp_near_mainline(anchor, params, exclude_date, branch, index)
     if near is not None:
       return RowVerdict(False, k, n_dates, n_passes, f"ramp end {near:.0f} m from a mainline branch end", hwy, spl)
   # curvedbramps2pnw: a row that touches a link (link-class anchor, or a mainline anchor whose extent reaches one) is priced on its SHARPEST pass, not the
@@ -615,21 +615,88 @@ def _pooled(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: 
   return obs
 
 
-def ramp_near_mainline(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: tuple[float, float]) -> float | None:
-  """Distance (m) from this branch's end to the nearest OTHER branch end of the anchor that is NOT ramp-touching (class link / any ext_ramp pass), when that is
-  < RAMP_MAINLINE_SEP_M; else None. The sibling need not have authority: a refused mainline branch is still the road a drifting path is on."""
+def _ramp_like(obs: list) -> bool:
+  """A branch is ramp-like when at least half of its passes touch a link (link class or ext_ramp): ONE pass whose class flickered to a link near the
+  gore must not turn a mainline branch into a 'ramp' and hide it from the separation rule."""
+  n = sum(1 for o in obs if o.hwy in RAMP_CLASSES or o.ext_ramp)
+  return 2 * n >= len(obs)
+
+
+def _centers(anchor: Anchor, params: V2Params, exclude_date: str | None):
+  """[(canonical branch centre, its pooled passes)] for the anchor, exclude_date honoured -- the SAME clusters the export and the car use."""
   kept = Anchor(anchor.lat, anchor.lon, anchor.brg, [o for o in anchor.obs if o.date != exclude_date])
+  return [(c, [o for o in kept.obs if math.isfinite(o.end_lat) and haversine_m(o.end_lat, o.end_lon, c[0], c[1]) <= params.branch_radius_m])
+          for c in branches(kept, params.branch_radius_m)]
+
+
+class MainlineEnds:
+  """curvedbramps2pnw: every NON-ramp branch end of every anchor of an index (one exclude_date), in a ~55 m grid. A ramp pass can seed an anchor of its own
+  just past the gore (mainline passes never attached to it), so the same-anchor sibling test cannot see the mainline there; this can."""
+  CELL = 0.0005
+
+  def __init__(self, index: AnchorIndex, exclude_date: str | None):
+    self.p = index.p
+    self.grid: dict[tuple[int, int], list[tuple[float, float, int, float]]] = {}
+    for ai, a in enumerate(index.anchors):
+      for c, ob in _centers(a, index.p, exclude_date):
+        if ob and not _ramp_like(ob):
+          self.grid.setdefault((int(c[0] / self.CELL), int(c[1] / self.CELL)), []).append((c[0], c[1], ai, a.brg))
+
+  def nearest(self, lat: float, lon: float, brg: float, skip_anchor: int) -> float | None:
+    """Distance to the nearest mainline branch end of ANOTHER anchor whose bearing is within 2 x the match tolerance (a mainline car and either anchor
+    are each within heading_tol_deg of the path), if < RAMP_MAINLINE_SEP_M + site_radius_m; else None.
+    The extra site_radius_m (40 m): anchors are first-come, so consecutive mainline anchors can be up to 2 x site_radius_m = 80 m apart and the mainline end
+    nearest to where a mainline path ends can be up to 40 m away ALONG the road (tests: test_a_mainline_chain_gap_...)."""
+    best = None
+    ky, kx = int(lat / self.CELL), int(lon / self.CELL)
+    for dy in (-2, -1, 0, 1, 2):          # 2 cells = 110 m >= RAMP_MAINLINE_SEP_M + site_radius_m
+      for dx in (-2, -1, 0, 1, 2):
+        for la, lo, ai, b in self.grid.get((ky + dy, kx + dx), ()):
+          if ai == skip_anchor or bearing_diff_deg(b, brg) > 2 * self.p.heading_tol_deg:
+            continue
+          d = haversine_m(la, lo, lat, lon)
+          if d < RAMP_MAINLINE_SEP_M + self.p.site_radius_m and (best is None or d < best):
+            best = d
+    return best
+
+
+def mainline_ends(index: AnchorIndex, exclude_date: str | None) -> MainlineEnds:
+  cache = index.__dict__.setdefault("_mainline_ends", {})
+  if exclude_date not in cache:
+    cache[exclude_date] = MainlineEnds(index, exclude_date)
+  return cache[exclude_date]
+
+
+def ramp_near_mainline(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: tuple[float, float],
+                       index: AnchorIndex | None = None) -> float | None:
+  """Distance (m) from this branch's end to the nearest non-ramp branch end -- of the SAME anchor, and (with `index`) of any other anchor -- when that is
+  < RAMP_MAINLINE_SEP_M; else None. `branch` is snapped to its canonical cluster centre first (a raw pass end point, as the replay's LODO queries pass, must
+  not be mistaken for a sibling). A sibling need not have authority: a refused mainline branch is still the road a drifting path is on."""
+  cents = _centers(anchor, params, exclude_date)
+  me = min(range(len(cents)), key=lambda n: haversine_m(cents[n][0][0], cents[n][0][1], branch[0], branch[1]), default=None)
+  if me is None or haversine_m(cents[me][0][0], cents[me][0][1], branch[0], branch[1]) > params.branch_radius_m:
+    return None
+  mine = cents[me][0]
   best = None
-  for c in branches(kept, params.branch_radius_m):
-    d = haversine_m(c[0], c[1], branch[0], branch[1])
-    if d <= params.branch_radius_m:
-      continue                      # the branch itself
-    ob = [o for o in kept.obs if math.isfinite(o.end_lat) and haversine_m(o.end_lat, o.end_lon, c[0], c[1]) <= params.branch_radius_m]
-    if not ob or majority([o.hwy for o in ob if o.hwy not in UNKNOWN_CLASSES], "") in RAMP_CLASSES or any(o.ext_ramp for o in ob):
-      continue                      # a ramp (or empty) sibling
+  for n, (c, ob) in enumerate(cents):
+    if n == me or not ob or _ramp_like(ob):
+      continue
+    d = haversine_m(c[0], c[1], mine[0], mine[1])
     if d < RAMP_MAINLINE_SEP_M and (best is None or d < best):
       best = d
+  if index is not None:
+    d = mainline_ends(index, exclude_date).nearest(mine[0], mine[1], anchor.brg, index_of(index, anchor))
+    if d is not None and (best is None or d < best):
+      best = d
   return best
+
+
+def index_of(index: AnchorIndex, anchor: Anchor) -> int:
+  """The anchor's position in the index (identity, not equality)."""
+  for n, a in enumerate(index.anchors):
+    if a is anchor:
+      return n
+  return -1
 
 
 def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, exclude_date: str | None = None,

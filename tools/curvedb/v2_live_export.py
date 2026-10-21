@@ -90,7 +90,7 @@ def export_doc(idx: rt.AnchorIndex, exclude_date: str | None = None, lower_bound
     # query side sees them (row_verdict filters by date first, then by branch).
     kept = rt.Anchor(a.lat, a.lon, a.brg, [o for o in a.obs if o.date != exclude_date])
     for br in rt.branches(kept, p.branch_radius_m):
-      v = rt.row_verdict(a, p, exclude_date=exclude_date, branch=br)
+      v = rt.row_verdict(a, p, exclude_date=exclude_date, branch=br, index=idx)
       n_branches += 1
       k = round(v.k, 8) if v.granted else None
       n_rows += v.granted

@@ -1,6 +1,7 @@
 """curvedbramps2pnw (owner 2026-10-19, "ramp option A"): with V2Params.allow_ramps a ramp/link branch is treated like any other road;
 EVERY other refusal stays, and a build without the flag is unchanged. Synthetic geometry only (the real rows are private)."""
 import gzip
+import math
 import json
 from collections import Counter
 from dataclasses import asdict, replace
@@ -219,3 +220,111 @@ def test_the_export_writes_the_refused_ramp_branch_as_null():
   doc, _ = ex.export_doc(idx)
   ks = sorted((b[2] is None, round(b[2] or 0, 4)) for b in doc["anchors"][0][3])
   assert ks == [(False, 0.004), (True, 0)]
+
+
+# ---- review fixes: canonical centres, mainline flicker, cross-anchor ----
+def _north(end, m):
+  return (end[0] + m / 111194.0, end[1])
+
+
+def test_a_raw_query_end_point_is_snapped_to_its_branch_centre_before_the_test():
+  """LODO / replay queries pass a pass end point, not a centre. M-R = 16 m; a ramp query 4 m toward M (12 m from M, 4 m from R) used to skip BOTH."""
+  a, main_end, ramp_end = _two_branch_anchor(16.0)
+  query = _north(ramp_end, -4.0)
+  assert rt.ramp_near_mainline(a, PR, None, query) == pytest.approx(16.0, abs=0.5)
+  a, main_end, ramp_end = _two_branch_anchor(23.0)
+  assert rt.ramp_near_mainline(a, PR, None, _north(ramp_end, 4.0)) == pytest.approx(23.0, abs=0.5)      # snapped to R: still 23 m from M, not granted by drift
+
+
+def test_one_flickering_pass_does_not_turn_a_mainline_branch_into_a_ramp():
+  a, main_end, ramp_end = _two_branch_anchor(19.0)
+  a.obs += [replace(_obs(f"2026-08-{n + 10}", 0.004, end=main_end, drive=f"m{n}"), ext_ramp=(n == 0)) for n in range(5)]    # 1 of 8 mainline passes flickered
+  assert rt.row_verdict(a, PR, branch=ramp_end).reason.startswith("ramp end")
+
+
+def _gore_index(ramp_gap_m, mainline_ext=False):
+  """A0: mainline passes. A1 (40 m on): ONLY ramp passes, ending ramp_gap_m from A0's mainline end. Mainline passes never attached to A1."""
+  idx = rt.AnchorIndex(PR)
+  main_end = (45.00135, -122.7)
+  a0 = idx.anchors[idx.add(45.0, -122.7, 0.0)]
+  a0.obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=main_end) for n in range(3)]
+  a1 = idx.anchors[idx.add(45.00036, -122.7, 0.0)]
+  ramp_end = _north(main_end, ramp_gap_m)
+  a1.obs = [replace(_obs(f"2026-09-0{n + 1}", 0.007, hwy="motorwayLink", drive=f"r{n}", end=ramp_end), ext_ramp=True) for n in range(3)]
+  return idx, a1, ramp_end
+
+
+def test_a_ramp_only_anchor_past_the_gore_is_refused_when_a_mainline_end_is_within_25_m():
+  idx, a1, ramp_end = _gore_index(19.0)
+  assert rt.row_verdict(a1, PR, branch=ramp_end).granted                                  # the same-anchor test alone cannot see the mainline
+  v = rt.row_verdict(a1, PR, branch=ramp_end, index=idx)
+  assert not v.granted and v.reason.startswith("ramp end 19 m")
+  doc, _ = ex.export_doc(idx)
+  assert [b[2] for b in doc["anchors"][1][3]] == [None] and doc["anchors"][0][3][0][2] == pytest.approx(0.004)      # the export passes the index
+
+
+def test_a_ramp_only_anchor_with_a_mainline_end_70_m_away_is_granted():
+  idx, a1, ramp_end = _gore_index(70.0)
+  assert rt.row_verdict(a1, PR, branch=ramp_end, index=idx).granted
+
+
+def test_the_cross_anchor_test_ignores_ramp_ends_and_other_headings():
+  idx, a1, ramp_end = _gore_index(19.0)
+  idx.anchors[0].obs = [replace(o, hwy="motorwayLink", ext_ramp=True) for o in idx.anchors[0].obs]       # A0 is a ramp too: nothing mainline nearby
+  assert rt.row_verdict(a1, PR, branch=ramp_end, index=idx).granted
+  idx, a1, ramp_end = _gore_index(19.0)
+  idx.anchors[0].brg = 180.0                                                                # a crossing road, not the same direction
+  assert rt.row_verdict(a1, PR, branch=ramp_end, index=idx).granted
+
+
+def _chain_gap_index(lateral_m, with_rule_index):
+  """Mainline anchors A0 and A2 80 m apart (first-come anchors can be that far apart); a RAMP-ONLY anchor A1 midway whose ramp end is lateral_m beside
+  where a mainline path ends 150 m past A1. Returns (rows dir loaded by the car, mainline polyline)."""
+  idx = rt.AnchorIndex(PR)
+  lon = -122.7
+  for lat in (45.0, 45.00072):
+    idx.anchors[idx.add(lat, lon, 0.0)].obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=(lat + 150.0 / 111194.0, lon)) for n in range(3)]
+  a1 = idx.anchors[idx.add(45.00036, lon, 0.0)]
+  ramp_end = (45.00036 + 150.0 / 111194.0, lon + lateral_m / (111194.0 * math.cos(math.radians(45.0))))
+  a1.obs = [replace(_obs(f"2026-09-0{n + 1}", 0.007, hwy="motorwayLink", drive=f"r{n}", end=ramp_end), ext_ramp=True) for n in range(3)]
+  return idx
+
+
+def _car_match_at_a1(idx, tmp_path, index_rule):
+  import types
+  if not index_rule:                                   # the same-anchor-only rule of e0059cc187
+    real = rt.mainline_ends
+    rt.mainline_ends = lambda index, exclude_date: types.SimpleNamespace(nearest=lambda *a: None)
+  try:
+    d, c = ex.export_doc(idx)
+  finally:
+    if not index_rule:
+      rt.mainline_ends = real
+  (tmp_path / "t").write_bytes(b"x")
+  ex.write(d, c, str(tmp_path), str(tmp_path / "t"))
+  rows, _ = cl.load_rows(str(tmp_path))
+  pts = [{"latitude": 44.9990 + n * 10.0 / 111194.0, "longitude": -122.7} for n in range(520)]
+  poly = cl.Polyline(pts)
+  s = (45.00036 - 44.9990) * 111194.0
+  la, lo = poly.at(s)
+  return cl.match_at(rows, poly, s, la, lo)
+
+
+def test_a_mainline_chain_gap_lets_the_ramp_row_be_matched_by_a_mainline_car_without_the_cross_anchor_rule(tmp_path):
+  m = _car_match_at_a1(_chain_gap_index(8.0, False), tmp_path, index_rule=False)
+  assert m.why == "ok" and m.k == pytest.approx(0.007)         # the phantom: the mainline car is handed the ramp's row
+
+
+def test_the_cross_anchor_rule_closes_the_chain_gap(tmp_path):
+  m = _car_match_at_a1(_chain_gap_index(8.0, True), tmp_path, index_rule=True)
+  assert m.why == "noAuthority"                                   # the branch is exported null: no effect on the mainline car
+
+
+def test_the_cross_anchor_reach_is_the_full_65_m_not_one_grid_cell():
+  """The mainline end sits just below a grid-cell edge (longitude cell frac .98) and the query is 60 m east: two cells away."""
+  idx = rt.AnchorIndex(PR)
+  lon = -122.70001
+  idx.anchors[idx.add(45.0, lon, 0.0)].obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=(45.00135, lon)) for n in range(3)]
+  east = 60.0 / (111194.0 * math.cos(math.radians(45.0)))
+  assert rt.mainline_ends(idx, None).nearest(45.00135, lon + east, 0.0, -1) == pytest.approx(60.0, abs=1.0)
+  assert rt.mainline_ends(idx, None).nearest(45.00135, lon + 70.0 / (111194.0 * math.cos(math.radians(45.0))), 0.0, -1) is None

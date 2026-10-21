@@ -216,7 +216,7 @@ def replay(idx: rt.AnchorIndex, passes, eps: list[Episode], a_mapd: float, tally
       rows.append(r)
       continue
     br = rt.branch_point(pts, i, idx.anchors[ai], p.extent_fwd_m)
-    v = rt.row_verdict(idx.anchors[ai], p, exclude_date=ep.date, branch=br) if br is not None else \
+    v = rt.row_verdict(idx.anchors[ai], p, exclude_date=ep.date, branch=br, index=idx) if br is not None else \
       rt.RowVerdict(False, None, 0, 0, "query has no branch point (own pass ends)", "", 0.0)
     r.update(k_row=v.k, n_dates=v.n_dates, row_why=v.reason)
     if v.granted and p.way_check and pt.way:
@@ -268,7 +268,7 @@ def scan_adds(idx: rt.AnchorIndex, passes, eps: list[Episode], a_mapd: float, da
         ai, _ = idx.nearest(pt.lat, pt.lon, pt.brg)
         br = rt.branch_point(pts, i, idx.anchors[ai], p.extent_fwd_m) if ai is not None else None
         if ai is not None and br is not None:
-          v = rt.row_verdict(idx.anchors[ai], p, exclude_date=date, branch=br)
+          v = rt.row_verdict(idx.anchors[ai], p, exclude_date=date, branch=br, index=idx)
           v_db = math.sqrt(a_mapd / v.k) if v.granted else None       # a LOWERING: no margin
           if v_db is not None and any(x <= v_db + MIN_RED_MS for x in icbm_here):
             v_db = None                      # ICBM was already slowing at least this much here
@@ -308,7 +308,7 @@ def row_accuracy(idx: rt.AnchorIndex, *, k_min: float, a_mapd: float,
     for o in a.obs:
       d = o.date
       br = (o.end_lat, o.end_lon) if math.isfinite(o.end_lat) else None
-      v = rt.row_verdict(a, idx.p, exclude_date=d, branch=br)
+      v = rt.row_verdict(a, idx.p, exclude_date=d, branch=br, index=idx)
       if not v.granted:
         tally[v.reason.split(" (")[0]] += 1
         continue
