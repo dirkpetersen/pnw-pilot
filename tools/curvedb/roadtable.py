@@ -59,6 +59,13 @@ class V2Params:
   allow_ramps: bool = False
 
 
+# curvedbramps2pnw: a ramp-touching branch is REFUSED when its end point lies within this of a mainline branch end at the same anchor. PROVISIONAL, MEASURED
+# on the OR-34 / US-20 Corvallis ramp junction: ramp and mainline ends were 18.9 m apart, mainline passes ended 17.7-20.6 m from the ramp end, so a mainline
+# path 3-6 m off its usual line would have matched the 40 mph ramp row (the car matches a branch within branch_radius_m = 15 m of its end). 25 m = the 15 m
+# radius + 10 m: a mainline path must then be >= 10 m off its pooled end (3 lane widths) to reach a ramp end.
+# A path inside 15 m of both is "ambiguous" on the car.
+RAMP_MAINLINE_SEP_M = 25.0
+
 PROVISIONAL_V2 = V2Params(
   v_min_ms=5.0,          # cited: v1's min_speed_ms (tools/curvedb_telemetry_check.py's floor). MEASURED: at
                          # 8 m/s most city episodes lost their truth (the pass ends at the junction).
@@ -584,10 +591,15 @@ def row_verdict(anchor: Anchor, params: V2Params, *, exclude_date: str | None = 
   lo, hi = min(per_date.values()), max(per_date.values())
   if lo <= 0 or hi / lo > params.max_date_spread and hi - lo > params.spread_floor_k:
     return RowVerdict(False, k, n_dates, n_passes, f"dates disagree ({lo:.5f}..{hi:.5f})", hwy, spl)
+  touches = hwy in RAMP_CLASSES or any(o.ext_ramp for o in obs)
+  if params.allow_ramps and touches and branch is not None:
+    near = ramp_near_mainline(anchor, params, exclude_date, branch)
+    if near is not None:
+      return RowVerdict(False, k, n_dates, n_passes, f"ramp end {near:.0f} m from a mainline branch end", hwy, spl)
   # curvedbramps2pnw: a row that touches a link (link-class anchor, or a mainline anchor whose extent reaches one) is priced on its SHARPEST pass, not the
   # median across dates: ramp curvature varies along the ramp. HERE, so the export, the replay and rows.json all see the same k. The spread rule above
   # (and every refusal) is decided on the medians, unchanged.
-  if params.allow_ramps and (hwy in RAMP_CLASSES or any(o.ext_ramp for o in obs)):
+  if params.allow_ramps and touches:
     k = max(getattr(o, which) for o in obs)
   return RowVerdict(True, k, n_dates, n_passes, "ok", hwy, spl)
 
@@ -601,6 +613,23 @@ def _pooled(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: 
     if w is not None:
       obs = [o for o in obs if o.way in (0, w)]
   return obs
+
+
+def ramp_near_mainline(anchor: Anchor, params: V2Params, exclude_date: str | None, branch: tuple[float, float]) -> float | None:
+  """Distance (m) from this branch's end to the nearest OTHER branch end of the anchor that is NOT ramp-touching (class link / any ext_ramp pass), when that is
+  < RAMP_MAINLINE_SEP_M; else None. The sibling need not have authority: a refused mainline branch is still the road a drifting path is on."""
+  kept = Anchor(anchor.lat, anchor.lon, anchor.brg, [o for o in anchor.obs if o.date != exclude_date])
+  best = None
+  for c in branches(kept, params.branch_radius_m):
+    d = haversine_m(c[0], c[1], branch[0], branch[1])
+    if d <= params.branch_radius_m:
+      continue                      # the branch itself
+    ob = [o for o in kept.obs if math.isfinite(o.end_lat) and haversine_m(o.end_lat, o.end_lon, c[0], c[1]) <= params.branch_radius_m]
+    if not ob or majority([o.hwy for o in ob if o.hwy not in UNKNOWN_CLASSES], "") in RAMP_CLASSES or any(o.ext_ramp for o in ob):
+      continue                      # a ramp (or empty) sibling
+    if d < RAMP_MAINLINE_SEP_M and (best is None or d < best):
+      best = d
+  return best
 
 
 def raise_only_info(anchor: Anchor, params: V2Params, verdict: RowVerdict, *, exclude_date: str | None = None,

@@ -172,3 +172,50 @@ def test_without_the_flag_nothing_changes():
 
 def test_the_sharpest_pass_honours_exclude_date():
   assert _export_k(PR, "motorwayLink", [0.010, 0.012, 0.015], exclude_date="2026-09-03") == pytest.approx(0.012)
+
+
+# ---- ramp end vs mainline end separation ----
+def _two_branch_anchor(sep_m, ramp_hwy="motorwayLink", ramp_ext=False):
+  """One anchor, a mainline branch (3 dates) and a ramp branch whose end is sep_m metres north of the mainline end."""
+  main_end = (45.00135, -122.7)
+  ramp_end = (main_end[0] + sep_m / 111194.0, main_end[1])
+  obs = [_obs(f"2026-09-0{n + 1}", 0.004, end=main_end) for n in range(3)]
+  obs += [replace(_obs(f"2026-09-0{n + 1}", 0.007, hwy=ramp_hwy, drive=f"ramp{n}", end=ramp_end), ext_ramp=ramp_ext) for n in range(3)]
+  return _anchor(*obs), main_end, ramp_end
+
+
+def test_a_ramp_end_within_25_m_of_a_mainline_end_is_refused_beyond_it_granted():
+  a, main_end, ramp_end = _two_branch_anchor(19.0)
+  v = rt.row_verdict(a, PR, branch=ramp_end)
+  assert not v.granted and v.reason.startswith("ramp end 19 m from a mainline branch end")
+  a, main_end, ramp_end = _two_branch_anchor(40.0)
+  v = rt.row_verdict(a, PR, branch=ramp_end)
+  assert v.granted and v.k == pytest.approx(0.007)
+
+
+def test_the_mainline_branch_is_unaffected_by_a_close_ramp():
+  a, main_end, ramp_end = _two_branch_anchor(19.0)
+  v = rt.row_verdict(a, PR, branch=main_end)
+  assert v.granted and v.k == pytest.approx(0.004)
+
+
+def test_an_ext_ramp_priced_branch_is_covered_too_and_the_flag_off_is_unchanged():
+  a, main_end, ramp_end = _two_branch_anchor(19.0, ramp_hwy="motorway", ramp_ext=True)
+  assert rt.row_verdict(a, PR, branch=ramp_end).reason.startswith("ramp end")
+  assert rt.row_verdict(a, P, branch=ramp_end).reason == "extent reaches a ramp"      # off: the old refusal, not the new one
+
+
+def test_a_ramp_next_to_another_ramp_is_not_refused_by_the_rule():
+  a, main_end, ramp_end = _two_branch_anchor(19.0)
+  second = (ramp_end[0] + 20.0 / 111194.0, ramp_end[1])                          # a second ramp 20 m past the first (39 m from the mainline)
+  a.obs += [replace(_obs(f"2026-09-0{n + 1}", 0.007, hwy="motorwayLink", drive=f"r2{n}", end=second), ext_ramp=True) for n in range(3)]
+  assert rt.ramp_near_mainline(a, PR, None, second) is None
+
+
+def test_the_export_writes_the_refused_ramp_branch_as_null():
+  a, main_end, ramp_end = _two_branch_anchor(19.0)
+  idx = rt.AnchorIndex(PR)
+  idx.anchors[idx.add(a.lat, a.lon, a.brg)].obs = a.obs
+  doc, _ = ex.export_doc(idx)
+  ks = sorted((b[2] is None, round(b[2] or 0, 4)) for b in doc["anchors"][0][3])
+  assert ks == [(False, 0.004), (True, 0)]
