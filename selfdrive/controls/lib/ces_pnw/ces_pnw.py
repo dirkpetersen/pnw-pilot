@@ -1847,6 +1847,63 @@ def icbm_map_sanity(own, ref, v_ego, src, cand_dist, k_at, k_at_n, k_at_gap, vis
   return min(ref, v_geo), "gentler"
 
 
+# icbmvisraise2pnw (drive 2026-10-21 PT, I-5 northbound Portland, posted 50): mapd's curve speed (43-45 mph) capped the stock
+# set while the camera measured k 0.0047-0.0051 1/m (~50 mph at 2.5 m/s^2); the truck held 42-43 in a 50 for the whole stretch.
+# Owner rule (feedback-repeat-roads-first): the mapd rating is not a hard ceiling, confident vision may override it.
+ICBM_VIS_RAISE_GAIN_MS = 5.0 * CV.MPH_TO_MS   # vision must beat mapd's target by MORE than this (design 2026-10-21) to raise
+ICBM_VIS_RAISE_CONFIRM_S = 1.0                # s the raise must read stable before the first SET+ (design 2026-10-21)
+ICBM_VIS_RAISE_K_RISE = 0.10                  # vis_k this fraction above the lowest k of the window = the curve tightens: drop.
+                                              #   Not measured -- a guess at the model's tick-to-tick noise on vis_k_max.
+
+
+def icbm_vis_raise(capping, src, own, cand_dist, v_ego, vis_k, vis_reach, a_lat, rain_ms, k_ref, limit):
+  """icbmvisraise2pnw: the speed (m/s) vision says a RUNNING map/far ICBM cap may be lifted to, or None. Returns (v_vis, why);
+  why is "ok" when v_vis is returned, else the gate that refused (icbmVisRaise):
+    off      a_lat <= 0: the car has no capability (Tesla: icbm_restore_hold_lat_accel 0)
+    noCap    no running cap (a new episode is never raised by vision)
+    notMap   the cap is not mapd's own number (vision / DB / gpsHold / no target)
+    lowConf  no usable vision curvature or horizon (model hiccup: vis_k None, reach 0)
+    noReach  mapd's apex is beyond what vision has MEASURED: min(model reach, v_ego * ICBM_VIS_TRUST_S) (13:57 lesson)
+    kRise    vis_k rose more than ICBM_VIS_RAISE_K_RISE over the window's lowest: the curve is tightening
+    noLimit  posted limit unknown (`limit` m/s <= 0)
+    noCurve  vision's own curve speed is above the posted limit + 5 mph: the camera does not SEE the curve mapd rates (a
+             straight reading). A phantom and a vision miss (2026-09-12 13:57) look the same here, so no raise.
+    noGain   v_vis does not beat `own` by more than ICBM_VIS_RAISE_GAIN_MS (incl. vision sharper than the map)
+  v_vis = sqrt(a_lat / vis_k) - rain, vis_k = the tightest curvature on the model's horizon (vis_k_max, not the instant one).
+  Every further bound (pre-cap set, posted limit + 5 mph, restore cap, 1 s confirm) is IcbmEpisode._db_raise's. Pure; never raises.
+  KNOWN RISK (icbm_map_sanity, 2026-09-12 weekend): vision under-read some real curves ~1.6x; the limit + 5 bound and the
+  layer-2 lat-accel cap (lataccel2pnw) are the backstop, not this function."""
+  try:
+    a_lat = float(a_lat)
+  except (TypeError, ValueError):
+    return None, "off"
+  if not (a_lat > 0.0):
+    return None, "off"
+  if not capping:
+    return None, "noCap"
+  if own is None or src not in ("map", "far"):
+    return None, "notMap"
+  try:
+    own, v_ego, rain_ms, cand_dist = float(own), float(v_ego), float(rain_ms), float(cand_dist)
+    vis_k, vis_reach, limit = float(vis_k), float(vis_reach), float(limit or 0.0)
+  except (TypeError, ValueError):
+    return None, "lowConf"
+  if not (math.isfinite(vis_k) and math.isfinite(vis_reach) and vis_reach > 0.0 and vis_k >= 0.0):
+    return None, "lowConf"
+  if not (cand_dist <= min(vis_reach, v_ego * ICBM_VIS_TRUST_S)):   # also refuses an inf / nan apex distance
+    return None, "noReach"
+  if k_ref is not None and vis_k > k_ref * (1.0 + ICBM_VIS_RAISE_K_RISE):
+    return None, "kRise"
+  v_vis = math.sqrt(a_lat / max(vis_k, 1e-9)) - rain_ms
+  if not (limit > 0.0):
+    return None, "noLimit"
+  if v_vis > limit + ICBM_DB_RAISE_OVER_MS:
+    return None, "noCurve"
+  if not (v_vis > own + ICBM_VIS_RAISE_GAIN_MS):
+    return None, "noGain"
+  return v_vis, "ok"
+
+
 def icbm_path_behind(points, cur_lat, cur_lon, cand_dist):
   """curvelead2pnw (B-behind) -- TELEMETRY ONLY. Is the map candidate at `cand_dist` BEHIND the truck along
   mapd's own path? True / False / None (cannot tell).
@@ -3026,7 +3083,7 @@ class IcbmEpisode:
     return (self.ceiling, self.latch_limit, self.zone_cap, self.zone_why, self.zone_n0, self._sa_inst0,
             self._sa_restart_logged)
 
-  def _db_raise(self, now, db_t, stock_set, limit_now, restore_cap):
+  def _db_raise(self, now, db_t, stock_set, limit_now, restore_cap, confirm_s=ICBM_RATCHET_CONFIRM_S):
     """icbmdbraise2pnw: the speed (m/s) a RUNNING cap may lift the stock set to this tick, or None. `db_t` is the curve DB's own
     target (min'd with the final cap) when the DB's raise/add is what binds, else None. Bounded by the episode ceiling C, the
     posted limit + ICBM_DB_RAISE_OVER_MS and the restore cap; must clear the set by one tap and hold for ICBM_RATCHET_CONFIRM_S
@@ -3053,7 +3110,7 @@ class IcbmEpisode:
       self._dbr_t0 = now
     out = bound if self._dbr_prev is None else min(bound, self._dbr_prev)
     self._dbr_prev = bound
-    if now - self._dbr_t0 < ICBM_RATCHET_CONFIRM_S or out < stock_set + ICBM_RESTORE_DONE_TOL:
+    if now - self._dbr_t0 < confirm_s or out < stock_set + ICBM_RESTORE_DONE_TOL:   # icbmvisraise2pnw: vision confirms 1.0 s
       self.db_raise = "wait"
       return None
     self.db_raise = "acted"
@@ -3310,7 +3367,8 @@ class IcbmEpisode:
 
   def step(self, now, cap_target, v_set, stock_set, stock_on, driver_pedal,
            cap_dist=None, v_ego=0.0, in_curve=False, restore_cap=None, limit_now=None, hold_ahead=False,
-           hold_vsafe=None, gas_resume=False, driver_gas=False, db_raise_t=None):
+           hold_vsafe=None, gas_resume=False, driver_gas=False, db_raise_t=None,
+           raise_confirm_s=ICBM_RATCHET_CONFIRM_S):
     """One brain tick (~4 Hz). All inputs SI primitives; cap_target is the (penalty-applied) cap
     from icbm_curve_target or None. Returns (publish_target or None, direction 'dec'/'inc'/None).
 
@@ -3344,6 +3402,7 @@ class IcbmEpisode:
     icbmdbraise2pnw optional input (None = the previous behaviour exactly):
       db_raise_t   m/s: this tick's target IS a curve-DB raise/add (not mapd's or vision's own number). A RUNNING cap then
                    returns (bound, "inc") instead of its dec-only target once the raise reads stable -- see _db_raise.
+      raise_confirm_s  s that raise must read stable (icbmvisraise2pnw: a VISION raise passes ICBM_VIS_RAISE_CONFIRM_S).
 
     terwilliger2pnw optional inputs (defaults = the previous behaviour exactly):
       gas_resume   the car resumes an episode after a driver gas press (PnwVehicle.lightning_curve_slow);
@@ -3442,7 +3501,7 @@ class IcbmEpisode:
                               else min(self._min_published, publish_target))
       self._clear_t0 = None             # curve (re)bound: reset the clear debounce
       up = None if fresh else self._db_raise(now, None if db_raise_t is None else min(db_raise_t, cap_target),
-                                             stock_set, limit_now, restore_cap)
+                                             stock_set, limit_now, restore_cap, raise_confirm_s)
       # icbmmapfirst2pnw: remember where the binding candidate sits — used at clear to tell
       # "passed the curve" (early restore) from "detection dropout" (full debounce).
       # icbmratchet2pnw (Fable review catch): only snapshot from a CONFIRMED/accepted reading — an
@@ -4632,6 +4691,7 @@ class CESController:
     self._icbm_last_pub = 0.0
     self._icbm_last_target = None
     self._icbm_src = None                  # curveslow-lightning: "map"/"vis"/None for the drive log
+    self._icbm_vis_raise, self._icbm_vis_v, self._icbm_vis_fed, self._icbm_vis_k0 = None, None, False, None   # icbmvisraise2pnw
     # curvedbtel2pnw section 3.4: the candidate _icbm_src names. `_cand_pt` is the (lat, lon),
     # resolved at the position the distance was measured from (see _icbm_step) -- that point is what
     # reaches ces_events as mapLat/mapLon, so they locate ICBM's candidate and not CES's nearer 10 s
@@ -5837,6 +5897,7 @@ class CESController:
         self._icbm_dir = None
         self._icbm_gate = None          # icbmmapfirst2pnw
         self._icbm_map_reach = None
+        self._icbm_vis_raise, self._icbm_vis_v, self._icbm_vis_fed, self._icbm_vis_k0 = "off", None, False, None   # icbmvisraise2pnw
         self._icbm_firm_t, self._icbm_late_t, self._icbm_late_vmax_t, self._icbm_start_why = None, None, None, None   # icbmlatestart2pnw: per-tick only
         self._icbm_late_latch = False
         self._icbm_late_hold_t, self._icbm_late_anchor, self._icbm_late_anchor_t = None, None, None
@@ -6076,11 +6137,35 @@ class CESController:
       # Every gate is in curvedb_live.py; a failed gate is no effect at all. Lightning only (capability).
       roaddb = getattr(self, "_roaddb", None)      # getattr: the ICBM tests bind this method onto bare stubs
       db_raise_t = None                            # icbmdbraise2pnw: set only when the DB's own raise/add is what binds
+      t_pre_db = target                            # icbmvisraise2pnw: a target the DB changed is the DB's, not mapd's
       if roaddb is not None and roaddb.enabled:
         target, far_dist = self._icbm_roaddb(target, sig, plat, plon, ref, ep_ceiling, starting, in_curve,
                                              vis_v, vis_dist, ttc, far_v, far_dist, far_raw)
         if target is not None and getattr(roaddb, "backed", False) and self._icbm_src in ("map", "far"):
           db_raise_t = target
+      # icbmvisraise2pnw: a RUNNING cap on mapd's own number may be lifted by VISION through the same bounded raise as the DB
+      # (IcbmEpisode._db_raise: pre-cap set, posted limit + 5 mph, restore cap), confirmed for ICBM_VIS_RAISE_CONFIRM_S. The target
+      # itself becomes v_vis (as the DB's does), so the dec-only cap HOLDS the raised set; any failed gate gives mapd's number
+      # back the same tick (lowering is never blocked). Gates and labels: icbm_vis_raise. Lightning only (capability a_lat).
+      self._icbm_vis_v, self._icbm_vis_fed = None, False
+      vis_raise_confirm = ICBM_RATCHET_CONFIRM_S
+      if db_raise_t is None and target == t_pre_db:
+        cand_d = {"map": sig.get("map_target_dist", float("inf")), "far": far_dist}.get(self._icbm_src)
+        v_vr, self._icbm_vis_raise = icbm_vis_raise(
+          self._icbm_ep.phase == "cap", self._icbm_src, target, cand_d, sig["v_ego"], sig.get("vis_k_max"),
+          sig.get("vis_reach", 0.0), self._veh.icbm_restore_hold_lat_accel, self._veh.rain_penalty_ms(),
+          getattr(self, "_icbm_vis_k0", None), sig.get("spd_lim", 0.0))
+      else:
+        v_vr, self._icbm_vis_raise = None, "notMap"
+      if v_vr is not None:
+        k = float(sig["vis_k_max"])
+        k0 = getattr(self, "_icbm_vis_k0", None)
+        self._icbm_vis_k0 = k if k0 is None else min(k0, k)
+        self._icbm_vis_v, self._icbm_vis_fed = round(v_vr, 2), True
+        target = db_raise_t = min(v_vr, ref)     # never above the set the cap latched from (a straight road reads ~inf)
+        vis_raise_confirm = ICBM_VIS_RAISE_CONFIRM_S
+      else:
+        self._icbm_vis_k0 = None
       # curvefloor2pnw: POSTED-LIMIT FLOOR for the ICBM path, low limits only.
       # 2026-08-11 06:52: spdLim 11.2 (25 mph), map target 7.3 m/s sustained 12 s, stock set tapped
       # 23.7 -> 7.15 (16 mph). icbmratchet2pnw only confirms single-tick OUTLIER drops, so nothing
@@ -6303,7 +6388,9 @@ class CESController:
                                                  limit_now=rcap_lim if rcap_lim > 0.0 else None,
                                                  hold_ahead=rhold, hold_vsafe=rhold_vsafe,
                                                  gas_resume=self._veh.lightning_curve_slow, driver_gas=driver_gas,
-                                                 db_raise_t=db_raise_t)
+                                                 db_raise_t=db_raise_t, raise_confirm_s=vis_raise_confirm)
+      if self._icbm_vis_fed:   # icbmvisraise2pnw: the episode's verdict on vision's raise; "held" = the set is already there
+        self._icbm_vis_raise = self._icbm_ep.db_raise or "held"
       _icbm_rhold_note(self, now, rhold_src)
       if late_ok and late_knob > 0.0 and self._icbm_ep.phase == "cap":
         # this tick started the cap (late_ok is a START-tick quantity): remember WHERE the starting candidate is (cd, the
@@ -6356,7 +6443,8 @@ class CESController:
         if direction == "inc":
           payload["dir"] = "inc"        # explicit marker: executor's inc path is ONLY reachable via this
           if getattr(self._icbm_ep, "db_raise", None) == "acted":
-            payload["why"] = "dbRaise"  # icbmdbraise2pnw: speedadjust must read these SET+ taps as ours, not the driver's
+            # icbmdbraise2pnw: speedadjust must read these SET+ taps as ours, not the driver's (icbmvisraise2pnw: visRaise too)
+            payload["why"] = "visRaise" if getattr(self, "_icbm_vis_fed", False) else "dbRaise"
         self.mem_params.put_nonblocking("IcbmTarget", payload)
       else:
         self.mem_params.put_nonblocking("IcbmTarget", {})
@@ -6551,7 +6639,10 @@ class CESController:
       tele["icbmZoneWhy"] = getattr(getattr(self, "_icbm_ep", None), "zone_why", None)      # sazoneset2pnw
       tele["icbmRestoreWhy"] = getattr(getattr(self, "_icbm_ep", None), "restore_why", None)  # terwilliger2pnw
       tele["icbmGas"] = getattr(getattr(self, "_icbm_ep", None), "gas_res", None)             # terwilliger2pnw
-      tele["icbmDbRaise"] = getattr(getattr(self, "_icbm_ep", None), "db_raise", None)         # icbmdbraise2pnw
+      tele["icbmDbRaise"] = (None if getattr(self, "_icbm_vis_fed", False)                     # icbmdbraise2pnw
+                             else getattr(getattr(self, "_icbm_ep", None), "db_raise", None))
+      tele["icbmVisRaise"] = getattr(self, "_icbm_vis_raise", None)   # icbmvisraise2pnw: icbm_vis_raise gate / wait/acted/capped/held
+      tele["icbmVisV"] = getattr(self, "_icbm_vis_v", None)           # icbmvisraise2pnw: vision's raise speed, m/s (None = refused)
       tele["icbmLatchLim"] = getattr(getattr(self, "_icbm_ep", None), "latch_limit", None)  # sazoneset2pnw
       tele["icbmFlrHit"] = bool(self._icbm_floor_hit)
       tele["icbmDir"] = self._icbm_dir           # icbmrestore2pnw: "dec" capping / "inc" restoring
@@ -6844,7 +6935,10 @@ class CESController:
       # ("hold" / "resumed" / "no:<why>", until the next episode latches) -- ces_icbm_gas_resume logs each transition
       "icbmRestoreWhy": getattr(getattr(self, "_icbm_ep", None), "restore_why", None),
       "icbmGas": getattr(getattr(self, "_icbm_ep", None), "gas_res", None),
-      "icbmDbRaise": getattr(getattr(self, "_icbm_ep", None), "db_raise", None),   # icbmdbraise2pnw: wait/acted/capped/noLimit/gas
+      "icbmDbRaise": (None if getattr(self, "_icbm_vis_fed", False)   # icbmdbraise2pnw: wait/acted/capped/noLimit/gas
+                      else getattr(getattr(self, "_icbm_ep", None), "db_raise", None)),
+      "icbmVisRaise": getattr(self, "_icbm_vis_raise", None),   # icbmvisraise2pnw: off/noCap/notMap/lowConf/noReach/kRise/noGain/wait/acted/capped/held
+      "icbmVisV": getattr(self, "_icbm_vis_v", None),           # icbmvisraise2pnw: m/s
       "icbmLatchLim": getattr(getattr(self, "_icbm_ep", None), "latch_limit", None),  # sazoneset2pnw: limit at latch
       "icbmDir": self._icbm_dir,   # icbmrestore2pnw: "inc" rows in ces_events = restore taps
       "stockSet": self._stock_set, "stockOn": self._stock_on,

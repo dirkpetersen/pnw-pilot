@@ -1439,7 +1439,7 @@ class SpeedAdjustController:
       self._icbm_dec_t = now
     elif icbm_dir == "inc":
       self._icbm_inc_t = now
-      if self._icbm_why == "dbRaise":
+      if self._icbm_why in ("dbRaise", "visRaise"):   # icbmvisraise2pnw: a vision raise during a cap is ICBM's SET+ too
         self._icbm_dbr_t = now
 
     # speedadjustreset2pnw (driver directive 2026-08-16): a manual cruise-set change (either

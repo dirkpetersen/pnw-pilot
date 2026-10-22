@@ -47,7 +47,7 @@ def _police(t):
 class TestAPoliceCapIsNotDismissedByTheRaise:
   """The review's case: speedadjust holds a cap (_cap_out set) when the curve brain's DB-raise SET+ arrives."""
 
-  @pytest.mark.parametrize("why, verdict", [("dbRaise", "icbmTap"), (None, "applied")])
+  @pytest.mark.parametrize("why, verdict", [("dbRaise", "icbmTap"), ("visRaise", "icbmTap"), (None, "applied")])   # icbmvisraise2pnw: visRaise
   def test_the_dbraise_marker_decides_whose_tap_it_is(self, monkeypatch, why, verdict):
     from openpilot.selfdrive.controls.lib.speedadjust_pnw.tests.test_zone_set_closed_loop import POLICE, _Clock, _SM
     f, _, c = simulate(monkeypatch, lambda t: (60, (35 if 5 <= t < 30 else None), _police(t)), 40, v0_mph=75)
