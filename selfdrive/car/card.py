@@ -246,7 +246,8 @@ class Car:
       _veh = PnwVehicle(self.CP)
       if _veh.acc_drop_status_msgs:
         from openpilot.selfdrive.car.accdrop_pnw import AccDropLogger
-        self._accdrop = AccDropLogger(self.CI.can_parsers, _veh.acc_drop_status_msgs, _veh.acc_drop_trace, self.CI.CC)
+        self._accdrop = AccDropLogger(self.CI.can_parsers, _veh.acc_drop_status_msgs, _veh.acc_drop_trace, self.CI.CC,
+                                      rocker=_veh.wheel_rocker)
     except Exception:
       cloudlog.exception("accdroplog2pnw: logger construction FAILED -- ACC dropouts on this drive will NOT be explained")
 

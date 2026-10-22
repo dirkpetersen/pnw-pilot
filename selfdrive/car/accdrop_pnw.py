@@ -23,6 +23,11 @@ window [-PRE_S, +POST_S] around the edge:
   tx083   every 0x083 frame card transmitted in the window: bus, raw hex, the button bits set, and what each
           requester was asking for at that tick (see WHO SENDS 0x083 below).
   route / seg   the loggerd route and segment, so that minute's rlog can be found and preserved.
+  wb*     wheelbtnlog2pnw: the driver's wheel buttons at the edge (wheel_buttons_pnw.py): wbLast/wbAge = the last
+          press before the edge and how long before it, wbHeld = a button down at the edge, wbN = press edges in
+          the PRE_S before the edge. From carState.buttonEvents PLUS the raw rocker bits carstate does not turn into
+          ButtonEvents (PnwVehicle.wheel_rocker). This logger also publishes those rocker bits, on every change, to
+          the WheelRocker mem-param, so ces_pnw's 1 Hz tick can name them too (selfdrived has no CAN parser).
 
 WHO SENDS 0x083. Every frame is built by the Ford carcontroller inside card, on behalf of:
   cancel      CC.cruiseControl.cancel (controlsd)
@@ -66,6 +71,7 @@ from collections import deque
 from operator import itemgetter
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.controls.lib.wheel_buttons_pnw import WHEEL_ROCKER_PARAM, WheelButtons
 
 EV_NAME = "accDrop"
 SCHEMA = 1
@@ -74,6 +80,7 @@ PRE_S = 3.0
 POST_S = 1.0
 TRACE_EVERY = 10              # card ticks per trace row: 100 Hz -> 10 Hz
 CHG_MAXLEN = 512              # changes kept per channel (a 50 Hz flicker still covers >5 s)
+ROCKER_EDGES_PUBLISHED = 8    # rocker press edges carried in each WheelRocker publish (ces_pnw reads it at ~1 Hz)
 TX_MAXLEN = 1024              # a cancel is 2 frames/tick at 100 Hz: 1024 covers 5.1 s, more than the 4 s window
 MAX_EVENTS_PER_MIN = 10       # a flapping CcStat must not rotate the whole ces_events log away
 BUTTON_ADDR = 0x083
@@ -231,7 +238,8 @@ class _Chan:
 
 class AccDropLogger:
   def __init__(self, can_parsers: dict, status_msgs: tuple, trace_sigs: tuple, car_controller=None,
-               write_fn=append_to_ces_log, route_fn=current_route_segment, threaded: bool = True):
+               write_fn=append_to_ces_log, route_fn=current_route_segment, threaded: bool = True,
+               rocker: tuple = (), publish_fn=None):
     self._cc_obj = car_controller
     self._write_fn = write_fn
     self._route_fn = route_fn
@@ -251,6 +259,14 @@ class AccDropLogger:
     self._unresolved_trace = list(trace_sigs)
     self._status: list = []       # (chan, getter, vl_inner, ts_inner, first_sig, parser)
     self._trace_can: list = []    # (label, vl_inner, ts_inner, sig)
+    # wheelbtnlog2pnw: resolved lazily like the status messages (carstate registers on its first update)
+    self._unresolved_rocker = list(rocker)
+    self._rocker: list = []       # (name, vl_inner, ts_inner, sig)
+    self._rocker_down: dict = {}  # name -> bool
+    self._wb = WheelButtons()
+    self._publish_fn = publish_fn
+    self._mem = None
+    self._publish_err = 0
     self.trace_cols = TRACE_COLS
     self._trace: deque = deque(maxlen=int((PRE_S + POST_S + 1.0) * 100 / TRACE_EVERY))
     self._tx: deque = deque(maxlen=TX_MAXLEN)
@@ -268,7 +284,7 @@ class AccDropLogger:
     self._suppressed = 0
     self._write_fail = 0
 
-  def _resolve(self) -> None:
+  def _resolve(self, now: float) -> None:
     """Bind every capability-listed message carstate has registered by now. Never registers one itself.
     Status messages are retried (a new one is just a new channel); trace columns are fixed at the first call so
     trace rows never go ragged. Logs on the first call and whenever something newly binds -- not every retry."""
@@ -294,6 +310,22 @@ class AccDropLogger:
       getter = itemgetter(*sigs) if len(sigs) > 1 else (lambda d, s=sigs[0]: (d[s],))
       self._status.append((_Chan(label, sigs), getter, dict.get(p.vl, name), p.ts_nanos[name], sigs[0], p))
     self._unresolved_status = still
+    still_r = []
+    for bus, name, sig, label in self._unresolved_rocker:
+      p = self._parsers.get(bus)
+      key = f"{bus}:{name}.{sig}"
+      if p is None or not dict.__contains__(p.vl, name):  # NEVER p.vl[name] (see above)
+        self.not_registered[key] = "wheel rocker signal's message not registered by opendbc carstate this session"
+        if p is not None:
+          still_r.append((bus, name, sig, label))
+        continue
+      self.not_registered.pop(key, None)
+      self._rocker.append((label, dict.get(p.vl, name), p.ts_nanos[name], sig))
+      self._rocker_down[label] = False
+    newly_rocker = len(self._unresolved_rocker) != len(still_r)
+    self._unresolved_rocker = still_r
+    if newly_rocker:
+      self._publish_rocker(now)   # an empty state now, so ces_pnw can tell "no presses" from "reader not running"
     if first:
       for bus, name, sig in self._unresolved_trace:
         p = self._parsers.get(bus)
@@ -314,11 +346,25 @@ class AccDropLogger:
     # status channels and the edge test run every tick; the CarState/CarControl channels and the trace run at
     # 10 Hz and on the edge tick itself; onroadEvents/pandaStates only when a new message arrived.
     self._frame += 1
-    if self._frame == 1 or (self._unresolved_status and self._frame % 100 == 0):
-      self._resolve()
+    if self._frame == 1 or ((self._unresolved_status or self._unresolved_rocker) and self._frame % 100 == 0):
+      self._resolve(now)
     for chan, getter, vl, ts, s0, _p in self._status:
       if ts[s0]:                                         # 0 until the first frame: no fake zeros in the log
         chan.feed(now, getter(vl))
+
+    # wheelbtnlog2pnw: driver wheel buttons. buttonEvents is usually empty; the rocker bits are plain dict reads.
+    wb = [(str(b.type), b.pressed) for b in cs.buttonEvents]   # str() of the capnp enum is the BARE name
+    rocker_changed = False
+    for label, vl, ts, sig in self._rocker:
+      down = bool(vl[sig]) if ts[sig] else False
+      if down != self._rocker_down[label]:
+        self._rocker_down[label] = down
+        wb.append((label, down))
+        rocker_changed = True
+    if wb:
+      self._wb.feed(now, wb)
+    if rocker_changed:
+      self._publish_rocker(now)
 
     for c in can_sends:
       if c[0] == BUTTON_ADDR:
@@ -375,7 +421,7 @@ class AccDropLogger:
       else:
         rx[chan.name] = {"ageMs": round((last - ts[s0]) / 1e6)}
     self._pending.append({"mono": now, "wall": time.time(), "edge": edge, "rx": rx,  # noqa: TID251 -- log stamp
-                          "suppressed": self._suppressed})
+                          "suppressed": self._suppressed, "wb": self._wb.fields(now, now - PRE_S)})
     self._suppressed = 0
 
   def _emit(self, p: dict) -> None:
@@ -391,6 +437,26 @@ class AccDropLogger:
       threading.Thread(target=self._write_event, args=(p, snap), daemon=True, name="accdroplog").start()
     else:
       self._write_event(p, snap)
+
+  def _publish_rocker(self, now: float) -> None:
+    """wheelbtnlog2pnw: the rocker state to the WheelRocker mem-param, for ces_pnw's tick. Only on a change (rare).
+    A failure is logged (first, then every 100th) and never reaches the card loop."""
+    names = set(self._rocker_down)
+    payload = {"edges": [[round(t, 3), n] for t, n in self._wb.edges if n in names][-ROCKER_EDGES_PUBLISHED:],
+               "held": sorted(n for n, d in self._rocker_down.items() if d), "ts": round(now, 3)}
+    try:
+      if self._publish_fn is not None:
+        self._publish_fn(payload)
+      else:
+        if self._mem is None:
+          from openpilot.common.params import Params
+          self._mem = Params("/dev/shm/params")
+        self._mem.put_nonblocking(WHEEL_ROCKER_PARAM, payload)
+    except Exception:
+      self._publish_err += 1
+      if self._publish_err % 100 == 1:
+        cloudlog.exception(f"wheelbtnlog2pnw: WheelRocker publish FAILED ({self._publish_err}x) -- the ces_events tick " +
+                           "cannot name the driver's cancel/resume rocker presses")
 
   # ---------------------------------------------------------------- writer thread
   def _write_event(self, p: dict, snap: dict) -> None:
@@ -464,6 +530,7 @@ class AccDropLogger:
       "rx": p["rx"],
       "notRegistered": snap["notRegistered"],
       "tx083": tx,
+      **p["wb"],
     }
     if len(snap["tx"]) >= snap["txMaxlen"] and snap["tx"][0][0] > t0:
       trunc = (f"truncated: the {snap['txMaxlen']}-frame buffer's oldest frame is {rel(snap['tx'][0][0])} s from " +

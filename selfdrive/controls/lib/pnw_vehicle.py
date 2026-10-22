@@ -812,6 +812,15 @@ class PnwVehicle:
       self.acc_drop_status_msgs = ()
       self.acc_drop_trace = ()
 
+    # wheelbtnlog2pnw (LOGGING ONLY): driver wheel buttons the pinned opendbc carstate does NOT turn into a carState
+    # ButtonEvent, as (parser bus, DBC message, signal, log name). card's accdrop logger reads them (the message is
+    # already registered: carstate decodes Steering_Data_FD1 every frame) and publishes them to ces_pnw's tick.
+    # Evidence: drives/2026-10-21/corvallis-portland-i5 (five driver cancel/resume rocker presses read as ACC drop-outs).
+    # Built only where the accdrop logger is built (it hosts the reader); () everywhere else.
+    self.wheel_rocker: tuple = ((("pt", "Steering_Data_FD1", "CcAslButtnCnclResPress", "cnclRes"),
+                                 ("pt", "Steering_Data_FD1", "CcAslButtnCnclPress", "cncl"))
+                                if self.acc_drop_status_msgs else ())
+
     # pscmlimlog2pnw (LOGGING ONLY, selfdrive/car/pscmlim_pnw.py, run by card): where the steering rack reports its own
     # lateral limit, as (CAN parser bus, DBC message, limit signal, capability signal). The Lightning's PSCM sends
     # LimitClose/LimitReached in angle mode (drives/2026-09-12/central-oregon-weekend/PSCM_LIMITREACHED.md). The message

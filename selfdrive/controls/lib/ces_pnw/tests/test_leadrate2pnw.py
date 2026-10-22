@@ -134,7 +134,8 @@ def _ces_pnw_globals():
                "DQ_BLINKER", "_DQ_NAMES"):
     exec(compile(_extract_module_assign(src, tree, name), f"<{name}>", "exec"), ns)
   for name in ("_dq_names", "_zero_is_null", "_curvature_from_yaw", "_round_or_none",
-               "_haversine_m", "map_candidate_point", "_curve_tele"):
+               "_haversine_m", "map_candidate_point", "_curve_tele",
+               "_wb_tele"):   # wheelbtnlog2pnw: the harness has no _wb, so this returns {} (no wheel fields)
     exec(compile(_extract_func(src, tree, name), f"<{name}>", "exec"), ns)
   # parkgate2pnw: _steer_log_step's park gate compares against the module-level PARK_SUPPRESS alias.
   # Taken from the real park_tick_gate module, not redefined here -- a hand-typed copy would let the

@@ -56,6 +56,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, Ov
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VTSC_C
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+from openpilot.selfdrive.controls.lib.wheel_buttons_pnw import WHEEL_ROCKER_PARAM, WheelButtons   # wheelbtnlog2pnw
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
 # descentcurve2pnw: MAP_SOURCE_HORIZON_M is mapd's hard 500 m path cap — ICBM's full-horizon map scan
@@ -2821,6 +2822,58 @@ def icbm_note_speedadjust(ep, sa_tele, limit_now) -> None:
                   sa_tele.get("saInst"))
 
 
+def _wb_feed(ctl, car_state, now: float) -> None:
+  """wheelbtnlog2pnw: feed each NEW carState's buttonEvents once (selfdrived re-passes CS_prev when no carState
+  arrived, which would count a press twice). Telemetry only: a failure is logged and counted, never raised."""
+  if getattr(ctl, "_wb", None) is None or car_state is ctl._wb_cs:   # stub built without __init__ / same message
+    return
+  ctl._wb_cs = car_state
+  try:
+    # str() of the capnp ButtonEvent.Type enum is the BARE name ("accelCruise") -- a log value, never compared
+    ctl._wb.feed(now, [(str(b.type), b.pressed) for b in getattr(car_state, 'buttonEvents', ())])
+  except Exception:
+    ctl._wb_err += 1
+    if ctl._wb_err % 1000 == 1:
+      cloudlog.exception(f"wheelbtnlog2pnw: buttonEvents read failed ({ctl._wb_err}x) -- wb* fields miss presses")
+
+
+def _wb_tele(ctl, now: float) -> dict:
+  """wheelbtnlog2pnw: the driver's wheel-button fields for one breadcrumb, over (previous breadcrumb, now].
+
+  carState.buttonEvents are fed every cycle in experimental_request. The rocker bits opendbc does not turn into
+  ButtonEvents (PnwVehicle.wheel_rocker) come from card through the WheelRocker mem-param; their edges are merged
+  by card's monotonic time (same system clock). An edge card published after the previous breadcrumb read the
+  param but timed before that breadcrumb is counted HERE, so no press is lost between the two. When the car has
+  a rocker and it cannot be read, wbRockWhy says why -- "no rocker press" is never faked."""
+  if getattr(ctl, "_wb", None) is None:   # permissive test stub built without __init__; CESController.__init__ always sets it
+    return {}
+  since, ctl._wb_since = ctl._wb_since, now
+  held, why, late = (), None, 0
+  if ctl._veh.wheel_rocker:
+    try:
+      r = ctl.mem_params.get(WHEEL_ROCKER_PARAM, return_default=True) if ctl.mem_params is not None else None
+      if ctl.mem_params is None:
+        why = "no /dev/shm param store in this process"
+      elif r is None:
+        why = "WheelRocker never published: card's rocker reader is not running"
+      else:
+        for t, name in r["edges"]:
+          if t > ctl._wb_rock_t:
+            ctl._wb.edges.append((t, name))
+            ctl._wb_rock_t = t
+            late += t <= since
+        held = r["held"]
+    except Exception as e:
+      why = f"WheelRocker read failed: {type(e).__name__}: {e}"
+  out = ctl._wb.fields(now, since, held)
+  out["wbN"] += late
+  if why:
+    out["wbRockWhy"] = why
+  if ctl._wb_err:
+    out["wbErr"] = ctl._wb_err
+  return out
+
+
 def _rhold_tele(ctl) -> dict:
   """restorehold2pnw: the two telemetry fields, from ONE builder for both the overlay feed and the ces_events record
   (the CURVELEAD_TELE_KEYS lesson: two hand-written copies drift). icbmRHold = the source holding the restore right
@@ -4504,6 +4557,12 @@ class CESController:
     self._ces2_div = DivergenceCounter()  # cumulative v1-vs-CES2 divergence EDGES this session
     self._enabled = False
     self._button = C.BTN_CES
+    # wheelbtnlog2pnw: the DRIVER's steering-wheel buttons for the tick/steer breadcrumb (wheel_buttons_pnw.py)
+    self._wb = WheelButtons()
+    self._wb_cs = None                  # the last carState fed (selfdrived re-passes CS_prev when none arrived)
+    self._wb_since = time.monotonic()   # end of the previous breadcrumb's window
+    self._wb_rock_t = -math.inf         # newest rocker edge already merged from the WheelRocker mem-param
+    self._wb_err = 0
     self._toggles = {"curves": True, "stops": True, "low_speed": True, "lead": True}
     self._map_targets = []          # cached MapTargetVelocities (refreshed ~1 Hz)
     # icbmcurv2pnw: measured curvature of the map polyline ahead. TELEMETRY ONLY.
@@ -5166,6 +5225,7 @@ class CESController:
     """True if CES wants Experimental this cycle. Reads params; advances the state machine.
     Safe to call always — returns False whenever CES is disabled (behavior-neutral)."""
     self._read_params()
+    _wb_feed(self, car_state, time.monotonic())   # wheelbtnlog2pnw: the driver's wheel-button edges
     # bsm2pnw: sample the blind-spot booleans every cycle (cheap), so adopt/tick records carry them
     # even while CES is disabled — the point is drive-log evidence that BSM flips with passing cars.
     self._bs_l = bool(getattr(car_state, 'leftBlindspot', False))
@@ -5618,6 +5678,7 @@ class CESController:
       if clock_bad(now_wall):
         rec["clockBad"] = True
       rec.update(self._park_gate.record_fields(park_d))   # parkgate2pnw: hold/release marker
+      rec.update(_wb_tele(self, now))      # wheelbtnlog2pnw
       self._append_event(rec)
     except Exception:
       pass
@@ -6707,6 +6768,7 @@ class CESController:
         if park_d != PARK_SUPPRESS:
           rec = self._event_record("tick", tele)
           rec.update(self._park_gate.record_fields(park_d))
+          rec.update(_wb_tele(self, now2))      # wheelbtnlog2pnw
           self._append_event(rec)
 
     # ~5 Hz publish to /dev/shm/params (put a dict -> JSON; nonblocking so the safety loop never waits)
@@ -6786,7 +6848,11 @@ class CESController:
       cand_d = tele.get("mapDist")
     rec = {
       "t": round(now_wall, 1),
-      "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"), "button": int(self._button),
+      "ev": kind, "mode": tele.get("mode"), "reason": tele.get("reason"),
+      # wheelbtnlog2pnw: the CES ON-SCREEN mode button (CESButtonState 0=CES 1=Chill 2=Exp), NOT a wheel button --
+      # the wheel buttons are wbLast/wbN/wbHeld/wbAge. `button` is the old name, kept for one release only because
+      # tools/curvebrain/golden.py reads it from logged ticks; drop it after that reads cesBtn.
+      "cesBtn": int(self._button), "button": int(self._button),
       "vEgo": tele.get("vEgo"), "vSet": tele.get("vSet"), "aEgo": tele.get("aEgo"), "gas": tele.get("gas"),
       "accelZone": tele.get("accelZone"),
       # stophold2pnw (B): raw model stop intent — red-vs-green is decidable from the breadcrumb now

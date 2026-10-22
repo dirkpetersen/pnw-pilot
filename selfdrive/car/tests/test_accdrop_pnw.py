@@ -56,13 +56,14 @@ class Bench:
     self.CI = CI_cls(CP)
     self.parsers = self.CI.can_parsers
     self.records: list = []
+    self.rocker_pubs: list = []                     # wheelbtnlog2pnw: what card would put to the WheelRocker mem-param
     veh = PnwVehicle(SimpleNamespace(carFingerprint=LIGHTNING, brand="ford", openpilotLongitudinalControl=False))
     # SAME ORDER AS card.py: the logger is built BEFORE the first CarInterface.update(), i.e. before opendbc's
     # carstate has lazily registered anything. A logger that resolved messages at construction recorded no CAN.
     self.log = adp.AccDropLogger(self.parsers, veh.acc_drop_status_msgs, veh.acc_drop_trace, car_controller,
                                  write_fn=write_fn or self.records.append,
                                  route_fn=route_fn or (lambda w: {"route": "00000133--b4cc0b5efd", "seg": 348, "edgeInSegS": 46.9}),
-                                 threaded=False)
+                                 threaded=False, rocker=veh.wheel_rocker, publish_fn=self.rocker_pubs.append)
     self.CI.update([(0, [])])                       # carstate registers what it reads, as on the car's first tick
     self.registered_before = _registered(self.parsers)
     self.t = 1000.0
@@ -376,3 +377,34 @@ def test_update_cost_is_bounded(n):
   per_tick = (time.perf_counter() - start) / n
   print(f"accdrop update(): {per_tick * 1e6:.1f} us/tick on this host")
   assert per_tick < 250e-6 and math.isfinite(per_tick)
+
+
+def test_wheel_buttons_and_the_rocker_explain_a_driver_toggle():
+  """wheelbtnlog2pnw, drives/2026-10-21/corvallis-portland-i5 18:52:10: the driver's cancel/resume rocker
+  (CcAslButtnCnclResPress, no carState ButtonEvent) toggled ACC 30-80 ms before each CcStat change. The record
+  must name it, and card must publish it for the ces_events tick."""
+  tesla = PnwVehicle(SimpleNamespace(carFingerprint="TESLA_MODEL_S_HW3", brand="tesla", openpilotLongitudinalControl=True))
+  assert tesla.wheel_rocker == ()
+  b = Bench()
+  b.steady_active()
+  b.run(2.0)
+  assert b.rocker_pubs == [{"edges": [], "held": [], "ts": b.rocker_pubs[0]["ts"]}], "reader alive, nothing pressed"
+  b.cs.buttonEvents = [structs.CarState.ButtonEvent(type=structs.CarState.ButtonEvent.Type.accelCruise, pressed=True)]
+  b.run(0.01)
+  b.cs.buttonEvents = [structs.CarState.ButtonEvent(type=structs.CarState.ButtonEvent.Type.accelCruise, pressed=False)]
+  b.run(0.01)
+  b.cs.buttonEvents = []
+  b.run(1.0)
+  b.can("pt", "Steering_Data_FD1", CcAslButtnCnclResPress=1)
+  b.run(0.05)
+  b.cruise(3)
+  b.run(0.03)
+  b.can("pt", "Steering_Data_FD1", CcAslButtnCnclResPress=0)
+  b.run(1.5)
+  (rec,) = b.parsed()
+  assert rec["edge"] == "active->standby"
+  assert rec["wbLast"] == "cnclRes" and rec["wbHeld"] == "cnclRes" and rec["wbN"] == 2
+  assert 0.04 <= rec["wbAge"] <= 0.07
+  press, release = b.rocker_pubs[1:]
+  assert press["held"] == ["cnclRes"] and [e[1] for e in press["edges"]] == ["cnclRes"]
+  assert release["held"] == [] and release["edges"] == press["edges"]

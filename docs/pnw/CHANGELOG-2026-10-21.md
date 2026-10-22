@@ -35,3 +35,20 @@ no row there. Owner rule: the mapd rating is not a hard ceiling, confident visio
   vision curve; the descent and left extras and rain still come off). `noCurve` still reads the raw speed. A defect in either
   check is `icbmVisRaise: err`, logged, and mapd's cap stands. Not changed: finding 3 (the kRise window re-arms one tick after a
   refusal, at the tighter k, so the raise then follows the lower speed). Tests: 28; 18 mutants killed.
+
+## `wheelbtnlog2pnw` (branch `wheelbtnlog2pnw`, not yet pushed): ces_events names the driver's wheel buttons
+
+Drive 2026-10-21, I-5 Corvallis to Portland (Lightning). The 85 mph in a 65 was the driver holding SET+ for 4.4 s, and five ACC toggles at 18:52 were the
+driver's cancel/resume rocker. The analysis first blamed openpilot and stock ACC, because the tick field `button` is the CES on-screen mode button and no
+ces_events field recorded wheel presses. Evidence: `drives/2026-10-21/corvallis-portland-i5/DRIVE_REPORT.md` (private). **Logging only: no control change.**
+
+- **Tick and CES-off `steer` records** gain `wbLast` (last pressed button: the capnp `ButtonEvent.Type` name, for example `accelCruise`, or `cnclRes` / `cncl`
+  for the Lightning rocker), `wbAge` (s since that press), `wbN` (press edges since the previous record), `wbHeld` (a button down now, else null).
+  `wbRockWhy` appears when the car has a rocker and its state cannot be read; `wbErr` counts buttonEvents read failures.
+- **`accDrop` records** gain the same four fields at the edge (`wbN` = presses in the 3 s before the edge). The raw `Steering_Data_FD1` bits were already in `chg`.
+- **Rocker**: the pinned opendbc Ford carstate does not emit a ButtonEvent for `CcAslButtnCnclResPress` / `CcAslButtnCnclPress`. No submodule change: card's
+  accdrop logger reads the two bits from the CAN parser carstate already registers (capability `PnwVehicle.wheel_rocker`, Lightning only) and publishes them on
+  each change to the new mem-param `WheelRocker` (`params_keys.h`: needs the params_pyx rebuild that build-on-boot does). ces_pnw merges them into the tick.
+- **`cesBtn`** is the new name of the record field `button` (CES on-screen mode button). `button` stays in the record for one release because
+  `tools/curvebrain/golden.py` reads it from logged ticks. The overlay feed `CESStatus.button` (read by `ces_status.py`) is unchanged.
+- Tests: `test_wheelbtnlog2pnw.py` (10, new), `test_accdrop_pnw.py` (+1). Mutation-checked (8 mutants, all killed).
