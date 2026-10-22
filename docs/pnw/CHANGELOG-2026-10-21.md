@@ -27,3 +27,11 @@ no row there. Owner rule: the mapd rating is not a hard ceiling, confident visio
   set), apex beyond reach, low confidence, vision sharper, straight reading, tightening curve, dropout, unknown limit, DB-changed
   target, the controller record fields and marker, Tesla `off`. 13 mutants killed (every gate, the confirm time, the k window,
   the target feed, both markers).
+- **Review fixes (Gemini 4 Argon, SHIP-WITH-FIXES on 41ee11b9d9):** (1) the camera check covered only the WINNING mapd apex; a
+  sharper mapd curve just past the camera could still be raised into. New gate `beyondReach`: every mapd point past the trust
+  horizon (passed points removed) is priced as ICBM prices a far candidate, and the raise is refused when the most-binding one's
+  decel envelope from here, at the 0.8 m/s2 comfort decel (not the large-drop firm decel), is below v_vis. (2) v_vis skipped the
+  Lightning curve penalties: it now goes through `icbm_penalise` as a vision candidate (the base hump is given back, as for any
+  vision curve; the descent and left extras and rain still come off). `noCurve` still reads the raw speed. A defect in either
+  check is `icbmVisRaise: err`, logged, and mapd's cap stands. Not changed: finding 3 (the kRise window re-arms one tick after a
+  refusal, at the tighter k, so the raise then follows the lower speed). Tests: 28; 18 mutants killed.

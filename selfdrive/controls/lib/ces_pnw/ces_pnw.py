@@ -1146,7 +1146,7 @@ def _icbm_binding_apex(v_ego, ref, apex, dist, a_decel=ICBM_A_DECEL):
 
 
 def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_scale=1.0,
-                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M, eff_fn=None, skip_late=None):
+                           firm_decel=0.0, horizon_m=ICBM_MAP_HORIZON_M, eff_fn=None, skip_late=None, min_d=0.0):
   """descentcurve2pnw: FULL-horizon map candidate for ICBM. Scans every mapd path point out to
   `horizon_m` (mapd's 500 m publish cap — vs the old 10 s time window, ~400 m at 90 mph) and
   returns (apex_eff m/s, dist m, apex_RAW m/s) of the MOST-BINDING candidate — the one whose decel-limited brake
@@ -1183,7 +1183,7 @@ def icbm_far_map_candidate(points, cur_lat, cur_lon, v_ego, ref, scale_fn, map_s
       continue
     if not _map_v_sane(tv) or d != d:    # icbmonset: NaN + curvature-noise guard (mapd emits both live)
       continue
-    if not (0.0 < d <= horizon_m):
+    if not (max(min_d, 0.0) < d <= horizon_m):   # icbmvisraise2pnw: min_d > 0 = only the points beyond the camera
       continue
     eff = scale_fn(tv) * tv * map_scale if eff_fn is None else eff_fn(tv, d)
     if eff >= ref - ICBM_MIN_DROP_MS:
@@ -1856,7 +1856,7 @@ ICBM_VIS_RAISE_K_RISE = 0.10                  # vis_k this fraction above the lo
                                               #   Not measured -- a guess at the model's tick-to-tick noise on vis_k_max.
 
 
-def icbm_vis_raise(capping, src, own, cand_dist, v_ego, vis_k, vis_reach, a_lat, rain_ms, k_ref, limit):
+def icbm_vis_raise(capping, src, own, cand_dist, v_ego, vis_k, vis_reach, a_lat, k_ref, limit, pen_fn, unseen_fn):
   """icbmvisraise2pnw: the speed (m/s) vision says a RUNNING map/far ICBM cap may be lifted to, or None. Returns (v_vis, why);
   why is "ok" when v_vis is returned, else the gate that refused (icbmVisRaise):
     off      a_lat <= 0: the car has no capability (Tesla: icbm_restore_hold_lat_accel 0)
@@ -1868,9 +1868,13 @@ def icbm_vis_raise(capping, src, own, cand_dist, v_ego, vis_k, vis_reach, a_lat,
     noLimit  posted limit unknown (`limit` m/s <= 0)
     noCurve  vision's own curve speed is above the posted limit + 5 mph: the camera does not SEE the curve mapd rates (a
              straight reading). A phantom and a vision miss (2026-09-12 13:57) look the same here, so no raise.
+    beyondReach  a mapd curve BEYOND the trust horizon (not only the winning apex) cannot be braked for from v_vis:
+             unseen_fn(trust) (m/s, the decel envelope of the most-binding mapd point past `trust`) < v_vis (Gemini review)
     noGain   v_vis does not beat `own` by more than ICBM_VIS_RAISE_GAIN_MS (incl. vision sharper than the map)
-  v_vis = sqrt(a_lat / vis_k) - rain, vis_k = the tightest curvature on the model's horizon (vis_k_max, not the instant one).
-  Every further bound (pre-cap set, posted limit + 5 mph, restore cap, 1 s confirm) is IcbmEpisode._db_raise's. Pure; never raises.
+  v_vis = pen_fn(sqrt(a_lat / vis_k)), vis_k = the tightest curvature on the model's horizon (vis_k_max, not the instant one);
+  pen_fn = the vision candidate's own penalties (icbm_penalise: descent, left curve, rain; Gemini review). noCurve reads the
+  raw speed. Every further bound (pre-cap set, posted limit + 5 mph, restore cap, 1 s confirm) is IcbmEpisode._db_raise's.
+  Pure apart from the two callables (the caller catches what they raise).
   KNOWN RISK (icbm_map_sanity, 2026-09-12 weekend): vision under-read some real curves ~1.6x; the limit + 5 bound and the
   layer-2 lat-accel cap (lataccel2pnw) are the backstop, not this function."""
   try:
@@ -1884,21 +1888,25 @@ def icbm_vis_raise(capping, src, own, cand_dist, v_ego, vis_k, vis_reach, a_lat,
   if own is None or src not in ("map", "far"):
     return None, "notMap"
   try:
-    own, v_ego, rain_ms, cand_dist = float(own), float(v_ego), float(rain_ms), float(cand_dist)
+    own, v_ego, cand_dist = float(own), float(v_ego), float(cand_dist)
     vis_k, vis_reach, limit = float(vis_k), float(vis_reach), float(limit or 0.0)
   except (TypeError, ValueError):
     return None, "lowConf"
   if not (math.isfinite(vis_k) and math.isfinite(vis_reach) and vis_reach > 0.0 and vis_k >= 0.0):
     return None, "lowConf"
-  if not (cand_dist <= min(vis_reach, v_ego * ICBM_VIS_TRUST_S)):   # also refuses an inf / nan apex distance
+  trust = min(vis_reach, v_ego * ICBM_VIS_TRUST_S)
+  if not (cand_dist <= trust):   # also refuses an inf / nan apex distance
     return None, "noReach"
   if k_ref is not None and vis_k > k_ref * (1.0 + ICBM_VIS_RAISE_K_RISE):
     return None, "kRise"
-  v_vis = math.sqrt(a_lat / max(vis_k, 1e-9)) - rain_ms
+  v_raw = math.sqrt(a_lat / max(vis_k, 1e-9))
   if not (limit > 0.0):
     return None, "noLimit"
-  if v_vis > limit + ICBM_DB_RAISE_OVER_MS:
+  if v_raw > limit + ICBM_DB_RAISE_OVER_MS:
     return None, "noCurve"
+  v_vis = float(pen_fn(v_raw))
+  if not (float(unseen_fn(trust)) >= v_vis):        # nan refuses too
+    return None, "beyondReach"
   if not (v_vis > own + ICBM_VIS_RAISE_GAIN_MS):
     return None, "noGain"
   return v_vis, "ok"
@@ -6151,10 +6159,33 @@ class CESController:
       vis_raise_confirm = ICBM_RATCHET_CONFIRM_S
       if db_raise_t is None and target == t_pre_db:
         cand_d = {"map": sig.get("map_target_dist", float("inf")), "far": far_dist}.get(self._icbm_src)
-        v_vr, self._icbm_vis_raise = icbm_vis_raise(
-          self._icbm_ep.phase == "cap", self._icbm_src, target, cand_d, sig["v_ego"], sig.get("vis_k_max"),
-          sig.get("vis_reach", 0.0), self._veh.icbm_restore_hold_lat_accel, self._veh.rain_penalty_ms(),
-          getattr(self, "_icbm_vis_k0", None), sig.get("spd_lim", 0.0))
+        veh, pts, v_e = self._veh, self._map_targets, sig["v_ego"]
+
+        def pen_fn(v):     # vision's own pricing: base hump given back (floor = v), descent + left extras and rain still off
+          return icbm_penalise(veh, pts, v, "vis", sig, plat, plon, far_dist, far_raw)[0]
+
+        def unseen_fn(trust):
+          # the most-binding mapd point the camera has NOT measured, as a decel envelope from here at the COMFORT decel
+          # (firm_decel 0: not the large-drop firming -- a raise must leave the whole comfort budget for a curve it cannot see)
+          mask, _ = icbm_passed_points(pts, plat, plon, getattr(self, "_cur_bearing", None), v_e)   # None = unfiltered (stricter)
+          ahead = pts if mask is None else [q for q, gone in zip(pts, mask, strict=True) if not gone]
+          ev, ed, _ = icbm_far_map_candidate(ahead, plat, plon, v_e, ref, icbm_map_eff_scale, veh.icbm_map_scale, 0.0,
+                                             eff_fn=eff_fn, min_d=trust)
+          if not math.isfinite(ed):
+            return float("inf")
+          return math.sqrt(ev * ev + 2.0 * ICBM_A_DECEL * max(ed - ICBM_MARGIN_M, 0.0))
+        try:
+          v_vr, self._icbm_vis_raise = icbm_vis_raise(
+            self._icbm_ep.phase == "cap", self._icbm_src, target, cand_d, v_e, sig.get("vis_k_max"),
+            sig.get("vis_reach", 0.0), veh.icbm_restore_hold_lat_accel, getattr(self, "_icbm_vis_k0", None),
+            sig.get("spd_lim", 0.0), pen_fn, unseen_fn)
+        except Exception as e:
+          # Rule 2: a defect here costs the vision raise (mapd's cap stands), never the IcbmTarget publish; said out loud
+          v_vr, self._icbm_vis_raise = None, "err"
+          now_w = time.monotonic()
+          if now_w - getattr(self, "_icbm_vis_err_t", -1e9) > ICBM_ERR_LOG_S:
+            self._icbm_vis_err_t = now_w
+            cloudlog.exception(f"icbmvisraise2pnw: vision raise FAILED ({type(e).__name__}) -- mapd's cap stands")
       else:
         v_vr, self._icbm_vis_raise = None, "notMap"
       if v_vr is not None:

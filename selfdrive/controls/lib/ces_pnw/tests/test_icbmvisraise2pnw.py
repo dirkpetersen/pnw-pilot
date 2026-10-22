@@ -48,7 +48,8 @@ class Truck:
     for _ in range(n):
       own = map_mph * MPH
       ref = self.ep.bind_ceiling if self.ep.phase == "cap" else self.set
-      v, why = icbm_vis_raise(self.ep.phase == "cap", "map", own, apex, V_EGO, vis_k, reach, A_LAT, 0.0, self.k0, self.limit)
+      v, why = icbm_vis_raise(self.ep.phase == "cap", "map", own, apex, V_EGO, vis_k, reach, A_LAT, self.k0, self.limit,
+                              lambda x: x, lambda _t: float("inf"))
       cap, db, conf = own, None, ICBM_RATCHET_CONFIRM_S
       if v is not None:
         self.k0 = vis_k if self.k0 is None else min(self.k0, vis_k)
@@ -148,7 +149,7 @@ class TestNoRaise:
 class TestGates:
   def test_labels(self):
     base = dict(capping=True, src="map", own=43 * MPH, cand_dist=100.0, v_ego=V_EGO, vis_k=K_PORTLAND, vis_reach=190.0,
-                a_lat=A_LAT, rain_ms=0.0, k_ref=None, limit=50 * MPH)
+                a_lat=A_LAT, k_ref=None, limit=50 * MPH, pen_fn=lambda x: x, unseen_fn=lambda _t: float("inf"))
     assert icbm_vis_raise(**base) == (pytest.approx(_v(K_PORTLAND)), "ok")
     assert icbm_vis_raise(**{**base, "src": "far"})[1] == "ok"
     for kw, why in (({"a_lat": 0.0}, "off"), ({"capping": False}, "noCap"), ({"src": "vis"}, "notMap"),
@@ -156,7 +157,18 @@ class TestGates:
                     ({"k_ref": K_PORTLAND / 1.2}, "kRise"), ({"limit": 0.0}, "noLimit"), ({"limit": 44 * MPH}, "noCurve")):
       assert icbm_vis_raise(**{**base, **kw}) == (None, why), kw
     assert icbm_vis_raise(**{**base, "k_ref": K_PORTLAND / 1.05})[1] == "ok"   # inside the noise band
-    assert icbm_vis_raise(**{**base, "rain_ms": 1.0})[0] == pytest.approx(_v(K_PORTLAND) - 1.0)
+    assert icbm_vis_raise(**{**base, "pen_fn": lambda x: x - 1.0})[0] == pytest.approx(_v(K_PORTLAND) - 1.0)
+    assert icbm_vis_raise(**{**base, "pen_fn": lambda x: x - 6.0})[1] == "noGain"     # the penalty is what must beat mapd
+
+  def test_beyond_reach(self):
+    base = dict(capping=True, src="map", own=43 * MPH, cand_dist=100.0, v_ego=V_EGO, vis_k=K_PORTLAND, vis_reach=190.0,
+                a_lat=A_LAT, k_ref=None, limit=50 * MPH, pen_fn=lambda x: x)
+    seen = []
+    v = _v(K_PORTLAND)
+    assert icbm_vis_raise(**base, unseen_fn=lambda t: seen.append(t) or v + 0.01)[1] == "ok"
+    assert seen == [pytest.approx(min(190.0, V_EGO * m.ICBM_VIS_TRUST_S))]       # the trust horizon, not the model reach
+    for cap in (v - 0.01, float("nan")):
+      assert icbm_vis_raise(**base, unseen_fn=lambda _t, _c=cap: _c) == (None, "beyondReach")
 
 
 def _curve_later(monkeypatch, k=K_PORTLAND, horizon_s=10.0, after=150, k_late=None, late=300):
@@ -171,9 +183,9 @@ def _curve_later(monkeypatch, k=K_PORTLAND, horizon_s=10.0, after=150, k_late=No
   monkeypatch.setattr(cdb, "_model", model)
 
 
-def _drive(monkeypatch, tmp_path, **kw):
+def _drive(monkeypatch, tmp_path, posted_mph=50.0, **kw):
   return cdb._drive(monkeypatch, tmp_path, points=cdb._path({140.0: 43 * MPH}), anchors=[cdb.FAR_ANCHOR], stock_mph=55.0,
-                    posted_mph=50.0, v_ego=24.0, **kw)
+                    posted_mph=posted_mph, v_ego=24.0, **kw)
 
 
 class TestController:
@@ -206,6 +218,49 @@ class TestController:
     whys = [r["icbmVisRaise"] for r in recs if r["icbmPhase"] == "cap"]
     assert "held" in whys and whys.index("kRise") > whys.index("held")
     assert cdb._targets(icbm)[-1] == pytest.approx(43 * MPH, abs=0.01)    # mapd's cap is back
+
+  def test_a_sharper_mapd_curve_beyond_the_camera_blocks_the_raise(self, monkeypatch, tmp_path):
+    """Gemini review: the camera covers the winning apex (100 m, trust horizon 192 m) but not a 12 mph curve at 260 m, which
+    the truck could not brake for from vision's 50.5 mph at the 0.8 m/s^2 comfort decel (envelope ~20 m/s). mapd's 43 still
+    binds the cap (the large drop starts only by the late envelope)."""
+    _curve_later(monkeypatch)
+    pts = cdb._path({100.0: 43 * MPH, 260.0: 12 * MPH})
+    icbm, recs, _ = cdb._drive(monkeypatch, tmp_path, points=pts, anchors=[cdb.FAR_ANCHOR], stock_mph=55.0, posted_mph=50.0,
+                               v_ego=24.0)
+    cap = [r for r in recs if r["icbmPhase"] == "cap"]
+    assert cap and cap[-1]["icbmVisRaise"] == "beyondReach" and cap[-1]["icbmVisV"] is None
+    assert max(t for t in cdb._targets(icbm) if t is not None) < 44 * MPH
+
+  def test_the_curve_the_camera_sees_is_not_an_unseen_curve(self, monkeypatch, tmp_path):
+    """The winning apex at 60 m is INSIDE the trust horizon: its own envelope (~21 m/s, below vision's 22.6) must not
+    refuse the raise -- only points past the horizon count."""
+    _curve_later(monkeypatch)
+    icbm, recs, _ = cdb._drive(monkeypatch, tmp_path, points=cdb._path({60.0: 43 * MPH}), anchors=[cdb.FAR_ANCHOR],
+                               stock_mph=55.0, posted_mph=50.0, v_ego=24.0)
+    assert recs[-1]["icbmVisRaise"] == "held" and cdb._targets(icbm)[-1] == pytest.approx(_v(K_PORTLAND), abs=0.01)
+
+  def test_the_unseen_curve_is_picked_at_the_comfort_decel(self, monkeypatch, tmp_path):
+    """Two curves past the horizon: a 6 mph hairpin at 300 m (comfort envelope ~21 m/s, below vision) and a 40 mph curve at
+    220 m (~26 m/s). The large-drop firm decel would pick the 40 mph one and let the raise through."""
+    _curve_later(monkeypatch)
+    pts = cdb._path({100.0: 43 * MPH, 220.0: 40 * MPH, 300.0: 6 * MPH})
+    _, recs, _ = cdb._drive(monkeypatch, tmp_path, points=pts, anchors=[cdb.FAR_ANCHOR], stock_mph=55.0, posted_mph=50.0,
+                            v_ego=24.0)
+    cap = [r for r in recs if r["icbmPhase"] == "cap"]
+    assert cap and cap[-1]["icbmSrc"] == "map" and cap[-1]["icbmVisRaise"] == "beyondReach"
+
+  def test_a_downhill_lowers_visions_speed(self, monkeypatch, tmp_path):
+    """Gemini review: v_vis gets the vision candidate's own penalties (descent here), like any vision curve."""
+    def ns(**kw):
+      if "orientationNED" in kw:
+        kw["orientationNED"] = [0.0, -0.06, 0.0]                           # 6 % downhill
+      return cdb.types.SimpleNamespace(**kw)
+    monkeypatch.setattr(cdb, "NS", ns)
+    _curve_later(monkeypatch, k=0.0040)                                     # 55.9 mph flat, so the penalised speed still gains
+    icbm, recs, _ = _drive(monkeypatch, tmp_path, posted_mph=55.0)
+    last = recs[-1]
+    assert last["icbmVisRaise"] == "held" and last["icbmVisV"] < _v(0.0040) - 0.5
+    assert cdb._targets(icbm)[-1] == pytest.approx(last["icbmVisV"], abs=0.01)
 
   def test_apex_beyond_the_camera_is_no_raise(self, monkeypatch, tmp_path):
     _curve_later(monkeypatch, horizon_s=4.0)                                # reach 96 m < the 140 m apex
