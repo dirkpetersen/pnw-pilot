@@ -2838,7 +2838,7 @@ def _wb_feed(ctl, car_state, now: float) -> None:
 
 
 def _wb_tele(ctl, now: float) -> dict:
-  """wheelbtnlog2pnw: the driver's wheel-button fields for one breadcrumb, over (previous breadcrumb, now].
+  """wheelbtnlog2pnw: the driver's wheel-button fields for one record (tick, adopt or steer), over (previous one, now].
 
   carState.buttonEvents are fed every cycle in experimental_request. The rocker bits opendbc does not turn into
   ButtonEvents (PnwVehicle.wheel_rocker) come from card through the WheelRocker mem-param; their edges are merged
@@ -2855,7 +2855,7 @@ def _wb_tele(ctl, now: float) -> dict:
       if ctl.mem_params is None:
         why = "no /dev/shm param store in this process"
       elif r is None:
-        why = "WheelRocker never published: card's rocker reader is not running"
+        why = "WheelRocker never published: card's rocker reader is not running, or its publish is failing (see card log)"
       else:
         for t, name in r["edges"]:
           if t > ctl._wb_rock_t:
@@ -6752,6 +6752,7 @@ class CESController:
                     tele.get("vSet", 0.0), tele.get("accelZone"), tele.get("mapV", 0.0))
       rec = self._event_record("adopt", tele)
       rec["from"], rec["to"] = self._last_mode, mode
+      rec.update(_wb_tele(self, time.monotonic()))   # wheelbtnlog2pnw: adopt drains the window too, so no press is lost
       self._append_event(rec)
       self._last_mode = mode
     else:

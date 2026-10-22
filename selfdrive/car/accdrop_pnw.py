@@ -267,6 +267,7 @@ class AccDropLogger:
     self._publish_fn = publish_fn
     self._mem = None
     self._publish_err = 0
+    self._rocker_unpublished = False   # the last WheelRocker publish failed: retried once a second until one lands
     self.trace_cols = TRACE_COLS
     self._trace: deque = deque(maxlen=int((PRE_S + POST_S + 1.0) * 100 / TRACE_EVERY))
     self._tx: deque = deque(maxlen=TX_MAXLEN)
@@ -363,7 +364,7 @@ class AccDropLogger:
         rocker_changed = True
     if wb:
       self._wb.feed(now, wb)
-    if rocker_changed:
+    if rocker_changed or (self._rocker_unpublished and self._frame % 100 == 0):
       self._publish_rocker(now)
 
     for c in can_sends:
@@ -440,7 +441,8 @@ class AccDropLogger:
 
   def _publish_rocker(self, now: float) -> None:
     """wheelbtnlog2pnw: the rocker state to the WheelRocker mem-param, for ces_pnw's tick. Only on a change (rare).
-    A failure is logged (first, then every 100th) and never reaches the card loop."""
+    A failure is logged (first, then every 100th), retried from update() once a second, and never reaches the card
+    loop. Only a synchronous failure is seen here: put_nonblocking writes on its own thread."""
     names = set(self._rocker_down)
     payload = {"edges": [[round(t, 3), n] for t, n in self._wb.edges if n in names][-ROCKER_EDGES_PUBLISHED:],
                "held": sorted(n for n, d in self._rocker_down.items() if d), "ts": round(now, 3)}
@@ -452,7 +454,9 @@ class AccDropLogger:
           from openpilot.common.params import Params
           self._mem = Params("/dev/shm/params")
         self._mem.put_nonblocking(WHEEL_ROCKER_PARAM, payload)
+      self._rocker_unpublished = False
     except Exception:
+      self._rocker_unpublished = True
       self._publish_err += 1
       if self._publish_err % 100 == 1:
         cloudlog.exception(f"wheelbtnlog2pnw: WheelRocker publish FAILED ({self._publish_err}x) -- the ces_events tick " +

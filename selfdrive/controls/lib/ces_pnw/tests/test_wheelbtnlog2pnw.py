@@ -142,3 +142,33 @@ def test_the_ces_off_steer_breadcrumb_carries_them_too(monkeypatch):
   c._steer_log_step(_cs(), {"radarState": SimpleNamespace(leadOne=SimpleNamespace(status=False))})
   (rec,) = c.captured
   assert rec["ev"] == "steer" and rec["wbLast"] == "resumeCruise" and rec["wbN"] == 1 and rec["wbHeld"] == "resumeCruise"
+
+
+def test_an_adopt_record_carries_the_fields_and_drains_the_window(monkeypatch):
+  """Review fix 1: a press just before a chill<->experimental change lands in the adopt record, once."""
+  c = _controller(monkeypatch)
+  c._last_mode = "experimental"           # _publish computes "chill" -> the next record is an adopt
+  m._wb_feed(c, _cs((BT.decelCruise, True)), 1000.5)
+  monkeypatch.setattr(m.time, "monotonic", lambda: 1000.6)
+  c._publish(None, False)
+  (adopt,) = c.captured
+  assert adopt["ev"] == "adopt" and adopt["wbN"] == 1 and adopt["wbLast"] == "decelCruise"
+  ticks = _drive(monkeypatch, c, [_cs((BT.decelCruise, False))] + [_cs()] * 150, t0=1000.6)
+  assert ticks and ticks[0]["wbN"] == 0, "the adopt record already reported that press"
+
+
+def test_held_is_the_newest_press_across_both_sources(monkeypatch):
+  """Review fix 2: SET+ held since 1000.2, the rocker pressed at 1000.5 and still down -> wbHeld is the rocker."""
+  c = _controller(monkeypatch, rocker=ROCKER)
+  c.mem_params = _Mem({"edges": [[1000.5, "cnclRes"]], "held": ["cnclRes"], "ts": 1000.5})
+  c._tele_last = math.inf
+  m._wb_feed(c, _cs((BT.accelCruise, True)), 1000.2)
+  ticks = _drive(monkeypatch, c, [_cs()] * 110)
+  assert ticks[0]["wbHeld"] == "cnclRes" and ticks[0]["wbN"] == 2
+
+
+def test_held_unit_rocker_without_an_edge_still_counts():
+  wb = WheelButtons()
+  wb.feed(10.0, [("accelCruise", True)])
+  assert wb.fields(11.0, 9.0, ["cnclRes"])["wbHeld"] == "accelCruise"   # undated extra loses to a dated press
+  assert WheelButtons().fields(11.0, 9.0, ["cnclRes"])["wbHeld"] == "cnclRes"

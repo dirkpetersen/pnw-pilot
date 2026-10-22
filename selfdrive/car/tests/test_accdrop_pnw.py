@@ -408,3 +408,25 @@ def test_wheel_buttons_and_the_rocker_explain_a_driver_toggle():
   press, release = b.rocker_pubs[1:]
   assert press["held"] == ["cnclRes"] and [e[1] for e in press["edges"]] == ["cnclRes"]
   assert release["held"] == [] and release["edges"] == press["edges"]
+
+
+def test_a_failed_first_rocker_publish_is_retried_without_a_press(mocker):
+  """Review fix 3: a transient failure of the seed publish must not leave WheelRocker unwritten until the driver
+  touches the rocker -- ces_pnw would read that as 'reader not running' all drive."""
+  err = mocker.patch.object(adp.cloudlog, "exception")
+  b = Bench()
+  sent = []
+  calls = {"n": 0}
+
+  def flaky(payload):
+    calls["n"] += 1
+    if calls["n"] == 1:
+      raise OSError("shm busy")
+    sent.append(payload)
+  b.log._publish_fn = flaky
+  b.steady_active()
+  b.run(1.5)
+  assert err.call_count == 1 and "WheelRocker publish FAILED" in err.call_args[0][0]
+  assert len(sent) == 1 and sent[0]["edges"] == [] and sent[0]["held"] == []
+  b.run(3.0)
+  assert len(sent) == 1, "after a success, nothing is republished until the rocker changes"
