@@ -605,6 +605,18 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
   },
 
+  # handsready2pnw: heads-up while openpilot steers a sharp low-speed turn with weak lane lines on a car whose EPS unwinds slowly
+  # (the Lightning in angle mode; drives/2026-10-21/seattle-left-curve-overshoot). selfdrived raises it only while steering is
+  # active and holds it itself (>= 2 s, until the turn ends), so the alert duration is short. ET.WARNING only: no disengage, no
+  # no-entry, no effect on the state machine. One soft prompt chime when it appears (the driver's eyes are on the road at night).
+  EventNamePnw.sharpTurnHands: {
+    ET.WARNING: Alert(
+      "Keep hands ready: sharp turn",
+      "",
+      AlertStatus.userPrompt, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .2),
+  },
+
   EventName.ldw: {
     ET.PERMANENT: Alert(
       "Lane Departure Detected",

@@ -924,6 +924,12 @@ class PnwVehicle:
     # is made later in the carcontroller. Every other car (the Tesla included) keeps the stock 1.0.
     self.steer_sat_demand_floor: float = STEER_SAT_ANGLE_FLOOR if fp == "FORD_F_150_LIGHTNING_MK1" else 1.0
 
+    # handsready2pnw: this car's EPS unwinds slowly after a sharp low-speed turn in ANGLE lateral mode (the Lightning's PSCM
+    # lags the command 0.8-1.4 s on the exit; drives/2026-10-21/seattle-left-curve-overshoot), so selfdrived shows "Keep hands
+    # ready: sharp turn" there when lane lines are weak. selfdrived also requires FordLatStatus mode "angle" at runtime (the
+    # Ford interface always declares steerControlType=angle). Every other car, the Tesla included: False, never shown.
+    self.sharp_turn_hands_alert: bool = fp == "FORD_F_150_LIGHTNING_MK1"
+
     # toggles2pnw: does the capability view know what car this is? False when nothing was ever fingerprinted (CP None), the
     # fingerprint is empty, or it is the MOCK brand. The settings UI uses it to leave EVERY car-gated toggle enabled in
     # that case (the owner must be able to set troubleshooting toggles while parked at home with no last-known car).

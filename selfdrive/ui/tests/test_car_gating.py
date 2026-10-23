@@ -28,6 +28,7 @@ OPERABLE_ON = {
   "DisableFordSignSpeedLimit": {"lightning"},
   "DisableEverDrive": {"lightning"},
   "DisableMapdCarGps": {"lightning"},
+  "DisableSharpTurnHandsAlert": {"lightning"},
   "NudgeForLaneChange": {"lightning", "tesla"},
   "DisengageOnBrake": {"lightning", "tesla"},
 }
@@ -104,11 +105,11 @@ def run_update(monkeypatch, car, stored=None):
 @pytest.mark.parametrize("car", ["tesla", "lightning"])
 def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
   stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableMapdCarGps": True, "DisableFordConvenience": True,
-            "FordAngleLateral": False}
+            "DisableSharpTurnHandsAlert": True, "FordAngleLateral": False}
   me, params = run_update(monkeypatch, car, dict(stored))
   for param, cars in OPERABLE_ON.items():
     assert param in me._toggles, "greyed means present, never removed"
-    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps"):
+    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableSharpTurnHandsAlert"):
       assert me._toggles[param].enabled == (car in cars), param
     assert (me._grey_reason[param] is None) == (car in cars), param
     if car not in cars:
@@ -116,7 +117,8 @@ def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
   assert SETTABLE_EVERYWHERE in me._toggles and SETTABLE_EVERYWHERE not in me._grey_reason, "never greyed, on either car"
   assert me._toggles[SETTABLE_EVERYWHERE].enabled is True
   assert params.writes == [], "greying is display only: the stored params are never written"
-  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableFordConvenience"):
+  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableFordConvenience",
+            "DisableSharpTurnHandsAlert"):
     assert params.vals[k] is True
 
 
@@ -168,3 +170,13 @@ def test_mapd_car_gps_row_exists_defaults_off_and_is_registered():
   hdr = (Path(__file__).resolve().parents[3] / "common" / "params_keys.h").read_text()
   assert re.search(r'\{"DisableMapdCarGps", \{PERSISTENT, BOOL, "0"\}\}', hdr)
   assert "MapdUseCarGps" not in hdr
+
+
+def test_sharp_turn_hands_row_exists_defaults_off_and_is_registered():
+  """handsready2pnw: opt-out row, greyed off the Lightning with a reason, default "0" in params_keys.h."""
+  import re
+  from pathlib import Path
+  assert "Turn this ON to hide it" in T.DESCRIPTIONS["DisableSharpTurnHandsAlert"]
+  assert T.CAR_GATED["DisableSharpTurnHandsAlert"][1] == "Ford F-150 Lightning only"
+  hdr = (Path(__file__).resolve().parents[3] / "common" / "params_keys.h").read_text()
+  assert re.search(r'\{"DisableSharpTurnHandsAlert", \{PERSISTENT, BOOL, "0"\}\}', hdr)

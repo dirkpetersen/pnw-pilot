@@ -121,6 +121,7 @@ struct OnroadEventPnw @0x84ddbb3c1051f1d9 {
     madsControlsMismatchLateral @3;  # was @102 (madsheartbeat2pnw) -- the MADS safety event
     cruiseOffRequested @4;           # was @103 (onebutton2pnw)
     madsResumeSetTooHigh @5;         # was @104 (engagegoal2pnw; nothing raises it since nosetcancel2pnw)
+    sharpTurnHands @6;               # handsready2pnw: "Keep hands ready: sharp turn" (display only)
   }
 }
 

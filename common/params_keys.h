@@ -174,6 +174,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // correction is hard-clamped to a tiny curvature nudge, confidence-gated, releases smoothly,
     // and this toggle switches it off instantly). Tuning is a hot-reloaded JSON file, not a param.
     {"DisableLaneCentering", {PERSISTENT, BOOL, "0"}},
+    // handsready2pnw: opt-OUT of the "Keep hands ready: sharp turn" alert (Lightning angle mode; ON by default). selfdrived re-reads it at 10 Hz (no restart).
+    {"DisableSharpTurnHandsAlert", {PERSISTENT, BOOL, "0"}},
     // coopsteer2pnw: Tesla Raven cooperative steering (selfdrive/controls/lib/coopsteer_pnw.py). OPT-OUT, same
     // idiom as DisableLaneCentering (owner 2026-09-27: "enabling should be the default... default always means
     // that a toggle is disabled"): default "0" = NOT disabled = the car yields to the driver's push. Read by

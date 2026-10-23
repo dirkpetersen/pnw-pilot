@@ -5883,7 +5883,8 @@ class CESController:
         rec["durationS"] = payload["durationS"]
       if payload.get("ev"):
         rec["ev"] = payload["ev"]   # steersatfloor2pnw: suppressed episodes are "alertSuppressed", never counted as "alert"
-      for k in ("demand", "floor", "angErr", "supCount", "peakDemand", "peakAngErr", "escaped"):  # steersatfloor2pnw: suppressed-alert fields
+      for k in ("demand", "floor", "angErr", "supCount", "peakDemand", "peakAngErr", "escaped",  # steersatfloor2pnw: suppressed-alert fields
+                "k", "kMeas", "laneConf"):  # handsready2pnw: sharpTurnHands fire fields
         if payload.get(k) is not None:
           rec[k] = payload[k]
       if clock_bad(now_wall):

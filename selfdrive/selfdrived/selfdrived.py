@@ -27,6 +27,7 @@ from openpilot.selfdrive.selfdrived.loopdiag_pnw import LoopDiag  # loopdiag2pnw
 from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event, off_request_gas_input, off_request_latches,
                                                      MADS_BRAKE_PANDA_GRACE_FRAMES, panda_lateral_view)
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
+from openpilot.selfdrive.selfdrived.sharp_turn_pnw import SharpTurnHands, ego_lane_prob, plan_curvature  # handsready2pnw
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -219,6 +220,10 @@ class SelfdriveD:
     self.steer_sat_sup_peak_err = 0.0
     self.steer_sat_sup_escaped = False
     self.steer_sat_sup_seen = False         # the open episode had >= 1 genuinely suppressed frame (so it gets Suppressed records)
+    # handsready2pnw: None = this car does not have the capability (the Tesla), so the alert never runs.
+    self.sharp_turn = None
+    self.sharp_turn_err_n = 0
+    self.disable_sharp_turn = self.params.get_bool("DisableSharpTurnHandsAlert")
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -229,7 +234,9 @@ class SelfdriveD:
       veh = PnwVehicle(self.CP)
       self.stalk_off_ignores_gas = bool(veh.stalk_cruise_buttons)
       self.steer_sat_floor = float(veh.steer_sat_demand_floor)  # steersatfloor2pnw
-      if self.steer_sat_floor > 1.0:
+      if veh.sharp_turn_hands_alert:
+        self.sharp_turn = SharpTurnHands()
+      if self.steer_sat_floor > 1.0 or self.sharp_turn is not None:
         self.latstat_mem = Params("/dev/shm/params")
       if not veh.mads_resume:
         self.mads_resume = None
@@ -641,6 +648,7 @@ class SelfdriveD:
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
       # TODO: lac.saturated includes speed and other checks, should be pulled out
       self._steer_sat_step(CS, desired_lateral_accel, actual_lateral_accel, lac)
+    self._sharp_turn_step(CS, lac.active, controlstate.curvature)
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -1038,7 +1046,7 @@ class SelfdriveD:
     """steersatfloor2pnw B2: the angle floor applies only while the Ford carcontroller says the angle lateral path is live
     (FordLatStatus mode "angle"; it can fall back to curvature mid-drive). Unknown / stale / unreadable => stock 1.0.
     Every change of the observed mode is logged, so the boot log shows which mode the floor assumed."""
-    if self.steer_sat_floor <= 1.0:
+    if self.latstat_mem is None:   # neither the floor nor handsready2pnw needs the mode on this car
       return
     if self.steer_sat_mode != "unset" and self.sm.frame % STEER_SAT_MODE_POLL_FRAMES != 0:
       return
@@ -1054,6 +1062,33 @@ class SelfdriveD:
       cloudlog.warning("steersatfloor2pnw: lateral mode now %r -> Take Control demand floor %.2f",
                        mode, self.steer_sat_floor if mode == "angle" else 1.0)
     self.steer_sat_floor_now = self.steer_sat_floor if mode == "angle" else 1.0
+
+  def _sharp_turn_step(self, CS, lat_active: bool, k_meas: float) -> None:
+    """handsready2pnw: "Keep hands ready: sharp turn" (sharp_turn_pnw.py). Display only. Runs only on a car with the capability,
+    and only while the Ford carcontroller reports the angle lateral path live and the driver has not turned it off."""
+    if self.sharp_turn is None:
+      return
+    self._refresh_steer_sat_mode()
+    armed = lat_active and self.steer_sat_mode == "angle" and not self.disable_sharp_turn
+    try:
+      model = self.sm['modelV2']
+      k_plan, lane_prob = plan_curvature(model), ego_lane_prob(model)
+    except Exception:
+      # Rule 2: a malformed model message is not "straight road". The alert cannot decide this frame; say so (throttled, 100 Hz).
+      self.sharp_turn_err_n += 1
+      if self.sharp_turn_err_n == 1 or self.sharp_turn_err_n % 1000 == 0:
+        cloudlog.exception(f"handsready2pnw: modelV2 unreadable ({self.sharp_turn_err_n} frames) -- sharp-turn alert NOT deciding")
+      armed, k_plan, lane_prob = False, 0.0, 1.0
+    if self.sharp_turn.update(time.monotonic(), armed, float(CS.vEgo), k_plan, float(k_meas), lane_prob):
+      cloudlog.warning("handsready2pnw: Keep hands ready fired k=%.4f kMeas=%.4f laneProb=%.2f v=%.2f", k_plan, k_meas, lane_prob, CS.vEgo)
+      try:
+        self.ces_pnw.log_take_control_alert({"name": "sharpTurnHands", "phase": "fire", "vEgo": round(float(CS.vEgo), 2),
+                                             "k": round(k_plan, 4), "kMeas": round(float(k_meas), 4),
+                                             "laneConf": round(lane_prob, 3)})
+      except Exception:
+        cloudlog.exception("handsready2pnw: ces_events record raised")
+    if self.sharp_turn.active:
+      self.events.add(EventNamePnw.sharpTurnHands)
 
   def _steer_sat_step(self, CS, desired_lat: float, actual_lat: float, lac) -> None:
     """The steerSaturated decision (steersatfloor2pnw). Alert-affecting inputs: floor in force, wheel error, suppression age."""
@@ -1198,6 +1233,7 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.disable_sharp_turn = self.params.get_bool("DisableSharpTurnHandsAlert")  # handsready2pnw
       self.manual_experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl  # ces2xnor
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)

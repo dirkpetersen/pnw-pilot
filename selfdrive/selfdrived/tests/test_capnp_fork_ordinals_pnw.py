@@ -247,7 +247,9 @@ class TestLogCapnpIsUpstreams:
     """AlertManager breaks (priority, start_frame) ties by insertion order, which follows the sorted
     event list. The fork's events must sort among themselves exactly as they did at @99-@104."""
     enum = custom.OnroadEventPnw.EventName.schema.enumerants
-    assert [n for n, _ in sorted(enum.items(), key=lambda kv: kv[1])] == [M.PNW_FORK_V1_ORDINALS[o] for o in range(99, 105)]
+    # handsready2pnw: the enum is APPEND ONLY, so later events (sharpTurnHands @6) follow the six; the six keep @0-@5.
+    assert [n for n, _ in sorted(enum.items(), key=lambda kv: kv[1])][:6] == [M.PNW_FORK_V1_ORDINALS[o] for o in range(99, 105)]
+    assert sorted(enum.values()) == list(range(len(enum)))
 
 
 # =================================================================================================

@@ -183,6 +183,12 @@ DESCRIPTIONS = {
     "become uncertain, you signal a turn, or a lane change starts. Turn this ON to disable it — a " +
     "quick escape hatch if steering ever feels off. Advanced tuning: /data/pnw/lanecenter_tuning.json."
   ),
+  # handsready2pnw: ON by default on the Lightning; this is the opt-OUT toggle.
+  "DisableSharpTurnHandsAlert": tr_noop(
+    "By default, while openpilot steers a sharp turn below about 33 mph and the lane lines are hard to see, a " +
+    "\"Keep hands ready: sharp turn\" alert shows with a soft chime: the truck's steering can be slow to unwind at the " +
+    "turn exit. Display only, it never changes steering. F-150 Lightning angle steering only. Turn this ON to hide it."
+  ),
   # coopsteer2pnw: Tesla Raven cooperative steering, ON by default; this is the opt-OUT toggle (owner
   # 2026-09-27: a toggle's default is always off). A plain toggle_item, so the description does not disable
   # it (that trap is action BUTTONS, not toggles).
@@ -260,6 +266,7 @@ CAR_GATED = {
   "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
   "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
   "DisableMapdCarGps": (lambda v: v.car_gps, tr_noop("Ford F-150 Lightning only")),
+  "DisableSharpTurnHandsAlert": (lambda v: v.sharp_turn_hands_alert, tr_noop("Ford F-150 Lightning only")),
   "NudgeForLaneChange": (lambda v: v.nudgeless, tr_noop("Tesla and Ford F-150 Lightning only")),
   "DisengageOnBrake": (lambda v: v.mads_lateral, tr_noop("Ford F-150 Lightning and Tesla Model S only")),
 }
@@ -350,6 +357,13 @@ class TogglesLayout(Widget):
       "DisableLaneCentering": (
         lambda: tr("Disable Lane Centering"),
         DESCRIPTIONS["DisableLaneCentering"],
+        "warning.png",
+        False,
+      ),
+      # handsready2pnw: opt-OUT, no restart (selfdrived re-reads it at 10 Hz); greyed (CAR_GATED) without the capability.
+      "DisableSharpTurnHandsAlert": (
+        lambda: tr("Disable Sharp-Turn Hands Alert"),
+        DESCRIPTIONS["DisableSharpTurnHandsAlert"],
         "warning.png",
         False,
       ),
@@ -754,7 +768,7 @@ class TogglesLayout(Widget):
     car_ok = {}
     for param in CAR_GATED:
       car_ok[param], self._grey_reason[param] = car_gate(veh, param)
-    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableMapdCarGps"):
+    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableMapdCarGps", "DisableSharpTurnHandsAlert"):
       if param in self._toggles:
         self._toggles[param].action_item.set_enabled(car_ok[param])
 
