@@ -301,6 +301,68 @@ def test_current_and_loaded_reports_loaded_true(env):
   assert [c for c in env.http.calls if c[0] == "POST"][0][2]["json"]["loaded"] is True
 
 
+# ---- curvedbloaded2pnw: loaded evidence is sticky per sha ---------------------------------------------------------------
+def _reports(env):
+  return [c[2]["json"] for c in env.http.calls if c[0] == "POST"]
+
+
+def _fresh_report(env):
+  env.u.rep_key = None     # force the next cycle to report, as the daily resend would
+  env.u.cycle()
+  return _reports(env)[-1]
+
+
+def test_loaded_once_stays_true_while_parked_and_while_driving(env):
+  env.route({**env.ptr, "sha256": env.old_sha})
+  env.record(env.old_sha)
+  log = pathlib.Path(swap.SWAGLOG, "swaglog.1")
+  log.write_text('{"event$s": "curvedb_v2_loaded", "sha256$s": "' + env.old_sha + '"}\n')
+  assert _fresh_report(env)["loaded"] is True
+  assert json.loads(pathlib.Path(cu.RECORD_FILE).read_text())["loaded_sha"] == env.old_sha
+  log.unlink()                              # the swaglog rotated away: the scan now answers 'pending'
+  env.state = ("1", "0", "")                # truck off, selfdrived not running
+  p = _fresh_report(env)
+  assert p["loaded"] is True and "selfdrived load: loaded, recorded" in p["reason"] and "now pending" in p["reason"]
+  env.state = ("0", "1", "500")             # driving: no scan at all
+  p = _fresh_report(env)
+  assert p["loaded"] is True and "now unknown, not checked, driving" in p["reason"]
+
+
+def test_no_evidence_reports_loaded_false_with_the_reason(env):
+  env.route({**env.ptr, "sha256": env.old_sha})
+  env.record(env.old_sha)
+  env.state = ("0", "1", "500")
+  p = _fresh_report(env)
+  assert p["loaded"] is False and "selfdrived load: unknown, not checked, driving" in p["reason"]
+  env.state = ("1", "0", "")
+  p = _fresh_report(env)
+  assert p["loaded"] is False and "selfdrived load: pending" in p["reason"]
+  assert "loaded_sha" not in json.loads(pathlib.Path(cu.RECORD_FILE).read_text())
+
+
+def test_new_live_sha_resets_the_loaded_evidence(env):
+  env.record(env.old_sha)
+  pathlib.Path(cu.RECORD_FILE).write_text(json.dumps({"last_auto_sha": env.old_sha, "auto_utc": 1, "loaded_sha": env.old_sha,
+                                                      "loaded_utc": 1}))
+  env.u.cycle()                             # installs new_sha
+  assert env.live_sha() == env.new_sha and "loaded_sha" not in json.loads(pathlib.Path(cu.RECORD_FILE).read_text())
+  env.state = ("1", "0", "")
+  p = _fresh_report(env)                    # current, no load line for new_sha yet
+  assert p["state"] == "current" and p["loaded"] is False
+  rec = json.loads(pathlib.Path(cu.RECORD_FILE).read_text())
+  pathlib.Path(cu.RECORD_FILE).write_text(json.dumps({**rec, "loaded_sha": env.old_sha, "loaded_utc": 1}))
+  assert _fresh_report(env)["loaded"] is False    # evidence for another sha never counts
+
+
+def test_mismatch_clears_the_loaded_evidence(env):
+  env.route({**env.ptr, "sha256": env.old_sha})
+  pathlib.Path(cu.RECORD_FILE).write_text(json.dumps({"last_auto_sha": env.old_sha, "auto_utc": 1, "loaded_sha": env.old_sha,
+                                                      "loaded_utc": 1}))
+  pathlib.Path(swap.SWAGLOG, "swaglog.1").write_text('{"event$s": "curvedb_v2_loaded", "sha256$s": "' + env.new_sha + '"}\n')
+  assert _fresh_report(env)["loaded"] is False
+  assert "loaded_sha" not in json.loads(pathlib.Path(cu.RECORD_FILE).read_text())
+
+
 # ---- the shared lock ------------------------------------------------------------------------------------------------
 def test_install_waits_when_the_ssh_gate_holds_the_lock(env, monkeypatch):
   env.record(env.old_sha)

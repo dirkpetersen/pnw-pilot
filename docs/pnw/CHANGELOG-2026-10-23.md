@@ -36,3 +36,26 @@ the PSCM, so the driver gets a heads-up in that situation. Owner approved 2026-1
   order and the enum has no gaps (it asserted the enum was exactly those six, which an append broke).
   Touched suites (selfdrived, ui, ui/onroad, controls/lib, ces_pnw): 3421 passed, 86 skipped (base: 3286 + 107 onroad = 3393).
 - Not done: no screenshot (the UI has no harness that renders a single alert); no on-car check yet.
+
+## `curvedbloaded2pnw` (branch `curvedbloaded2pnw` in pnw-pilot, not yet pushed): curve-DB `loaded` is sticky per sha
+
+Why: the cloud job promotes an installed curve-DB table to its baseline only when the device report says `loaded: true`
+for that sha. `curvedb_updated` decided `loaded` fresh on each cycle. While driving it does not scan the swaglogs
+(`unknown, not checked, driving`), and when parked or offroad the scan only finds a `curvedb_v2_loaded` line while that
+swaglog still exists. So a `loaded: true` report (2026-10-21 17:08 for b9066860) was overwritten by later `false`
+reports, and the baseline stayed e32ccf54.
+
+- **What changed** (`system/curvedb/curvedb_updated.py`). When the scan finds that selfdrived loaded the live sha (the
+  existing `swap.verify()`: a load line newer than the table file's mtime), the daemon writes `loaded_sha` + `loaded_utc`
+  into `/data/pnw/curvedb_autoinstall.json`. Later cycles report `loaded: true` for that same sha when the scan answers
+  `unknown` or `pending`. The reason then says `selfdrived load: loaded, recorded MM-DD, now <unknown|pending>...`.
+- **Resets.** A new install, `--adopt` or a record repair rewrites the record without `loaded_sha`, so a new live sha starts
+  at `false`. Evidence for another sha never counts. A `mismatch` (selfdrived loaded a different table) clears it.
+- **Unknown stays unknown.** No recorded evidence: `loaded: false` with the reason, as before. The swaglog scan keeps its
+  existing gate (never while driving).
+- **Report contract unchanged** (same 9 keys; `loaded` is still a bool).
+- Tests: `system/curvedb/tests/test_updater.py` (+4: loaded once stays true parked and driving; no evidence is false with the
+  reason; a new live sha resets, evidence for another sha does not count; mismatch clears). Curvedb suite 100 -> 104 passed,
+  1 skipped. 5 mutants, all killed.
+- Note: the device record has no `loaded_sha` yet. b9066860 reports `true` only after the next drive start is followed by a
+  parked/offroad cycle that still finds its load line.

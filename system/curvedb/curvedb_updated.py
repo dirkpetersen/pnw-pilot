@@ -133,6 +133,25 @@ class Updater:
       os.fsync(f.fileno())
     os.replace(tmp, RECORD_FILE)
 
+  def mark_loaded(self, sha: str | None) -> None:
+    """curvedbloaded2pnw: persist that selfdrived loaded `sha` (None clears it). Swaglogs rotate and later cycles run
+    while driving (no scan), so the evidence is kept per sha; write_record() drops it, so a new live sha starts unloaded."""
+    rec = self.read_record()
+    if sha is None:
+      rec.pop("loaded_sha", None)
+      rec.pop("loaded_utc", None)
+    else:
+      rec.update(loaded_sha=sha, loaded_utc=int(self.wall()))
+    tmp = RECORD_FILE + ".tmp"
+    try:
+      with open(tmp, "w") as f:
+        json.dump(rec, f)
+        f.flush()
+        os.fsync(f.fileno())
+      os.replace(tmp, RECORD_FILE)
+    except OSError as e:   # the evidence is real this cycle; only its persistence failed, so say so loudly
+      self.log("record", "loaded_unsaved", f"could not persist loaded_sha: {type(e).__name__}: {e}", loud=True)
+
   # ---- network ----------------------------------------------------------------------------------------------------
   def _req(self, method: str, url: str, what: str, **kw):
     try:
@@ -292,6 +311,7 @@ class Updater:
       except OSError as e:
         raise Stop("error", "error: could not update the install record", f"write_record failed: {type(e).__name__}: {e}", loud=True) from e
       self.log("record", "adopted", f"live {live[:8]} equals the approved table; install record updated")
+      rec = {}   # the rewrite dropped any loaded evidence
     ok, why = swap.decide(*swap.now_state())      # the swaglog scan is disk I/O: never while driving (System Lagging)
     if not ok:
       v, got = "unknown", f"not checked, {why}"
@@ -302,7 +322,15 @@ class Updater:
         raise Stop("error", f"error: {clean(e, 100)}", f"verify failed: {e}", loud=True) from e
     if v == "unknown" and ok:
       self.log("verify", "unknown", got, loud=True)
-    self.ctx["loaded"] = v == "loaded"
+    if v == "loaded" and rec.get("loaded_sha") != live:
+      self.mark_loaded(live)
+    elif v == "mismatch" and "loaded_sha" in rec:
+      self.mark_loaded(None)
+    sticky = v in ("unknown", "pending") and rec.get("loaded_sha") == live
+    self.ctx["loaded"] = v == "loaded" or sticky
+    if sticky:   # evidence persisted by an earlier cycle; today's check could not see it (driving / rotated swaglogs)
+      at = rec.get("loaded_utc")
+      v, got = "loaded", f"recorded {_md(at) if isinstance(at, int) else '?'}, now {v}{', ' + got if got else ''}"
     if v == "mismatch":
       raise Stop("error", f"error: selfdrived loaded {got}, not {live[:8]}", f"loaded sha {got} != live {live[:8]}", loud=True)
     try:
@@ -310,7 +338,7 @@ class Updater:
     except OSError as e:
       raise Stop("error", "error: live table unreadable", f"getmtime failed: {type(e).__name__}: {e}", loud=True) from e
     return Stop("current", f"installed {live[:8]} ({date})",
-                f"live table is the approved table (selfdrived load: {v}{'' if v != 'unknown' else ', ' + got})")
+                f"live table is the approved table (selfdrived load: {v}{', ' + got if v == 'unknown' or sticky else ''})")
 
   def cycle(self) -> float:
     self.ctx, self.net_ok = {}, False
