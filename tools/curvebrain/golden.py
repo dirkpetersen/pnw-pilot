@@ -377,6 +377,7 @@ class Env:
         fh.write('{"version": 2, "overrides": []}')
     p(cb, "OVERRIDES_PATH", ovr)
     p(m, "CES_EVENT_LOG", os.path.join(self.tmp, "ces_events.jsonl"))
+    p(cl, "LOADED_MARKER", os.path.join(self.tmp, "curvedb_loaded.json"))   # never the device's load marker
     p(cl, "BACKGROUND", [False])                 # load + read A in the constructor: no thread, no race
     p(cl, "A_MAX_AGE_S", float("inf"))           # the device's poll thread keeps A fresh; there is no thread here
     p(cl, "READ_PARAMS", [lambda: self.reader()])

@@ -31,3 +31,8 @@ and none did.
   marker. curvedb + test_curvedblive2pnw 226 -> 236 passed, 1 skipped; system/curvedb + ces_pnw 2201 passed, 1 skipped.
   8 mutants, all killed.
 - Note: the first `loaded: true` for eb255743 needs one drive start with this code (the marker is written at load).
+- Follow-up (channel tip red after the push): `tools/curvebrain/golden.py` patches `curvedb_live.DATA_DIR` to its own
+  table, so its loads counted as the live table and tried to write `/data/pnw/curvedb_loaded.json` on the laptop; the error
+  text carried the thread-id tmp name, so two runs differed. The golden harness now redirects `LOADED_MARKER` into its temp
+  dir (like `roaddb_fixture`). No other tool loads `CurveDbLive` with `DATA_DIR`. tools/curvebrain + curvedb + ces_pnw:
+  2221 passed, 1 skipped.
