@@ -73,6 +73,7 @@ FORMAT = "curvedb-v2-live/1"
 DATA_DIR = "/data/pnw/curvedb_v2"
 ROWS_NAME = "curvedb_v2_rows.json.zst"   # zstd-compressed JSON (owner 2026-09-24: like the device's other logs)
 MANIFEST_NAME = "manifest.json"
+LOADED_MARKER = "/data/pnw/curvedb_loaded.json"   # curvedbmarker2pnw: curvedb_updated reads it (swaglogs rotate)
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ROWS_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024   # decompressed; the 2026-09-24 table is ~2.9 MB
@@ -623,12 +624,26 @@ class CurveDbLive:
                      flags=man.get("flags"), lower_bound_rows=idx.n_lower_bound, raise_only_rows=idx.n_raise_only,
                      first_date=man.get("first_date"), last_date=man.get("last_date"),
                      age_days=age if isinstance(age, int) else "age unknown", seconds=round(time.monotonic() - t0, 2))
+      if self.data_dir == DATA_DIR:   # only a load of the LIVE table is evidence for curvedb_updated
+        self._write_marker(man.get("sha256"))
       if isinstance(age, int):
         self._age_done = True
         self._warn_if_stale(age)
       # else: an unsynced boot clock is normal -- poll_a re-evaluates once the clock is valid
     finally:
       self._loaded.set()
+
+  @staticmethod
+  def _write_marker(sha) -> None:
+    """curvedbmarker2pnw: persist which table this selfdrived loaded. Load thread only. A failure is loud, the table stays in use."""
+    tmp = f"{LOADED_MARKER}.{threading.get_ident()}.tmp"   # ces_pnw and curve_brain load in two threads
+    try:
+      with open(tmp, "w") as f:
+        json.dump({"sha256": sha, "utc": int(_wall_now())}, f)   # wall clock: compared with the rows file mtime
+      os.replace(tmp, LOADED_MARKER)
+    except OSError as e:
+      cloudlog.error(f"curvedb_v2: cannot write the load marker {LOADED_MARKER}: {type(e).__name__}: {e} -- the table IS in use; " +
+                     "curvedb_updated falls back to the swaglog scan")
 
   def _safe_age(self, last_date):
     """table_age_days that can never kill the load thread: a crash is logged and reads as 'age unknown'."""

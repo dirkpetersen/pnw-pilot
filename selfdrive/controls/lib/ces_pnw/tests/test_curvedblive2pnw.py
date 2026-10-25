@@ -16,6 +16,8 @@ import builtins
 import copy
 import json
 import math
+import os
+import pathlib
 import types
 
 import pytest
@@ -327,6 +329,26 @@ class TestLoader:
     db = self._live(write_db(str(tmp_path), [FAR_ANCHOR, _anchor(300.0, 0.002)]), logs)
     assert db.state == "ok" and db.index.n_rows == 2 and logs.errors == []
     assert [n for n, _ in logs.events] == ["curvedb_v2_loaded"]
+
+  def test_a_load_of_the_live_table_writes_the_marker(self, tmp_path, logs, monkeypatch):
+    """curvedbmarker2pnw: curvedb_updated reads this instead of scanning rotated swaglogs."""
+    d = write_db(str(tmp_path / "live"), [FAR_ANCHOR])
+    monkeypatch.setattr(cl, "DATA_DIR", d)
+    self._live(d, logs)
+    m = json.loads(pathlib.Path(cl.LOADED_MARKER).read_text())
+    assert m["sha256"] == json.loads(pathlib.Path(d, cl.MANIFEST_NAME).read_text())["sha256"] and isinstance(m["utc"], int)
+
+  def test_a_load_of_another_dir_writes_no_marker(self, tmp_path, logs):
+    self._live(write_db(str(tmp_path / "other"), [FAR_ANCHOR]), logs)
+    assert not os.path.exists(cl.LOADED_MARKER)
+
+  def test_a_marker_write_failure_is_loud_and_the_table_stays_in_use(self, tmp_path, logs, monkeypatch):
+    d = write_db(str(tmp_path / "live"), [FAR_ANCHOR])
+    monkeypatch.setattr(cl, "DATA_DIR", d)
+    monkeypatch.setattr(cl, "LOADED_MARKER", str(tmp_path / "no-such-dir" / "curvedb_loaded.json"))
+    db = self._live(d, logs)
+    assert db.state == "ok" and db.index is not None and [n for n, _ in logs.events] == ["curvedb_v2_loaded"]
+    assert len(logs.errors) == 1 and "load marker" in logs.errors[0]
 
   @pytest.mark.parametrize("case", ["missing", "tamper", "swapped", "format", "lodo", "params", "count", "k", "dates", "nozstd"])
   def test_a_bad_file_is_OFF_loud_and_never_partial(self, tmp_path, logs, monkeypatch, case):

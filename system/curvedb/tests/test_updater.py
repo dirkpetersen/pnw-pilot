@@ -423,3 +423,60 @@ def test_unreadable_gear_or_ignition_param_refuses_and_logs_instead_of_crashing(
   env.u.params = Boom()
   assert env.u.safe_now() is False and env.u.safe_now() is False
   assert pathlib.Path(cu.LOG_FILE).read_text().count(" state unreadable ") == 1          # said once, not per tick
+
+
+# ---- curvedbmarker2pnw: selfdrived's load marker answers `loaded` without the swaglog scan ------------------------------
+def _marker(sha, utc):
+  pathlib.Path(cu.LOADED_MARKER).write_text(json.dumps({"sha256": sha, "utc": utc}))
+
+
+def _no_scan(monkeypatch):
+  def fail(sha):
+    raise AssertionError("swap.verify was called")
+  monkeypatch.setattr(swap, "verify", fail)
+
+
+def _current_old(env):
+  env.route({**env.ptr, "sha256": env.old_sha})
+  env.record(env.old_sha)
+
+
+def test_marker_for_the_live_sha_is_loaded_without_a_scan_even_while_driving(env, monkeypatch):
+  _current_old(env)
+  _marker(env.old_sha, 1)                   # a too-early boot clock does not matter when the sha matches
+  _no_scan(monkeypatch)
+  env.state = ("0", "1", "500")             # driving: the scan gate refuses, the marker still answers
+  p = _fresh_report(env)
+  assert p["state"] == "current" and p["loaded"] is True and "selfdrived load: loaded" in p["reason"]
+  assert json.loads(pathlib.Path(cu.RECORD_FILE).read_text())["loaded_sha"] == env.old_sha
+
+
+def test_marker_for_another_sha_after_the_install_is_a_mismatch(env, monkeypatch):
+  _current_old(env)
+  pathlib.Path(cu.RECORD_FILE).write_text(json.dumps({"last_auto_sha": env.old_sha, "auto_utc": 1, "loaded_sha": env.old_sha,
+                                                      "loaded_utc": 1}))
+  _marker(env.new_sha, int(os.path.getmtime(f"{swap.LIVE}/{swap.ROWS}")) + 10)
+  _no_scan(monkeypatch)
+  p = _fresh_report(env)
+  assert p["state"] == "error" and p["loaded"] is False and env.new_sha[:8] in p["reason"]
+  assert "loaded_sha" not in json.loads(pathlib.Path(cu.RECORD_FILE).read_text())
+
+
+def test_marker_for_another_sha_before_the_install_falls_back_to_the_scan(env, monkeypatch):
+  _current_old(env)
+  _marker(env.new_sha, int(os.path.getmtime(f"{swap.LIVE}/{swap.ROWS}")) - 10)
+  calls = []
+  monkeypatch.setattr(swap, "verify", lambda sha: calls.append(sha) or ("pending", ""))
+  p = _fresh_report(env)
+  assert calls == [env.old_sha] and p["state"] == "current" and p["loaded"] is False and "selfdrived load: pending" in p["reason"]
+
+
+@pytest.mark.parametrize("body", ["{not json", '{"sha256": "abc", "utc": 5}', '{"utc": 5}', '["x"]'])
+def test_a_malformed_marker_is_loud_and_falls_back_to_the_scan(env, monkeypatch, body):
+  _current_old(env)
+  pathlib.Path(cu.LOADED_MARKER).write_text(body)
+  calls = []
+  monkeypatch.setattr(swap, "verify", lambda sha: calls.append(sha) or ("pending", ""))
+  p = _fresh_report(env)
+  assert calls == [env.old_sha] and p["loaded"] is False
+  assert "verify marker_unreadable" in pathlib.Path(cu.LOG_FILE).read_text()

@@ -29,6 +29,7 @@ from openpilot.system.curvedb import swap
 
 LOG_FILE = swap.ROOT + "/data/pnw/curvedb-autoinstall.log"
 RECORD_FILE = swap.ROOT + "/data/pnw/curvedb_autoinstall.json"
+LOADED_MARKER = swap.ROOT + "/data/pnw/curvedb_loaded.json"   # written by curvedb_live.load() (curvedbmarker2pnw)
 HOURLY_S = 3600.0
 REPORT_EVERY_S = 86400.0
 POINTER_MAX = 16 * 1024
@@ -151,6 +152,27 @@ class Updater:
       os.replace(tmp, RECORD_FILE)
     except OSError as e:   # the evidence is real this cycle; only its persistence failed, so say so loudly
       self.log("record", "loaded_unsaved", f"could not persist loaded_sha: {type(e).__name__}: {e}", loud=True)
+
+  def marker_verdict(self, live: str) -> tuple[str, str] | None:
+    """curvedbmarker2pnw: selfdrived's load marker -> ('loaded'|'mismatch', sha8), or None = no usable marker (scan swaglogs).
+    A matching sha is proof whatever the clock said. A different sha counts only if written after the install (rows mtime):
+    a load at boot before the clock synced can carry a too-early utc, and then the scan decides instead."""
+    try:
+      with open(LOADED_MARKER) as f:
+        m = json.load(f)
+      sha, utc = m["sha256"], m["utc"]
+      if not (isinstance(sha, str) and HEX64.fullmatch(sha) and isinstance(utc, int)):
+        raise ValueError(f"bad fields sha256={str(sha)[:16]!r} utc={utc!r}")
+      if sha == live:
+        return "loaded", sha[:8]
+      if utc >= os.path.getmtime(f"{swap.LIVE}/{swap.ROWS}"):
+        return "mismatch", sha[:8]
+      return None
+    except FileNotFoundError:
+      return None
+    except (OSError, ValueError, KeyError, TypeError) as e:   # json.JSONDecodeError is a ValueError
+      self.log("verify", "marker_unreadable", f"{LOADED_MARKER}: {type(e).__name__}: {e}; using the swaglog scan", loud=True)
+      return None
 
   # ---- network ----------------------------------------------------------------------------------------------------
   def _req(self, method: str, url: str, what: str, **kw):
@@ -312,8 +334,11 @@ class Updater:
         raise Stop("error", "error: could not update the install record", f"write_record failed: {type(e).__name__}: {e}", loud=True) from e
       self.log("record", "adopted", f"live {live[:8]} equals the approved table; install record updated")
       rec = {}   # the rewrite dropped any loaded evidence
-    ok, why = swap.decide(*swap.now_state())      # the swaglog scan is disk I/O: never while driving (System Lagging)
-    if not ok:
+    marker = self.marker_verdict(live)            # a tiny file read: fine while driving, so it runs before the gate
+    ok, why = (True, "") if marker else swap.decide(*swap.now_state())   # the swaglog scan is disk I/O: never while driving
+    if marker:
+      v, got = marker
+    elif not ok:
       v, got = "unknown", f"not checked, {why}"
     else:
       try:

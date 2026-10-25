@@ -74,6 +74,7 @@ SHIPPED_LAT_A = pv._CURVE_DEFAULTS["curvedb_v2_lat_a"]   # the shipped Lightning
 def isolate(monkeypatch, tmp_path_factory):
   d = write_db(str(tmp_path_factory.mktemp("roaddb")), [FAR_ANCHOR], last_date=_today_pt())
   monkeypatch.setattr(cl, "DATA_DIR", d)
+  monkeypatch.setattr(cl, "LOADED_MARKER", str(tmp_path_factory.mktemp("marker") / "curvedb_loaded.json"))
   monkeypatch.setattr(cl, "READ_PARAMS", [reader()])
   monkeypatch.setattr(cl, "BACKGROUND", [False])     # load in the constructor: no thread, no race
   monkeypatch.setattr(cl, "A_MAX_AGE_S", float("inf"))   # A is read once there and never re-polled

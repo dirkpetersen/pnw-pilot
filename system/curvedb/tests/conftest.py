@@ -96,6 +96,7 @@ def env(tmp_path, monkeypatch):
   monkeypatch.setattr(swap, "ROOT", str(tmp_path))
   monkeypatch.setattr(cu, "LOG_FILE", str(data / "pnw/curvedb-autoinstall.log"))
   monkeypatch.setattr(cu, "RECORD_FILE", str(data / "pnw/curvedb_autoinstall.json"))
+  monkeypatch.setattr(cu, "LOADED_MARKER", str(data / "pnw/curvedb_loaded.json"))
   loader = tmp_path / "loader.py"
   loader.write_text(LOADER)
   monkeypatch.setattr(swap, "LOADER_SCRIPT", str(loader))

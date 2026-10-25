@@ -27,7 +27,7 @@ Runs at boot (after a valid clock), on each offroad/Park transition, then hourly
 4. `GET {API_HOST}/v1/curvedb/{dongle}/approved` with `Authorization: JWT <device token>`:
    200 pointer, 404 `none published`, 401/403 `error: auth HTTP <code>` (logged as an error), 5xx or timeout `gateway unavailable`
    (retry with backoff 60 s doubling to 30 min).
-5. Live sha == pointer sha: `installed <sha8> (MM-DD)`; the swaglog `curvedb_v2_loaded` line is checked (`loaded` in the report).
+5. Live sha == pointer sha: `installed <sha8> (MM-DD)`; selfdrived's load marker `/data/pnw/curvedb_loaded.json` is read, else the swaglog `curvedb_v2_loaded` line is checked (`loaded` in the report).
 6. Hand-change hold: `/data/pnw/curvedb_autoinstall.json` records the sha WE installed last. If the live sha differs (or there is no
    record) the device HOLDS (`held: table changed by hand`) and never overwrites. A missing live dir is restored from the newest
    `-auto` backup, then held. Resume with `python -m openpilot.system.curvedb.curvedb_updated --adopt` (records the live sha).
