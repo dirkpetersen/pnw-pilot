@@ -122,6 +122,8 @@ struct OnroadEventPnw @0x84ddbb3c1051f1d9 {
     cruiseOffRequested @4;           # was @103 (onebutton2pnw)
     madsResumeSetTooHigh @5;         # was @104 (engagegoal2pnw; nothing raises it since nosetcancel2pnw)
     sharpTurnHands @6;               # handsready2pnw: "Keep hands ready: sharp turn" (display only)
+    wheelWeightLeft @7;              # wheelweight2pnw: "Wheel weight detected: left" (display only)
+    wheelWeightRight @8;             # wheelweight2pnw: "Wheel weight detected: right" (display only)
   }
 }
 

@@ -968,6 +968,11 @@ class PnwVehicle:
     # Ford interface always declares steerControlType=angle). Every other car, the Tesla included: False, never shown.
     self.sharp_turn_hands_alert: bool = fp == "FORD_F_150_LIGHTNING_MK1"
 
+    # wheelweight2pnw: the owner keeps an aftermarket weight on this car's wheel (for Tesla FSD hands-on detection); it twists
+    # the column, which moves the learned angle offset and the straight-road torque (drives/2026-10-26/tesla-i5-olympia-grand-mound).
+    # selfdrived detects the side and tells the driver (selfdrive/selfdrived/wheel_weight_pnw.py). Every other car: False.
+    self.wheel_weight_detect: bool = fp == "TESLA_MODEL_S_HW3"
+
     # toggles2pnw: does the capability view know what car this is? False when nothing was ever fingerprinted (CP None), the
     # fingerprint is empty, or it is the MOCK brand. The settings UI uses it to leave EVERY car-gated toggle enabled in
     # that case (the owner must be able to set troubleshooting toggles while parked at home with no last-known car).

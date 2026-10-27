@@ -617,6 +617,25 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .2),
   },
 
+  # wheelweight2pnw: information only. A wheel weight twists the column, which moves the learned angle offset, so curves toward
+  # the weight get less steering (drives/2026-10-26/tesla-i5-olympia-grand-mound). selfdrived raises it once per side per drive,
+  # while steering is active, for WHEEL_WEIGHT_SHOW_S. ET.WARNING only, no sound: no disengage, no state-machine effect.
+  EventNamePnw.wheelWeightLeft: {
+    ET.WARNING: Alert(
+      "Wheel weight detected: left",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2),
+  },
+
+  EventNamePnw.wheelWeightRight: {
+    ET.WARNING: Alert(
+      "Wheel weight detected: right",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2),
+  },
+
   EventName.ldw: {
     ET.PERMANENT: Alert(
       "Lane Departure Detected",

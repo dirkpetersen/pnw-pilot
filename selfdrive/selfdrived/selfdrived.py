@@ -28,6 +28,7 @@ from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event
                                                      MADS_BRAKE_PANDA_GRACE_FRAMES, panda_lateral_view)
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.selfdrived.sharp_turn_pnw import SharpTurnHands, ego_lane_prob, plan_curvature  # handsready2pnw
+from openpilot.selfdrive.selfdrived.wheel_weight_pnw import LEFT, RIGHT, WheelWeight  # wheelweight2pnw
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -55,6 +56,7 @@ STEER_SAT_ESC_DURATION_S = 2.0
 # carcontroller) every this many frames; a status older than STALE_S (carcontroller dead / not Ford) counts as "not angle".
 STEER_SAT_MODE_POLL_FRAMES = 25
 STEER_SAT_MODE_STALE_S = 5.0
+WHEEL_WEIGHT_SHOW_S = 6.0   # wheelweight2pnw: how long the one-time "Wheel weight detected" message shows
 
 
 def steer_sat_verdict(desired_lat: float, actual_lat: float, saturated: bool, floor: float,
@@ -224,6 +226,10 @@ class SelfdriveD:
     self.sharp_turn = None
     self.sharp_turn_err_n = 0
     self.disable_sharp_turn = self.params.get_bool("DisableSharpTurnHandsAlert")
+    # wheelweight2pnw: None = this car does not have the capability, so the detector never runs.
+    self.wheel_weight = None
+    self.wheel_weight_shown: set[str] = set()   # sides already shown to the driver this drive
+    self.wheel_weight_show_until = 0.0
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -236,6 +242,8 @@ class SelfdriveD:
       self.steer_sat_floor = float(veh.steer_sat_demand_floor)  # steersatfloor2pnw
       if veh.sharp_turn_hands_alert:
         self.sharp_turn = SharpTurnHands()
+      if veh.wheel_weight_detect:
+        self.wheel_weight = WheelWeight()
       if self.steer_sat_floor > 1.0 or self.sharp_turn is not None:
         self.latstat_mem = Params("/dev/shm/params")
       if not veh.mads_resume:
@@ -280,6 +288,7 @@ class SelfdriveD:
     except Exception:
       cloudlog.exception("ces_pnw: CESController construction FAILED -> CES inert (stock behavior)")
       self.ces_pnw = CESStub()
+    self.ces_pnw.wheel_weight = self.wheel_weight   # wheelweight2pnw: the ces_events records read its ww* fields
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.state_machine = StateMachine()
@@ -649,6 +658,7 @@ class SelfdriveD:
       # TODO: lac.saturated includes speed and other checks, should be pulled out
       self._steer_sat_step(CS, desired_lateral_accel, actual_lateral_accel, lac)
     self._sharp_turn_step(CS, lac.active, controlstate.curvature)
+    self._wheel_weight_step(CS, lac.active, controlstate.curvature)
 
     # Check for FCW
     stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
@@ -1089,6 +1099,25 @@ class SelfdriveD:
         cloudlog.exception("handsready2pnw: ces_events record raised")
     if self.sharp_turn.active:
       self.events.add(EventNamePnw.sharpTurnHands)
+
+  def _wheel_weight_step(self, CS, lat_active: bool, k_meas: float) -> None:
+    """wheelweight2pnw: detect a steering-wheel weight (wheel_weight_pnw.py). Logs every state change; shows the driver
+    "Wheel weight detected: <side>" once per side per drive, while steering is active. Display only."""
+    if self.wheel_weight is None:
+      return
+    ww, now = self.wheel_weight, time.monotonic()
+    lp = self.sm['liveParameters']
+    v = float(CS.vEgo)
+    lp_valid = self.sm.valid['liveParameters'] and lp.valid and lp.angleOffsetValid
+    if ww.update(now, lp_valid, float(lp.angleOffsetDeg), v, float(k_meas) * v * v, float(CS.steeringTorque),
+                 bool(CS.steeringPressed)):
+      cloudlog.warning("wheelweight2pnw: wheel weight now %s (angleOffsetDeg=%s, straight-road torque median=%s Nm)%s",
+                       ww.side, ww.off, ww.tq, f" -- {ww.why}" if ww.side == "unknown" else "")
+    if ww.side in (LEFT, RIGHT) and lat_active and ww.side not in self.wheel_weight_shown:
+      self.wheel_weight_shown.add(ww.side)
+      self.wheel_weight_show_until = now + WHEEL_WEIGHT_SHOW_S
+    if now < self.wheel_weight_show_until and ww.side in (LEFT, RIGHT):
+      self.events.add(EventNamePnw.wheelWeightLeft if ww.side == LEFT else EventNamePnw.wheelWeightRight)
 
   def _steer_sat_step(self, CS, desired_lat: float, actual_lat: float, lac) -> None:
     """The steerSaturated decision (steersatfloor2pnw). Alert-affecting inputs: floor in force, wheel error, suppression age."""

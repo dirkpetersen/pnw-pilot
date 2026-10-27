@@ -2876,6 +2876,13 @@ def _wb_tele(ctl, now: float) -> dict:
   return out
 
 
+def _ww_tele(ctl) -> dict:
+  """wheelweight2pnw: wwSide/wwOff/wwTq from selfdrived's wheel-weight detector, which selfdrived attaches as
+  `ctl.wheel_weight`. No fields on a car without the capability (None)."""
+  ww = getattr(ctl, "wheel_weight", None)
+  return ww.tele() if ww is not None else {}
+
+
 def _rhold_tele(ctl) -> dict:
   """restorehold2pnw: the two telemetry fields, from ONE builder for both the overlay feed and the ces_events record
   (the CURVELEAD_TELE_KEYS lesson: two hand-written copies drift). icbmRHold = the source holding the restore right
@@ -5676,6 +5683,7 @@ class CESController:
         # dRel/vLead null (not 0.0) when there is no lead -- 0.0 would be indistinguishable from a
         # genuine lead sitting right at the bumper.
         "hasLead": has_lead, "dRel": d_rel, "vLead": v_lead,
+        **_ww_tele(self),   # wheelweight2pnw
       }
       if clock_bad(now_wall):
         rec["clockBad"] = True
@@ -7054,6 +7062,7 @@ class CESController:
       # and the event are now separate, meaningful channels.
       "glSt": self._gl.state,
       "glEv": self._gl_ev_pending,
+      **_ww_tele(self),   # wheelweight2pnw
     }
     self._gl_ev_pending = None   # consumed by exactly one record (adopt or tick, whichever is next)
     # stophold2pnw (D): mark (never drop) records written before the clock is plausibly synced —
