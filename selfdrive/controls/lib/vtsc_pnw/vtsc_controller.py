@@ -290,6 +290,7 @@ class VTSCController:
     self._applied = None
     self._cb_applied = None     # the brain term's own state must not outlive a CES-off / model-loss gap
     self._nc_hold = self._nc_cap = None   # noaccelcurve2pnw: the same for the no-acceleration hold and its release ramp
+    self._ww_applied = None   # wheelweight2pnw stage 2: the same for the wheel-weight term's rate-limited cap
     self._below = 0
     self._clear = 0
 
@@ -451,6 +452,7 @@ class VTSCController:
     self._hold_away = 0
     self._cb_applied = None
     self._nc_hold = self._nc_cap = None   # noaccelcurve2pnw: a hold (or its release ramp) from before the driver drove must not apply after re-engage
+    self._ww_applied = None   # wheelweight2pnw stage 2: the same for the wheel-weight term's rate-limited cap
     # the release-later freeze (_rel_defer_t0 / _rel_defer_capped / _rel_latched) needs no line here: cap() clears it on every cycle whose
     # state is not `release`, and the state is idle from here (test_the_release_freeze_state_is_cleared_too pins the outcome)
 
@@ -660,6 +662,7 @@ class VTSCController:
       model = sm['modelV2']
     except Exception:
       self._cb_applied = None
+      self._ww_applied = None   # wheelweight2pnw stage 2
       return self._finish(v_cruise, v_cruise, v_ego, 0.0, -1.0, float('inf'), now)
 
     # sharpcurve2pnw: keep the driver's SET speed for display; the state machine works against a possibly

@@ -44,6 +44,10 @@ class WheelWeight:
     return {"wwSide": self.side, "wwOff": None if self.off is None else round(self.off, 2),
             "wwTq": None if self.tq is None else round(self.tq, 3)}
 
+  def fail(self, why: str) -> None:
+    """The caller could not feed this frame (its input read raised): "unknown" until a good frame, which update() then reports."""
+    self.side, self.why, self._missing = UNKNOWN, why, True
+
   def update(self, t: float, lp_valid: bool, off: float, v_ego: float, lat_accel: float, torque: float,
              steering_pressed: bool) -> bool:
     """One frame. t = monotonic seconds. Returns True when the caller must log: the state changed, or an input went

@@ -229,6 +229,7 @@ class SelfdriveD:
     # wheelweight2pnw: None = this car does not have the capability, so the detector never runs.
     self.wheel_weight = None
     self.wheel_weight_shown: set[str] = set()   # sides already shown to the driver this drive
+    self.wheel_weight_err = False                 # the step raised on the last frame (logged once per change)
     self.wheel_weight_show_until = 0.0
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
@@ -1106,11 +1107,21 @@ class SelfdriveD:
     if self.wheel_weight is None:
       return
     ww, now = self.wheel_weight, time.monotonic()
-    lp = self.sm['liveParameters']
-    v = float(CS.vEgo)
-    lp_valid = self.sm.valid['liveParameters'] and lp.valid and lp.angleOffsetValid
-    if ww.update(now, lp_valid, float(lp.angleOffsetDeg), v, float(k_meas) * v * v, float(CS.steeringTorque),
-                 bool(CS.steeringPressed)):
+    try:
+      lp = self.sm['liveParameters']
+      v = float(CS.vEgo)
+      lp_valid = self.sm.valid['liveParameters'] and lp.valid and lp.angleOffsetValid
+      changed = ww.update(now, lp_valid, float(lp.angleOffsetDeg), v, float(k_meas) * v * v, float(CS.steeringTorque),
+                          bool(CS.steeringPressed))
+      self.wheel_weight_err = False
+    except Exception as e:
+      # selfdrived is restart_if_crash=False: a display-only detector must never take it down. Loud once per change (Rule 2).
+      if not self.wheel_weight_err:
+        cloudlog.exception(f"wheelweight2pnw: detector step FAILED ({type(e).__name__}) -- wheel weight is UNKNOWN while this lasts")
+      self.wheel_weight_err = True
+      ww.fail(f"step raised {type(e).__name__}")
+      return
+    if changed:
       cloudlog.warning("wheelweight2pnw: wheel weight now %s (angleOffsetDeg=%s, straight-road torque median=%s Nm)%s",
                        ww.side, ww.off, ww.tq, f" -- {ww.why}" if ww.side == "unknown" else "")
     if ww.side in (LEFT, RIGHT) and lat_active and ww.side not in self.wheel_weight_shown:

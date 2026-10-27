@@ -278,3 +278,29 @@ def test_brain_ww_fields_reach_the_ces_tick_record(monkeypatch):
   c._curve_brain = b
   caps = _run_publish(monkeypatch, c, 1, g="drive", v_ego=40.0, t0=1000.0)
   assert caps and (caps[0]["wwPrice"], caps[0]["wwDir"], caps[0]["wwUse"]) == (35.71, "left", True)
+
+
+def test_vtsc_ww_cap_does_not_survive_cruise_off(env):
+  """Gemini 2026-10-27: the term's rate-limited cap must be dropped while the driver drives (cruise off), like the brain's and the
+  no-accel hold's, so a re-engage after the curve does not apply a stale low cap."""
+  env.write_text(json.dumps({"tesla": {"curve_brain": "lower"}}))
+  _CLOCK[0] = 1000.0
+  c = vc.VTSCController(_CP(*TESLA), params=_MapParams())
+  mem = _MapMem(lambda t: {"ts": t, "seq": 1, "mode": "lower", "v": None, "ww": ["left", 4.1]}, _arc(-0.0018))
+  c.mem_params = mem
+  i = 0
+
+  def tick(enabled):
+    nonlocal i
+    _CLOCK[0] = 1000.0 + i / 20.0
+    i += 1
+    sm = _sm()
+    sm["carControl"].enabled = enabled
+    return c.cap(sm, V_SET, V_SET)
+
+  held = [tick(True) for _ in range(200)][-1]
+  assert held < V_SET - 1.0 and c._ww_applied < V_SET - 1.0          # the term is holding a low cap
+  mem.points = _arc(0.0)                                              # the driver drives the curve by hand; the road is straight now
+  for _ in range(20):
+    tick(False)
+  assert tick(True) == pytest.approx(V_SET)                           # re-engage: no stale cap

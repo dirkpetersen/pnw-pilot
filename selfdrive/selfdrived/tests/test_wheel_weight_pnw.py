@@ -268,3 +268,34 @@ def test_the_ces_records_have_no_ww_fields_without_the_capability(monkeypatch):
   assert caps and not any(k in r for r in caps for k in det)
   caps = _run_steer_log_step(monkeypatch)
   assert caps and not any(k in caps[0] for k in det)
+
+
+class _BadCS:
+  vEgo, steeringPressed = 30.0, False
+
+  @property
+  def steeringTorque(self):
+    raise ValueError("bad carState")
+
+
+def test_selfdrived_a_raising_input_does_not_propagate_and_is_logged_once(monkeypatch):
+  """Gemini 2026-10-27: selfdrived is restart_if_crash=False, so the display-only detector must never raise out of its step."""
+  excs, warns = [], []
+  import openpilot.selfdrive.selfdrived.selfdrived as SD
+  monkeypatch.setattr(SD.cloudlog, "exception", lambda msg, *a, **k: excs.append(msg))
+  monkeypatch.setattr(SD.cloudlog, "warning", lambda msg, *a, **k: warns.append(msg % a))
+  with OpenpilotPrefix():
+    sd = tesla()
+    drive(sd, monkeypatch, 30.0)
+    assert sd.wheel_weight.side == "left"
+    clock = {"t": 2000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    for _ in range(300):
+      sd.events = Events()
+      sd._wheel_weight_step(_BadCS(), True, 0.0)   # must not raise
+      clock["t"] += DT
+    assert sd.wheel_weight.side == "unknown" and "ValueError" in sd.wheel_weight.why
+    assert len([m for m in excs if "wheelweight2pnw" in m]) == 1
+    warns.clear()
+    drive(sd, monkeypatch, 15.0, t0=3000.0)           # good input again (old samples are past the 60 s window): recovers, says so
+    assert sd.wheel_weight.side == "left" and any("wheel weight now left" in m for m in warns)
