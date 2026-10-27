@@ -171,9 +171,11 @@ def test_clip_curvature_takes_the_platform(sched, monkeypatch):
 
 
 @pytest.mark.parametrize("mph", [30, 50, 60, 65, 70, 75, 80, 85, 90, 100, 120])
-def test_the_tesla_brain_prices_at_the_steering_ceiling_at_every_speed_with_its_entry(sched, mph):
+def test_the_tesla_brain_prices_at_the_steering_ceiling_below_80_mph_with_its_entry(sched, mph):
+  """curvehi2pnw (owner 2026-10-27): from 80 mph the price is capped at curve.json tesla.curve_lat_a_hi (3.3)."""
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
-  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(CEIL, abs=1e-9)
+  want = CEIL if mph < 80 else pv.TESLA_CURVE_LAT_A_HI_DEFAULT
+  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(want, abs=1e-9)
 
 
 @pytest.mark.parametrize("mph,want", [(60, CEIL), (70, CEIL), (80, 2.7), (90, 2.7)])
@@ -211,7 +213,9 @@ def test_a_valid_per_car_entry_is_flagged_per_car(sched, mph, want):
 @pytest.mark.parametrize("mph", [60, 70, 80, 90])
 def test_the_tesla_margin_is_not_applied_to_the_per_car_entry(sched, mph):
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
-  assert tesla().curve_lat_a(mph * MPH) == pytest.approx(CEIL, abs=1e-9)    # NOT 3.3 at >= 80 mph (3.6 - 0.3)
+  v = tesla()
+  v._tesla_curve_cfg["curve_lat_a_hi"] = CEIL      # curvehi2pnw's 80 mph cap is 3.3 too: turn it up so only the margin could bind here
+  assert v.curve_lat_a(mph * MPH) == pytest.approx(CEIL, abs=1e-9)    # NOT 3.3 at >= 80 mph (3.6 - 0.3)
 
 
 def test_a_per_car_entry_below_the_ceiling_is_used_as_is_without_the_margin(sched):
@@ -252,12 +256,12 @@ def test_the_flat_failsafe_is_never_per_car(sched, state):
 
 
 def test_priced_speed_at_k_0_0020_and_85_mph(sched):
-  """sqrt(A/k) at k 0.0020: with the entry A = 3.5886 -> 94.8 mph; the margin (3.6 - 0.3 = 3.3) would have priced 90.9."""
+  """sqrt(A/k) at k 0.0020: with the entry A = 3.5886 -> 94.8 mph; since curvehi2pnw (owner 2026-10-27) A = 3.3 at 85 mph -> 90.9."""
   import math
   sched(_doc({TESLA: {"breakpoints": TESLA_BP}}))
   a = tesla().curve_lat_a(85 * MPH)
-  assert math.sqrt(a / 0.0020) / MPH == pytest.approx(94.75, abs=0.01)
-  assert math.sqrt(3.3 / 0.0020) / MPH == pytest.approx(90.86, abs=0.01)
+  assert math.sqrt(a / 0.0020) / MPH == pytest.approx(90.86, abs=0.01)
+  assert math.sqrt(CEIL / 0.0020) / MPH == pytest.approx(94.75, abs=0.01)
 
 
 @pytest.mark.parametrize("key", ["TESLA_MODEL_S_HW3 ", "TESLA_MODEL_S", "tesla_model_s_hw3"])

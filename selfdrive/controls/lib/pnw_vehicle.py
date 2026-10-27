@@ -399,6 +399,13 @@ CURVE_LAT_A_DEFAULT = 2.5          # m/s^2: today's VTSC_A_LAT -- the Lightning'
 # (ces_pnw/curve_brain.py). (3) is a limit nothing here can see.
 TESLA_CURVE_LAT_A_DEFAULT = 4.0    # m/s^2 (was 2.8 until 2026-09-28)
 _TESLA_CURVE_LAT_A_BOUNDS = (2.0, 4.5)
+# curvehi2pnw (owner 2026-10-27): engaged at 85-90 mph the Tesla delivers only ~2.2 m/s^2 at the steering-angle clamp, so a curve priced at
+# the 3.59 clamp is not slowed enough at freeway speed. At and above TESLA_CURVE_LAT_A_HI_FROM the price is capped at curve.json
+# tesla.curve_lat_a_hi (default 3.3, bounds [2.0, 3.5886]: never above the clamp). Below it: unchanged. curve_brain.row_speed takes the
+# LOWEST A over the speed now and the speeds the estimate asks for, so a row whose price crosses 80 mph keeps the lower value (no flip-flop).
+TESLA_CURVE_LAT_A_HI_DEFAULT = 3.3   # m/s^2
+_TESLA_CURVE_LAT_A_HI_BOUNDS = (2.0, 3.5886)
+TESLA_CURVE_LAT_A_HI_FROM = 80 * 0.44704   # m/s (80 mph)
 CURVE_LAT_CLIP_MARGIN = 0.3        # m/s^2 the Tesla's target stays below openpilot's own SHARED lateral clip (lat_accel_target);
 #                                    not applied to a valid per-car entry (latmargin2pnw)
 CURVE_BRAIN_MODES = ("off", "shadow", "lower", "raise")   # "raise" includes "lower" (design s5.2)
@@ -513,7 +520,8 @@ def _load_tesla_curve_config() -> dict:
   mode that is not one are each a cloudlog.error naming the path; a value clamped into bounds is a cloudlog.warning.
   `why` says where the values came from ("default", "curve.json", or "INVALID ..." -- CESController logs that as an
   error at start too)."""
-  cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT, "why": "default",
+  cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_lat_a_hi": TESLA_CURVE_LAT_A_HI_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT,
+         "why": "default",
          "release_later": VTSC_RELEASE_LATER_DEFAULT, "notch_vego": VTSC_NOTCH_VEGO_DEFAULT,
          "hold_envelope": VTSC_HOLD_ENVELOPE_DEFAULT, "db_first": VTSC_DB_FIRST_DEFAULT,
          "stop_go": STOP_GO_DEFAULT, "no_accel_curve": VTSC_NO_ACCEL_CURVE_DEFAULT}
@@ -577,6 +585,16 @@ def _load_tesla_curve_config() -> dict:
         cfg["curve_lat_a"] = v
       else:
         bad.append(f"curve_lat_a {raw!r:.24} is not a finite number -> {TESLA_CURVE_LAT_A_DEFAULT}")
+    if "curve_lat_a_hi" in tesla:
+      # curvehi2pnw: same contract as curve_lat_a above (clamped into bounds with a warning; not a finite number -> default, a `bad` key)
+      raw = tesla["curve_lat_a_hi"]
+      if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
+        v = _clamp(float(raw), *_TESLA_CURVE_LAT_A_HI_BOUNDS)
+        if v != raw:
+          clamped.append(f"curve_lat_a_hi={raw}->{v}")
+        cfg["curve_lat_a_hi"] = v
+      else:
+        bad.append(f"curve_lat_a_hi {raw!r:.24} is not a finite number -> {TESLA_CURVE_LAT_A_HI_DEFAULT}")
     if "curve_brain" in tesla:
       mode = _parse_curve_brain_mode(tesla["curve_brain"])
       if mode is None:
@@ -663,7 +681,8 @@ def _load_tesla_curve_config() -> dict:
       cfg["why"] = "curve.json"
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
-    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT, "release_later": False,
+    return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_lat_a_hi": TESLA_CURVE_LAT_A_HI_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT,
+            "release_later": False,
             "notch_vego": False, "hold_envelope": False, "db_first": False, "stop_go": False, "no_accel_curve": False,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
@@ -1240,7 +1259,8 @@ class PnwVehicle:
     lat_accel_target(v) - CURVE_LAT_CLIP_MARGIN (shared 4.0 at 70 mph, 3.0 at >= 80 mph; flat 3.0 without a valid file).
     ALSO capped at the steering ceiling (_tesla_steer_lat_ceiling: the vehicle-model angle clamp's lateral acceleration
     min(3.6 owner, MAX_LATERAL_ACCEL 3.5886), zero margin -- see the comment above it), so the owner's requested 4.0 is
-    clipped to 3.59 while the schedule allows it: with the Tesla's per-car entry that is at EVERY speed (A = 3.5886).
+    clipped to 3.59 while the schedule allows it: with the Tesla's per-car entry that is below 80 mph (A = 3.5886). curvehi2pnw: at and
+    above TESLA_CURVE_LAT_A_HI_FROM (80 mph) it is also capped at tesla.curve_lat_a_hi (default 3.3).
     Without that entry (shared device schedule [[50,5],[60,5],[70,4],[80,3]]) up to ~71 mph, then
     3.5 at 72 mph ... 2.7 from 80 mph; without a schedule file the clip is a flat 2.7.
     Every other car: CURVE_LAT_A_DEFAULT (2.5). On the
@@ -1249,8 +1269,8 @@ class PnwVehicle:
     if not self.curve_brain_vtsc:
       return CURVE_LAT_A_DEFAULT
     clip, per_car = lat_accel_target_source(v_ego, self.curve_override_platform)
-    return min(self._tesla_curve_cfg["curve_lat_a"], clip if per_car else clip - CURVE_LAT_CLIP_MARGIN,
-               _tesla_steer_lat_ceiling())
+    a = min(self._tesla_curve_cfg["curve_lat_a"], clip if per_car else clip - CURVE_LAT_CLIP_MARGIN, _tesla_steer_lat_ceiling())
+    return min(a, self._tesla_curve_cfg["curve_lat_a_hi"]) if v_ego >= TESLA_CURVE_LAT_A_HI_FROM else a
 
   def refresh_curve_brain_cfg(self, now: float | None = None, log_event: bool = True) -> bool:
     """curvebrain2b2pnw: hot-reload curve.json's "tesla" section (the owner's kill switch: {"tesla": {"curve_brain":
@@ -1276,22 +1296,23 @@ class PnwVehicle:
       new = _load_tesla_curve_config()
       if not _tesla_cfg_is_honored(new) and self._tesla_cfg_good:
         cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
-                       f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} " +
+                       f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} lat_a_hi={old['curve_lat_a_hi']} " +
                        f"release_later={old['release_later']} notch_vego={old['notch_vego']} hold_envelope={old['hold_envelope']} " +
                        f"db_first={old['db_first']} stop_go={old['stop_go']} no_accel_curve={old['no_accel_curve']}")
         self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
         return False
       self._tesla_curve_cfg = new
       self._tesla_cfg_good = _tesla_cfg_is_honored(new)
-      changed = ((new["curve_brain"], new["curve_lat_a"], new["release_later"], new["notch_vego"], new["hold_envelope"],
+      changed = ((new["curve_brain"], new["curve_lat_a"], new["curve_lat_a_hi"], new["release_later"], new["notch_vego"], new["hold_envelope"],
                   new["db_first"], new["stop_go"], new["no_accel_curve"])
-                 != (old["curve_brain"], old["curve_lat_a"], old["release_later"], old["notch_vego"], old["hold_envelope"], old["db_first"],
-                     old["stop_go"], old["no_accel_curve"]))
+                 != (old["curve_brain"], old["curve_lat_a"], old["curve_lat_a_hi"], old["release_later"], old["notch_vego"], old["hold_envelope"],
+                     old["db_first"], old["stop_go"], old["no_accel_curve"]))
       # log_event False: the planner's own instance (stopgo2pnw) re-reads the same file as VTSC's in the same process; its errors still log,
       # but the reload EVENT is VTSC's (one per change, not two)
       if log_event:
         cloudlog.event("curve_brain_cfg_reload", mode=new["curve_brain"], lat_a=new["curve_lat_a"], why=new["why"],
                        prev_mode=old["curve_brain"], prev_lat_a=old["curve_lat_a"], changed=changed,
+                       lat_a_hi=new["curve_lat_a_hi"], prev_lat_a_hi=old["curve_lat_a_hi"],
                        release_later=new["release_later"], prev_release_later=old["release_later"],
                        notch_vego=new["notch_vego"], prev_notch_vego=old["notch_vego"],
                        hold_envelope=new["hold_envelope"], prev_hold_envelope=old["hold_envelope"],
