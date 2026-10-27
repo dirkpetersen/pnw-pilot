@@ -31,6 +31,7 @@ def env(monkeypatch, tmp_path):
 SET = 90 * MPH           # 40.2 m/s
 K_DB = 0.00175           # the 20:09 curve DB row: 40.2^2 x 0.00175 = 2.83 m/s^2 > 2.5 -> uncomfortable at the set speed
 K_MAPD = 0.0015          # the 20:09 mapd value: 2.43 m/s^2 < 2.5 -> comfortable on its own
+DT = 0.05
 
 
 def _ctrl(env_path, cfg=None, car=TESLA):
@@ -46,8 +47,19 @@ def _db(c, k=K_DB, d=150.0, v=45.0, mode="lower"):
   c._cb_age, c._cb_problem = 0.0, None
 
 
-def _mapd(c, k, d=150.0, n=3, ahead=True):
-  c._tele_mapk, c._tele_mapk_d, c._tele_mapk_n, c._tele_mapk_ahead = k, d, n, ahead
+def _mapd(c, monkeypatch, k, d=150.0, n=3, ahead=True, far=None):
+  """mapd's path as polyline_curvature measures it: (k, d) is the sharpest point over a horizon that reaches d; `far` = (k, d) of a sharper
+  curve further on, which a longer horizon would return instead (the function gives ONE maximum per horizon)."""
+  c._map_targets = [{"latitude": 0.0, "longitude": 0.0}]       # non-empty; the fake below ignores the geometry
+  asked = []
+
+  def fake(points, lat, lon, horizon, a_lat, bearing=None):
+    asked.append(horizon)
+    if far is not None and horizon >= far[1]:
+      return far[0], far[1], 0.0, n, True
+    return (k, d, 0.0, n, ahead) if horizon >= d else (0.0, 0.0, float("inf"), n, True)
+  monkeypatch.setattr(vc, "polyline_curvature", fake)
+  return asked
 
 
 def _logs(monkeypatch):
@@ -62,27 +74,27 @@ def _logs(monkeypatch):
 def test_a_db_curve_uncomfortable_at_the_set_speed_holds_the_cap_at_vego(env):
   c = _ctrl(env)
   _db(c)
-  assert c._no_accel_curve(SET, 32.0, SET) == pytest.approx(32.0)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0)
   assert c._tele_nc == ("hold", 32.0)
   # the car slows (a lead): the cap stays at the start speed, it may come back to it but not above it
-  assert c._no_accel_curve(SET, 30.0, SET) == pytest.approx(32.0)
+  assert c._no_accel_curve(SET, 30.0, SET, DT) == pytest.approx(32.0)
   # the car is faster than the start speed (downhill): the cap follows the car, it never brakes it
-  assert c._no_accel_curve(SET, 33.0, SET) == pytest.approx(33.0)
+  assert c._no_accel_curve(SET, 33.0, SET, DT) == pytest.approx(33.0)
   # lower-only: a lower cap from VTSC / the brain passes through
-  assert c._no_accel_curve(SET, 33.0, 28.0) == pytest.approx(28.0)
+  assert c._no_accel_curve(SET, 33.0, 28.0, DT) == pytest.approx(28.0)
 
 
-def test_a_mapd_curve_alone_also_holds(env):
+def test_a_mapd_curve_alone_also_holds(env, monkeypatch):
   c = _ctrl(env, {"curve_brain": "off"})
-  _mapd(c, 0.002)
-  assert c._no_accel_curve(SET, 32.0, SET) == pytest.approx(32.0) and c._tele_nc[0] == "hold"
+  _mapd(c, monkeypatch, 0.002)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0) and c._tele_nc[0] == "hold"
 
 
-def test_the_sharpest_of_db_and_mapd_decides(env):
+def test_the_sharpest_of_db_and_mapd_decides(env, monkeypatch):
   c = _ctrl(env)
   _db(c, k=0.0010)                     # comfortable
-  _mapd(c, K_DB)                       # uncomfortable
-  assert c._no_accel_curve(SET, 32.0, SET) == pytest.approx(32.0)
+  _mapd(c, monkeypatch, K_DB)          # uncomfortable
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0)
 
 
 @pytest.mark.parametrize("why, db, mapd", [
@@ -93,42 +105,132 @@ def test_the_sharpest_of_db_and_mapd_decides(env):
   ("mapd point behind the car", None, (K_DB, 50.0, 3, False)),
   ("the DB has no row ahead", "noNeed", None),
 ])
-def test_no_uncomfortable_curve_ahead_changes_nothing(env, why, db, mapd):
+def test_no_uncomfortable_curve_ahead_changes_nothing(env, monkeypatch, why, db, mapd):
   c = _ctrl(env)
   if db == "noNeed":
     c._cb_entry, c._cb_age, c._cb_problem = {"mode": "lower", "v": None}, 0.0, "noNeed"
   elif db:
     _db(c, k=db[0], d=db[1])
   if mapd:
-    _mapd(c, *mapd)
-  assert c._no_accel_curve(SET, 32.0, SET) == SET, why
+    _mapd(c, monkeypatch, *mapd)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET, why
   assert c._tele_nc == ("clear", None), why
 
 
 def test_the_hold_ends_when_the_curve_is_past_and_restarts_fresh(env):
   c = _ctrl(env)
   _db(c)
-  c._no_accel_curve(SET, 32.0, SET)
+  c._no_accel_curve(SET, 32.0, SET, DT)
   _db(c, k=0.0005)                     # past the curve: the next row is mild
-  assert c._no_accel_curve(SET, 33.0, SET) == SET and c._nc_hold is None
+  assert c._no_accel_curve(SET, 33.0, SET, DT) < SET and c._nc_hold is None     # easing up, not a snap (see the ramp test)
   _db(c)
-  assert c._no_accel_curve(SET, 35.0, SET) == pytest.approx(35.0)     # a new hold starts at the speed of then
+  assert c._no_accel_curve(SET, 35.0, SET, DT) == pytest.approx(35.0)     # a new hold starts at the speed of then
+
+
+def test_the_release_eases_up_at_a_relax_from_the_held_cap(env):
+  """Gemini 2026-10-27 (1): VTSC's and the brain's own caps sit at the set speed through the hold, so a plain release snapped the cap
+  32 -> 40 m/s in one tick. The term now eases up at A_RELAX from the held cap, then stops acting."""
+  c = _ctrl(env)
+  _db(c)
+  c._no_accel_curve(SET, 32.0, SET, DT)
+  _db(c, k=0.0005)
+  caps = [c._no_accel_curve(SET, 32.0, SET, DT) for _ in range(400)]
+  steps = [b - a for a, b in zip([32.0] + caps, caps, strict=False)]
+  assert max(steps) <= c.tune["A_RELAX"] * DT + 1e-9
+  assert steps[0] == pytest.approx(c.tune["A_RELAX"] * DT)
+  assert caps[-1] == SET and c._nc_cap is None and c._tele_nc == ("clear", None)
+  assert c._tele_nc[0] == "clear"
+
+
+def test_the_ramp_payload_names_the_easing_cap(env):
+  c = _ctrl(env)
+  _db(c)
+  c._no_accel_curve(SET, 32.0, SET, DT)
+  _db(c, k=0.0005)
+  out = c._no_accel_curve(SET, 32.0, SET, DT)
+  assert c._tele_nc == ("clear", round(out, 2))
+
+
+def test_the_ramp_follows_its_own_held_cap_not_a_lower_cap_from_the_brain(env):
+  """A brain cap of 22 during the hold must not become the ramp's start: when the brain lets go (kill switch), the cap goes back to the
+  hold's own value at once, then eases."""
+  c = _ctrl(env)
+  _db(c)
+  assert c._no_accel_curve(SET, 32.0, 22.0, DT) == 22.0
+  _db(c, k=0.0005)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0 + c.tune["A_RELAX"] * DT)
+
+
+def test_the_ramp_never_asks_for_less_than_the_car_s_speed(env):
+  c = _ctrl(env)
+  _db(c)
+  c._no_accel_curve(SET, 32.0, SET, DT)
+  _db(c, k=0.0005)
+  assert c._no_accel_curve(SET, 36.0, SET, DT) == pytest.approx(36.0)     # the driver pressed the accelerator: no brake to the ramp
+
+
+def test_the_opt_out_switch_stops_the_ramp_at_once(env):
+  c = _ctrl(env)
+  _db(c)
+  c._no_accel_curve(SET, 32.0, SET, DT)
+  c.veh._tesla_curve_cfg["no_accel_curve"] = False
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET and c._nc_cap is None
+
+
+def test_a_lower_cap_from_vtsc_ends_the_ramp(env):
+  c = _ctrl(env)
+  _db(c)
+  c._no_accel_curve(SET, 32.0, SET, DT)
+  _db(c, k=0.0005)
+  assert c._no_accel_curve(SET, 32.0, 30.0, DT) == 30.0 and c._nc_cap is None
+
+
+def test_a_sharper_far_curve_does_not_hide_a_near_one(env, monkeypatch):
+  """Gemini 2026-10-27 (2): the ~500 m mapK maximum (k 0.0025 at 350 m) hid an uncomfortable curve at 120 m (k 0.0020: 3.24 m/s^2 at 90 mph).
+  The feature measures the polyline over its own 200 m window."""
+  c = _ctrl(env, {"curve_brain": "off"})
+  asked = _mapd(c, monkeypatch, 0.0020, d=120.0, far=(0.0025, 350.0))
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0) and c._tele_nc[0] == "hold"
+  assert asked == [C.NO_ACCEL_CURVE_AHEAD_M]
+
+
+def test_a_sharp_curve_beyond_200_m_with_a_mild_near_one_does_not_hold(env, monkeypatch):
+  c = _ctrl(env, {"curve_brain": "off"})
+  _mapd(c, monkeypatch, 0.0010, d=120.0, far=(0.0025, 350.0))
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET and c._tele_nc == ("clear", None)
+
+
+def test_an_unmeasurable_mapd_path_is_missing_input_and_logged(env, monkeypatch):
+  lines = _logs(monkeypatch)
+  c = _ctrl(env, {"curve_brain": "off"})
+  _mapd(c, monkeypatch, 0.0, n=0)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET and c._tele_nc == ("noInput", None)
+  assert any("-> noInput" in m and "mapd triplets in 200.0 m: 0" in m for _, m in lines)
+
+
+def test_a_non_number_speed_is_an_error_and_never_raises(env, monkeypatch):
+  """Gemini 2026-10-27 (3): the state-change log line is outside the try; it must not raise out of cap() on a non-number."""
+  lines = _logs(monkeypatch)
+  c = _ctrl(env)
+  _db(c)
+  assert c._no_accel_curve(None, 32.0, SET, DT) == SET and c._tele_nc == ("err", None)
+  assert any(lvl == "exception" for lvl, _ in lines) and any("-> err" in m for _, m in lines)
 
 
 def test_the_dead_reckoned_distance_of_an_aged_entry_is_used(env):
   c = _ctrl(env)
   _db(c, d=230.0)
   c._cb_age = 1.0                      # 230 - 32 x 1.0 = 198 m now
-  assert c._no_accel_curve(SET, 32.0, SET) == pytest.approx(32.0)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0)
 
 
 # ------------------------------------------------------------------------------------------- inactive: unchanged, and said
 
-def test_the_lightning_is_unchanged_and_publishes_null(env):
+def test_the_lightning_is_unchanged_and_publishes_null(env, monkeypatch):
   c = _ctrl(env, car=LIGHTNING)
   _db(c)
-  _mapd(c, K_DB)
-  assert c._no_accel_curve(SET, 32.0, SET) == SET
+  _mapd(c, monkeypatch, K_DB)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET
   assert c._tele_nc == (None, None) and c.overlay_payload()["ncOn"] is None
 
 
@@ -136,7 +238,7 @@ def test_the_opt_out_switch_turns_it_off(env, monkeypatch):
   lines = _logs(monkeypatch)
   c = _ctrl(env, {"vtsc_no_accel_curve_off": True})
   _db(c)
-  assert c._no_accel_curve(SET, 32.0, SET) == SET and c._tele_nc == ("off", None)
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET and c._tele_nc == ("off", None)
   assert any("no-accel-curve: None -> off" in m for _, m in lines)
 
 
@@ -161,10 +263,10 @@ def test_missing_input_is_inactive_and_logged(env, monkeypatch, why, mode, entry
   lines = _logs(monkeypatch)
   c = _ctrl(env, {"curve_brain": mode})
   _db(c, mode=entry_mode)
-  assert c._no_accel_curve(SET, 32.0, SET) == SET, why
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET, why
   assert c._tele_nc == ("noInput", None), why
   assert [lvl for lvl, m in lines if "no-accel-curve" in m and "-> noInput" in m] == ["info"], why
-  c._no_accel_curve(SET, 32.0, SET)
+  c._no_accel_curve(SET, 32.0, SET, DT)
   assert len([m for _, m in lines if "no-accel-curve" in m]) == 1, why          # change-only: not 20 lines a second
 
 
@@ -172,7 +274,7 @@ def test_a_db_row_without_a_usable_k_is_missing_input(env, monkeypatch):
   lines = _logs(monkeypatch)
   c = _ctrl(env)
   _db(c, k=None)
-  assert c._no_accel_curve(SET, 32.0, SET) == SET and c._tele_nc[0] == "noInput"
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET and c._tele_nc[0] == "noInput"
   assert any("-> noInput" in m for _, m in lines)
 
 
@@ -185,7 +287,7 @@ def test_an_exception_is_inactive_and_logged(env, monkeypatch):
       raise RuntimeError("boom")
   c._cb_entry = Boom()
   c._nc_hold = 30.0
-  assert c._no_accel_curve(SET, 32.0, SET) == SET
+  assert c._no_accel_curve(SET, 32.0, SET, DT) == SET
   assert c._tele_nc == ("err", None) and c._nc_hold is None
   assert any(lvl == "exception" and "no-accel-curve check FAILED" in m for lvl, m in lines)
 
@@ -193,7 +295,7 @@ def test_an_exception_is_inactive_and_logged(env, monkeypatch):
 def test_cruise_off_drops_the_hold(env):
   c = _ctrl(env)
   _db(c)
-  c._no_accel_curve(SET, 32.0, SET)
+  c._no_accel_curve(SET, 32.0, SET, DT)
   c._drop_latched()
   assert c._nc_hold is None
 
@@ -202,38 +304,48 @@ def test_the_telemetry_keys_reach_ces_events(env):
   assert {"ncOn", "ncHold"} <= set(VTSC_TELE_KEYS)
   c = _ctrl(env)
   _db(c)
-  c._no_accel_curve(SET, 32.0, SET)
+  c._no_accel_curve(SET, 32.0, SET, DT)
   pay = json.loads(json.dumps(c.overlay_payload()))
   assert pay["ncOn"] == "hold" and pay["ncHold"] == pytest.approx(32.0)
 
 
 # ------------------------------------------------------------------------------------------- the 20:09 replay, through the real cap()
 
-def _replay_2009(env_path, cfg):
+def _replay_2009(env_path, cfg, secs=8, past_m=None):
   """Closed loop from 20:09:01 (the lead left at 72 mph, set 90): the car follows min(cap, set) at most +1.3 m/s^2 (what it did that night).
   The curve DB row (k 0.00175, priced at 101 mph so the brain itself never binds) starts 190 m ahead and comes closer as the car drives."""
   env_path.write_text(json.dumps({"tesla": dict({"curve_brain": "lower"}, **cfg)}))
   c = vc.VTSCController(_CP(*TESLA), params=_Params())
   pos = [0.0]
-  c.mem_params = _Mem(lambda t: {"ts": t, "seq": 1, "mode": "lower", "v": 101 * MPH, "d": max(190.0 - pos[0], 0.0), "src": "db",
-                                 "ev": "measured", "a": 3.59, "k": K_DB, "row": "4700:0"})
+  c.mem_params = _Mem(lambda t: {"ts": t, "seq": 1, "mode": "lower", "v": None} if past_m is not None and pos[0] > past_m else
+                      {"ts": t, "seq": 1, "mode": "lower", "v": 101 * MPH, "d": max(190.0 - pos[0], 0.0), "src": "db",
+                       "ev": "measured", "a": 3.59, "k": K_DB, "row": "4700:0"})
   v, out = 72 * MPH, []
-  for i in range(8 * 20):
+  for i in range(secs * 20):
     _CLOCK[0] = 1000.0 + i / 20.0
     cap = c.cap(_sm(), SET, v)
     out.append((i / 20.0, v, cap))
     v += max(min(min(cap, SET) - v, 1.3), -1.5) / 20.0
     pos[0] += v / 20.0
-  return out
+  return out, c
 
 
 def test_replay_2009_the_cap_holds_at_72_mph_instead_of_rising(env):
-  run = _replay_2009(env, {})
+  run, _ = _replay_2009(env, {})
   at_0902 = [r for r in run if r[0] == pytest.approx(1.0)][0]
   assert at_0902[2] == pytest.approx(72 * MPH, abs=0.05) and at_0902[1] == pytest.approx(72 * MPH, abs=0.05)
   assert max(r[1] for r in run) < 72.2 * MPH             # 20:09:08 was 88 mph; now it stays at 72
   # today's behavior, for contrast (and the proof the scenario has teeth): with the switch off it accelerates as it did that night
-  off = _replay_2009(env, {"vtsc_no_accel_curve_off": True})
+  off, _ = _replay_2009(env, {"vtsc_no_accel_curve_off": True})
   assert max(r[1] for r in off) > 85 * MPH
   assert all(r[2] >= SET - 0.05 for r in off)            # neither VTSC nor the brain acted on this curve
   assert C.NO_ACCEL_CURVE_AHEAD_M == 200.0
+
+
+def test_replay_2009_after_the_curve_the_cap_eases_up_at_a_relax(env):
+  run, c = _replay_2009(env, {}, secs=20, past_m=340.0)            # the row's extent ends ~150 m past its anchor 190 m ahead
+  caps = [r[2] for r in run]
+  release = next(i for i, r in enumerate(caps) if r > 72 * MPH + 0.01)
+  assert 10.0 < run[release][0] < 11.5                          # 340 m at 72 mph
+  assert max(b - a for a, b in zip(caps, caps[1:], strict=False)) <= c.tune["A_RELAX"] * DT + 1e-6       # never a snap to the set speed
+  assert caps[-1] > caps[release]
