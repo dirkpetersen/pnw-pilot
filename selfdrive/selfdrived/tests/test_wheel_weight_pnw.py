@@ -263,7 +263,8 @@ def test_the_ces_off_steer_record_carries_the_ww_fields(monkeypatch):
 
 
 def test_the_ces_records_have_no_ww_fields_without_the_capability(monkeypatch):
+  det = ("wwSide", "wwOff", "wwTq")   # the detector's own fields (the stage-2 price fields are nulled columns on every car)
   caps = _run_publish(monkeypatch, _publish_controller(monkeypatch), 2, g="drive", v_ego=30.0)
-  assert caps and not any(k.startswith("ww") for r in caps for k in r)
+  assert caps and not any(k in r for r in caps for k in det)
   caps = _run_steer_log_step(monkeypatch)
-  assert caps and not any(k.startswith("ww") for k in caps[0])
+  assert caps and not any(k in caps[0] for k in det)

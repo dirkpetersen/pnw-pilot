@@ -34,12 +34,14 @@ from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import (
   polyline_curvature,
   model_curve_state, brake_cap_for_apex, apply_limits,
   most_binding_map_curve, notch_reference, twisty_section_cap, required_decel,   # sharpcurve2pnw
-  apex_turn_direction)                                          # descentcurve2pnw
+  apex_turn_direction,                                          # descentcurve2pnw
+  ww_map_need)                                                  # wheelweight2pnw stage 2
 from openpilot.selfdrive.controls.lib.ces_pnw import ces_pnw_constants as CES
 from openpilot.selfdrive.controls.lib.ces_pnw.ces_pnw import icbm_passed_points   # vtscpass2pnw: the ONE passed-point geometry
 from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (   # curvebrain2b2pnw; dbfirst2pnw: parse_coverage
-  parse_entry as parse_curve_brain_entry, parse_coverage)
+  parse_entry as parse_curve_brain_entry, parse_coverage, parse_ww)
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle   # curveslow-lightning
+from openpilot.selfdrive.controls.lib.ww_price_pnw import offset_speed, raven_clamp_vm   # wheelweight2pnw stage 2
 
 # twistyr2pnw (Rule 2): a failing twisty-descent cap is logged -- the first failure at once, then at most one line per
 # this many seconds (cap() runs at 20 Hz), each counting the failures since the previous line.
@@ -182,6 +184,18 @@ class VTSCController:
     self._nc_cap = None        # the term's own cap: the held cap, then easing up at A_RELAX after the hold; None = not acting
     self._nc_why = None        # the last state logged (change-only): off / noInput / clear / hold / err
     self._tele_nc = (None, None)   # (ncOn, ncHold) for this tick; (None, None) on a car without the capability
+    # wheelweight2pnw stage 2 (Raven): mapd curves toward a detected wheel weight are priced so the angle they need fits under the
+    # car-side clamp after the offset (ww_price_pnw). The detector (selfdrived) sends (side, offset) in the CurveBrain entry.
+    self._ww_vm = None
+    if self.veh.wheel_weight_detect:
+      try:
+        self._ww_vm = raven_clamp_vm()
+      except Exception:
+        cloudlog.exception("VTSC: wheel-weight vehicle model FAILED to build -- mapd curves are NOT offset-priced this drive")
+    self._cb_ww, self._cb_ww_why = None, "absent"
+    self._ww_applied = None    # the term's own rate-limited cap (m/s); None = not acting
+    self._ww_state = None      # (why, side) last logged, change-only
+    self._tele_ww = (None, None, None)   # (wwMapPrice, wwMapDir, wwMapUse) for this tick
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -623,6 +637,7 @@ class VTSCController:
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
     self._tele_nc = (None, None)            # noaccelcurve2pnw: per tick, like the rest
+    self._tele_ww = (None, None, None)      # wheelweight2pnw stage 2: per tick, like the rest
     # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
     # LastGPSPosition "fix_ts", the clock and timestamp ces_pnw's icbm_project_position uses for icbmGpsAge. Negative
     # (a fix_ts ahead of this clock) is reported as it is. None when the fold uses no position: map curves off or VTSC
@@ -887,6 +902,7 @@ class VTSCController:
     # posted-limit floor below (so the floor still bounds it: T2 never crosses the freeway floor).
     capped = self._apply_brain(now, dt, v_cruise, v_ego, capped)
     capped = self._no_accel_curve(v_cruise_set, v_ego, capped, dt)   # noaccelcurve2pnw: lower-only, before the floor like the brain
+    capped = self._apply_ww(now, dt, v_cruise, v_ego, capped)        # wheelweight2pnw stage 2: lower-only, before the floor like the brain
 
     # SPEED-LIMIT FLOOR (driver rule 2026-07-01): on a HIGHWAY, never trim below the posted limit — only from
     # the set speed DOWN TOWARD the limit. This bounds the downside (worst case = the limit, never the old deep
@@ -953,6 +969,7 @@ class VTSCController:
                        f"term is INACTIVE, VTSC runs exactly as before ({self._cb_ign_n} ignored since the last log)")
         self._cb_ign_t, self._cb_ign_n = now, 0
     self._cb_entry, self._cb_problem, self._cb_age = entry, problem, age
+    self._cb_ww, self._cb_ww_why = parse_ww(raw, now) if getattr(self, "_ww_vm", None) is not None else (None, "off")   # wheelweight2pnw stage 2
     if self.veh.vtsc_db_first:                    # dbfirst2pnw: the same raw read; never raises (a malformed entry is a "bad" verdict)
       self._cb_cov, self._cb_cov_why = parse_coverage(raw, now)
     else:
@@ -1024,6 +1041,48 @@ class VTSCController:
       self._cb_applied = None
       self._note_cb_err(now, ex, "apply")
       return capped
+
+  def _apply_ww(self, now, dt, v_cruise, v_ego, capped) -> float:
+    """wheelweight2pnw stage 2 (Raven): returns `capped`, LOWERED only, while selfdrived detects a wheel weight and a mapd curve ahead
+    bends toward it: the curve is priced at ww_price_pnw.offset_speed and the cap follows VTSC's decel envelope through its own rate
+    limiter, like the brain term. Curves bending away, a straight polyline, and no detection: unchanged. The (side, offset) rides on
+    the CurveBrain entry, so the brain's switch (curve.json tesla.curve_brain) is this term's switch too: it acts only in lower/raise.
+    Every change of state is logged with the reason (Rule 2); an exception is logged and makes the term inactive."""
+    if getattr(self, "_ww_vm", None) is None:     # getattr: permissive test stubs are built without it
+      return capped
+    why, side, out = "none", None, capped
+    try:
+      if self.veh.curve_brain not in ("lower", "raise"):
+        self._cb_ww, self._cb_ww_why = None, "brain:" + str(self.veh.curve_brain)   # the off switch never reads the param (the brain's rule)
+      else:
+        self._read_brain(now)
+      if self._cb_ww is None:
+        why = self._cb_ww_why                      # absent = no weight detected (normal); stale / bad = the entry is unusable
+      else:
+        side, off = self._cb_ww
+        need = ww_map_need(self._map_targets, self._cur_lat, self._cur_lon, self._cur_bearing, C.MAP_SOURCE_HORIZON_M, side,
+                           lambda k: offset_speed(self._ww_vm, k, off), v_ego, self.tune["A_DECEL"])
+        target = float("inf") if need is None else need[2]
+        a_max = min(self.tune["A_DECEL_MAX"], C.REGEN_A_DECEL)
+        prev = v_cruise if self._ww_applied is None else self._ww_applied
+        self._ww_applied = apply_limits(prev, min(target, v_cruise), v_cruise, dt, a_max, self.tune["A_RELAX"])
+        out = min(capped, self._ww_applied)
+        why = "noCurve" if need is None else "curve"
+        if need is not None:
+          self._tele_ww = (round(need[0], 2), side, bool(out < capped - 0.05))
+        if out < capped - 0.05:
+          self._tele_curve_win = "ww"
+    except Exception as ex:
+      why, out = "err", capped
+      if self._ww_state is None or self._ww_state[0] != "err":
+        cloudlog.exception(f"VTSC: wheel-weight curve price FAILED ({type(ex).__name__}) -- the term is OFF while this lasts, VTSC runs as before")
+    if self._cb_ww is None or why == "err":
+      self._ww_applied = None                      # nothing detected (or a failure): the term stops at once, like the brain's kill switch
+    if (why, side) != self._ww_state:
+      (cloudlog.warning if why in ("stale", "bad") else cloudlog.info)(
+        "VTSC wheel-weight price: %s (weight side %s)", why, side)
+      self._ww_state = (why, side)
+    return out
 
   def _no_accel_curve(self, v_set, v_ego, capped, dt) -> float:
     """noaccelcurve2pnw (owner-approved 2026-10-26; drive 2026-10-26 20:09 PT: the lead left and the Raven went 72 -> 88 mph toward set 90 into
@@ -1216,4 +1275,7 @@ class VTSCController:
         # noaccelcurve2pnw: ncOn = the state (off / noInput / clear / hold / err; null on a car without the capability); ncHold = the cap the
         # hold applied (m/s), null when not holding. getattr for the same reason as above.
         "ncOn": getattr(self, "_tele_nc", (None, None))[0], "ncHold": getattr(self, "_tele_nc", (None, None))[1],
+        # wheelweight2pnw stage 2: the binding mapd curve's offset price (m/s), its side, and whether it lowered the cap; null when not
+        # priced. getattr for the same reason as above.
+        **dict(zip(("wwMapPrice", "wwMapDir", "wwMapUse"), getattr(self, "_tele_ww", (None, None, None)), strict=True)),
       }

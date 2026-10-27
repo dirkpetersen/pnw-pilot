@@ -56,6 +56,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, Ov
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VTSC_C
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
+from openpilot.selfdrive.controls.lib.ww_price_pnw import raven_clamp_vm   # wheelweight2pnw stage 2
 from openpilot.selfdrive.controls.lib.wheel_buttons_pnw import WHEEL_ROCKER_PARAM, WheelButtons   # wheelbtnlog2pnw
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
@@ -86,6 +87,8 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "mapRef", "visK", "visD"
                   # BEFORE the brain (m/s); cbCap = the cap the brain term applied (m/s, null = not acting);
                   # cbStaleN / cbBadN = entries ignored since start (cumulative); cbMode = VTSC's own live mode.
                   "cbUse", "cbAge", "cbWould", "cbWouldV", "vtscPre", "cbCap", "cbStaleN", "cbBadN", "cbMode",
+                  # wheelweight2pnw stage 2: the mapd curve's wheel-weight offset price (m/s) / its side / did it lower VTSC's cap
+                  "wwMapPrice", "wwMapDir", "wwMapUse",
                   # vtscfloor2pnw release-later: why the cap is frozen in release instead of climbing this tick ("" = not): falling/switch/fast
                   "vtscRelDefer",
                   # vtschold2pnw: how the apex hold lowered its frozen cap this tick ("" = frozen as before): env / speed
@@ -2883,6 +2886,15 @@ def _ww_tele(ctl) -> dict:
   return ww.tele() if ww is not None else {}
 
 
+def _ww_pricing(ctl):
+  """wheelweight2pnw stage 2: (side, offset deg, VehicleModel) for the curve brain while selfdrived's detector says left or right,
+  else None (no weight, unknown, no detector, or no vehicle model on this car)."""
+  ww, vm = getattr(ctl, "wheel_weight", None), getattr(ctl, "_ww_vm", None)
+  if ww is None or vm is None or ww.side not in ("left", "right") or ww.off is None:
+    return None
+  return ww.side, ww.off, vm
+
+
 def _rhold_tele(ctl) -> dict:
   """restorehold2pnw: the two telemetry fields, from ONE builder for both the overlay feed and the ces_events record
   (the CURVELEAD_TELE_KEYS lesson: two hand-written copies drift). icbmRHold = the source holding the restore right
@@ -4753,6 +4765,13 @@ class CESController:
     # curvebrain2b2pnw: the Tesla's need layer -- loads the SAME curve DB file the Lightning uses (read-only index, own
     # thread) and publishes the CurveBrain mem-param VTSC reads. None on any car without the capability.
     self._curve_brain = CurveBrain(veh) if veh.curve_brain_vtsc else None
+    # wheelweight2pnw stage 2: the car's own vehicle model, for pricing curves toward a detected wheel weight (ww_price_pnw)
+    self._ww_vm = None
+    if veh.wheel_weight_detect:
+      try:
+        self._ww_vm = raven_clamp_vm()
+      except Exception:
+        cloudlog.exception("curve_brain: wheel-weight vehicle model FAILED to build -- curve-DB rows are NOT offset-priced this drive")
     self._cb_last_pub = 0.0
     self._cb_err_t = None
     self._cb_err_n = 0
@@ -5397,7 +5416,7 @@ class CESController:
       prof = VTSC_C.GENTLE_PROFILE if self._gentle else VTSC_C.DEFAULT_PROFILE
       payload = self._curve_brain.step(now, v_ego=sig["v_ego"], points=self._map_targets, plat=plat, plon=plon,
                                        gps_state=gps_state, way_sel=self._way_sel, hwy=self._hwy_class,
-                                       a_decel=prof["A_DECEL"])
+                                       a_decel=prof["A_DECEL"], ww=_ww_pricing(self))
       self.mem_params.put_nonblocking("CurveBrain", payload)
     except Exception as e:
       # Rule 2: throttled, with a count. The consequence is stated: VTSC gets no entry (stale) and runs as before.

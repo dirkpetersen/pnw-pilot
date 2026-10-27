@@ -365,6 +365,49 @@ def polyline_curvature_at(points, cur_lat, cur_lon, horizon_m, at_dist_m, cur_be
     return 0.0, 0.0, 0, 0.0, True
 
 
+def ww_map_need(points, cur_lat, cur_lon, cur_bearing, horizon_m, side, price, v_ego, a_decel):
+  """wheelweight2pnw stage 2: the most binding mapd curve that bends toward `side` ("left"/"right"), priced by `price(k)` (m/s).
+
+  Same triplets and spacing gate as polyline_curvature, but signed: the cross product of the two legs says the bend side
+  (negative = left). Only points ahead of the car count (relative bearing <= 90 deg; with no bearing nothing is ahead, so
+  nothing is priced). Returns (v, d, env) with env = brake_cap_for_apex(v, d, v_ego, a_decel), the lowest env over the
+  matching triplets, or None when none binds. A triplet that is straight has no side and is skipped. Pure; raises on
+  malformed input (the caller logs it)."""
+  if not points or cur_lat is None or cur_lon is None or cur_bearing is None:
+    return None
+  pts = []
+  for p in points[:_K_MAX_POINTS]:
+    try:
+      la, lo = float(p["latitude"]), float(p["longitude"])
+    except (KeyError, TypeError, ValueError):
+      continue
+    if math.isfinite(la) and math.isfinite(lo):
+      d = _haversine_m(cur_lat, cur_lon, la, lo)
+      if d <= horizon_m:
+        pts.append((d, la, lo))
+  best = None
+  for i in range(1, len(pts) - 1):
+    (_, la0, lo0), (db, la1, lo1), (_, la2, lo2) = pts[i - 1], pts[i], pts[i + 1]
+    ab, bc, ca = _haversine_m(la0, lo0, la1, lo1), _haversine_m(la1, lo1, la2, lo2), _haversine_m(la0, lo0, la2, lo2)
+    if not (_K_MIN_LEG_M <= ab <= _K_MAX_LEG_M and _K_MIN_LEG_M <= bc <= _K_MAX_LEG_M) or ab * bc * ca <= 0.0:
+      continue
+    if _rel_bearing_deg(cur_lat, cur_lon, la1, lo1, float(cur_bearing)) > 90.0:
+      continue
+    cosb = math.cos(math.radians(la1))
+    ax, ay = (lo0 - lo1) * 111320.0 * cosb, (la0 - la1) * 111320.0
+    cx, cy = (lo2 - lo1) * 111320.0 * cosb, (la2 - la1) * 111320.0
+    cross = ax * cy - ay * cx
+    if cross == 0.0 or ("left" if cross < 0.0 else "right") != side:
+      continue
+    v = price(2.0 * abs(cross) / (ab * bc * ca))
+    if v is None:
+      continue
+    env = brake_cap_for_apex(v, db, v_ego, a_decel)
+    if best is None or env < best[2]:
+      best = (v, db, env)
+  return best
+
+
 def notch_reference(v_set: float, v_ego: float, enabled: bool = True) -> float:
   """vtscnotch2pnw: the speed the map-curve minimum-slowdown notch (and its gate) is measured from. Today that is the SET speed; the
   2026-09-30 22:32:27 bend showed that is wrong whenever the car is BELOW its set speed (right after a raise, or in traffic): the notch

@@ -72,6 +72,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.curvedb_live import (
 from openpilot.selfdrive.controls.lib.pnw_vehicle import CURVE_OVERRIDE_PLATFORMS, CURVE_OVERRIDE_V1_PLATFORM
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VC
 from openpilot.selfdrive.controls.lib.vtsc_pnw.vtsc_pnw import brake_cap_for_apex
+from openpilot.selfdrive.controls.lib.ww_price_pnw import offset_speed, turn_side
 
 HORIZON_M = VC.MAP_SOURCE_HORIZON_M     # 500 m: mapd's own path horizon; no path data exists beyond it
 PUBLISH_S = 0.25                        # ~4 Hz, the ICBM cadence
@@ -85,7 +86,8 @@ MODES = ("off", "shadow", "lower", "raise")
 # Every key tele() emits -- pinned by the tests: a key added here and not emitted (or vice versa) is a silently-null
 # ces_events column (that happened four times in ces_pnw.py's history).
 TELE_KEYS = ("cbOn", "cbDb", "cbWhy", "cbV", "cbD", "cbSrc", "cbEv", "cbA", "cbK", "cbRow", "cbN", "cbErr", "cbSeq",
-             "cbRows", "cbCfg", "cbOvr", "cbOvrN", "cbCov")
+             "cbRows", "cbCfg", "cbOvr", "cbOvrN", "cbCov",
+             "wwPrice", "wwDir", "wwUse")   # wheelweight2pnw stage 2: the binding row's offset price (m/s), its side, did it set the need
 # dbfirst2pnw: a covered vertex is only RELIABLE when no lowerBound row lies between the car and it, or within this far past it
 COV_LOOKAHEAD_M = 250.0
 COV_MAX_POINTS = 300                    # dbfirst2pnw: path vertices classified per tick (mapd's 500 m path is ~100); the rest stay UNKNOWN
@@ -307,13 +309,27 @@ def _price(veh, k: float, v_ego: float, a_cap: float | None) -> tuple[float | No
   return min(math.sqrt(a / k), V_NEED_MAX), a
 
 
+def row_turn_side(idx, m) -> str | None:
+  """wheelweight2pnw stage 2: which way the row's road bends -- the bearing from the anchor to its branch end point (150 m on)
+  against the anchor's approach bearing. None when the bend is too small to tell, or the row has no branch."""
+  if m.anchor is None or m.branch is None:
+    return None
+  a = idx.anchors[m.anchor]
+  b = a[3][m.branch]
+  return turn_side((cl.initial_bearing_deg(a[0], a[1], b[0], b[1]) - a[2] + 540.0) % 360.0 - 180.0)
+
+
 def most_binding_row(idx, rows, s_ego: float, veh, v_ego: float, a_decel: float, finish_s: float = VC.APEX_FINISH_S,
-                     overrides: Overrides | None = None):
+                     overrides: Overrides | None = None, ww=None):
   """(need dict, n_rows_priced) for the row that needs the LOWEST speed NOW through VTSC's own decel envelope
   (brake_cap_for_apex), or (None, n). d = the distance to 25 m before the anchor (0 once inside the row's extent),
   exactly as the Lightning prices the same rows. `overrides` lowers A per row (or for all rows when it is in fail-safe);
-  the returned need carries `ovr` = the override note that priced it ("failsafe" in fail-safe), else None."""
-  best, best_env, n = None, float("inf"), 0
+  the returned need carries `ovr` = the override note that priced it ("failsafe" in fail-safe), else None.
+
+  wheelweight2pnw stage 2: `ww` = (side, angle offset deg, VehicleModel) while a wheel weight is detected, else None. A row that
+  bends toward `side` is also priced at ww_price_pnw.offset_speed and takes the LOWER speed. A row whose bend side is unknown
+  is not offset-priced; the need counts it in `ww_unknown`. The need carries ww_price / ww_dir / ww_use for its own row."""
+  best, best_env, n, n_unknown = None, float("inf"), 0, 0
   for m in rows:
     a_cap, ovr = None, None
     if overrides is not None:
@@ -326,11 +342,24 @@ def most_binding_row(idx, rows, s_ego: float, veh, v_ego: float, a_decel: float,
       continue
     if ovr is not None and a < a_cap - 1e-9:
       ovr = None                                       # the override did not bind (a lower clip did): do not claim it
+    ww_price = ww_dir = None
+    ww_use = False
+    if ww is not None:
+      ww_dir = row_turn_side(idx, m)
+      if ww_dir is None:
+        n_unknown += 1
+      elif ww_dir == ww[0]:
+        ww_price = offset_speed(ww[2], m.k, ww[1])
+        if ww_price is not None and ww_price < v:
+          v, ww_use = ww_price, True
     n += 1
     d = max(m.s_anchor - idx.back - s_ego, 0.0)
     env = brake_cap_for_apex(v, d, v_ego, a_decel, finish_s)
     if env < best_env:
-      best_env, best = env, {"v": v, "d": d, "a": a, "k": m.k, "row": m.row_id, "ovr": ovr}
+      best_env, best = env, {"v": v, "d": d, "a": a, "k": m.k, "row": m.row_id, "ovr": ovr,
+                             "ww_price": ww_price, "ww_dir": ww_dir, "ww_use": ww_use}
+  if best is not None:
+    best["ww_unknown"] = n_unknown
   return best, n
 
 
@@ -348,6 +377,7 @@ class CurveBrain:
     self._err_t = None
     self._err_n = 0
     self._noflags_logged = False
+    self._ww_unknown_logged = None   # wheelweight2pnw stage 2: the weight side the "bend side unknown" line was last logged for
     self.err = None
     if veh.curve_override_platform is None:              # the brain is Tesla-only; a car without the capability must not build one
       raise ValueError("CurveBrain built for a car without curve_override_platform")
@@ -359,9 +389,10 @@ class CurveBrain:
         self.db.load()
 
   # -- the step ------------------------------------------------------------------------------------
-  def step(self, now, *, v_ego, points, plat, plon, gps_state, way_sel, hwy, a_decel) -> dict:
+  def step(self, now, *, v_ego, points, plat, plon, gps_state, way_sel, hwy, a_decel, ww=None) -> dict:
     """One ~4 Hz tick -> the CurveBrain payload (always a heartbeat: ts / seq / mode; v is None without a need).
-    Never raises."""
+    Never raises. wheelweight2pnw stage 2: `ww` = (side, offset deg, VehicleModel) while a wheel weight is detected, else None;
+    it prices DB rows (most_binding_row) and rides in the payload as "ww": [side, offset] so VTSC prices mapd curves too."""
     try:
       self.veh.refresh_curve_brain_cfg(now)             # the owner's kill switch: cheap, throttled, never raises
     except Exception as e:                              # rule 2: it is documented never to raise; if it does, say so
@@ -371,7 +402,11 @@ class CurveBrain:
     self._seq += 1
     out = {"ts": round(float(now), 3), "seq": self._seq, "mode": mode, "v": None, "d": None, "src": None, "ev": None,
            "a": None, "k": None, "row": None}
-    rec = {"cbWhy": None, "cbN": 0, "cbErr": None, "cbOvr": None, "cbCov": None}
+    rec = {"cbWhy": None, "cbN": 0, "cbErr": None, "cbOvr": None, "cbCov": None, "wwPrice": None, "wwDir": None, "wwUse": None}
+    if ww is not None:
+      out["ww"] = [ww[0], round(float(ww[1]), 2)]
+    else:
+      self._ww_unknown_logged = None
     try:
       # tracked on EVERY tick before any gate, so the last-"current" time stays true while another gate is closed
       ws = self.db.way_sel_held(way_sel, now)[0] if mode != "off" else way_sel
@@ -388,7 +423,14 @@ class CurveBrain:
             rows = rows + extra                  # a covered point's row is always priced, even where the 25 m scan stepped over it
             rec["cbCov"] = _cov_summary(out["cov"])
           need, n = most_binding_row(self.db.index, rows, s_ego, self.veh, float(v_ego), float(a_decel),
-                                     overrides=self.overrides)
+                                     overrides=self.overrides, ww=ww)
+          if need is not None and ww is not None:
+            rec.update(wwPrice=None if need["ww_price"] is None else round(need["ww_price"], 2), wwDir=need["ww_dir"],
+                       wwUse=need["ww_use"])
+            if need["ww_unknown"] and self._ww_unknown_logged != ww[0]:
+              self._ww_unknown_logged = ww[0]   # Rule 2: once per detected side, not per tick
+              cloudlog.warning(f"curve_brain: wheel weight {ww[0]}: {need['ww_unknown']} curve-DB row(s) ahead bend too little to tell " +
+                               "their side -- those rows are NOT offset-priced")
           rec["cbOvr"] = need["ovr"] if need is not None else None
           rec["cbN"] = n
           if need is None:
@@ -401,6 +443,7 @@ class CurveBrain:
     except Exception as e:
       rec["cbWhy"], rec["cbErr"] = "err", type(e).__name__
       out.update(v=None, d=None, src=None, ev=None, a=None, k=None, row=None)
+      rec.update(wwPrice=None, wwDir=None, wwUse=None)
       out.pop("cov", None)                               # an exception never publishes coverage: VTSC keeps its notch
       rec["cbCov"] = None
       self._note_err(now, e, "need layer")
@@ -486,7 +529,8 @@ class CurveBrain:
     if self._last and now - self._last_t <= 2.0 * PUBLISH_S + 0.5:
       L = self._last
       out.update(cbWhy=L["cbWhy"], cbV=L["v"], cbD=L["d"], cbSrc=L["src"], cbEv=L["ev"], cbA=L["a"], cbK=L["k"],
-                 cbRow=L["row"], cbN=L["cbN"], cbSeq=L["seq"], cbOvr=L["cbOvr"], cbCov=L["cbCov"])
+                 cbRow=L["row"], cbN=L["cbN"], cbSeq=L["seq"], cbOvr=L["cbOvr"], cbCov=L["cbCov"],
+                 wwPrice=L["wwPrice"], wwDir=L["wwDir"], wwUse=L["wwUse"])
       if L["cbErr"]:
         out["cbErr"] = L["cbErr"]
     else:
@@ -577,5 +621,32 @@ def parse_coverage(raw, now) -> tuple[dict | None, str]:
         return None, "bad"
       out[(float(la), float(lo))] = int(c)
     return out, "ok"
+  except Exception:   # anything else in an untrusted param is "malformed"
+    return None, "bad"
+
+
+def parse_ww(raw, now) -> tuple[tuple[str, float] | None, str]:
+  """wheelweight2pnw stage 2: VTSC's side of the wheel-weight contract: the CurveBrain param -> ((side, offset deg), "ok"), or
+  (None, why). why: "absent" (nothing published, or no weight detected: the key is absent), "stale" (age outside
+  [-PUBLISH_S, ENTRY_MAX_AGE_S], like parse_entry), "bad" (malformed). Independent of the brain's mode. Pure; never raises."""
+  try:
+    if raw in (None, b"", ""):
+      return None, "absent"
+    if isinstance(raw, (bytes, str)):
+      raw = json.loads(raw)
+    if not isinstance(raw, dict):
+      return None, "bad"
+    if "ww" not in raw:
+      return None, "absent"
+    ts = raw.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+      return None, "bad"
+    if not -PUBLISH_S <= float(now) - float(ts) <= ENTRY_MAX_AGE_S:
+      return None, "stale"
+    ww = raw["ww"]
+    if not (isinstance(ww, list) and len(ww) == 2 and ww[0] in ("left", "right") and isinstance(ww[1], (int, float))
+            and not isinstance(ww[1], bool) and math.isfinite(ww[1])):
+      return None, "bad"
+    return (ww[0], float(ww[1])), "ok"
   except Exception:   # anything else in an untrusted param is "malformed"
     return None, "bad"
