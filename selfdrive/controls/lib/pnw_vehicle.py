@@ -444,6 +444,11 @@ VTSC_DB_FIRST_DEFAULT = True
 # {"tesla": {"stop_go_handoff": false}} in curve.json (hot-reloaded with the rest of the tesla section); same fail-safe as the other switches: a
 # present-but-unreadable file / bad value turns it OFF = today's behaviour (byte-identical planner path).
 STOP_GO_DEFAULT = True
+# noaccelcurve2pnw (owner-approved 2026-10-26, drive 2026-10-26 20:09 PT): on the Raven, VTSC does not let the car ACCELERATE toward the set
+# speed while a curve within vtsc_constants.NO_ACCEL_CURVE_AHEAD_M would be uncomfortable at the set speed (set^2 x k > A_LAT_TARGET); the cap
+# holds the car's speed, lower-only. DEFAULT ON. Opt-out: {"tesla": {"vtsc_no_accel_curve_off": true}} in curve.json (hot-reloaded with the
+# rest of the tesla section); same fail-safe as the other switches: a present-but-unreadable file / bad value turns it OFF = today's behavior.
+VTSC_NO_ACCEL_CURVE_DEFAULT = True
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
 # curvebrain2b2pnw A2..A5: the STEERING ceiling on the lateral acceleration a curve speed may assume. The Tesla's angle is
@@ -511,7 +516,7 @@ def _load_tesla_curve_config() -> dict:
   cfg = {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_DEFAULT, "why": "default",
          "release_later": VTSC_RELEASE_LATER_DEFAULT, "notch_vego": VTSC_NOTCH_VEGO_DEFAULT,
          "hold_envelope": VTSC_HOLD_ENVELOPE_DEFAULT, "db_first": VTSC_DB_FIRST_DEFAULT,
-         "stop_go": STOP_GO_DEFAULT}
+         "stop_go": STOP_GO_DEFAULT, "no_accel_curve": VTSC_NO_ACCEL_CURVE_DEFAULT}
   path = CURVE_CONFIG_PATH
   try:
     st = os.stat(path)
@@ -525,6 +530,7 @@ def _load_tesla_curve_config() -> dict:
       cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
       cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
       cfg["stop_go"] = False       # stopgo2pnw: unreadable file -> e2e stop authoritative (today's)
+      cfg["no_accel_curve"] = False   # noaccelcurve2pnw: unreadable file -> VTSC may accelerate toward a curve (today's)
       return cfg
     with open(path) as f:
       data = json.load(f)
@@ -540,6 +546,7 @@ def _load_tesla_curve_config() -> dict:
     cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
     cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
     cfg["stop_go"] = False       # stopgo2pnw: unreadable file -> e2e stop authoritative (today's)
+    cfg["no_accel_curve"] = False   # noaccelcurve2pnw: unreadable file -> VTSC may accelerate toward a curve (today's)
     return cfg
   # The key parse is guarded like the read above (Fable F1): json.load turns a 309+ digit literal into an int that
   # math.isfinite / float() cannot convert (OverflowError), and a raise here would take down EVERY process that builds
@@ -558,6 +565,7 @@ def _load_tesla_curve_config() -> dict:
       cfg["hold_envelope"] = False   # vtschold2pnw: unreadable file -> frozen hold (today's)
       cfg["db_first"] = False      # dbfirst2pnw: unreadable file -> flat notch (today's)
       cfg["stop_go"] = False       # stopgo2pnw: unreadable file -> e2e stop authoritative (today's)
+      cfg["no_accel_curve"] = False   # noaccelcurve2pnw: unreadable file -> VTSC may accelerate toward a curve (today's)
       return cfg
     bad, clamped = [], []
     if "curve_lat_a" in tesla:
@@ -633,6 +641,17 @@ def _load_tesla_curve_config() -> dict:
       else:
         cfg["stop_go"] = False
         bad.append(f"stop_go_handoff {raw!r:.24} is not true/false -> OFF")
+    if "vtsc_no_accel_curve_off" in tesla:
+      # noaccelcurve2pnw opt-out, same contract as the switches above but inverted: true (1) turns the feature OFF, false (0) keeps it on;
+      # anything else is a `bad` key, the feature goes OFF (today's behavior) and the section is not honored (mid-drive: last good config kept).
+      raw = tesla["vtsc_no_accel_curve_off"]
+      if isinstance(raw, bool):
+        cfg["no_accel_curve"] = not raw
+      elif isinstance(raw, (int, float)) and raw in (0, 1):
+        cfg["no_accel_curve"] = not bool(raw)
+      else:
+        cfg["no_accel_curve"] = False
+        bad.append(f"vtsc_no_accel_curve_off {raw!r:.24} is not true/false -> feature OFF")
     if clamped:
       cloudlog.warning(f"pnw_vehicle: {path}: tesla value(s) clamped into bounds: {', '.join(clamped)}")
     if bad:
@@ -645,7 +664,7 @@ def _load_tesla_curve_config() -> dict:
   except Exception as e:
     cloudlog.error(f"pnw_vehicle: {path} tesla section unparsable ({type(e).__name__}) -- the curve brain uses its defaults")
     return {"curve_lat_a": TESLA_CURVE_LAT_A_DEFAULT, "curve_brain": CURVE_BRAIN_CORRUPT, "release_later": False,
-            "notch_vego": False, "hold_envelope": False, "db_first": False, "stop_go": False,
+            "notch_vego": False, "hold_envelope": False, "db_first": False, "stop_go": False, "no_accel_curve": False,
             "why": f"default (curve.json tesla unparsable: {type(e).__name__})"}
   return cfg
 
@@ -1259,15 +1278,15 @@ class PnwVehicle:
         cloudlog.error(f"pnw_vehicle: curve.json changed but its tesla section was NOT applied ({new['why']}) -- " +
                        f"keeping mode={old['curve_brain']} lat_a={old['curve_lat_a']} " +
                        f"release_later={old['release_later']} notch_vego={old['notch_vego']} hold_envelope={old['hold_envelope']} " +
-                       f"db_first={old['db_first']} stop_go={old['stop_go']}")
+                       f"db_first={old['db_first']} stop_go={old['stop_go']} no_accel_curve={old['no_accel_curve']}")
         self._tesla_curve_cfg = dict(old, why=f"{old['why']} | reload rejected: {new['why']}")
         return False
       self._tesla_curve_cfg = new
       self._tesla_cfg_good = _tesla_cfg_is_honored(new)
       changed = ((new["curve_brain"], new["curve_lat_a"], new["release_later"], new["notch_vego"], new["hold_envelope"],
-                  new["db_first"], new["stop_go"])
+                  new["db_first"], new["stop_go"], new["no_accel_curve"])
                  != (old["curve_brain"], old["curve_lat_a"], old["release_later"], old["notch_vego"], old["hold_envelope"], old["db_first"],
-                     old["stop_go"]))
+                     old["stop_go"], old["no_accel_curve"]))
       # log_event False: the planner's own instance (stopgo2pnw) re-reads the same file as VTSC's in the same process; its errors still log,
       # but the reload EVENT is VTSC's (one per change, not two)
       if log_event:
@@ -1278,6 +1297,7 @@ class PnwVehicle:
                        hold_envelope=new["hold_envelope"], prev_hold_envelope=old["hold_envelope"],
                        db_first=new["db_first"], prev_db_first=old["db_first"],
                        stop_go=new["stop_go"], prev_stop_go=old["stop_go"],
+                       no_accel_curve=new["no_accel_curve"], prev_no_accel_curve=old["no_accel_curve"],
                        file="absent" if sig is None else "present")
       return changed
     except Exception as e:
@@ -1329,6 +1349,13 @@ class PnwVehicle:
     Raven (curve_brain_vtsc) only -- the Lightning has no op-long path through this and is never affected -- and only while curve.json's
     tesla.stop_go_handoff is not switched off. False on every other car."""
     return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["stop_go"])
+
+  @property
+  def vtsc_no_accel_curve(self) -> bool:
+    """noaccelcurve2pnw: may VTSC hold the car's speed (no acceleration toward the set speed) while a curve close ahead would be uncomfortable
+    at the set speed? The Raven (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_no_accel_curve_off is not true; False on every
+    other car, so the Lightning's VTSC is byte-unchanged."""
+    return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["no_accel_curve"])
 
   @property
   def curve_brain_why(self) -> str:

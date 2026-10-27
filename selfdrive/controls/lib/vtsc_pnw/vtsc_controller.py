@@ -99,7 +99,8 @@ class VTSCController:
     self._rel_defer_capped = False
     self._rel_latched = False
     self._tele_rel_defer = ""
-    # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
+    # mapcurv2pnw: curvature MEASURED from the map polyline. Telemetry, and since noaccelcurve2pnw one input of _no_accel_curve
+    # (it can only stop an acceleration, never lower the cap below the car's speed).
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
     self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
@@ -177,6 +178,10 @@ class VTSCController:
     self._cb_cov_why = "absent"  # ... and why there is none: absent / stale / mode / bad / "ok"
     self._dbf_state = None     # dbfirst2pnw: (avail, why, limit known) last logged, so the verdict logs on CHANGE only
     self._tele_cb = self._cb_tele_blank()
+    # noaccelcurve2pnw (Raven): no acceleration toward the set speed while a close curve is uncomfortable at it. See _no_accel_curve.
+    self._nc_hold = None       # the car's speed when the current hold started (m/s); None = not holding
+    self._nc_why = None        # the last state logged (change-only): off / noInput / clear / hold / err
+    self._tele_nc = (None, None)   # (ncOn, ncHold) for this tick; (None, None) on a car without the capability
     # last decision, for the logged vtscState message (read by the planner)
     self.msg = dict(enabled=False, active=False, state="idle", vCruise=0.0, vTarget=0.0,
                     vEgo=0.0, apexDist=-1.0, apexCurvature=0.0, vCurveSafe=0.0, timeToApex=-1.0)
@@ -270,6 +275,7 @@ class VTSCController:
     self._state = "idle"
     self._applied = None
     self._cb_applied = None     # the brain term's own state must not outlive a CES-off / model-loss gap
+    self._nc_hold = None        # noaccelcurve2pnw: the same for the no-acceleration hold
     self._below = 0
     self._clear = 0
 
@@ -430,6 +436,7 @@ class VTSCController:
     self._clear = 0
     self._hold_away = 0
     self._cb_applied = None
+    self._nc_hold = None                # noaccelcurve2pnw: a hold from before the driver drove must not apply after re-engage
     # the release-later freeze (_rel_defer_t0 / _rel_defer_capped / _rel_latched) needs no line here: cap() clears it on every cycle whose
     # state is not `release`, and the state is idle from here (test_the_release_freeze_state_is_cleared_too pins the outcome)
 
@@ -615,12 +622,14 @@ class VTSCController:
     self._tele_hold_env = ""        # vtschold2pnw: per tick, like the rest (set only inside the hold branch)
     self._tele_map_err = ""         # foldlog2pnw: per tick, so a recovered fold stops reporting the failure
     self._tele_cb = self._cb_tele_blank()   # curvebrain2b2pnw: per tick, like the rest
+    self._tele_nc = (None, None)            # noaccelcurve2pnw: per tick, like the rest
     # vtscgpsage2pnw: TELEMETRY ONLY. Age (s) of the GPS fix the map fold uses on this tick: time.monotonic() minus
     # LastGPSPosition "fix_ts", the clock and timestamp ces_pnw's icbm_project_position uses for icbmGpsAge. Negative
     # (a fix_ts ahead of this clock) is reported as it is. None when the fold uses no position: map curves off or VTSC
     # disabled (the held position is not refreshed then), no fix, or no usable fix_ts. Computed before the early returns.
     self._tele_gps_age = (now - self._gps_fix_ts) if (self._map_curves and self._gps_fix_ts is not None) else None
-    # mapcurv2pnw: curvature MEASURED from the map polyline. TELEMETRY ONLY -- feeds nothing.
+    # mapcurv2pnw: curvature MEASURED from the map polyline. Telemetry, and since noaccelcurve2pnw one input of _no_accel_curve
+    # (it can only stop an acceleration, never lower the cap below the car's speed).
     self._tele_mapk = self._tele_mapk_d = 0.0
     self._tele_mapk_v = 0.0
     self._tele_mapk_n = 0           # triplets passing the spacing gate: 0 = UNMEASURABLE, not straight
@@ -654,7 +663,8 @@ class VTSCController:
     self._tele_pitch = pitch
     self._tele_dir = ""
 
-    # mapcurv2pnw (TELEMETRY ONLY, 2026-08-18): measure curvature from the map POLYLINE and record
+    # mapcurv2pnw (TELEMETRY ONLY, 2026-08-18; since noaccelcurve2pnw also an input of _no_accel_curve, which can only stop an
+    # acceleration): measure curvature from the map POLYLINE and record
     # what it WOULD advise, so a drive can be replayed against the three reference cases before any
     # of this is allowed to touch control. mapd's velocity field cannot tell a real 409 m curve from
     # a sweeper the driver takes at 85 mph (both land in the same 24-27 m/s band); the coordinates in
@@ -878,6 +888,7 @@ class VTSCController:
     # curvebrain2b2pnw: the shared curve brain's DB need, LOWER-ONLY, after VTSC's own state machine and before the
     # posted-limit floor below (so the floor still bounds it: T2 never crosses the freeway floor).
     capped = self._apply_brain(now, dt, v_cruise, v_ego, capped)
+    capped = self._no_accel_curve(v_cruise_set, v_ego, capped)   # noaccelcurve2pnw: lower-only, before the floor like the brain
 
     # SPEED-LIMIT FLOOR (driver rule 2026-07-01): on a HIGHWAY, never trim below the posted limit — only from
     # the set speed DOWN TOWARD the limit. This bounds the downside (worst case = the limit, never the old deep
@@ -1016,6 +1027,60 @@ class VTSCController:
       self._note_cb_err(now, ex, "apply")
       return capped
 
+  def _no_accel_curve(self, v_set, v_ego, capped) -> float:
+    """noaccelcurve2pnw (owner-approved 2026-10-26; drive 2026-10-26 20:09 PT: the lead left and the Raven went 72 -> 88 mph toward set 90 into
+    a left curve that VTSC and the brain priced above the set speed). Returns `capped`, LOWERED only, never below the car's own speed:
+    while a curve within NO_ACCEL_CURVE_AHEAD_M is uncomfortable at the SET speed (set^2 x k > A_LAT_TARGET, k = the sharpest of the curve
+    brain's row and mapd's polyline), the cap is held at max(the car's speed when the hold started, the car's speed now). So the car does not
+    accelerate toward the curve; any braking still comes from VTSC / the brain. It releases when no such curve is ahead (past, or comfortable).
+
+    Inputs: the curve brain's fresh entry (only while the brain acts, read by _apply_brain this tick; a heartbeat with no row counts as "looked,
+    nothing ahead") and mapd's measured polyline curvature (mapK, this tick). Neither usable -> inactive ("noInput"). Every state change is a
+    cloudlog event with the reason (Rule 2); an exception is logged and makes the feature inactive. Raven only (PnwVehicle.vtsc_no_accel_curve)."""
+    if not self.veh.curve_brain_vtsc:
+      return capped
+    out, why = capped, "off"
+    try:
+      if self.veh.vtsc_no_accel_curve:
+        ks, seen = [], False
+        e = self._cb_entry
+        if self.veh.curve_brain in ("lower", "raise") and e is not None and e.get("mode") in ("lower", "raise"):
+          k = e.get("k")
+          if e.get("v") is None:
+            seen = True                                    # a live heartbeat: the DB has no row ahead
+          elif isinstance(k, (int, float)) and not isinstance(k, bool) and math.isfinite(k) and k > 0.0:
+            seen = True
+            if e["d"] - v_ego * (self._cb_age or 0.0) <= C.NO_ACCEL_CURVE_AHEAD_M:
+              ks.append(float(k))
+        if self._tele_mapk_n > 0 and math.isfinite(self._tele_mapk):
+          seen = True
+          if self._tele_mapk_ahead and self._tele_mapk_d <= C.NO_ACCEL_CURVE_AHEAD_M:
+            ks.append(float(self._tele_mapk))
+        if not (seen and math.isfinite(v_set) and math.isfinite(v_ego)):
+          why = "noInput"
+        elif ks and v_set * v_set * max(ks) > self.tune['A_LAT_TARGET']:
+          why = "hold"
+          if self._nc_hold is None:
+            self._nc_hold = v_ego
+          out = min(capped, max(self._nc_hold, v_ego))
+        else:
+          why = "clear"
+    except Exception as ex:
+      out, why = capped, "err"
+      if self._nc_why != "err":
+        cloudlog.exception(f"VTSC: no-accel-curve check FAILED ({type(ex).__name__}) -- the feature is OFF while this lasts, VTSC runs as before")
+    if why != "hold":
+      self._nc_hold = None
+    if why != self._nc_why:
+      # info, also for noInput: it is the normal state at start and on every road without curve data (a failure is the exception above)
+      cloudlog.info(
+        "VTSC no-accel-curve: %s -> %s (set %.1f m/s, vEgo %.1f, hold %s; brain mode %s entry %s, mapd triplets %d)", self._nc_why, why,
+        v_set, v_ego, "none" if self._nc_hold is None else f"{self._nc_hold:.1f} m/s", self.veh.curve_brain, self._cb_problem or "ok",
+        self._tele_mapk_n)
+      self._nc_why = why
+    self._tele_nc = (why, None if self._nc_hold is None else round(float(out), 2))
+    return out
+
   def _finish(self, capped, v_cruise, v_ego, k_apex, d_apex, v_curve, now):
     active = capped < v_cruise - 0.5
     vcs = 0.0 if v_curve == float('inf') else float(v_curve)
@@ -1135,4 +1200,7 @@ class VTSCController:
         **{k: getattr(self, "_tele_cb", self._cb_tele_blank()).get(k) for k in ("cbUse", "cbAge", "cbWould", "cbWouldV",
                                                                                    "vtscPre", "cbCap", "cbMode")},
         "cbStaleN": int(getattr(self, "_cb_stale_n", 0)), "cbBadN": int(getattr(self, "_cb_bad_n", 0)),
+        # noaccelcurve2pnw: ncOn = the state (off / noInput / clear / hold / err; null on a car without the capability); ncHold = the cap the
+        # hold applied (m/s), null when not holding. getattr for the same reason as above.
+        "ncOn": getattr(self, "_tele_nc", (None, None))[0], "ncHold": getattr(self, "_tele_nc", (None, None))[1],
       }

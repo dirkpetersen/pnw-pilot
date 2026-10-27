@@ -92,7 +92,9 @@ VTSC_TELE_KEYS = ("mapRaw", "mapEff", "mapD", "mapFlr", "mapRef", "visK", "visD"
                   "vtscHoldEnv",
                   # dbfirst2pnw: which rule decided the map curve (mapSrc db/cap15/mild/notch/osm, "" = none), whether the curve DB covered it
                   # (mapCov 1/0/?) and the posted-limit cap speed in m/s (mapCap15, null = no limit known)
-                  "mapSrc", "mapCov", "mapCap15")
+                  "mapSrc", "mapCov", "mapCap15",
+                  # noaccelcurve2pnw: the no-acceleration-toward-a-curve hold (ncOn = state off/noInput/clear/hold/err, ncHold = its cap m/s)
+                  "ncOn", "ncHold")
 
 CES_EVENT_LOG = "/data/pnw/ces_events.jsonl"
 CES_EVENT_LOG_MAX_BYTES = 20 * 1024 * 1024   # rotate at 20 MB per generation
