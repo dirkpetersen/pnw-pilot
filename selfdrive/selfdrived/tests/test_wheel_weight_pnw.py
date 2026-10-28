@@ -58,11 +58,19 @@ def test_mirror_reads_right():
   assert ww.side == M.RIGHT
 
 
-@pytest.mark.parametrize("off,tq,want", [(4.1, 0.0, M.NONE), (4.1, 0.09, M.NONE), (4.1, -0.09, M.NONE), (0.0, 0.11, M.LEFT),
-                                         (-4.1, 0.16, M.LEFT), (4.1, -0.11, M.RIGHT)])
+@pytest.mark.parametrize("off,tq,want", [(4.1, 0.0, M.NONE), (4.1, 0.09, M.NONE), (4.1, 0.10, M.NONE), (0.0, 0.11, M.LEFT),
+                                         (-4.1, 0.16, M.LEFT), (4.1, -0.15, M.NONE), (4.1, -0.16, M.RIGHT)])
 def test_the_torque_alone_decides(off, tq, want):
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0, off=off, tq=tq)
+  assert ww.side == want
+
+
+@pytest.mark.parametrize("tq,want", [(-0.10, M.NONE), (-0.12, M.NONE), (-0.19, M.RIGHT), (0.16, M.LEFT)])
+def test_asymmetric_thresholds_10_27_no_weight_baseline(tq, want):
+  """10-27 evening, no weight: -0.10 Nm straight-road median. A symmetric 0.10 threshold read that as "right"."""
+  ww = M.WheelWeight()
+  run(ww, 0.0, 20.0, tq=tq)
   assert ww.side == want
 
 
@@ -131,9 +139,11 @@ def test_hysteresis_holds_right_until_well_back():
   ww = M.WheelWeight()
   _, t = run(ww, 0.0, 20.0, tq=-0.19)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.06)
+  _, t = run(ww, t, 120.0, tq=-0.12)    # above the "on" threshold (-0.15), below the "off" one (-0.10)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.04)
+  _, t = run(ww, t, 120.0, tq=-0.09)    # above -(0.15 - 0.05)
+  assert ww.side == M.NONE
+  _, t = run(ww, t, 120.0, tq=-0.12)    # same value from "none" does not decide right
   assert ww.side == M.NONE
 
 

@@ -1,12 +1,13 @@
 """wheelweight2pnw: detect an aftermarket steering-wheel weight and tell the driver.
 
 WHY. drives/2026-10-26/tesla-i5-olympia-grand-mound: the owner keeps a weight on one side of the Tesla's wheel for FSD.
-The straight-road steering torque follows the weight: +0.16 Nm with it on the left (10-26), -0.19 Nm on the right (10-27).
+The straight-road steering torque follows the weight: +0.16 Nm with it on the left (10-26), -0.19 Nm on the right (10-27),
+-0.10 Nm with no weight (10-27 evening, US-34 Corvallis to Albany). The no-weight baseline is not zero, so the thresholds are asymmetric.
 The learned angleOffsetDeg does NOT: it stayed 4.8 to 5.3 deg on 10-27 with the weight on the right, so the offset is not
 part of this decision (it only sets off_side, below). Positive = left.
 
-DECIDES "left" when the median steering torque over the last WINDOW_S of straight-road samples > TQ_ON; "right" when
-< -TQ_ON; else "none". To leave left/right, the median must fall back past TQ_ON - TQ_HYST (no flicker).
+DECIDES "left" when the median steering torque over the last WINDOW_S of straight-road samples > TQ_LEFT_ON; "right" when
+< -TQ_RIGHT_ON; else "none". To leave left/right, the median must fall back past that side's threshold - TQ_HYST (no flicker).
 A straight-road sample: vEgo > V_MIN, |lateral accel| < LAT_MAX, no driver steering press, engaged or not. With fewer than MIN_SAMPLES in the window
 (city driving) the last decision holds. A missing or invalid input makes the state "unknown" (the caller logs every state change with the reason).
 
@@ -22,9 +23,11 @@ from statistics import median
 
 OFF_ON = 3.0          # deg, learned angle offset that sets off_side (curve pricing)
 OFF_HYST = 1.0        # deg back before off_side clears
-# shortcut: TQ_ON is from two drives (weight left +0.16, right -0.19 Nm); a no-weight baseline is NOT known (earlier days -0.09 to
-# -0.21 Nm, weight position not recorded), recalibrate after one drive without the weight.
-TQ_ON = 0.10          # Nm, straight-road torque median to decide a weight
+# shortcut: the thresholds are from three drives: weight left +0.16, weight right -0.19, no weight -0.10 Nm (one 5-minute
+# drive, 10-27). The "right" margin is small: 0.05 Nm from the no-weight value, 0.04 Nm from the weight-right value. Recalibrate
+# after a second no-weight drive.
+TQ_LEFT_ON = 0.10     # Nm, straight-road torque median above which the weight is on the left
+TQ_RIGHT_ON = 0.15    # Nm, straight-road torque median below minus this is a weight on the right (no weight reads -0.10)
 TQ_HYST = 0.05        # Nm back before the decision clears
 WINDOW_S = 60.0       # s of qualifying samples in the torque median
 SAMPLE_S = 0.1        # s between decisions and kept samples (10 Hz, so the median sorts at most 600 values)
@@ -96,13 +99,13 @@ class WheelWeight:
       return False   # too little straight road: the last decision holds
     self.tq = median(tq for _, tq in self._samples)
 
-    if self.side == LEFT and self.tq > TQ_ON - TQ_HYST:
+    if self.side == LEFT and self.tq > TQ_LEFT_ON - TQ_HYST:
       pass
-    elif self.side == RIGHT and self.tq < -(TQ_ON - TQ_HYST):
+    elif self.side == RIGHT and self.tq < -(TQ_RIGHT_ON - TQ_HYST):
       pass
-    elif self.tq > TQ_ON:
+    elif self.tq > TQ_LEFT_ON:
       self.side = LEFT
-    elif self.tq < -TQ_ON:
+    elif self.tq < -TQ_RIGHT_ON:
       self.side = RIGHT
     else:
       self.side = NONE
