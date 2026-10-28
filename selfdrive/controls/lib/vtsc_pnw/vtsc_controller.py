@@ -1091,8 +1091,10 @@ class VTSCController:
     """noaccelcurve2pnw (owner-approved 2026-10-26; drive 2026-10-26 20:09 PT: the lead left and the Raven went 72 -> 88 mph toward set 90 into
     a left curve that VTSC and the brain priced above the set speed). Returns `capped`, LOWERED only, never below the car's own speed:
     while a curve within NO_ACCEL_CURVE_AHEAD_M is uncomfortable at the SET speed (set^2 x k > A_LAT_TARGET, k = the sharpest of the curve
-    brain's row and mapd's polyline within that distance), the cap is held at max(the car's speed when the hold started, the car's speed now).
-    So the car does not accelerate toward the curve; any braking still comes from VTSC / the brain. When no such curve is ahead (past, or
+    brain's row and mapd's polyline within that distance), the cap is max(v_comf, v_hold): v_comf = sqrt(A_LAT_TARGET / k), the curve's own
+    comfortable speed, and v_hold = max(the car's speed when the hold started, the car's speed now). So the car accelerates up to v_comf and
+    no further (drive 2026-10-27 Corvallis: holding at the car's speed kept it at 41 mph in a 55 on bends that allow 53 to 65 mph); this term
+    never brakes, any braking still comes from VTSC / the brain. When no such curve is ahead (past, or
     comfortable) the term's cap eases back up at A_RELAX from the held value (VTSC's own release rate), so the curve exit is not a sudden surge.
 
     Inputs: the curve brain's fresh entry (only while the brain acts, read by _apply_brain this tick; a heartbeat with no row counts as "looked,
@@ -1129,7 +1131,8 @@ class VTSCController:
           why = "hold"
           if self._nc_hold is None:
             self._nc_hold = v_ego
-          self._nc_cap = max(self._nc_hold, v_ego)
+          # the car may accelerate up to the curve's own comfortable speed, and is never asked to go below its own speed
+          self._nc_cap = max(math.sqrt(self.tune['A_LAT_TARGET'] / max(ks)), self._nc_hold, v_ego)
         else:
           why = "clear"
       # the term's OWN cap (never the other terms' lower one: the brain's kill switch must not be eased), never below vEgo

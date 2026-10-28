@@ -62,7 +62,8 @@ REL_DEFER_WINDOW_S = 0.5
 REL_DEFER_FALL_EPS = 0.5    # m/s
 REL_DEFER_MAX_S    = 5.0    # = 2 x HOLD_TTA_S
 # noaccelcurve2pnw (owner 2026-10-26): a curve row (curve DB or mapd polyline) this close ahead that is uncomfortable at the SET speed stops
-# the Raven from accelerating toward the set speed (the cap holds the car's speed). Owner value: 200 m.
+# the Raven from accelerating toward the set speed past the curve's own comfortable speed sqrt(A_LAT_TARGET / k) (never below the car's
+# speed). Owner value: 200 m.
 NO_ACCEL_CURVE_AHEAD_M = 200.0
 CLEAR_CYCLES    = 5     # cycles with no curve before RELEASE -> IDLE (debounce the exit so we don't re-brake
                         #   on the curve we just left)

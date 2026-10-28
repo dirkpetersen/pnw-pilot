@@ -453,8 +453,9 @@ VTSC_DB_FIRST_DEFAULT = True
 STOP_GO_DEFAULT = True
 # noaccelcurve2pnw (owner-approved 2026-10-26, drive 2026-10-26 20:09 PT): on the Raven, VTSC does not let the car ACCELERATE toward the set
 # speed while a curve within vtsc_constants.NO_ACCEL_CURVE_AHEAD_M would be uncomfortable at the set speed (set^2 x k > A_LAT_TARGET); the cap
-# holds the car's speed, lower-only. DEFAULT ON. Opt-out: {"tesla": {"vtsc_no_accel_curve_off": true}} in curve.json (hot-reloaded with the
-# rest of the tesla section); same fail-safe as the other switches: a present-but-unreadable file / bad value turns it OFF = today's behavior.
+# is max(the curve's comfortable speed sqrt(A_LAT_TARGET / k), the car's speed), lower-only. DEFAULT ON.
+# Opt-out: {"tesla": {"vtsc_no_accel_curve_off": true}} in curve.json (hot-reloaded with the rest of the tesla section); same fail-safe
+# as the other switches: a present-but-unreadable file / bad value turns it OFF = today's behavior.
 VTSC_NO_ACCEL_CURVE_DEFAULT = True
 CURVE_CFG_POLL_S = 1.0             # curve.json's tesla section is re-checked (one os.stat) at most this often
 
@@ -1378,9 +1379,9 @@ class PnwVehicle:
 
   @property
   def vtsc_no_accel_curve(self) -> bool:
-    """noaccelcurve2pnw: may VTSC hold the car's speed (no acceleration toward the set speed) while a curve close ahead would be uncomfortable
-    at the set speed? The Raven (curve_brain_vtsc) only, and only while curve.json's tesla.vtsc_no_accel_curve_off is not true; False on every
-    other car, so the Lightning's VTSC is byte-unchanged."""
+    """noaccelcurve2pnw: may VTSC stop the car accelerating past a close curve's comfortable speed (never below the car's speed) while that
+    curve would be uncomfortable at the set speed? The Raven (curve_brain_vtsc) only, and only while curve.json's
+    tesla.vtsc_no_accel_curve_off is not true; False on every other car, so the Lightning's VTSC is byte-unchanged."""
     return bool(self.curve_brain_vtsc and self._tesla_curve_cfg["no_accel_curve"])
 
   @property
