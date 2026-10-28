@@ -1122,8 +1122,8 @@ class SelfdriveD:
       ww.fail(f"step raised {type(e).__name__}")
       return
     if changed:
-      cloudlog.warning("wheelweight2pnw: wheel weight now %s (angleOffsetDeg=%s, straight-road torque median=%s Nm)%s",
-                       ww.side, ww.off, ww.tq, f" -- {ww.why}" if ww.side == "unknown" else "")
+      cloudlog.warning("wheelweight2pnw: wheel weight now %s, angle offset side %s (angleOffsetDeg=%s, straight-road torque median=%s Nm)%s",
+                       ww.side, ww.off_side, ww.off, ww.tq, f" -- {ww.why}" if "unknown" in (ww.side, ww.off_side) else "")
     if ww.side in (LEFT, RIGHT) and lat_active and ww.side not in self.wheel_weight_shown:
       self.wheel_weight_shown.add(ww.side)
       self.wheel_weight_show_until = now + WHEEL_WEIGHT_SHOW_S

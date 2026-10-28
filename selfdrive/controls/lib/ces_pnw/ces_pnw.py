@@ -2880,19 +2880,20 @@ def _wb_tele(ctl, now: float) -> dict:
 
 
 def _ww_tele(ctl) -> dict:
-  """wheelweight2pnw: wwSide/wwOff/wwTq from selfdrived's wheel-weight detector, which selfdrived attaches as
+  """wheelweight2pnw: wwSide/wwOffSide/wwOff/wwTq from selfdrived's wheel-weight detector, which selfdrived attaches as
   `ctl.wheel_weight`. No fields on a car without the capability (None)."""
   ww = getattr(ctl, "wheel_weight", None)
   return ww.tele() if ww is not None else {}
 
 
 def _ww_pricing(ctl):
-  """wheelweight2pnw stage 2: (side, offset deg, VehicleModel) for the curve brain while selfdrived's detector says left or right,
-  else None (no weight, unknown, no detector, or no vehicle model on this car)."""
+  """wheelweight2pnw stage 2: (offset side, offset deg, VehicleModel) for the curve brain while the learned angle offset points left or
+  right (the detector's off_side; the clamp takes the offset whatever its cause, drives/2026-10-27/tesla-us34-corvallis), else None
+  (offset small, unknown, no detector, or no vehicle model on this car)."""
   ww, vm = getattr(ctl, "wheel_weight", None), getattr(ctl, "_ww_vm", None)
-  if ww is None or vm is None or ww.side not in ("left", "right") or ww.off is None:
+  if ww is None or vm is None or ww.off_side not in ("left", "right") or ww.off is None:
     return None
-  return ww.side, ww.off, vm
+  return ww.off_side, ww.off, vm
 
 
 def _rhold_tele(ctl) -> dict:

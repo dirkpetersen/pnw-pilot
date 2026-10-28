@@ -326,7 +326,8 @@ def most_binding_row(idx, rows, s_ego: float, veh, v_ego: float, a_decel: float,
   exactly as the Lightning prices the same rows. `overrides` lowers A per row (or for all rows when it is in fail-safe);
   the returned need carries `ovr` = the override note that priced it ("failsafe" in fail-safe), else None.
 
-  wheelweight2pnw stage 2: `ww` = (side, angle offset deg, VehicleModel) while a wheel weight is detected, else None. A row that
+  wheelweight2pnw stage 2: `ww` = (side, angle offset deg, VehicleModel) while the learned angle offset points left/right (selfdrived's
+  off_side), else None. A row that
   bends toward `side` is also priced at ww_price_pnw.offset_speed and takes the LOWER speed. A row whose bend side is unknown
   is not offset-priced; the need counts it in `ww_unknown`. The need carries ww_price / ww_dir / ww_use for its own row."""
   best, best_env, n, n_unknown = None, float("inf"), 0, 0
@@ -391,7 +392,7 @@ class CurveBrain:
   # -- the step ------------------------------------------------------------------------------------
   def step(self, now, *, v_ego, points, plat, plon, gps_state, way_sel, hwy, a_decel, ww=None) -> dict:
     """One ~4 Hz tick -> the CurveBrain payload (always a heartbeat: ts / seq / mode; v is None without a need).
-    Never raises. wheelweight2pnw stage 2: `ww` = (side, offset deg, VehicleModel) while a wheel weight is detected, else None;
+    Never raises. wheelweight2pnw stage 2: `ww` = (offset side, offset deg, VehicleModel) while the angle offset points left/right, else None;
     it prices DB rows (most_binding_row) and rides in the payload as "ww": [side, offset] so VTSC prices mapd curves too."""
     try:
       self.veh.refresh_curve_brain_cfg(now)             # the owner's kill switch: cheap, throttled, never raises
@@ -429,7 +430,7 @@ class CurveBrain:
                        wwUse=need["ww_use"])
             if need["ww_unknown"] and self._ww_unknown_logged != ww[0]:
               self._ww_unknown_logged = ww[0]   # Rule 2: once per detected side, not per tick
-              cloudlog.warning(f"curve_brain: wheel weight {ww[0]}: {need['ww_unknown']} curve-DB row(s) ahead bend too little to tell " +
+              cloudlog.warning(f"curve_brain: angle offset {ww[0]}: {need['ww_unknown']} curve-DB row(s) ahead bend too little to tell " +
                                "their side -- those rows are NOT offset-priced")
           rec["cbOvr"] = need["ovr"] if need is not None else None
           rec["cbN"] = n

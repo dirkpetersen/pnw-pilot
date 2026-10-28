@@ -11,6 +11,10 @@ TQ_ON - TQ_HYST (no flicker). A straight-road sample: vEgo > V_MIN, |lateral acc
 engaged or not. With fewer than MIN_SAMPLES in the window (city driving) the last decision holds. A missing or invalid
 input makes the state "unknown" (the caller logs every state change with the reason).
 
+OFFSET SIDE (off_side, for curve pricing, ww_price_pnw): "left" when angleOffsetDeg > OFF_ON, "right" when < -OFF_ON, cleared below
+OFF_ON - OFF_HYST, else "none"; "unknown" while liveParameters is invalid. It is the offset alone, whatever its cause: the clamp takes the
+whole offset from the side it points to (drives/2026-10-27/tesla-us34-corvallis: 4.8 to 5.3 deg for 45 min with the weight on the RIGHT).
+
 Pure: no params, no sockets, no clock. selfdrived feeds it and owns the event and the log.
 """
 import math
@@ -33,6 +37,7 @@ UNKNOWN, NONE, LEFT, RIGHT = "unknown", "none", "left", "right"
 class WheelWeight:
   def __init__(self):
     self.side = UNKNOWN
+    self.off_side = UNKNOWN          # the side the learned angle offset points to (curve pricing), see the module docstring
     self.off: float | None = None    # last valid angleOffsetDeg
     self.tq: float | None = None     # median straight-road torque, None until MIN_SAMPLES
     self.why = "no input yet"        # why the state is "unknown" (meaningful only while it is)
@@ -41,27 +46,36 @@ class WheelWeight:
     self._missing: bool | None = None   # last frame had a missing input; None before the first frame
 
   def tele(self) -> dict:
-    return {"wwSide": self.side, "wwOff": None if self.off is None else round(self.off, 2),
+    return {"wwSide": self.side, "wwOffSide": self.off_side, "wwOff": None if self.off is None else round(self.off, 2),
             "wwTq": None if self.tq is None else round(self.tq, 3)}
 
   def fail(self, why: str) -> None:
     """The caller could not feed this frame (its input read raised): "unknown" until a good frame, which update() then reports."""
-    self.side, self.why, self._missing = UNKNOWN, why, True
+    self.side, self.off_side, self.why, self._missing = UNKNOWN, UNKNOWN, why, True
 
   def update(self, t: float, lp_valid: bool, off: float, v_ego: float, lat_accel: float, torque: float,
              steering_pressed: bool) -> bool:
     """One frame. t = monotonic seconds. Returns True when the caller must log: the state changed, or an input went
     missing or came back (so a missing input is logged once, also while the state is already "unknown")."""
-    prev, prev_missing = self.side, self._missing
-    if not lp_valid or not math.isfinite(off):
+    prev, prev_missing, prev_off_side = self.side, self._missing, self.off_side
+    lp_ok = lp_valid and math.isfinite(off)
+    self.off_side = self._offset_side(off) if lp_ok else UNKNOWN
+    if not lp_ok:
       self.why = f"liveParameters not valid (valid={lp_valid}, angleOffsetDeg={off})"
     elif not (math.isfinite(torque) and math.isfinite(lat_accel) and math.isfinite(v_ego)):
       self.why = f"carState not finite (steeringTorque={torque}, latAccel={lat_accel}, vEgo={v_ego})"
     else:
       self._missing = False
-      return self._decide(t, off, v_ego, lat_accel, torque, steering_pressed) or prev_missing is not False
+      return self._decide(t, off, v_ego, lat_accel, torque, steering_pressed) or prev_missing is not False or self.off_side != prev_off_side
     self._missing, self.side = True, UNKNOWN
-    return prev_missing is not True or prev != UNKNOWN
+    return prev_missing is not True or prev != UNKNOWN or self.off_side != prev_off_side
+
+  def _offset_side(self, off: float) -> str:
+    if off > OFF_ON or (self.off_side == LEFT and off > OFF_ON - OFF_HYST):
+      return LEFT
+    if off < -OFF_ON or (self.off_side == RIGHT and off < -(OFF_ON - OFF_HYST)):
+      return RIGHT
+    return NONE
 
   def _decide(self, t: float, off: float, v_ego: float, lat_accel: float, torque: float, steering_pressed: bool) -> bool:
     prev = self.side

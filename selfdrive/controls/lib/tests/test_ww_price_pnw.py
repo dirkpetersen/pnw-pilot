@@ -145,13 +145,31 @@ def test_parse_ww_refuses_what_it_cannot_use(raw, why):
   assert cb.parse_ww(raw, 100.0) == (None, why)
 
 
-def test_ces_controller_hands_the_brain_the_detector_state():
+def test_ces_controller_hands_the_brain_the_offset_side_not_the_weight_side():
   det = WheelWeight()
   ctl = types.SimpleNamespace(wheel_weight=det, _ww_vm=VM)
-  for side, off, want in [("unknown", None, None), ("none", 4.1, None), ("left", 4.1, ("left", 4.1, VM)), ("right", -4.1, ("right", -4.1, VM))]:
-    det.side, det.off = side, off
+  for side, off_side, off, want in [("left", "unknown", None, None), ("left", "none", 2.0, None), ("none", "left", 4.1, ("left", 4.1, VM)),
+                                    ("left", "right", -4.8, ("right", -4.8, VM)), ("unknown", "left", 5.0, ("left", 5.0, VM))]:
+    det.side, det.off_side, det.off = side, off_side, off
     assert m._ww_pricing(ctl) == want
   assert m._ww_pricing(types.SimpleNamespace(wheel_weight=det, _ww_vm=None)) is None   # a car without the capability
+
+
+def _priced_by_offset(off, x):
+  """Feed the real detector the offset alone (no straight-road samples: the weight side stays unknown), price a row bending x."""
+  det = WheelWeight()
+  det.update(0.0, True, off, 0.0, 0.0, 0.0, False)
+  return _need(x, m._ww_pricing(types.SimpleNamespace(wheel_weight=det, _ww_vm=VM)))["v"]
+
+
+def test_pricing_follows_the_offset_10_26_left_curve():
+  assert _priced_by_offset(4.1, -20.0) / MPH == pytest.approx(79.9, abs=0.15)
+
+
+def test_pricing_follows_the_offset_10_27_weight_right_offset_negative():
+  assert _priced_by_offset(-4.8, 20.0) / MPH == pytest.approx(77.2, abs=0.15)       # a right curve with offset -4.8
+  assert _priced_by_offset(-4.8, -20.0) == pytest.approx(V_BASE)                     # a left curve: unchanged
+  assert _priced_by_offset(2.9, -20.0) == pytest.approx(V_BASE)                      # a normal offset: unchanged
 
 
 def test_capability_tesla_only():

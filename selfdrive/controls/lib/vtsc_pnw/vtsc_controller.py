@@ -184,8 +184,8 @@ class VTSCController:
     self._nc_cap = None        # the term's own cap: the held cap, then easing up at A_RELAX after the hold; None = not acting
     self._nc_why = None        # the last state logged (change-only): off / noInput / clear / hold / err
     self._tele_nc = (None, None)   # (ncOn, ncHold) for this tick; (None, None) on a car without the capability
-    # wheelweight2pnw stage 2 (Raven): mapd curves toward a detected wheel weight are priced so the angle they need fits under the
-    # car-side clamp after the offset (ww_price_pnw). The detector (selfdrived) sends (side, offset) in the CurveBrain entry.
+    # wheelweight2pnw stage 2 (Raven): mapd curves toward the side the learned angle offset points to are priced so the angle they need
+    # fits under the car-side clamp after the offset (ww_price_pnw). selfdrived's off_side and the offset ride in the CurveBrain entry.
     self._ww_vm = None
     if self.veh.wheel_weight_detect:
       try:
@@ -1046,11 +1046,11 @@ class VTSCController:
       return capped
 
   def _apply_ww(self, now, dt, v_cruise, v_ego, capped) -> float:
-    """wheelweight2pnw stage 2 (Raven): returns `capped`, LOWERED only, while selfdrived detects a wheel weight and a mapd curve ahead
-    bends toward it: the curve is priced at ww_price_pnw.offset_speed and the cap follows VTSC's decel envelope through its own rate
-    limiter, like the brain term. Curves bending away, a straight polyline, and no detection: unchanged. The (side, offset) rides on
-    the CurveBrain entry, so the brain's switch (curve.json tesla.curve_brain) is this term's switch too: it acts only in lower/raise.
-    Every change of state is logged with the reason (Rule 2); an exception is logged and makes the term inactive."""
+    """wheelweight2pnw stage 2 (Raven): returns `capped`, LOWERED only, while the learned angle offset points left/right (selfdrived's
+    off_side) and a mapd curve ahead bends toward that side: the curve is priced at ww_price_pnw.offset_speed and the cap follows VTSC's
+    decel envelope through its own rate limiter, like the brain term. Curves bending away, a straight polyline, and no detection:
+    unchanged. The (side, offset) rides on the CurveBrain entry, so the brain's switch (curve.json tesla.curve_brain) is this term's switch too:
+    it acts only in lower/raise. Every change of state is logged with the reason (Rule 2); an exception is logged and makes the term inactive."""
     if getattr(self, "_ww_vm", None) is None:     # getattr: permissive test stubs are built without it
       return capped
     why, side, out = "none", None, capped
@@ -1083,7 +1083,7 @@ class VTSCController:
       self._ww_applied = None                      # nothing detected (or a failure): the term stops at once, like the brain's kill switch
     if (why, side) != self._ww_state:
       (cloudlog.warning if why in ("stale", "bad") else cloudlog.info)(
-        "VTSC wheel-weight price: %s (weight side %s)", why, side)
+        "VTSC wheel-weight price: %s (angle offset side %s)", why, side)
       self._ww_state = (why, side)
     return out
 

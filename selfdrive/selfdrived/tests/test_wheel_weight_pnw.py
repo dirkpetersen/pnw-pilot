@@ -42,7 +42,7 @@ def test_todays_numbers_read_left():
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0)
   assert ww.side == M.LEFT
-  assert ww.tele() == {"wwSide": "left", "wwOff": 4.1, "wwTq": 0.16}
+  assert ww.tele() == {"wwSide": "left", "wwOffSide": "left", "wwOff": 4.1, "wwTq": 0.16}
 
 
 def test_earlier_drives_read_none():
@@ -142,6 +142,33 @@ def test_no_flicker_near_the_threshold():
     sides.append(ww.side)
   first_left = sides.index(M.LEFT)
   assert all(s == M.LEFT for s in sides[first_left:])   # once left, the 2.7 deg dips never clear it
+
+
+# ---------------------------------------------------------------------------------------------------------------- offset side (pricing)
+def test_offset_side_follows_the_offset_alone_10_27():
+  """10-27: weight right (torque -0.19 Nm) but the offset stayed +4.8 to +5.3 deg: the clamp loses room on the LEFT."""
+  ww = M.WheelWeight()
+  n, _ = run(ww, 0.0, 0.05, off=5.0, tq=-0.19)
+  assert ww.off_side == M.LEFT and n == 1 and ww.tele()["wwOffSide"] == "left"   # at once, no torque samples needed
+  run(ww, 0.0, 0.05, off=-4.8, tq=0.16)
+  assert ww.off_side == M.RIGHT
+
+
+def test_offset_side_hysteresis():
+  ww = M.WheelWeight()
+  for off, want in [(2.9, M.NONE), (3.1, M.LEFT), (2.1, M.LEFT), (1.9, M.NONE), (2.5, M.NONE), (-3.1, M.RIGHT), (-2.1, M.RIGHT),
+                    (-1.9, M.NONE)]:
+    run(ww, 0.0, 0.05, off=off)
+    assert ww.off_side == want, off
+
+
+def test_offset_side_is_unknown_while_live_parameters_is_invalid_and_reported_once():
+  ww = M.WheelWeight()
+  run(ww, 0.0, 1.0, off=5.0)
+  n, _ = run(ww, 1.0, 5.0, off=5.0, valid=False)
+  assert ww.off_side == M.UNKNOWN and n == 1
+  n, _ = run(ww, 6.0, 0.05, off=5.0, tq=float("nan"))   # carState bad, offset valid: the offset side is still known
+  assert ww.off_side == M.LEFT
 
 
 # ---------------------------------------------------------------------------------------------------------------- capability + event
@@ -253,17 +280,17 @@ def test_the_ces_tick_record_carries_the_ww_fields(monkeypatch):
   c = _publish_controller(monkeypatch)
   c.wheel_weight = _left()
   caps = _run_publish(monkeypatch, c, 2, g="drive", v_ego=30.0)
-  assert caps and all((r["wwSide"], r["wwOff"], r["wwTq"]) == ("left", 4.1, 0.16) for r in caps)
+  assert caps and all((r["wwSide"], r["wwOffSide"], r["wwOff"], r["wwTq"]) == ("left", "left", 4.1, 0.16) for r in caps)
 
 
 def test_the_ces_off_steer_record_carries_the_ww_fields(monkeypatch):
   c = _make_controller(monkeypatch, wheel_weight=_left())
   caps = _run_steer_log_step(monkeypatch, c=c)
-  assert caps and (caps[0]["wwSide"], caps[0]["wwOff"], caps[0]["wwTq"]) == ("left", 4.1, 0.16)
+  assert caps and (caps[0]["wwSide"], caps[0]["wwOffSide"], caps[0]["wwOff"], caps[0]["wwTq"]) == ("left", "left", 4.1, 0.16)
 
 
 def test_the_ces_records_have_no_ww_fields_without_the_capability(monkeypatch):
-  det = ("wwSide", "wwOff", "wwTq")   # the detector's own fields (the stage-2 price fields are nulled columns on every car)
+  det = ("wwSide", "wwOffSide", "wwOff", "wwTq")   # the detector's own fields (the stage-2 price fields are nulled columns on every car)
   caps = _run_publish(monkeypatch, _publish_controller(monkeypatch), 2, g="drive", v_ego=30.0)
   assert caps and not any(k in r for r in caps for k in det)
   caps = _run_steer_log_step(monkeypatch)
