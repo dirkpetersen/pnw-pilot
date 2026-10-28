@@ -139,11 +139,20 @@ def test_hysteresis_holds_right_until_well_back():
   ww = M.WheelWeight()
   _, t = run(ww, 0.0, 20.0, tq=-0.19)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.12)    # above the "on" threshold (-0.15), below the "off" one (-0.10)
+  _, t = run(ww, t, 120.0, tq=-0.13)    # above the "on" threshold (-0.15), below the "off" one (-0.125)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.09)    # above -(0.15 - 0.05)
+  _, t = run(ww, t, 120.0, tq=-0.12)    # above -(0.15 - 0.025)
   assert ww.side == M.NONE
-  _, t = run(ww, t, 120.0, tq=-0.12)    # same value from "none" does not decide right
+  _, t = run(ww, t, 120.0, tq=-0.13)    # same value from "none" does not decide right
+  assert ww.side == M.NONE
+
+
+def test_right_clears_at_the_no_weight_baseline():
+  """The weight comes off after "right": the no-weight median (-0.10 Nm, 10-27) must clear it, not hold it."""
+  ww = M.WheelWeight()
+  _, t = run(ww, 0.0, 20.0, tq=-0.19)
+  assert ww.side == M.RIGHT
+  run(ww, t, 120.0, tq=-0.10)
   assert ww.side == M.NONE
 
 
