@@ -145,13 +145,46 @@ def test_parse_ww_refuses_what_it_cannot_use(raw, why):
   assert cb.parse_ww(raw, 100.0) == (None, why)
 
 
-def test_ces_controller_hands_the_brain_the_detector_state():
+def test_ces_controller_prices_toward_the_learned_offset_not_the_weight_decision(monkeypatch):
+  """2026-10-27 (drives/2026-10-27/tesla-us34-corvallis): the offset was 4.8-5.3 deg with the weight on the RIGHT, so the pricing follows
+  the offset's sign, whatever the weight decision says."""
+  monkeypatch.setattr(m.cloudlog, "warning", lambda *a, **k: None)
   det = WheelWeight()
   ctl = types.SimpleNamespace(wheel_weight=det, _ww_vm=VM)
-  for side, off, want in [("unknown", None, None), ("none", 4.1, None), ("left", 4.1, ("left", 4.1, VM)), ("right", -4.1, ("right", -4.1, VM))]:
+  for side, off, want in [("none", 4.8, ("left", 4.8, VM)), ("right", 4.8, ("left", 4.8, VM)), ("unknown", -4.1, ("right", -4.1, VM)),
+                          ("left", 0.5, None), ("left", -0.99, None), ("none", 1.0, ("left", 1.0, VM))]:
     det.side, det.off = side, off
-    assert m._ww_pricing(ctl) == want
+    assert m._ww_pricing(ctl) == want, (side, off)
   assert m._ww_pricing(types.SimpleNamespace(wheel_weight=det, _ww_vm=None)) is None   # a car without the capability
+  assert m._ww_pricing(types.SimpleNamespace(wheel_weight=None, _ww_vm=VM)) is None    # no detector (not a Tesla)
+
+
+def test_offset_4_8_prices_a_left_curve_and_leaves_a_right_curve():
+  det = WheelWeight()
+  det.off = 4.8
+  ww = m._ww_pricing(types.SimpleNamespace(wheel_weight=det, _ww_vm=VM))
+  need = _need(-20.0, ww)
+  assert need["ww_use"] is True and need["v"] / MPH == pytest.approx(77.2, abs=0.15)     # the method's number, with the 0.1 margin
+  assert _need(20.0, ww)["v"] == pytest.approx(V_BASE)
+
+
+def test_an_invalid_offset_is_not_priced_and_logged_once_per_change(monkeypatch):
+  lines = []
+  monkeypatch.setattr(m.cloudlog, "warning", lambda msg, *a, **k: lines.append(msg))
+  det = WheelWeight()
+  ctl = types.SimpleNamespace(wheel_weight=det, _ww_vm=VM)
+  det.update(1.0, False, 4.8, 30.0, 0.0, -0.19, False)                 # liveParameters not valid
+  assert det.off is None
+  assert m._ww_pricing(ctl) is None and m._ww_pricing(ctl) is None
+  assert len(lines) == 1 and "NOT offset-priced" in lines[0] and "liveParameters not valid" in lines[0]
+  det.update(1.1, True, 4.8, 30.0, 0.0, -0.19, False)
+  assert m._ww_pricing(ctl) == ("left", 4.8, VM)
+  det.update(1.2, True, float("nan"), 30.0, 0.0, -0.19, False)
+  assert m._ww_pricing(ctl) is None and len(lines) == 2                # a new invalid stretch is logged again
+  det.update(1.3, True, 4.8, 30.0, 0.0, -0.19, False)
+  assert m._ww_pricing(ctl) == ("left", 4.8, VM)
+  det.fail("step raised RuntimeError")
+  assert m._ww_pricing(ctl) is None and len(lines) == 3 and "step raised" in lines[2]
 
 
 def test_capability_tesla_only():

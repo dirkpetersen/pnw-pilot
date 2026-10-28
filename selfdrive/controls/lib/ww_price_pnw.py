@@ -20,6 +20,9 @@ from opendbc.car.tesla.values import CarControllerParams as RAVEN_LIMITS  # the 
 from opendbc.car.vehicle_model import VehicleModel
 
 MARGIN_LAT_A = 0.1   # m/s^2 of the clamp kept free (owner 2026-10-26)
+# 2026-10-27 (drives/2026-10-27/tesla-us34-corvallis): the pricing follows the learned angleOffsetDeg itself, whatever its cause
+# (4.8-5.3 deg with the weight on the RIGHT), toward sign(offset), positive = left. Below this the effect is under about 1 mph.
+OFF_PRICE_MIN = 1.0  # deg
 V_LO = 10.0          # m/s, bisection bounds
 V_HI = 60.0
 TURN_MIN_DEG = 1.0   # a heading change smaller than this has no known direction

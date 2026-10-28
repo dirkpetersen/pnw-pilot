@@ -33,7 +33,7 @@ UNKNOWN, NONE, LEFT, RIGHT = "unknown", "none", "left", "right"
 class WheelWeight:
   def __init__(self):
     self.side = UNKNOWN
-    self.off: float | None = None    # last valid angleOffsetDeg
+    self.off: float | None = None    # angleOffsetDeg of the last frame; None when that frame had no valid offset (the curve pricing reads it)
     self.tq: float | None = None     # median straight-road torque, None until MIN_SAMPLES
     self.why = "no input yet"        # why the state is "unknown" (meaningful only while it is)
     self._samples: deque[tuple[float, float]] = deque()
@@ -46,14 +46,15 @@ class WheelWeight:
 
   def fail(self, why: str) -> None:
     """The caller could not feed this frame (its input read raised): "unknown" until a good frame, which update() then reports."""
-    self.side, self.why, self._missing = UNKNOWN, why, True
+    self.side, self.why, self._missing, self.off = UNKNOWN, why, True, None
 
   def update(self, t: float, lp_valid: bool, off: float, v_ego: float, lat_accel: float, torque: float,
              steering_pressed: bool) -> bool:
     """One frame. t = monotonic seconds. Returns True when the caller must log: the state changed, or an input went
     missing or came back (so a missing input is logged once, also while the state is already "unknown")."""
     prev, prev_missing = self.side, self._missing
-    if not lp_valid or not math.isfinite(off):
+    self.off = off if lp_valid and math.isfinite(off) else None
+    if self.off is None:
       self.why = f"liveParameters not valid (valid={lp_valid}, angleOffsetDeg={off})"
     elif not (math.isfinite(torque) and math.isfinite(lat_accel) and math.isfinite(v_ego)):
       self.why = f"carState not finite (steeringTorque={torque}, latAccel={lat_accel}, vEgo={v_ego})"
@@ -65,7 +66,6 @@ class WheelWeight:
 
   def _decide(self, t: float, off: float, v_ego: float, lat_accel: float, torque: float, steering_pressed: bool) -> bool:
     prev = self.side
-    self.off = off
 
     if t - self._sample_t < SAMPLE_S - 0.005:   # half a 100 Hz frame of slack, so float time does not skip to 11 frames
       return False   # decide at 10 Hz: the median sorts up to 600 values

@@ -1046,8 +1046,8 @@ class VTSCController:
       return capped
 
   def _apply_ww(self, now, dt, v_cruise, v_ego, capped) -> float:
-    """wheelweight2pnw stage 2 (Raven): returns `capped`, LOWERED only, while selfdrived detects a wheel weight and a mapd curve ahead
-    bends toward it: the curve is priced at ww_price_pnw.offset_speed and the cap follows VTSC's decel envelope through its own rate
+    """wheelweight2pnw stage 2 (Raven): returns `capped`, LOWERED only, while the learned angle offset is priced (ces_pnw._ww_pricing:
+    valid, |offset| >= OFF_PRICE_MIN, side = its sign) and a mapd curve ahead bends toward that side: the curve is priced at ww_price_pnw.offset_speed and the cap follows VTSC's decel envelope through its own rate
     limiter, like the brain term. Curves bending away, a straight polyline, and no detection: unchanged. The (side, offset) rides on
     the CurveBrain entry, so the brain's switch (curve.json tesla.curve_brain) is this term's switch too: it acts only in lower/raise.
     Every change of state is logged with the reason (Rule 2); an exception is logged and makes the term inactive."""

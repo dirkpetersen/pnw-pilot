@@ -56,7 +56,7 @@ from openpilot.selfdrive.controls.lib.ces_pnw.curve_brain import (CurveBrain, Ov
 from openpilot.selfdrive.controls.lib.vtsc_pnw import vtsc_constants as VTSC_C
 from openpilot.selfdrive.controls.lib import pnw_vehicle as pnw_vehicle_module
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle
-from openpilot.selfdrive.controls.lib.ww_price_pnw import raven_clamp_vm   # wheelweight2pnw stage 2
+from openpilot.selfdrive.controls.lib.ww_price_pnw import OFF_PRICE_MIN, raven_clamp_vm   # wheelweight2pnw stage 2
 from openpilot.selfdrive.controls.lib.wheel_buttons_pnw import WHEEL_ROCKER_PARAM, WheelButtons   # wheelbtnlog2pnw
 # curveslow-lightning: ICBM's vision apex uses the SAME lateral-accel target as the VTSC vision path
 # (v_safe = v_ego*sqrt(A_LAT/|lat|)) so the two subsystems agree on what a camera-seen curve "means".
@@ -2887,12 +2887,22 @@ def _ww_tele(ctl) -> dict:
 
 
 def _ww_pricing(ctl):
-  """wheelweight2pnw stage 2: (side, offset deg, VehicleModel) for the curve brain while selfdrived's detector says left or right,
-  else None (no weight, unknown, no detector, or no vehicle model on this car)."""
+  """wheelweight2pnw stage 2: (side, offset deg, VehicleModel) for the curve brain while the learned angleOffsetDeg is valid and
+  |offset| >= OFF_PRICE_MIN; side = its sign (positive = left). The offset removes clamp angle on that side, whatever its cause
+  (2026-10-27: 4.8-5.3 deg with the weight on the right), so the weight decision is not used. None: no detector or no vehicle
+  model on this car, offset too small, or no valid offset (logged once per change, Rule 2)."""
   ww, vm = getattr(ctl, "wheel_weight", None), getattr(ctl, "_ww_vm", None)
-  if ww is None or vm is None or ww.side not in ("left", "right") or ww.off is None:
+  if ww is None or vm is None:
     return None
-  return ww.side, ww.off, vm
+  if ww.off is None:
+    if not getattr(ctl, "_ww_nooff_logged", False):
+      ctl._ww_nooff_logged = True
+      cloudlog.warning(f"curve_brain: no valid learned angle offset ({ww.why}) -- curves are NOT offset-priced while this lasts")
+    return None
+  ctl._ww_nooff_logged = False
+  if abs(ww.off) < OFF_PRICE_MIN:
+    return None
+  return ("left" if ww.off > 0.0 else "right"), ww.off, vm
 
 
 def _rhold_tele(ctl) -> dict:
@@ -4765,8 +4775,9 @@ class CESController:
     # curvebrain2b2pnw: the Tesla's need layer -- loads the SAME curve DB file the Lightning uses (read-only index, own
     # thread) and publishes the CurveBrain mem-param VTSC reads. None on any car without the capability.
     self._curve_brain = CurveBrain(veh) if veh.curve_brain_vtsc else None
-    # wheelweight2pnw stage 2: the car's own vehicle model, for pricing curves toward a detected wheel weight (ww_price_pnw)
+    # wheelweight2pnw stage 2: the car's own vehicle model, for pricing curves toward the learned angle offset (ww_price_pnw)
     self._ww_vm = None
+    self._ww_nooff_logged = False   # the "no valid offset" line was logged (once per change, _ww_pricing)
     if veh.wheel_weight_detect:
       try:
         self._ww_vm = raven_clamp_vm()

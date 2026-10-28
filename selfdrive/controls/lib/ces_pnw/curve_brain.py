@@ -326,7 +326,8 @@ def most_binding_row(idx, rows, s_ego: float, veh, v_ego: float, a_decel: float,
   exactly as the Lightning prices the same rows. `overrides` lowers A per row (or for all rows when it is in fail-safe);
   the returned need carries `ovr` = the override note that priced it ("failsafe" in fail-safe), else None.
 
-  wheelweight2pnw stage 2: `ww` = (side, angle offset deg, VehicleModel) while a wheel weight is detected, else None. A row that
+  wheelweight2pnw stage 2: `ww` = (side, angle offset deg, VehicleModel) while the learned offset is valid and at least
+  ww_price_pnw.OFF_PRICE_MIN (side = its sign), else None. A row that
   bends toward `side` is also priced at ww_price_pnw.offset_speed and takes the LOWER speed. A row whose bend side is unknown
   is not offset-priced; the need counts it in `ww_unknown`. The need carries ww_price / ww_dir / ww_use for its own row."""
   best, best_env, n, n_unknown = None, float("inf"), 0, 0
@@ -391,7 +392,7 @@ class CurveBrain:
   # -- the step ------------------------------------------------------------------------------------
   def step(self, now, *, v_ego, points, plat, plon, gps_state, way_sel, hwy, a_decel, ww=None) -> dict:
     """One ~4 Hz tick -> the CurveBrain payload (always a heartbeat: ts / seq / mode; v is None without a need).
-    Never raises. wheelweight2pnw stage 2: `ww` = (side, offset deg, VehicleModel) while a wheel weight is detected, else None;
+    Never raises. wheelweight2pnw stage 2: `ww` = (side, offset deg, VehicleModel) while the learned offset is priced, else None;
     it prices DB rows (most_binding_row) and rides in the payload as "ww": [side, offset] so VTSC prices mapd curves too."""
     try:
       self.veh.refresh_curve_brain_cfg(now)             # the owner's kill switch: cheap, throttled, never raises
@@ -627,7 +628,7 @@ def parse_coverage(raw, now) -> tuple[dict | None, str]:
 
 def parse_ww(raw, now) -> tuple[tuple[str, float] | None, str]:
   """wheelweight2pnw stage 2: VTSC's side of the wheel-weight contract: the CurveBrain param -> ((side, offset deg), "ok"), or
-  (None, why). why: "absent" (nothing published, or no weight detected: the key is absent), "stale" (age outside
+  (None, why). why: "absent" (nothing published, or the offset is not priced: the key is absent), "stale" (age outside
   [-PUBLISH_S, ENTRY_MAX_AGE_S], like parse_entry), "bad" (malformed). Independent of the brain's mode. Pure; never raises."""
   try:
     if raw in (None, b"", ""):
