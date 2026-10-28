@@ -2897,7 +2897,7 @@ def _ww_pricing(ctl):
   if ww.off is None:
     if not getattr(ctl, "_ww_nooff_logged", False):
       ctl._ww_nooff_logged = True
-      cloudlog.warning(f"curve_brain: no valid learned angle offset ({ww.why}) -- curves are NOT offset-priced while this lasts")
+      cloudlog.warning(f"curve_brain: no valid learned angle offset ({ww.off_why}) -- curves are NOT offset-priced while this lasts")
     return None
   ctl._ww_nooff_logged = False
   if abs(ww.off) < OFF_PRICE_MIN:

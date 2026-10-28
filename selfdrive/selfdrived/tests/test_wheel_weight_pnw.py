@@ -1,6 +1,7 @@
 """wheelweight2pnw: steering-wheel weight detector (selfdrive/selfdrived/wheel_weight_pnw.py + SelfdriveD._wheel_weight_step).
 Evidence: drives/2026-10-26/tesla-i5-olympia-grand-mound (offset 4.1 deg, straight-road torque +0.16 Nm with the weight on the
-left; earlier drives offset about 2.3 deg, torque about -0.2 Nm)."""
+left; earlier drives offset about 2.3 deg, torque about -0.2 Nm). 2026-10-27 (drives/2026-10-27/tesla-us34-corvallis): weight on the
+RIGHT, torque -0.19 Nm, offset 4.8-5.3 deg -- the decision now uses the torque median only (provisional thresholds)."""
 import time
 from types import SimpleNamespace
 
@@ -45,26 +46,34 @@ def test_todays_numbers_read_left():
   assert ww.tele() == {"wwSide": "left", "wwOff": 4.1, "wwTq": 0.16}
 
 
-def test_earlier_drives_read_none():
+def test_todays_weight_right_reads_right():
   ww = M.WheelWeight()
-  run(ww, 0.0, 20.0, off=2.3, tq=-0.2)
-  assert ww.side == M.NONE
+  run(ww, 0.0, 20.0, off=4.96, tq=-0.19)
+  assert ww.side == M.RIGHT and ww.off == 4.96
 
 
-def test_mirror_reads_right():
+@pytest.mark.parametrize("tq,side", [(0.051, M.LEFT), (0.05, M.NONE), (0.0, M.NONE), (-0.09, M.NONE), (-0.15, M.NONE),
+                                     (-0.151, M.RIGHT), (-0.21, M.RIGHT)])
+def test_the_torque_median_alone_decides(tq, side):
+  for off in (5.3, 0.0, -5.3):                        # the offset does not count
+    ww = M.WheelWeight()
+    run(ww, 0.0, 20.0, off=off, tq=tq)
+    assert ww.side == side, (tq, off)
+
+
+def test_false_left_of_2026_10_27_stays_right():
+  """09:10:59-09:11:16: offset 5.3, a 17 s stretch of +0.595 Nm in a road that is otherwise -0.19 Nm. The old rule (offset > 3 AND
+  torque > 0.05) said "left". The median says right."""
   ww = M.WheelWeight()
-  run(ww, 0.0, 20.0, off=-4.1, tq=-0.16)
+  _, t = run(ww, 0.0, 60.0, off=5.3, tq=-0.19)
+  assert ww.side == M.RIGHT
+  _, t = run(ww, t, 17.0, off=5.3, tq=0.595)
+  assert ww.side == M.RIGHT and ww.tq == pytest.approx(-0.19)
+  _, t = run(ww, t, 30.0, off=4.96, tq=-0.19)
   assert ww.side == M.RIGHT
 
 
-@pytest.mark.parametrize("off,tq", [(4.1, 0.0), (2.5, 0.16), (4.1, -0.16), (-4.1, 0.16)])
-def test_both_signs_must_agree(off, tq):
-  ww = M.WheelWeight()
-  run(ww, 0.0, 20.0, off=off, tq=tq)
-  assert ww.side == M.NONE
-
-
-@pytest.mark.parametrize("kw", [dict(valid=False), dict(off=float("nan")), dict(tq=float("nan"))])
+@pytest.mark.parametrize("kw", [dict(tq=float("nan")), dict(v=float("nan")), dict(lat=float("inf"))])
 def test_missing_input_is_unknown_and_reported_once(kw):
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0)
@@ -77,8 +86,17 @@ def test_missing_input_is_unknown_and_reported_once(kw):
 
 def test_missing_from_the_start_is_reported_once_not_silent():
   ww = M.WheelWeight()
-  n, _ = run(ww, 0.0, 5.0, valid=False)
-  assert n == 1 and ww.side == M.UNKNOWN and "liveParameters" in ww.why
+  n, _ = run(ww, 0.0, 5.0, tq=float("nan"))
+  assert n == 1 and ww.side == M.UNKNOWN and "carState" in ww.why
+
+
+@pytest.mark.parametrize("kw", [dict(valid=False), dict(off=float("nan"))])
+def test_an_invalid_offset_does_not_change_the_decision_but_clears_off(kw):
+  ww = M.WheelWeight()
+  _, t = run(ww, 0.0, 20.0)
+  n, _ = run(ww, t, 5.0, **kw)
+  assert ww.side == M.LEFT and n == 0
+  assert ww.off is None and "liveParameters not valid" in ww.off_why and ww.tele()["wwOff"] is None
 
 
 def test_waits_for_ten_seconds_of_straight_road():
@@ -98,10 +116,10 @@ def test_only_straight_road_samples_count(kw):
 
 def test_median_is_over_the_last_60_seconds_only():
   ww = M.WheelWeight()
-  _, t = run(ww, 0.0, 120.0, off=4.1, tq=-0.2)   # old drive data: no weight
+  _, t = run(ww, 0.0, 120.0, off=4.1, tq=-0.1)   # no weight
   assert ww.side == M.NONE
   _, t = run(ww, t, 25.0, tq=0.16)                 # weight on: 25 of the last 60 s positive, median still negative
-  assert ww.side == M.NONE and ww.tq == pytest.approx(-0.2)
+  assert ww.side == M.NONE and ww.tq == pytest.approx(-0.1)
   _, t = run(ww, t, 10.0, tq=0.16)                 # 35 of 60 s positive: median flips
   assert ww.side == M.LEFT and ww.tq == pytest.approx(0.16)
 
@@ -117,20 +135,23 @@ def test_hysteresis_holds_left_until_well_back():
   ww = M.WheelWeight()
   _, t = run(ww, 0.0, 20.0)
   assert ww.side == M.LEFT
-  _, t = run(ww, t, 120.0, off=2.5, tq=0.02)    # below the "on" thresholds, above the "off" ones
+  _, t = run(ww, t, 120.0, off=4.1, tq=0.01)    # below the "on" threshold, above the "off" one
   assert ww.side == M.LEFT
-  _, t = run(ww, t, 1.0, off=1.9, tq=0.02)      # offset below 3.0 - 1.0
+  _, t = run(ww, t, 120.0, off=4.1, tq=-0.01)   # below 0.05 - 0.05
   assert ww.side == M.NONE
-  _, t = run(ww, t, 120.0, off=2.5, tq=0.02)    # same values from "none" do not decide left
+  _, t = run(ww, t, 120.0, off=4.1, tq=0.04)    # the same band from "none" does not decide left
   assert ww.side == M.NONE
 
 
-def test_hysteresis_on_torque():
+def test_hysteresis_holds_right_until_well_back():
   ww = M.WheelWeight()
-  _, t = run(ww, 0.0, 20.0)
-  _, t = run(ww, t, 120.0, off=4.1, tq=0.01)
-  assert ww.side == M.LEFT
-  _, t = run(ww, t, 120.0, off=4.1, tq=-0.01)
+  _, t = run(ww, 0.0, 20.0, tq=-0.19)
+  assert ww.side == M.RIGHT
+  _, t = run(ww, t, 120.0, tq=-0.11)            # above the "on" threshold, below the "off" one (-0.15 + 0.05)
+  assert ww.side == M.RIGHT
+  _, t = run(ww, t, 120.0, tq=-0.09)
+  assert ww.side == M.NONE
+  _, t = run(ww, t, 120.0, tq=-0.12)            # the same band from "none" does not decide right
   assert ww.side == M.NONE
 
 
@@ -138,10 +159,10 @@ def test_no_flicker_near_the_threshold():
   ww = M.WheelWeight()
   sides, t = [], 0.0
   for i in range(60):
-    _, t = run(ww, t, 2.0, off=3.0 + (0.3 if i % 2 else -0.3), tq=0.16)
+    _, t = run(ww, t, 2.0, tq=0.05 + (0.03 if i % 2 else -0.03))
     sides.append(ww.side)
   first_left = sides.index(M.LEFT)
-  assert all(s == M.LEFT for s in sides[first_left:])   # once left, the 2.7 deg dips never clear it
+  assert all(s == M.LEFT for s in sides[first_left:])   # once left, the 0.02 Nm dips never clear it
 
 
 # ---------------------------------------------------------------------------------------------------------------- capability + event
@@ -215,22 +236,24 @@ def test_selfdrived_waits_for_steering_to_show(monkeypatch):
 
 def test_selfdrived_no_weight_shows_nothing(monkeypatch):
   with OpenpilotPrefix():
-    sd = tesla(off=2.3)
-    assert drive(sd, monkeypatch, 30.0, tq=-0.2) == {"left": 0, "right": 0}
+    sd = tesla(off=5.3)
+    assert drive(sd, monkeypatch, 30.0, tq=-0.09) == {"left": 0, "right": 0}
     assert sd.wheel_weight.side == "none"
 
 
-def test_selfdrived_invalid_live_parameters_is_unknown_and_logged(monkeypatch):
-  logged = []
-  import openpilot.selfdrive.selfdrived.selfdrived as SD
-  monkeypatch.setattr(SD.cloudlog, "warning", lambda msg, *a, **k: logged.append(msg % a))
+def test_selfdrived_shows_right_from_the_torque(monkeypatch):
+  with OpenpilotPrefix():
+    sd = tesla(off=5.3)
+    shown = drive(sd, monkeypatch, 30.0, tq=-0.19)
+    assert sd.wheel_weight.side == "right" and shown["left"] == 0 and shown["right"] > 0
+
+
+def test_selfdrived_invalid_live_parameters_still_decides_from_the_torque(monkeypatch):
   with OpenpilotPrefix():
     sd = tesla()
     sd.sm.valid['liveParameters'] = False
-    assert drive(sd, monkeypatch, 30.0) == {"left": 0, "right": 0}
-    assert sd.wheel_weight.side == "unknown"
-    ww_logs = [m for m in logged if "wheelweight2pnw" in m]
-    assert len(ww_logs) == 1 and "unknown" in ww_logs[0] and "liveParameters not valid" in ww_logs[0]
+    assert drive(sd, monkeypatch, 30.0)["left"] > 0
+    assert sd.wheel_weight.side == "left" and sd.wheel_weight.off is None
 
 
 def test_selfdrived_lightning_has_no_detector(monkeypatch):
