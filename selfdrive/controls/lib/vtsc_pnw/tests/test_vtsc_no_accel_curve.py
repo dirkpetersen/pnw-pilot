@@ -1,6 +1,8 @@
 """noaccelcurve2pnw (owner-approved 2026-10-26): on the Raven, VTSC does not let the car ACCELERATE toward the set speed while a curve within
 NO_ACCEL_CURVE_AHEAD_M (200 m) would be uncomfortable at the SET speed (set^2 x k > A_LAT_TARGET), k = the sharpest of the curve brain's row and
-mapd's polyline curvature. The cap holds max(the car's speed at the start of the hold, the car's speed now): lower-only, never below vEgo.
+mapd's polyline curvature. The cap holds max(the car's speed at the start of the hold, the car's speed now, the curve's own comfortable speed
+sqrt(A_LAT_TARGET / k)): lower-only, never below vEgo. The comfortable-speed term came with the 2026-10-27 fix (drive
+drives/2026-10-27/tesla-us34-corvallis: set 90 into a city froze every bend at 41-43 mph).
 
 Drive 2026-10-26 20:09 PT (drives/2026-10-26/tesla-i5-olympia-grand-mound): the lead left at 72 mph, the Tesla accelerated at ~1.3 m/s^2 to
 88 mph toward set 90 into a left curve (DB k 0.00175, mapd k 0.0015). VTSC and the brain priced it above the set speed, so neither acted.
@@ -31,6 +33,7 @@ def env(monkeypatch, tmp_path):
 SET = 90 * MPH           # 40.2 m/s
 K_DB = 0.00175           # the 20:09 curve DB row: 40.2^2 x 0.00175 = 2.83 m/s^2 > 2.5 -> uncomfortable at the set speed
 K_MAPD = 0.0015          # the 20:09 mapd value: 2.43 m/s^2 < 2.5 -> comfortable on its own
+K_SHARP = 0.004          # comfortable at sqrt(2.5 / 0.004) = 25 m/s, below the 30-36 m/s these tests drive: the hold is the car's speed
 DT = 0.05
 
 
@@ -41,7 +44,7 @@ def _ctrl(env_path, cfg=None, car=TESLA):
   return c
 
 
-def _db(c, k=K_DB, d=150.0, v=45.0, mode="lower"):
+def _db(c, k=K_SHARP, d=150.0, v=45.0, mode="lower"):
   """Put a fresh curve-brain entry in place, as _apply_brain's _read_brain leaves it."""
   c._cb_entry = {"mode": mode, "v": v, "d": d, "ev": "measured", "src": "db", "row": "1:0", "a": 3.59, "k": k}
   c._cb_age, c._cb_problem = 0.0, None
@@ -86,14 +89,14 @@ def test_a_db_curve_uncomfortable_at_the_set_speed_holds_the_cap_at_vego(env):
 
 def test_a_mapd_curve_alone_also_holds(env, monkeypatch):
   c = _ctrl(env, {"curve_brain": "off"})
-  _mapd(c, monkeypatch, 0.002)
+  _mapd(c, monkeypatch, K_SHARP)
   assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0) and c._tele_nc[0] == "hold"
 
 
 def test_the_sharpest_of_db_and_mapd_decides(env, monkeypatch):
   c = _ctrl(env)
   _db(c, k=0.0010)                     # comfortable
-  _mapd(c, monkeypatch, K_DB)          # uncomfortable
+  _mapd(c, monkeypatch, K_SHARP)       # uncomfortable
   assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0)
 
 
@@ -189,7 +192,7 @@ def test_a_sharper_far_curve_does_not_hide_a_near_one(env, monkeypatch):
   """Gemini 2026-10-27 (2): the ~500 m mapK maximum (k 0.0025 at 350 m) hid an uncomfortable curve at 120 m (k 0.0020: 3.24 m/s^2 at 90 mph).
   The feature measures the polyline over its own 200 m window."""
   c = _ctrl(env, {"curve_brain": "off"})
-  asked = _mapd(c, monkeypatch, 0.0020, d=120.0, far=(0.0025, 350.0))
+  asked = _mapd(c, monkeypatch, K_SHARP, d=120.0, far=(0.0050, 350.0))
   assert c._no_accel_curve(SET, 32.0, SET, DT) == pytest.approx(32.0) and c._tele_nc[0] == "hold"
   assert asked == [C.NO_ACCEL_CURVE_AHEAD_M]
 
@@ -330,11 +333,14 @@ def _replay_2009(env_path, cfg, secs=8, past_m=None):
   return out, c
 
 
-def test_replay_2009_the_cap_holds_at_72_mph_instead_of_rising(env):
+def test_replay_2009_the_car_may_reach_the_curve_s_comfortable_speed_but_not_the_set_speed(env):
+  """2026-10-27 fix: the hold is sqrt(2.5 / 0.00175) = 37.8 m/s (84.5 mph), not the 72 mph the car had when the lead left (the first version
+  held 72). The car goes 72 -> ~84.5 mph, not 88-90."""
   run, _ = _replay_2009(env, {})
   at_0902 = [r for r in run if r[0] == pytest.approx(1.0)][0]
-  assert at_0902[2] == pytest.approx(72 * MPH, abs=0.05) and at_0902[1] == pytest.approx(72 * MPH, abs=0.05)
-  assert max(r[1] for r in run) < 72.2 * MPH             # 20:09:08 was 88 mph; now it stays at 72
+  assert at_0902[2] == pytest.approx(37.80, abs=0.01)
+  assert all(r[2] <= SET for r in run)                    # never above the set speed
+  assert 84.0 * MPH < max(r[1] for r in run) < 84.6 * MPH  # 20:09:08 was 88 mph
   # today's behavior, for contrast (and the proof the scenario has teeth): with the switch off it accelerates as it did that night
   off, _ = _replay_2009(env, {"vtsc_no_accel_curve_off": True})
   assert max(r[1] for r in off) > 85 * MPH
@@ -345,7 +351,17 @@ def test_replay_2009_the_cap_holds_at_72_mph_instead_of_rising(env):
 def test_replay_2009_after_the_curve_the_cap_eases_up_at_a_relax(env):
   run, c = _replay_2009(env, {}, secs=20, past_m=340.0)            # the row's extent ends ~150 m past its anchor 190 m ahead
   caps = [r[2] for r in run]
-  release = next(i for i, r in enumerate(caps) if r > 72 * MPH + 0.01)
-  assert 10.0 < run[release][0] < 11.5                          # 340 m at 72 mph
+  release = next(i for i, r in enumerate(caps) if r > 37.80 + 0.01)
+  assert 9.0 < run[release][0] < 10.0                           # 340 m, accelerating 72 -> 84.5 mph
   assert max(b - a for a, b in zip(caps, caps[1:], strict=False)) <= c.tune["A_RELAX"] * DT + 1e-6       # never a snap to the set speed
   assert caps[-1] > caps[release]
+
+
+def test_corvallis_2026_10_27_a_city_bend_lets_the_car_reach_the_curve_s_speed(env, monkeypatch):
+  """drives/2026-10-27/tesla-us34-corvallis 09:21: set 90, vEgo 41 mph, k 0.0031 within 200 m. The first version held 18.3 m/s (41 mph);
+  the curve allows sqrt(2.5 / 0.0031) = 28.4 m/s (63.5 mph)."""
+  c = _ctrl(env, {"curve_brain": "off"})
+  _mapd(c, monkeypatch, 0.0031)
+  assert c._no_accel_curve(SET, 18.3, SET, DT) == pytest.approx(28.40, abs=0.01)
+  assert c._tele_nc == ("hold", 28.4)
+  assert c._no_accel_curve(SET, 18.3, 26.0, DT) == 26.0    # lower-only
