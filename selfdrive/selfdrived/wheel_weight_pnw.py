@@ -1,15 +1,14 @@
 """wheelweight2pnw: detect an aftermarket steering-wheel weight and tell the driver.
 
 WHY. drives/2026-10-26/tesla-i5-olympia-grand-mound: the owner keeps a weight on one side of the Tesla's wheel for FSD.
-It twists the column: the learned angleOffsetDeg (liveParameters) went to 4.1 deg and the straight-road steering torque to
-+0.16 Nm (earlier drives: offset 1.3 to 2.9 deg, torque -0.09 to -0.21 Nm). The car-side angle clamp applies to the raw
-angle including the offset, so curves toward the weight lose that many degrees. Positive = left.
+The straight-road steering torque follows the weight: +0.16 Nm with it on the left (10-26), -0.19 Nm on the right (10-27).
+The learned angleOffsetDeg does NOT: it stayed 4.8 to 5.3 deg on 10-27 with the weight on the right, so the offset is not
+part of this decision (it only sets off_side, below). Positive = left.
 
-DECIDES "left" when angleOffsetDeg > OFF_ON AND the median steering torque over the last WINDOW_S of straight-road samples
-> TQ_ON; "right" for the mirror; else "none". To leave left/right, the values must fall back past OFF_ON - OFF_HYST and
-TQ_ON - TQ_HYST (no flicker). A straight-road sample: vEgo > V_MIN, |lateral accel| < LAT_MAX, no driver steering press,
-engaged or not. With fewer than MIN_SAMPLES in the window (city driving) the last decision holds. A missing or invalid
-input makes the state "unknown" (the caller logs every state change with the reason).
+DECIDES "left" when the median steering torque over the last WINDOW_S of straight-road samples > TQ_ON; "right" when
+< -TQ_ON; else "none". To leave left/right, the median must fall back past TQ_ON - TQ_HYST (no flicker).
+A straight-road sample: vEgo > V_MIN, |lateral accel| < LAT_MAX, no driver steering press, engaged or not. With fewer than MIN_SAMPLES in the window
+(city driving) the last decision holds. A missing or invalid input makes the state "unknown" (the caller logs every state change with the reason).
 
 OFFSET SIDE (off_side, for curve pricing, ww_price_pnw): "left" when angleOffsetDeg > OFF_ON, "right" when < -OFF_ON, cleared below
 OFF_ON - OFF_HYST, else "none"; "unknown" while liveParameters is invalid. It is the offset alone, whatever its cause: the clamp takes the
@@ -21,9 +20,11 @@ import math
 from collections import deque
 from statistics import median
 
-OFF_ON = 3.0          # deg, learned angle offset to decide a weight
-OFF_HYST = 1.0        # deg back before the decision clears
-TQ_ON = 0.05          # Nm, straight-road torque median to decide a weight
+OFF_ON = 3.0          # deg, learned angle offset that sets off_side (curve pricing)
+OFF_HYST = 1.0        # deg back before off_side clears
+# shortcut: TQ_ON is from two drives (weight left +0.16, right -0.19 Nm); a no-weight baseline is NOT known (earlier days -0.09 to
+# -0.21 Nm, weight position not recorded), recalibrate after one drive without the weight.
+TQ_ON = 0.10          # Nm, straight-road torque median to decide a weight
 TQ_HYST = 0.05        # Nm back before the decision clears
 WINDOW_S = 60.0       # s of qualifying samples in the torque median
 SAMPLE_S = 0.1        # s between decisions and kept samples (10 Hz, so the median sorts at most 600 values)
@@ -95,13 +96,13 @@ class WheelWeight:
       return False   # too little straight road: the last decision holds
     self.tq = median(tq for _, tq in self._samples)
 
-    if self.side == LEFT and off > OFF_ON - OFF_HYST and self.tq > TQ_ON - TQ_HYST:
+    if self.side == LEFT and self.tq > TQ_ON - TQ_HYST:
       pass
-    elif self.side == RIGHT and off < -(OFF_ON - OFF_HYST) and self.tq < -(TQ_ON - TQ_HYST):
+    elif self.side == RIGHT and self.tq < -(TQ_ON - TQ_HYST):
       pass
-    elif off > OFF_ON and self.tq > TQ_ON:
+    elif self.tq > TQ_ON:
       self.side = LEFT
-    elif off < -OFF_ON and self.tq < -TQ_ON:
+    elif self.tq < -TQ_ON:
       self.side = RIGHT
     else:
       self.side = NONE
