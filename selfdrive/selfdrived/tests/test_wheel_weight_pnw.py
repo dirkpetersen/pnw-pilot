@@ -1,7 +1,8 @@
 """wheelweight2pnw: steering-wheel weight detector (selfdrive/selfdrived/wheel_weight_pnw.py + SelfdriveD._wheel_weight_step).
 Evidence: drives/2026-10-26/tesla-i5-olympia-grand-mound (offset 4.1 deg, straight-road torque +0.16 Nm with the weight on the
-left) and drives/2026-10-27/tesla-us34-corvallis (weight right: torque -0.19 Nm, offset still +4.8 to +5.3 deg). The weight side is
-decided from the torque only; the offset only sets off_side (curve pricing)."""
+left) and drives/2026-10-27/tesla-us34-corvallis (weight right: torque -0.19 Nm in town, offset still +4.8 to +5.3 deg),
+drives/2026-10-29/tesla-corvallis-seattle (weight right: -0.5 Nm on the highway; false "left" in Seattle stop-and-go). The weight
+side is decided from the torque only; the offset only sets off_side (curve pricing)."""
 import time
 from types import SimpleNamespace
 
@@ -46,29 +47,37 @@ def test_todays_numbers_read_left():
   assert ww.tele() == {"wwSide": "left", "wwOffSide": "left", "wwOff": 4.1, "wwTq": 0.16}
 
 
-def test_10_27_weight_right_reads_right_although_the_offset_is_positive():
+def test_10_29_highway_weight_right_reads_right_although_the_offset_is_positive():
+  ww = M.WheelWeight()
+  run(ww, 0.0, 20.0, off=5.0, tq=-0.5)
+  assert ww.side == M.RIGHT and ww.off_side == M.LEFT
+
+
+def test_10_27_town_weight_right_minus_0_19_is_below_the_right_threshold_and_reads_none():
+  """The town reading with the weight on the right (-0.19 Nm) is too near the no-weight -0.10 to decide: "right" needs < -0.30."""
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0, off=5.0, tq=-0.19)
-  assert ww.side == M.RIGHT and ww.off_side == M.LEFT
+  assert ww.side == M.NONE
 
 
 def test_mirror_reads_right():
   ww = M.WheelWeight()
-  run(ww, 0.0, 20.0, off=-4.1, tq=-0.16)
+  run(ww, 0.0, 20.0, off=-4.1, tq=-0.35)
   assert ww.side == M.RIGHT
 
 
 @pytest.mark.parametrize("off,tq,want", [(4.1, 0.0, M.NONE), (4.1, 0.09, M.NONE), (4.1, 0.10, M.NONE), (0.0, 0.11, M.LEFT),
-                                         (-4.1, 0.16, M.LEFT), (4.1, -0.15, M.NONE), (4.1, -0.16, M.RIGHT)])
+                                         (-4.1, 0.16, M.LEFT), (4.1, -0.30, M.NONE), (4.1, -0.31, M.RIGHT)])
 def test_the_torque_alone_decides(off, tq, want):
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0, off=off, tq=tq)
   assert ww.side == want
 
 
-@pytest.mark.parametrize("tq,want", [(-0.10, M.NONE), (-0.12, M.NONE), (-0.19, M.RIGHT), (0.16, M.LEFT)])
-def test_asymmetric_thresholds_10_27_no_weight_baseline(tq, want):
-  """10-27 evening, no weight: -0.10 Nm straight-road median. A symmetric 0.10 threshold read that as "right"."""
+@pytest.mark.parametrize("tq,want", [(-0.10, M.NONE), (-0.19, M.NONE), (-0.35, M.RIGHT), (-0.5, M.RIGHT), (0.16, M.LEFT)])
+def test_asymmetric_thresholds_at_highway_speed(tq, want):
+  """No weight -0.10 and the town weight-right -0.19 read "none"; the highway weight-right -0.5 (10-29) and the weight-left
+  +0.16 (10-26) decide. A symmetric 0.15 threshold read -0.19 as "right"."""
   ww = M.WheelWeight()
   run(ww, 0.0, 20.0, tq=tq)
   assert ww.side == want
@@ -99,11 +108,32 @@ def test_waits_for_ten_seconds_of_straight_road():
   assert ww.side == M.LEFT
 
 
-@pytest.mark.parametrize("kw", [dict(v=19.0), dict(lat=0.2), dict(lat=-0.2), dict(pressed=True)])
+@pytest.mark.parametrize("kw", [dict(v=26.7), dict(lat=0.2), dict(lat=-0.2), dict(pressed=True)])
 def test_only_straight_road_samples_count(kw):
   ww = M.WheelWeight()
   run(ww, 0.0, 30.0, **kw)
   assert ww.side == M.UNKNOWN and ww.tq is None
+
+
+MPH = 0.44704
+
+
+def test_stop_and_go_below_60_mph_does_not_feed_the_median():
+  """10-29 Seattle: +0.04 to +0.27 Nm at 45 to 72 mph gave a false "left". A sample needs 60 mph."""
+  ww = M.WheelWeight()
+  run(ww, 0.0, 120.0, tq=0.27, v=55 * MPH)
+  assert ww.side == M.UNKNOWN and ww.tq is None
+  run(ww, 120.0, 20.0, tq=0.27, v=62 * MPH)
+  assert ww.side == M.LEFT
+
+
+def test_right_holds_through_slow_traffic():
+  """With fewer than MIN_SAMPLES fast samples in the window, the last decision holds."""
+  ww = M.WheelWeight()
+  _, t = run(ww, 0.0, 20.0, tq=-0.5)
+  assert ww.side == M.RIGHT
+  run(ww, t, 120.0, tq=0.27, v=16 * MPH)
+  assert ww.side == M.RIGHT and ww.tq is None
 
 
 def test_median_is_over_the_last_60_seconds_only():
@@ -137,20 +167,22 @@ def test_hysteresis_holds_left_until_well_back():
 
 def test_hysteresis_holds_right_until_well_back():
   ww = M.WheelWeight()
-  _, t = run(ww, 0.0, 20.0, tq=-0.19)
+  _, t = run(ww, 0.0, 20.0, tq=-0.5)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.13)    # above the "on" threshold (-0.15), below the "off" one (-0.125)
+  _, t = run(ww, t, 120.0, tq=-0.28)    # above the "on" threshold (-0.30), below the "off" one (-0.25)
   assert ww.side == M.RIGHT
-  _, t = run(ww, t, 120.0, tq=-0.12)    # above -(0.15 - 0.025)
+  _, t = run(ww, t, 120.0, tq=-0.26)    # still below -0.25: holds
+  assert ww.side == M.RIGHT
+  _, t = run(ww, t, 120.0, tq=-0.22)    # above -(0.30 - 0.05)
   assert ww.side == M.NONE
-  _, t = run(ww, t, 120.0, tq=-0.13)    # same value from "none" does not decide right
+  _, t = run(ww, t, 120.0, tq=-0.28)    # same value from "none" does not decide right
   assert ww.side == M.NONE
 
 
 def test_right_clears_at_the_no_weight_baseline():
   """The weight comes off after "right": the no-weight median (-0.10 Nm, 10-27) must clear it, not hold it."""
   ww = M.WheelWeight()
-  _, t = run(ww, 0.0, 20.0, tq=-0.19)
+  _, t = run(ww, 0.0, 20.0, tq=-0.5)
   assert ww.side == M.RIGHT
   run(ww, t, 120.0, tq=-0.10)
   assert ww.side == M.NONE
