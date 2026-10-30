@@ -892,7 +892,7 @@ class TestTheSeedFileAgainstTheRealTable:
     assert not o.failsafe and len(o.entries) == 2
     terw, or34 = o.entries
     assert terw["a_max"] == 2.8 and "Terwilliger SB left" in terw["note"]
-    assert or34["a_max"] == 1.9 and "OR-34 WB left" in or34["note"]
+    assert or34["a_max"] == _OR34_A and "OR-34 WB left" in or34["note"]
 
   def test_left_tight_rows_are_covered_right_curve_and_northbound_are_not(self):
     o, idx = cb.Overrides(str(_SEED)), self._rows()
@@ -907,6 +907,8 @@ class TestTheSeedFileAgainstTheRealTable:
 
 
 _OR34 = (44.5604, -123.1210)
+# owner 2026-10-28: the OR-34 WB left Tesla a_max went 1.9 -> 3.0 (ww_price_pnw now prices the steering offset on that side).
+_OR34_A = 3.0
 
 
 @pytest.mark.skipif(not (_SEED.exists() and _TABLE.exists() and _seed_is_v2()), reason=_SEED_SKIP)
@@ -930,10 +932,10 @@ class TestTheOr34SeedEntryAgainstTheRealTable:
     west = [a for a in near if 270 <= a[2] <= 320]
     east = [a for a in near if 90 <= a[2] <= 140]
     assert len(west) == 7 and len(east) >= 6, (len(west), len(east))
-    assert all(self._or34(o, a) == 1.9 for a in west), [(a[0], a[1], a[2]) for a in west]
+    assert all(self._or34(o, a) == _OR34_A for a in west), [(a[0], a[1], a[2]) for a in west]
     assert all(self._or34(o, a) is None for a in east), [(a[0], a[1], a[2]) for a in east]
     # everything the entry covers in the whole table is westbound, inside the circle: 7 priced rows + the row-less one at 194 m
-    covered = [a for a in idx.anchors if cb._dist_m(a[0], a[1], *_OR34) < 500 and self._or34(o, a) == 1.9]
+    covered = [a for a in idx.anchors if cb._dist_m(a[0], a[1], *_OR34) < 500 and self._or34(o, a) == _OR34_A]
     assert len(covered) == 8
     assert all(abs((a[2] - 297 + 180) % 360 - 180) <= 35 and cb._dist_m(a[0], a[1], *_OR34) <= 200 for a in covered)
     assert sum(1 for a in covered if any(b[2] for b in a[3])) == 7
@@ -944,7 +946,7 @@ class TestTheOr34SeedEntryAgainstTheRealTable:
     assert e["heading_deg"] == 297 and e["heading_tol_deg"] == 35
     for h in (117 - 35, 117, 117 + 35, 90, 135):
       assert o.limit(_OR34[0], _OR34[1], h) == (None, None), h
-    assert o.limit(_OR34[0], _OR34[1], 297)[0] == 1.9
+    assert o.limit(_OR34[0], _OR34[1], 297)[0] == _OR34_A
 
   def test_the_westbound_curve_600m_east_is_not_covered(self):
     o, idx = cb.Overrides(str(_SEED)), self._rows()
@@ -961,17 +963,18 @@ class TestTheOr34SeedEntryAgainstTheRealTable:
       got = o.limit(a[0], a[1], a[2])[0]
       if got == 2.8:
         by["terw"] += 1
-      elif got == 1.9:
+      elif got == _OR34_A:
         by["or34"] += 1
       else:
         assert got is None, got
     assert by["terw"] >= 3 and by["or34"] == 8
 
   def test_prices_of_every_covered_row_at_the_brains_effective_a(self, cfgpath, schedule):
+    """At 3.0 the entry is above the brain's own A on every covered row (2.7 at the row-speed fixed point of the shipped
+    schedule), so it does not bind: each row is priced exactly as without the entry. An override only ever lowers."""
     o, idx, veh = cb.Overrides(str(_SEED)), self._rows(), tesla()
     v_ego = 31.0                                                          # ~70 mph
-    a_eff = veh.curve_lat_a(v_ego)
-    assert a_eff > 1.9                                                    # the override binds (it does not raise anything)
+    assert veh.curve_lat_a(v_ego) > _OR34_A                               # A at v_ego is above the cap; the row speed sets A
     got = {}
     for a in self._near(idx):
       cap = self._or34(o, a)
@@ -979,12 +982,12 @@ class TestTheOr34SeedEntryAgainstTheRealTable:
       if cap is None or k is None:
         continue
       v, a_used = cb.row_speed(veh, k, v_ego, cap)
-      v0, _ = cb.row_speed(veh, k, v_ego)
-      assert a_used == pytest.approx(1.9) and v <= v0 + 1e-9 and v < v0    # only lowers, and here it does lower
+      v0, a0 = cb.row_speed(veh, k, v_ego)
+      assert a_used < cap and a_used == a0 and v == v0                    # not binding: the same price as no entry
       got[round(a[0], 5)] = (round(v / 0.44704), round(v0 / 0.44704))
-    assert got == {44.55966: (65, 78), 44.55994: (63, 75), 44.56026: (63, 75), 44.5605: (63, 75), 44.5607: (63, 75),
-                   44.56084: (66, 79), 44.56096: (72, 86)}, got
-    assert min(v for v, _ in got.values()) == 63
+    assert got == {44.55966: (78, 78), 44.55994: (75, 75), 44.56026: (75, 75), 44.5605: (75, 75), 44.5607: (75, 75),
+                   44.56084: (79, 79), 44.56096: (86, 86)}, got
+    assert min(v for v, _ in got.values()) == 75
 
 
 class TestOverrideFollowUps:

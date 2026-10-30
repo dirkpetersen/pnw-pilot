@@ -354,7 +354,6 @@ _OR34_EB = (44.5606, -123.1217)
 # The Lightning OR-34 EB right: 2.2 was measured to sit INSIDE the PSCM limit band (achLat 2.37-2.46 at k 0.00256 -> ~2.39), so the
 # seed must stay strictly BELOW 2.2 (and, lower-only, at or under the curve-DB A of 2.5). The exact private value is read from the seed.
 _LIGHT_KNOWN_BAD_A = 2.2
-_TESLA_DEFAULT_A = 2.8
 
 
 def _seed_a(plat):
@@ -380,11 +379,12 @@ class TestTheSeedAgainstTheRealTable:
     assert [x["a_max"] for x in t.entries] == _seed_a(TESLA_P) and len(t.entries) == 2
     assert [x["a_max"] for x in li.entries] == _seed_a(LIGHT_P) and len(li.entries) == 1
 
-  def test_the_lightning_a_max_is_below_the_known_bad_value_and_every_entry_is_lower_only(self):
+  def test_the_lightning_a_max_is_below_the_known_bad_value_and_every_tesla_entry_is_in_the_loader_range(self):
     (a_l,) = _seed_a(LIGHT_P)
     assert 0.0 < a_l < _LIGHT_KNOWN_BAD_A          # 2.2 ~ 2.39 m/s2 at the measured k: inside the PSCM limit band
-    assert all(0.0 < a <= _TESLA_DEFAULT_A for a in _seed_a(TESLA_P))
-    assert any(a < _TESLA_DEFAULT_A for a in _seed_a(TESLA_P))
+    # A Tesla entry may sit above the fail-safe 2.8 (owner 2026-10-28: OR-34 WB 3.0). row_speed makes every entry lower-only, so
+    # one above the brain's own A is a no-op; test_priced_speeds_per_car checks which entries bind.
+    assert all(1.0 <= a <= 5.0 for a in _seed_a(TESLA_P))
 
   def test_no_row_is_limited_for_both_cars_and_each_car_has_its_own_rows(self, idx):
     tes, lig = set(), set()
@@ -447,20 +447,24 @@ class TestTheSeedAgainstTheRealTable:
     assert max(v for v, _, _ in got.values()) > 100
 
     tes, veh = cb.Overrides(str(_SEED), platform=TESLA_P), tesla()
-    v_ego, seen, kmax = 31.0, {}, {}
+    v_ego, seen, kmax, a0max, bound = 31.0, {}, {}, {}, set()
     for a in idx.anchors:
       cap, note = tes.limit(a[0], a[1], a[2])
       k = max((b[2] for b in a[3] if b[2]), default=None)
       if cap is None or k is None:
         continue
       v, a_used = cb.row_speed(veh, k, v_ego, cap)
-      v0, _ = cb.row_speed(veh, k, v_ego)
+      v0, a0 = cb.row_speed(veh, k, v_ego)
       assert a_used <= cap + 1e-9 and v <= v0 + 1e-9     # lower-only in A AND in speed (row_speed guards the second)
       seen.setdefault(cap, []).append(round(v / MPH, 1))
-      kmax[cap] = max(kmax.get(cap, 0.0), k)
-    lo, hi = min(seen), max(seen)
-    assert hi == _TESLA_DEFAULT_A
-    # the slowest priced speed of each cap group is sqrt(cap / its tightest k), derived from the table (the schedule fixture's
-    # A at v_ego and at the row speed is >= cap, so the override binds)
-    for cap in (hi, lo):
-      assert min(seen[cap]) == round(math.sqrt(cap / kmax[cap]) / MPH, 1), cap
+      if a_used == cap and a_used < a0:
+        bound.add(cap)
+      if k > kmax.get(cap, 0.0):
+        kmax[cap], a0max[cap] = k, a0
+    assert sorted(seen) == sorted(set(_seed_a(TESLA_P))) == [2.8, 3.0]
+    # Terwilliger 2.8 binds (the schedule fixture's A on its tight rows is above 2.8). OR-34 WB 3.0 (owner 2026-10-28) binds on no
+    # row: the brain's own A there is lower (2.7), so it is a no-op. The slowest priced speed of each cap group is
+    # sqrt(min(cap, the uncapped A) / its tightest k), derived from the table.
+    assert bound == {2.8}
+    for cap in seen:
+      assert min(seen[cap]) == round(math.sqrt(min(cap, a0max[cap]) / kmax[cap]) / MPH, 1), cap
