@@ -27,8 +27,9 @@ everdrive_pnw.py), so the terms show at the first moving publish. With no live 0
 ESTIMATE effWhKm x km/h / 1000 + _P_ACC_KW (the truck's reference efficiency) and every figure built
 from it gets a leading "?"; it drops as soon as pNowKw is live again. With no efficiency either, the
 first term is the dash range, still "?".
-    term 1, charger off  energyKwh / P x mph. When that is not usable (coasting, regen, no energyKwh,
-                         over _RANGE_MAX_MI): the truck's own dash range.
+    term 1, charger off  energyKwh / P x mph. A measured P <= 0 (regen, coasting) uses the speed
+                         estimate, with "?". Otherwise not usable (no energyKwh, over _RANGE_MAX_MI):
+                         the truck's own dash range.
     term 1, charger on   the DASH range scaled by the generator, dash x P / (P - acKw), e.g. dash
                          141 mi, 30 kW, 10.8 kW in -> "220m"; needs no capacity. ">999m" when the
                          measured P <= acKw or over 999; "?>999m" when the ESTIMATE is <= acKw.
@@ -439,10 +440,12 @@ class EverDriveStatusRenderer(Widget):
     e = _f(st.get("energyKwh"))
     ac = ac_kw if charging else 0.0
     p = _num(st.get("pNowKw"))
-    est = p is None
-    if est and eff_wh_km > 0.0:
+    # Generator off, measured P <= 0 (regen, coasting): no range at that load, and the bare dash range
+    # would look measured, so it takes the speed estimate with "?" like a missing reading.
+    est = p is None or (not charging and p <= 0.0)
+    if est:
       # The speed estimate: the truck's reference efficiency at this speed + the accessory load.
-      p = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW
+      p = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW if eff_wh_km > 0.0 else None
     mile_kwh = _num(st.get("mileKwh"))
     # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside the
     # mile still put real energy in, so with acSeen the whole mile's AC energy is netted.

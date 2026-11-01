@@ -591,8 +591,6 @@ class TestTheMovingForm:
     assert widget._build_text(st(now, **{**self.MOV, "acKw": 1.4}, acSeen=False)) == "184m(63.49kwh),1mi:184m"
 
   @pytest.mark.parametrize("over", [
-    {"pNowKw": -5.0},                    # regen
-    {"pNowKw": 0.0},                     # zero load
     {"pNowKw": 1.0},                     # coasting: 3680 mi, over the ceiling
     {"energyKwh": None},                 # no pack energy
   ])
@@ -862,6 +860,18 @@ class TestEstimateMarker:
     out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0, "mileEst": True},
                                 mileKwh=0.1, mileAcKwh=0.135))
     assert out == "10.8kw,175m,1mi:?>999m", out
+
+  @pytest.mark.parametrize("p_now", [-5.0, 0.0])
+  def test_generator_off_regen_or_coasting_is_the_speed_estimate_not_the_bare_dash_range(self, widget, now, p_now):
+    """Coordinator 2026-11-01: the bare dash range would look like a measured range."""
+    assert widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now})) == "?111m(63.49kwh),1mi:?111m"
+    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, mileKwh=0.5, mileAcKwh=0.0))
+    assert out == "?111m(63.49kwh),1mi:119m", out           # the mile itself was measured
+    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, effOk=False))
+    assert out == "?112m(63.49kwh),1mi:?112m", out          # no estimate either: the dash range, still "?"
+
+  def test_generator_on_a_measured_load_under_the_charge_is_still_measured(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": -5.0})) == "10.8kw,>999m,1mi:>999m"
 
   def test_a_mile_from_an_older_producer_without_mileEst_is_not_called_measured(self, widget, now):
     mov = {k: v for k, v in self.MOV.items() if k != "mileEst"}
