@@ -41,7 +41,7 @@ publish, with no window wait; see everdrive_pnw.py):
 WITH THE CHARGER ON (owner 2026-11-01) the "@" term is different: the truck's DASH range scaled by the
 generator, dash x pNowKw / (pNowKw - acKw), e.g. dash 141 mi, 30 kW load, 10.8 kW in -> "@220m". It
 needs no capacity, and it falls back to the bare dash range only when pNowKw is None (no 0x441) or the
-projection is over _PROJ_MAX_RATIO x the dash range (see _charging_term). The last-mile term is net of
+the dash range is gone; past 999 mi it prints "@>999m" (see _charging_term). The last-mile term is net of
 the mile's AC energy in both cases, so both ranges are the ranges WITH the charge.
 The change of FORM is the signal, the same idiom the box already uses for "--" (no charger). There is
 deliberately no legend and no second line.
@@ -96,7 +96,7 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
 # HISTORY: 48 -> 56 on 2026-09-20 to match the location box, then BACK TO 48 the same day when the
 # driver asked for the pack kWh inline. The kWh parenthetical is ~50% more text, and at 56 the box
 # crosses screen centre -- into the green driving path this box must never enter. 48 -> 49 on
-# 2026-10-31 (owner, everdriveinstant2pnw), measured in the table below.
+# 2026-10-31, then 49 -> 52 on 2026-11-01 (owner, everdriveinstant2pnw), measured in the table below.
 #
 # ⚠️ THE NUMBERS THAT USED TO BE HERE WERE STALE BY 103 px (corrected 2026-09-20, everdrive2pnw).
 # They read "widest exemplar 925.4 px text -> 973.4 px box -> +36.6 px clear of centre". 925.4 px is
@@ -112,32 +112,34 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
 #
 # DIGITS ARE PROPORTIONAL IN INTER: '4' is the widest at 108 atlas units ('0' is 106, '9' 105), so an
 # all-4s line is the true upper bound for any shape. Content right edge is 2130, _MARGIN 40, screen
-# centre 1080. Every form the formatter can emit, at its maximum digit count, at _FS 49
-# (re-measured 2026-10-31, and 2026-11-01 for the growth forms; no "@" in the stopped forms):
+# centre 1080. Every form the formatter can emit, at its maximum digit count, at _FS 52
+# (re-measured 2026-11-01 with the growth and "@>999m" forms; no "@" in the stopped forms):
 #
-#     44.4kw,444m(444.44kwh),+44.4m/h    847.5 px text -> 895.5 box -> left 1194.5 -> +114.5 clear
-#     44.4kw,444m(444.44kwh)->444m       797.5              845.5           1244.5      +164.5
-#     @444m(444.44kwh),1mi:+44.4m/h      798.0              846.0           1244.0      +164.0
-#     444m(444.44kwh),1mi:+44.4m/h       752.8              800.8           1289.2      +209.2
-#     44.4kw,+44.4m/h,1mi:+44.4m/h       731.0              779.0           1311.0      +231.0
-#     44.4kw,@444m,1mi:+44.4m/h          686.6              734.6           1355.4      +275.4
-#     44.4kw,+44.4m/h,1mi:444m           641.4              689.4           1400.6      +320.6
-#     @444m(444.44kwh),1mi:444m          708.5              756.5           1333.5      +253.5
-#     --m(444.44kwh),1mi:444m            614.4              662.4           1427.6      +347.6
-#     44.4kw,444m(444.44kwh)             611.0              659.0           1431.0      +351.0
-#     44.4kw,@444m,1mi:444m              597.1              645.1           1444.9      +364.9
-#     --,444m(444.44kwh)                 484.6              532.6           1557.4      +477.4
+#     44.4kw,444m(444.44kwh),+44.4m/h    899.4 px text -> 947.4 box -> left 1142.6 -> +62.6 clear
+#     @444m(444.44kwh),1mi:+44.4m/h      846.9              894.9           1195.1      +115.1
+#     44.4kw,444m(444.44kwh)->444m       846.3              894.3           1195.7      +115.7
+#     444m(444.44kwh),1mi:+44.4m/h       798.9              846.9           1243.1      +163.1
+#     44.4kw,+44.4m/h,1mi:+44.4m/h       775.7              823.7           1266.3      +186.3
+#     44.4kw,@>999m,1mi:+44.4m/h         759.1              807.1           1282.9      +202.9
+#     @444m(444.44kwh),1mi:444m          751.9              799.9           1290.1      +210.1
+#     44.4kw,@444m,1mi:+44.4m/h          728.7              776.7           1313.3      +233.3
+#     44.4kw,+44.4m/h,1mi:444m           680.7              728.7           1361.3      +281.3
+#     44.4kw,@>999m,1mi:444m             664.1              712.1           1377.9      +297.9
+#     --m(444.44kwh),1mi:444m            652.1              700.1           1389.9      +309.9
+#     44.4kw,444m(444.44kwh)             648.4              696.4           1393.6      +313.6
+#     44.4kw,@444m,1mi:444m              633.7              681.7           1408.3      +328.3
+#     --,444m(444.44kwh)                 514.2              562.2           1527.8      +447.8
 #
-# WORST CASE 895.5 px, +114.5 px clear of the driving path, under the 1000 px _MAX_BOX_W tripwire.
-# (At 48 the same worst case was 878.2 px. The largest _FS that stays under the tripwire is 55:
-# 999.3 px; the tripwire binds before screen centre does.)
+# WORST CASE 947.4 px, +62.6 px clear of the driving path, under the 1000 px _MAX_BOX_W tripwire.
+# (At 49 the same worst case was 895.5 px. 53 would still fit, 964.7 px / +45.3; the largest _FS
+# under the tripwire is 55, 999.3 px; the tripwire binds before screen centre does.)
 #
 # The ranges stay at THREE digits because the producer bands the truck's own range to 254 mi and
 # _RANGE_MAX_MI bands the computed one to 499 mi, which also bounds the projection (<= 2x) to 998.
 # _GAIN_MAX_MI_H bounds the rate to 99.9. Adding a fourth digit anywhere costs ~30 px.
-_FS = 49
-_LINE_H = 60              # 48 * 1.25, the ratio ces_status.py and location_services_status.py both use;
-                          #   kept at 60 for _FS 49 (text 56.8 px high) so the stack geometry is unchanged
+_FS = 52
+_LINE_H = 65              # _FS * 1.25, the ratio ces_status.py and location_services_status.py both use.
+                          #   At 52 the text is 60.3 px high (52 x FONT_SCALE 1.16), over the old 60.
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
@@ -175,6 +177,8 @@ _RANGE_MAX_MI = 499.0     # everdrive2pnw (2026-09-20): plausibility ceiling on 
                           #       toward the green driving path.
                           #   Over it, fall back to the truck's own range: the fallback form is the
                           #   visible failure signal, the same way the projection's clamp works.
+_CHG_RANGE_MAX_MI = 999   # everdriveinstant2pnw (owner 2026-11-01): the generator-ON moving "@" term
+                          #   prints at most 3 digits; above it the form is "@>999m" (see _charging_term)
 _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple of the printed range.
                           #   Protects against (a) a glitched effWhKm/vMs squeezing the denominator
                           #   toward zero just inside the _PROJ_HEADROOM guard, which would print a
@@ -453,13 +457,13 @@ class EverDriveStatusRenderer(Widget):
     """Owner 2026-11-01: term 2 of the generator-ON moving form. The truck's DASH range scaled by the
     generator, range x P / (P - acKw) -- the stopped form's projection, fed the live load instead of
     the reference efficiency -- so it needs no capacity and is live from the first moving frame.
-      P > acKw, projection <= _PROJ_MAX_RATIO x range  -> "@220m"
-      P <= acKw (the generator covers the load)         -> "+N m/h" growth (needs effOk)
-      P None (no 0x441), no dash range, no efficiency   -> the bare dash range, the visible fallback
-    Over the ratio ceiling (the generator covers more than half the load) the projection diverges
-    toward the P = acKw pole and stops predicting anything. That surplus is still NEGATIVE (the pack
-    drains), so a growth form would claim a gain that is not there; and a near-zero drain rounds to
-    "+0.0", which _gain_text never prints. So it falls back to the bare dash range, as today."""
+      P > acKw, rounds to 1..999                -> "@220m"
+      P > acKw, over 999 (or not finite)        -> "@>999m"
+      P <= acKw (the generator covers the load) -> "+N m/h" growth (needs effOk)
+      P None (no 0x441), no dash range          -> the bare dash range, the visible fallback
+    Owner 2026-11-01: the bare dash range must NOT show while the generator runs and pNowKw is live.
+    Near the P = acKw pole the pack still drains, so the growth form would be wrong; the number is
+    only large, so it is printed up to 3 digits and as "@>999m" past that, never bent or clamped."""
     if p_now is None:
       return f"{rng}m"
     if p_now <= ac_kw:
@@ -468,9 +472,9 @@ class EverDriveStatusRenderer(Widget):
     if range_mi is None:
       return f"{rng}m"
     proj = range_mi * p_now / (p_now - ac_kw)
-    if math.isfinite(proj) and proj <= range_mi * _PROJ_MAX_RATIO:
-      return f"@{round(proj)}m"
-    return f"{rng}m"
+    if not math.isfinite(proj) or round(proj) > _CHG_RANGE_MAX_MI:
+      return f"@>{_CHG_RANGE_MAX_MI}m"
+    return f"@{round(proj)}m"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):

@@ -813,11 +813,22 @@ class TestGeneratorOnScalesTheDashRange:
     gain = (10.8 - p_now) * 1000.0 / (320.0 * 1.60934)
     assert out == (f"10.8kw,+{gain:.1f}m/h" if gain > 0.05 else "10.8kw,112m"), out
 
-  def test_over_the_ratio_ceiling_falls_back_to_the_dash_range(self, widget, now):
-    # 15 kW load, 10.8 kW in: 3.6 x the dash range -- the pole, not a prediction; the pack still drains
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 15.0})) == "10.8kw,112m"
-    # control: just under 2x still prints
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 21.7})) == "10.8kw,@223m"
+  def test_a_large_scaled_range_prints_up_to_999_never_the_bare_dash_range(self, widget, now):
+    """Owner 2026-11-01: no bare dash range while the generator runs and pNowKw is live."""
+    # 15 kW load, 10.8 kW in: 3.6 x the dash range = 400 mi
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 15.0})) == "10.8kw,@400m"
+    # 112 x 11 / 0.2 = 6160 -> over 3 digits
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 11.0})) == "10.8kw,@>999m"
+    # the boundary is on the ROUNDED value: 999.4 prints, 999.6 does not
+    for target, want in ((999.4, "@999m"), (999.6, "@>999m")):
+      dash = 180.2 / 1.60934                      # BASE rangeKm, 111.97 mi
+      p = 10.8 * target / (target - dash)
+      assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": p})) == f"10.8kw,{want}"
+
+  def test_the_widest_charging_forms_stay_inside_the_char_bound(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 27.7, "pNowKw": 27.8, "vMs": 99 * MPH}, mileKwh=0.0, mileAcKwh=0.15)
+    out = widget._build_text(s)
+    assert out.startswith("27.7kw,@>999m,1mi:+") and len(out) <= 31, out
 
   def test_no_dash_range_is_dashes(self, widget, now):
     assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0}, rangeKm=None)) == "10.8kw,--m"
