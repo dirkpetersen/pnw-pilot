@@ -13,6 +13,7 @@ afterwards so nothing leaks into the rest of the suite. What is NOT covered by t
 plainly: the raylib draw calls in `_render`, and the real font metrics behind `measure_text_cached`.
 """
 import contextlib
+import math
 import importlib.util
 import pathlib
 import sys
@@ -764,12 +765,13 @@ class TestGeneratorOnAlwaysThreeTerms:
     # 59.35 kWh / (0.5 - 0.0233) kWh per mile = 124.5
     assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0233) == "10.8kw,175m,1mi:125m"
 
-  def test_a_mile_that_cannot_be_computed_repeats_R1(self, widget, now):
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=None) == "10.8kw,175m,1mi:175m"
+  def test_a_mile_that_cannot_be_computed_repeats_R1_marked(self, widget, now):
+    """Gemini 2026-11-01: R1 standing in for a full mile is not the mile's figure: "?"."""
+    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=None) == "10.8kw,175m,1mi:?175m"
 
   def test_a_mile_range_under_half_a_mile_repeats_R1_never_zero(self, widget, now):
     # 0.2 kWh / 0.5 kWh per mile = 0.4 mi -> rounds to 0, not a range
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=0.2) == "10.8kw,175m,1mi:175m"
+    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=0.2) == "10.8kw,175m,1mi:?175m"
 
   def test_over_999_on_either_term(self, widget, now):
     assert self._on(widget, now, pNowKw=11.0) == "10.8kw,>999m,1mi:>999m"       # 112 x 11 / 0.2
@@ -924,3 +926,70 @@ class TestEstimateMarker:
       for v in (0.0, 2.0):
         out = widget._build_text(st(now, acKw=ac, vMs=v))
         assert "@" not in out, out
+
+
+class TestNoBareFigureUnlessMeasured:
+  """Gemini SHIP-WITH-FIXES on b7ec8dbb56 (2026-11-01): while moving, a figure without "?" is always a
+  measured one, on EVERY term, generator on or off. The expected measured figures are rebuilt here
+  from the inputs; the printed bound helpers (_miles, _range_text) have their own tests."""
+
+  MOV = TestTheMovingForm.MOV
+
+  @staticmethod
+  def _live(x):
+    return isinstance(x, float) and math.isfinite(x)
+
+  def test_sweep_every_bare_figure_is_a_measurement(self, widget, now):
+    n = bare = 0
+    mph = 62.0
+    for ac in (0.0, 10.8, 40.0):
+      for p_now in (None, float("nan"), -5.0, 0.0, 1.0, 10.8, 20.0, 30.0, 200.0):
+        for e in (None, 0.2, 59.35):
+          for mile in (None, (0.5, 0.0), (0.5, 0.0233), (0.0, 0.2), (0.1, 0.135), (0.1, 0.0), (1e-6, 0.0)):
+            for mile_est in (True, False, None):
+              for eff in (True, False):
+                for rng_km in (None, 180.2):
+                  over = {"acKw": ac, "pNowKw": p_now, "energyKwh": e, "mileEst": mile_est}
+                  if mile is not None:
+                    over.update(mileKwh=mile[0], mileAcKwh=mile[1])
+                  out = widget._build_text(st(now, **{**self.MOV, **over}, effOk=eff, rangeKm=rng_km))
+                  n += 1
+                  charging = ac > 0.05
+                  if charging:
+                    _, r1, r2 = out.split(",")
+                  else:
+                    r1, r2 = out.split("(")[0], out.split(",1mi:")[1]
+                    r1 = r1.split(",")[0]
+                  r2 = r2.removeprefix("1mi:")
+                  live = self._live(p_now)
+                  dash = None if rng_km is None else rng_km / 1.60934
+                  # the measured first term, or None when it cannot be measured
+                  if charging:
+                    m1 = None
+                    if live and dash is not None:
+                      m1 = ed._OVER_RANGE if p_now <= ac else ed._range_text(dash * p_now / (p_now - ac))
+                  else:
+                    m1 = None
+                    if live and p_now > 0 and e:
+                      m = round(e / p_now * mph)
+                      m1 = f"{m}m" if 1 <= m <= 499 else None
+                  # the measured mile figure, or None
+                  m2 = None
+                  if mile is not None and mile_est is False:
+                    net = mile[0] - mile[1]
+                    if charging:
+                      m2 = ed._OVER_RANGE if net <= 0 else (ed._range_text(e / net) if e else None)
+                    elif net <= 0:
+                      m2 = ed._OVER_RANGE if mile[1] * mph > 0.05 else None
+                    elif e:
+                      m = round(e / net)
+                      m2 = f"{m}m" if 1 <= m <= 499 else None
+                  case = (ac, p_now, e, mile, mile_est, eff, rng_km, out)
+                  if not r1.startswith(("?", "--")):
+                    bare += 1
+                    assert r1 == m1, case
+                  if not r2.startswith(("?", "--")):
+                    bare += 1
+                    # before the first mile the term repeats a measured first term; after it, the mile's own
+                    assert (r2 == m2) if mile is not None else (r2 == r1 == m1), case
+    assert n == 3 * 9 * 3 * 7 * 3 * 2 * 2 and bare > 1000, (n, bare)

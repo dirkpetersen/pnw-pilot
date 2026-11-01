@@ -460,16 +460,19 @@ class EverDriveStatusRenderer(Widget):
       elif p <= ac:
         r1 = _OVER_RANGE                     # the generator covers the load: no finite range
       else:
-        r1 = _range_text(range_mi * p / (p - ac)) or f"{rng}m"
+        r1 = _range_text(range_mi * p / (p - ac))
+        # Not reachable today (range_mi >= 0.5 and P / (P - acKw) > 1, so it rounds to >= 1); kept so
+        # that a later change can not print the unscaled dash range bare, as if measured.
+        if r1 is None:
+          r1, est = f"{rng}m", True
       r1 = _q(r1, est)
-      r2 = r1                                # before the first mile, or not computable: R1, with its "?"
+      r2 = r1                                # before the first mile: R1, with its "?"
       if mile_kwh is not None:
         net_mi = mile_kwh - mile_ac
-        if net_mi <= 0.0:
-          r2 = _q(_OVER_RANGE, mile_est)     # the mile netted out as charging
-        elif e > 0.0:
-          t = _range_text(e / net_mi)
-          r2 = _q(t, mile_est) if t is not None else r1
+        t = _OVER_RANGE if net_mi <= 0.0 else (_range_text(e / net_mi) if e > 0.0 else None)
+        # >999m: the mile netted out as charging. None: a full mile that cannot be computed, so R1
+        # stands in, and it is not the mile's own figure.
+        r2 = _q(t, mile_est) if t is not None else _q(r1.removeprefix("?"), True)
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
     # Generator OFF. A bare range is ALWAYS a measured one: live pNowKw and a result in 1.._RANGE_MAX_MI.
     # Anything else (no reading, regen, coasting, over the ceiling, no energy) is the speed estimate,
