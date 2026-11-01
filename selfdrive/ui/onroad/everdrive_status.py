@@ -11,9 +11,10 @@ actually holds the constraint now is that the box is RIGHT-anchored and every te
 
 Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveinstant2pnw, owner
 2026-10-31):
-    charger off:         @132m,1mi:128m(55.35kwh)
+    charger off:         @132m(55.35kwh),1mi:128m   (kWh right after the first range, as stopped)
     charger on:          1.4kw,@137m,1mi:135m          (no kWh while charging and moving)
     first mile not done: the ",1mi:" term is OMITTED, e.g. @132m(55.35kwh)
+    "@" not usable:      112m(55.35kwh),1mi:128m   (the truck's own range, without the "@")
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
@@ -103,8 +104,8 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
 #
 #     44.4kw,444m(444.44kwh),+44.4m/h    847.5 px text -> 895.5 box -> left 1194.5 -> +114.5 clear
 #     44.4kw,444m(444.44kwh)->444m       797.5              845.5           1244.5      +164.5
-#     @444m,1mi:444m(444.44kwh)          708.5              756.5           1333.5      +253.5
-#     --m,1mi:444m(444.44kwh)            614.4              662.4           1427.6      +347.6
+#     @444m(444.44kwh),1mi:444m          708.5              756.5           1333.5      +253.5
+#     --m(444.44kwh),1mi:444m            614.4              662.4           1427.6      +347.6
 #     44.4kw,444m(444.44kwh)             611.0              659.0           1431.0      +351.0
 #     44.4kw,@444m,1mi:444m              597.1              645.1           1444.9      +364.9
 #     --,444m(444.44kwh)                 484.6              532.6           1557.4      +477.4
@@ -383,7 +384,7 @@ class EverDriveStatusRenderer(Widget):
       mile = f",1mi:{rm:.0f}m" if 0.0 < rm <= _RANGE_MAX_MI else ",1mi:--"
     if charging:
       return f"{ac_kw:.1f}kw,{now_t}{mile}"
-    return f"{now_t}{mile}{pack}"
+    return f"{now_t}{pack}{mile}"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):

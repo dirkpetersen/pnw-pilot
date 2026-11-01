@@ -573,12 +573,12 @@ class TestTheMovingForm:
 
   def test_the_last_mile_term_appears_only_once_the_producer_has_a_mile(self, widget, now):
     assert "1mi:" not in widget._build_text(st(now, **self.MOV, mileKwh=None, mileAcKwh=None))
-    assert widget._build_text(st(now, **self.MOV, mileKwh=0.5, mileAcKwh=0.0)) == "@184m,1mi:119m(63.49kwh)"
+    assert widget._build_text(st(now, **self.MOV, mileKwh=0.5, mileAcKwh=0.0)) == "@184m(63.49kwh),1mi:119m"
 
   def test_the_terms_track_their_inputs(self, widget, now):
     """Positive control: constants would not move."""
     out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 40.0, "vMs": 31 * MPH}, mileKwh=1.0, mileAcKwh=0.0))
-    assert out == "@46m,1mi:59m(63.49kwh)", out
+    assert out == "@46m(63.49kwh),1mi:59m", out
 
   def test_generator_on_puts_the_kw_first_nets_the_charge_and_drops_the_kwh(self, widget, now):
     out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "pNowKw": 21.4}, mileKwh=0.5, mileAcKwh=0.0233))
@@ -598,6 +598,9 @@ class TestTheMovingForm:
   def test_an_unusable_current_load_falls_back_to_the_trucks_range_without_the_at(self, widget, now, over):
     out = widget._build_text(st(now, **{**self.MOV, **over}))
     assert out == "112m(63.49kwh)", out
+    out = widget._build_text(st(now, **{**self.MOV, **over}, mileKwh=0.5, mileAcKwh=0.0))
+    # with no pack energy the last mile has nothing to divide either
+    assert out == ("112m(63.49kwh),1mi:--" if "energyKwh" in over else "112m(63.49kwh),1mi:119m"), out
 
   def test_net_charging_while_moving_falls_back_visibly(self, widget, now):
     """9.6 kW in, 5 kW load: the pack is gaining, a range would be a division by a negative."""
@@ -607,7 +610,7 @@ class TestTheMovingForm:
   def test_an_unusable_last_mile_is_shown_as_dashes_not_a_number(self, widget, now, mile, ac):
     """Net regen / net charging over the mile, or 593 mi over the ceiling: '1mi:--', never a bent number."""
     out = widget._build_text(st(now, **self.MOV, mileKwh=mile, mileAcKwh=ac))
-    assert out == "@184m,1mi:--(63.49kwh)", out
+    assert out == "@184m(63.49kwh),1mi:--", out
 
   def test_no_truck_range_falls_back_to_dashes_never_zero(self, widget, now):
     assert widget._build_text(st(now, **{**self.MOV, "pNowKw": None}, rangeKm=None)) == "--m(63.49kwh)"
