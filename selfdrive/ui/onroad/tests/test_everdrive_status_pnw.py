@@ -503,37 +503,12 @@ class TestThePackEnergyTerm:
 
 
 class TestTheComputedRangeAtCurrentSpeed:
-  """everdrive2pnw (driver req 2026-09-20): the FIRST number becomes `energyKwh / grossKw * mph` --
-  the range at the speed being driven right now -- and falls back to the truck's own estimate.
-
-  Both inputs are producer-published. `grossKw` is GROSS of the EverDrive input precisely so the
-  existing `range * P/(P - acKw)` projection does not count the charger twice, and it is None
-  whenever the producer has no credible measurement (stopped, below ~10 mph, window not filled)."""
+  """everdrive2pnw (2026-09-20) introduced a measured "@" range from `grossKw`. everdriveinstant2pnw
+  (2026-10-31) moved every measured range to the MOVING form (TestTheMovingForm), so these now pin
+  that a stopped payload IGNORES grossKw and keeps the truck's own range, exactly as it shipped."""
 
   # 59.35 kWh at 20 kW and 62 mph -> 183.985 mi, and the projection at 1.4 kW in -> 197.8 mi
   MEAS = {"energyKwh": 59.35, "grossKw": 20.0, "vMs": 62 * MPH}
-
-  def test_the_first_number_is_energy_over_consumption_times_speed(self, widget, now):
-    out = widget._build_text(st(now, **self.MEAS))
-    assert out.startswith("1.4kw,@184m"), out
-    assert 59.35 / 20.0 * 62 == pytest.approx(183.985)
-
-  def test_it_tracks_speed_energy_and_consumption(self, widget, now):
-    """Positive control: a constant would not move when any of the three inputs does."""
-    def first(**o):
-      return widget._build_text(st(now, **{**self.MEAS, **o})).split(",")[1].split("m")[0]
-    assert first() == "@184"
-    assert first(vMs=31 * MPH) == "@92", "halving the speed must halve the range"
-    assert first(energyKwh=29.675) == "@92", "halving the energy must halve the range"
-    assert first(grossKw=40.0) == "@92", "doubling the consumption must halve the range"
-
-  def test_the_computed_number_is_visibly_different_from_the_trucks_own(self, widget, now):
-    """The driver must be able to tell which quantity he is looking at. The computed one carries a
-    leading '@'; the fallback prints exactly what this box has always printed."""
-    computed = widget._build_text(st(now, **self.MEAS))
-    fallback = widget._build_text(st(now, vMs=62 * MPH))          # no grossKw/energyKwh in BASE
-    assert "@" in computed and "@" not in fallback, (computed, fallback)
-    assert fallback == "1.4kw,112m(63.49kwh)->117m", "the fallback must be byte-identical to today"
 
   @pytest.mark.parametrize("over", [
     {"grossKw": None},                       # stopped / below 10 mph / window not filled
@@ -541,6 +516,7 @@ class TestTheComputedRangeAtCurrentSpeed:
     {"grossKw": 0.0},                        # would be a division by zero
     {"grossKw": -5.0},                       # would be a NEGATIVE range
     {"energyKwh": 0.0},                      # an empty pack is not a range of zero miles
+    {},                                      # since 2026-10-31 a GOOD grossKw is ignored too
   ])
   def test_every_unusable_input_falls_back_to_the_trucks_own_range(self, widget, now, over):
     out = widget._build_text(st(now, **{**self.MEAS, **over}))
@@ -562,64 +538,12 @@ class TestTheComputedRangeAtCurrentSpeed:
     assert "grossKw" not in s and "energyKwh" not in s
     assert widget._build_text(s) == "1.4kw,112m(63.49kwh)->117m"
 
-  def test_an_absurd_computed_range_falls_back_rather_than_printing_it(self, widget, now):
-    """_RANGE_MAX_MI. A long descent can regenerate most of a window's energy back, leaving a tiny
-    consumption and a range that is arithmetic rather than a prediction. It would also add a fourth
-    digit to the projection and push the box toward the green driving path."""
-    out = widget._build_text(st(now, energyKwh=59.35, grossKw=1.0, vMs=62 * MPH))
-    assert 59.35 / 1.0 * 62 == pytest.approx(3679.7), "positive control: this really is absurd"
-    assert out == "1.4kw,112m(63.49kwh)->117m", out
-    # ... and the boundary is where the constant says it is, not somewhere else. Deliberately NOT
-    # probed at exactly _RANGE_MAX_MI: `59.35 / 20 * (499 * 20 / 59.35)` is 499.00000000000006 in
-    # binary floating point, so an exact-boundary assertion would be testing float rounding, not the
-    # constant. One mile either side is unambiguous.
-    def mph_for(miles):
-      return miles * 20.0 / 59.35
-    assert "@498" in widget._build_text(st(now, energyKwh=59.35, grossKw=20.0,
-                                           vMs=mph_for(498.0) * MPH))
-    assert "@" not in widget._build_text(st(now, energyKwh=59.35, grossKw=20.0,
-                                            vMs=mph_for(500.0) * MPH))
-
-  def test_the_projection_uses_grossKw_and_so_cannot_double_count_the_charger(self, widget, now):
-    """THE reason grossKw is published gross. `range * P/(P - acKw)` is only correct when P is what
-    the truck would draw WITHOUT the charger. Handing it a net P (i.e. 20 - 1.4 = 18.6) would shift
-    the projection up by the charger's contribution a second time."""
-    out = widget._build_text(st(now, **self.MEAS))
-    r, p = 59.35 / 20.0 * 62, 20.0
-    assert out == f"1.4kw,@{r:.0f}m(63.49kwh)->{r * p / (p - 1.4):.0f}m", out
-    net = r * 18.6 / (18.6 - 1.4)
-    assert abs(net - r * p / (p - 1.4)) > 1.0, "positive control: net vs gross really do differ here"
-
-  def test_effOk_false_no_longer_costs_the_projection_when_it_is_MEASURED(self, widget, now):
-    """The efficiency constant is only needed for the FALLBACK projection. A measured consumption
-    does not depend on it, so a truck that stops reporting VehElEffAvg keeps the computed range."""
-    out = widget._build_text(st(now, **self.MEAS, effOk=False, effWhKm=-100.0))
-    assert out.startswith("1.4kw,@184m"), out
-    assert "->" in out, "a measured projection must survive effOk False"
-
-  def test_the_gain_rate_rides_the_same_basis_as_the_range_beside_it(self, widget, now):
-    """When the projection clamp trips while measured, the stopped form prints a gain rate. It must
-    come from the MEASURED mi/kWh (mph / grossKw), not from the truck's reference efficiency -- and
-    on that path effWhKm may legitimately be zero, which would otherwise be a divide-by-zero in the
-    UI render loop (this fork's documented brick scenario)."""
-    # ac 9.6 kW against gross 15 kW -> proj/range = 15/5.4 = 2.8 > _PROJ_MAX_RATIO, so the clamp trips
-    out = widget._build_text(st(now, energyKwh=59.35, grossKw=15.0, vMs=62 * MPH,
-                                acKw=9.6, effOk=False, effWhKm=-100.0))
-    assert "->" not in out, "positive control: the projection clamp must have tripped"
-    assert out.endswith(f",+{9.6 * 62 / 15.0:.1f}m/h"), out
-    assert "39.7m/h" in out
-    # ... and THIS branch must still mark the range as measured. It did not: the gain-form return
-    # re-formatted range_mi instead of reusing `rng`, so the "@" -- the only thing distinguishing a
-    # computed range from the truck's own -- silently vanished on exactly this path.
-    assert out == f"9.6kw,@{59.35 / 15.0 * 62:.0f}m(63.49kwh),+39.7m/h", out
-    assert out.startswith("9.6kw,@245m"), out
-
   def test_the_widest_line_this_can_emit_stays_inside_the_ceiling(self, widget, now):
     """Character-count guard (the stub measurement is not the device font; the real px worst case is
-    pinned in the _FS comment, measured against the device's own Inter-Medium.fnt). 32 chars is
-    '44.4kw,@444m(444.44kwh),+44.4m/h' -- every range term is bounded to 3 digits by _RANGE_MAX_MI
+    pinned in the _FS comment, measured against the device's own Inter-Medium.fnt). 31 chars is
+    '44.4kw,444m(444.44kwh),+44.4m/h' -- every range term is bounded to 3 digits by _RANGE_MAX_MI
     (499, so the projection is <= 998) and the truck's own 254 mi band."""
-    widest = 32
+    widest = 31
     cases = [
       st(now, **self.MEAS),
       st(now, **self.MEAS, acKw=27.7),
@@ -634,3 +558,81 @@ class TestTheComputedRangeAtCurrentSpeed:
       assert len(out) <= widest, f"{out!r} ({len(out)}) is wider than the bounded worst case"
       assert all(32 <= ord(c) <= 126 for c in out), repr(out)   # '@' is 64, in the device atlas
 
+
+
+class TestTheMovingForm:
+  """everdriveinstant2pnw (owner 2026-10-31): while the producer says `moving`, the line is built from
+  the INSTANT pack load pNowKw and the last-mile energy -- no window wait, no projection."""
+
+  # 59.35 kWh at 20 kW net and 62 mph -> 184 mi; last mile 0.5 kWh -> 118.7 mi
+  MOV = {"moving": True, "vMs": 62 * MPH, "energyKwh": 59.35, "pNowKw": 20.0, "acKw": 0.0}
+
+  def test_the_first_moving_payload_shows_the_current_load_range_at_once(self, widget, now):
+    """THE owner requirement: no wait. No grossKw, no mile yet -- the number is there anyway."""
+    assert widget._build_text(st(now, **self.MOV)) == "@184m(63.49kwh)"
+
+  def test_the_last_mile_term_appears_only_once_the_producer_has_a_mile(self, widget, now):
+    assert "1mi:" not in widget._build_text(st(now, **self.MOV, mileKwh=None, mileAcKwh=None))
+    assert widget._build_text(st(now, **self.MOV, mileKwh=0.5, mileAcKwh=0.0)) == "@184m,1mi:119m(63.49kwh)"
+
+  def test_the_terms_track_their_inputs(self, widget, now):
+    """Positive control: constants would not move."""
+    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 40.0, "vMs": 31 * MPH}, mileKwh=1.0, mileAcKwh=0.0))
+    assert out == "@46m,1mi:59m(63.49kwh)", out
+
+  def test_generator_on_puts_the_kw_first_nets_the_charge_and_drops_the_kwh(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "pNowKw": 21.4}, mileKwh=0.5, mileAcKwh=0.0233))
+    assert out == "1.4kw,@184m,1mi:125m", out
+    assert "kwh" not in out, "the pack kWh is never shown while charging and moving"
+
+  def test_acSeen_false_is_generator_off_whatever_acKw_says(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 1.4}, acSeen=False)) == "@184m(63.49kwh)"
+
+  @pytest.mark.parametrize("over", [
+    {"pNowKw": -5.0},                    # regen
+    {"pNowKw": 0.0},                     # zero load
+    {"pNowKw": 1.0},                     # coasting: 3680 mi, over the ceiling
+    {"pNowKw": None},                    # 0x441 not live
+    {"energyKwh": None},                 # no pack energy
+  ])
+  def test_an_unusable_current_load_falls_back_to_the_trucks_range_without_the_at(self, widget, now, over):
+    out = widget._build_text(st(now, **{**self.MOV, **over}))
+    assert out == "112m(63.49kwh)", out
+
+  def test_net_charging_while_moving_falls_back_visibly(self, widget, now):
+    """9.6 kW in, 5 kW load: the pack is gaining, a range would be a division by a negative."""
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 9.6, "pNowKw": 5.0})) == "9.6kw,112m"
+
+  @pytest.mark.parametrize("mile,ac", [(-0.1, 0.0), (0.0, 0.0), (0.5, 0.6), (0.1, 0.0)])
+  def test_an_unusable_last_mile_is_shown_as_dashes_not_a_number(self, widget, now, mile, ac):
+    """Net regen / net charging over the mile, or 593 mi over the ceiling: '1mi:--', never a bent number."""
+    out = widget._build_text(st(now, **self.MOV, mileKwh=mile, mileAcKwh=ac))
+    assert out == "@184m,1mi:--(63.49kwh)", out
+
+  def test_no_truck_range_falls_back_to_dashes_never_zero(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "pNowKw": None}, rangeKm=None)) == "--m(63.49kwh)"
+
+  def test_stopped_or_parked_is_exactly_the_old_form_and_ignores_the_instant_terms(self, widget, now):
+    """moving False (or absent): the kWh is shown and the instant terms play no part."""
+    for moving in (False, None):
+      s = st(now, **{**self.MOV, "moving": moving, "acKw": 1.4, "vMs": 0.0}, mileKwh=0.5, mileAcKwh=0.0)
+      assert widget._build_text(s) == "1.4kw,112m(63.49kwh),+2.7m/h"
+      s = st(now, **{**self.MOV, "moving": moving, "vMs": 0.0})
+      assert widget._build_text(s) == "--,112m(63.49kwh)"
+
+  def test_the_stopped_form_ignores_grossKw(self, widget, now):
+    """The measured '@' path was removed from the stopped form; grossKw is calibration-only now."""
+    assert widget._build_text(st(now, energyKwh=59.35, grossKw=20.0, vMs=62 * MPH)) == "1.4kw,112m(63.49kwh)->117m"
+
+  def test_moving_forms_stay_inside_the_stopped_worst_case(self, widget, now):
+    """All-max moving payloads. The real-font table at _FS has the px numbers; this is the char guard."""
+    cases = [
+      st(now, **{**self.MOV, "acKw": 27.7, "pNowKw": 27.8, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0),
+      st(now, **{**self.MOV, "pNowKw": 59.0, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0,
+         socPct=100.0, capKwh=474.63),
+      st(now, **{**self.MOV, "pNowKw": -1.0}, mileKwh=-1.0, mileAcKwh=0.0, socPct=100.0, capKwh=474.63),
+    ]
+    for s in cases:
+      out = widget._build_text(s)
+      assert len(out) <= 31, out
+      assert all(32 <= ord(c) <= 126 for c in out), repr(out)

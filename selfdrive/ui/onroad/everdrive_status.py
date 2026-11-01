@@ -9,21 +9,27 @@ toward centre"; that stopped being true when the box started hugging its text on
 actually holds the constraint now is that the box is RIGHT-anchored and every term is digit-bounded
 -- see the worst-case table at `_FS`.)
 
-Driver-approved formats (2026-09-20 revision -- compact shapes, `m` for miles, and the pack's energy
-in kWh beside the range it buys):
-    charging, moving:    1.4kw,@132m(55.35kwh)->137m
+Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveinstant2pnw, owner
+2026-10-31):
+    charger off:         @132m,1mi:128m(55.35kwh)
+    charger on:          1.4kw,@137m,1mi:135m          (no kWh while charging and moving)
+    first mile not done: the ",1mi:" term is OMITTED, e.g. @132m(55.35kwh)
+STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
+    charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
     not charging:        --,100m(55.35kwh)
     effOk False:         1.4kw,100m(55.35kwh)
     no capKwh/socPct:    the (kwh) parenthetical is OMITTED, never shown as 0.000
 
-THE FIRST NUMBER HAS TWO MEANINGS AND THEY ARE NOT THE SAME QUANTITY, so the driver has to be able
-to tell them apart at a glance:
-    "@132m"  the range at the speed he is doing RIGHT NOW -- remaining pack energy divided by the
-             MEASURED rolling consumption the producer published in `grossKw`. "@" reads "at".
-    "100m"   the truck's OWN dash range estimate (VehElRnge_L_Dsply), printed exactly as this box
-             has shipped since 2026-09-19. This is the FALLBACK, and it is what shows whenever
-             `grossKw` is None: stopped, below ~10 mph, window not yet filled, or inputs missing.
+THE MOVING TERMS (all from the producer's instant power pNowKw, so they show at the first moving
+publish, with no window wait; see everdrive_pnw.py):
+    "@132m"     range at the CURRENT load: energyKwh / (pNowKw - acKw) * mph. "@" reads "at". When
+                that is not usable (regen, coasting, net charging, no motor signal, over
+                _RANGE_MAX_MI) it falls back to the truck's OWN dash range WITHOUT the "@".
+    "1mi:128m"  range at the load of the LAST MILE driven: energyKwh / (mileKwh - mileAcKwh) miles.
+                Absent until the first full mile of the drive; "1mi:--" when that mile is not
+                usable (net regen or net charging over it, or over the ceiling).
+With the charger on, both ranges are net of its input, so they are the ranges WITH the charge.
 The change of FORM is the signal, the same idiom the box already uses for "--" (no charger). There is
 deliberately no legend and no second line.
 
@@ -75,7 +81,8 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
 #
 # HISTORY: 48 -> 56 on 2026-09-20 to match the location box, then BACK TO 48 the same day when the
 # driver asked for the pack kWh inline. The kWh parenthetical is ~50% more text, and at 56 the box
-# crosses screen centre -- into the green driving path this box must never enter.
+# crosses screen centre -- into the green driving path this box must never enter. 48 -> 49 on
+# 2026-10-31 (owner, everdriveinstant2pnw), measured in the table below.
 #
 # ⚠️ THE NUMBERS THAT USED TO BE HERE WERE STALE BY 103 px (corrected 2026-09-20, everdrive2pnw).
 # They read "widest exemplar 925.4 px text -> 973.4 px box -> +36.6 px clear of centre". 925.4 px is
@@ -91,23 +98,27 @@ _STALE_S = 5.0            # s: same dead-man value/idiom as ces_status.py — an
 #
 # DIGITS ARE PROPORTIONAL IN INTER: '4' is the widest at 108 atlas units ('0' is 106, '9' 105), so an
 # all-4s line is the true upper bound for any shape. Content right edge is 2130, _MARGIN 40, screen
-# centre 1080. Every form the formatter can emit, at its maximum digit count:
+# centre 1080. Every form the formatter can emit, at its maximum digit count, at _FS 49
+# (re-measured 2026-10-31; the "@" no longer appears in the stopped forms):
 #
-#     44.4kw,@444m(444.44kwh),+44.4m/h   874.5 px text -> 922.5 box -> left 1167.5 -> +87.5 clear
-#     44.4kw,444m(444.44kwh),+44.4m/h    830.2              878.2           1211.8      +131.8
-#     44.4kw,@444m(444.44kwh)->444m      825.5              873.5           1216.5      +136.5
-#     44.4kw,444m(444.44kwh)->444m       781.2              829.2           1260.8      +180.8
-#     --,@444m(444.44kwh)                518.9              566.9           1523.1      +443.1
+#     44.4kw,444m(444.44kwh),+44.4m/h    847.5 px text -> 895.5 box -> left 1194.5 -> +114.5 clear
+#     44.4kw,444m(444.44kwh)->444m       797.5              845.5           1244.5      +164.5
+#     @444m,1mi:444m(444.44kwh)          708.5              756.5           1333.5      +253.5
+#     --m,1mi:444m(444.44kwh)            614.4              662.4           1427.6      +347.6
+#     44.4kw,444m(444.44kwh)             611.0              659.0           1431.0      +351.0
+#     44.4kw,@444m,1mi:444m              597.1              645.1           1444.9      +364.9
+#     --,444m(444.44kwh)                 484.6              532.6           1557.4      +477.4
 #
-# WORST CASE 922.5 px, +87.5 px clear of the driving path, under the 1000 px _MAX_BOX_W tripwire.
-# A 145,800-payload sweep across the producer's actual published bands tops out lower still, at
-# '27.7kw,@140m(474.63kwh),+60.9m/h' = 897.1 px box, +112.9 px clear.
+# WORST CASE 895.5 px, +114.5 px clear of the driving path, under the 1000 px _MAX_BOX_W tripwire.
+# (At 48 the same worst case was 878.2 px. The largest _FS that stays under the tripwire is 55:
+# 999.3 px; the tripwire binds before screen centre does.)
 #
 # The ranges stay at THREE digits because the producer bands the truck's own range to 254 mi and
 # _RANGE_MAX_MI bands the computed one to 499 mi, which also bounds the projection (<= 2x) to 998.
 # _GAIN_MAX_MI_H bounds the rate to 99.9. Adding a fourth digit anywhere costs ~30 px.
-_FS = 48
-_LINE_H = 60              # _FS * 1.25, the ratio ces_status.py and location_services_status.py both use
+_FS = 49
+_LINE_H = 60              # 48 * 1.25, the ratio ces_status.py and location_services_status.py both use;
+                          #   kept at 60 for _FS 49 (text 56.8 px high) so the stack geometry is unchanged
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
@@ -130,7 +141,7 @@ _PROJ_HEADROOM = 1.05     # the projection is only credible while P_assumed > ac
                           #   1.05*acKw. Both land on the stopped form, so the driver sees the right
                           #   thing; this constant is the divergence backstop, not the cutoff.
 _RANGE_MAX_MI = 499.0     # everdrive2pnw (2026-09-20): plausibility ceiling on the COMPUTED range,
-                          #   `energyKwh / grossKw * mph`. Two independent constraints land on the
+                          #   since 2026-10-31 both moving terms (current load and last mile). Two independent constraints land on the
                           #   same number, which is why it is this one:
                           #     PHYSICS - 499 mi needs ~3.96 mi/kWh on a full 126 kWh pack. The truck's
                           #       own unadjusted full-charge estimate is 246.6 mi, EPA-equivalent is
@@ -169,7 +180,7 @@ _PROJ_MAX_RATIO = 2.0     # hard sanity clamp on the projection, as a multiple o
 _MAX_BOX_W = 1000.0       # Rule 2 tripwire, NOT a clamp. The driver's hard constraint is that this box
                           #   never enters the green driving path down screen centre: content right
                           #   edge 2130 - _MARGIN 40 - 1000 = 1090, i.e. 10 px clear of centre (1080).
-                          #   The producer's bands make it unreachable (kW <= 27.7, range <= 254 mi,
+                          #   The producer's bands make it unreachable (kW <= 27.7, range <= 499 mi,
                           #   capacity <= 474.7 kWh, rate <= 99.9), so tripping it means an input is
                           #   out of band -- which must be SAID, not silently drawn over the road.
                           #   Clamping instead would hide exactly the fault worth knowing about.
@@ -289,46 +300,15 @@ class EverDriveStatusRenderer(Widget):
     eff_wh_mi = eff_wh_km * _KM_PER_MI
     mph = _f(st.get("vMs")) * _MS_TO_MPH
 
-    # everdrive2pnw (driver req 2026-09-20): the FIRST number is now the range at the speed being
-    # driven RIGHT NOW -- remaining pack energy divided by the measured rolling consumption. Both
-    # inputs come from the producer, which publishes `grossKw` only while the truck is above ~10 mph
-    # AND its window has cleared its resolution floor; see everdrive_pnw._gross_kw. So a None here
-    # already means "stopped, or not measured yet", and this widget does not re-derive that.
-    #
-    # `grossKw` is GROSS of the EverDrive input on purpose. A SoC-derived consumption is already net
-    # of whatever the charger is putting in, so projecting `range * P/(P - acKw)` off a NET P would
-    # count the charger twice. Using the gross figure keeps the projection meaning what it always did.
-    #
-    # THE FALLBACK IS THE TRUCK'S OWN RANGE, PRINTED EXACTLY AS IT SHIPS TODAY, and the computed
-    # number carries a leading "@" ("at this speed"). The marker is on the COMPUTED value rather than
-    # on the fallback for two reasons: the degraded path then stays bit-identical to the shipped box,
-    # and it marks the one quantity whose meaning changes underneath the driver.
-    # CORRECTED (Fable review 2026-09-20): an earlier version of this comment claimed the "@" only
-    # ever lands in the moving form, the narrower of the two. That is FALSE -- the stopped/gain form
-    # also carries it whenever the projection clamp trips while moving (see the gain branch below,
-    # covered by test_the_gain_rate_rides_the_same_basis...). The worst-case table at the top of this
-    # file already includes that form, so the width numbers there are right; only this prose was wrong.
-    gross_kw = st.get("grossKw")
-    energy_kwh = st.get("energyKwh")
-    measured_mi = None
-    if gross_kw is not None and energy_kwh is not None:
-      g, e = _f(gross_kw), _f(energy_kwh)
-      if g > 0.0 and e > 0.0:
-        r = e / g * mph
-        if 0.0 < r <= _RANGE_MAX_MI:
-          measured_mi = r
-
-    if measured_mi is not None:
-      # p_kw is what the projection divides by. Measured consumption needs no efficiency constant, so
-      # this path stays alive even when effOk is False -- it never depended on that signal.
-      range_mi, p_kw = measured_mi, _f(gross_kw)
-      rng = f"@{range_mi:.0f}"
-    else:
-      range_mi = truck_mi if truck_mi > 0.0 else None
-      # today's assumed power: the truck's OWN reference efficiency, so the projection stays
-      # internally consistent with the range printed beside it. No substituted default if it is gone.
-      p_kw = (eff_wh_mi * mph / 1000.0) if (st.get("effOk") and eff_wh_km > 0.0) else None
-      rng = f"{range_mi:.0f}" if range_mi is not None else "--"   # never "0 m" from a dead signal
+    # Stopped-form first number: the truck's OWN range. (Until 2026-10-31 a measured "@" range from
+    # grossKw could land here; the producer only publishes grossKw while moving, and moving now has its
+    # own form below, so that path was dead and is removed. grossKw is still published as k's
+    # calibration source.)
+    range_mi = truck_mi if truck_mi > 0.0 else None
+    # today's assumed power: the truck's OWN reference efficiency, so the projection stays
+    # internally consistent with the range printed beside it. No substituted default if it is gone.
+    p_kw = (eff_wh_mi * mph / 1000.0) if (st.get("effOk") and eff_wh_km > 0.0) else None
+    rng = f"{range_mi:.0f}" if range_mi is not None else "--"   # never "0 m" from a dead signal
 
     # everdrive2pnw (driver req 2026-09-20): the pack's energy in kWh, beside the range it buys.
     # capKwh is DERIVED by the producer from the truck's own RngPerChrgAvg x VehElEffAvg, so there is
@@ -349,14 +329,16 @@ class EverDriveStatusRenderer(Widget):
     # acSeen False == the EverDrive CAN message has not been received, so acKw is a pre-filled 0.0 and
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
-    if not st.get("acSeen") or ac_kw <= _AC_ZERO_KW:
+    charging = bool(st.get("acSeen")) and ac_kw > _AC_ZERO_KW
+    if st.get("moving") is True:
+      return self._moving_text(st, charging, ac_kw, rng, mph, pack)
+    if not charging:
       return f"--,{rng}m{pack}"
 
     kw = f"{ac_kw:.1f}kw"
     # No range, or no consumption to divide by, means no projection and no gain rate -- and NO
     # substituted default: a made-up constant would produce a confident number out of a signal we do
-    # not have. p_kw is None exactly when effOk is False or effWhKm is at its -100 encoding floor AND
-    # there is no measured consumption to use instead.
+    # not have. p_kw is None exactly when effOk is False or effWhKm is at its -100 encoding floor.
     if range_mi is None or p_kw is None:
       return f"{kw},{rng}m{pack}"
 
@@ -369,12 +351,9 @@ class EverDriveStatusRenderer(Widget):
     # truck the truck's own awake load ate about 1.0 kW of a 1.36 kW input while parked, so SoC climbed
     # far more slowly than this figure. The contribution is still the right number to show a driver,
     # because that awake load would be drawn anyway.
-    # everdrive2pnw: the gain rate rides the SAME basis as the range printed beside it -- the measured
-    # mi/kWh (mph / grossKw) when there is one, the truck's reference efficiency otherwise. Mixing the
-    # two would put a measured range next to a reference-efficiency gain and invite the driver to
-    # divide one by the other. It is also what keeps this line safe when effOk is False: on the
-    # measured path eff_wh_mi is allowed to be 0, and dividing by it would crash-loop the UI.
-    gain = ac_kw * ((mph / p_kw) if measured_mi is not None else (1000.0 / eff_wh_mi))
+    # The gain rides the truck's reference efficiency, the same basis as the range beside it. p_kw is
+    # not None here, so eff_wh_km > 0 and the division is safe.
+    gain = ac_kw * 1000.0 / eff_wh_mi
     # everdrive2pnw: the same fixed-width discipline the projection gets from _PROJ_MAX_RATIO. The
     # exemplar budgets TWO integer digits for m/h ("+00.0"); three would overflow the box and CLIP,
     # which is a silent corruption of the whole line, not just of this term. The producer's AC band
@@ -384,11 +363,27 @@ class EverDriveStatusRenderer(Widget):
     # form is the visible signal, exactly as it is for the projection.
     if gain >= _GAIN_MAX_MI_H:
       return f"{kw},{rng}m{pack}"
-    # `rng`, NOT f"{range_mi:.0f}" -- range_mi is whichever quantity was selected above, and on the
-    # measured path the "@" is the ONLY thing telling the driver which one he is reading. Formatting
-    # it again here silently dropped the marker on this branch (found reviewing the diff 2026-09-20,
-    # after the tests for this branch checked the gain term and not the range term).
     return f"{kw},{rng}m{pack},+{gain:.1f}m/h"
+
+  @staticmethod
+  def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, mph: float, pack: str) -> str:
+    """everdriveinstant2pnw (owner 2026-10-31): the moving form. See the module docstring for the
+    shapes. Net power must be positive AND the range under _RANGE_MAX_MI: at 60 mph on a 126 kWh pack
+    that needs more than 15 kW net, so a near-zero denominator (coasting) falls back like regen does.
+    `rng` is the truck's own range ("--" if it is gone): the fallback, without the "@"."""
+    ac = ac_kw if charging else 0.0
+    e = _f(st.get("energyKwh"))
+    net_now = _f(st.get("pNowKw")) - ac      # pNowKw None -> 0 -> not positive -> fallback
+    r = e / net_now * mph if (net_now > 0.0 and e > 0.0) else 0.0
+    now_t = f"@{r:.0f}m" if 0.0 < r <= _RANGE_MAX_MI else f"{rng}m"
+    mile = ""
+    if st.get("mileKwh") is not None:
+      net_mi = _f(st.get("mileKwh")) - _f(st.get("mileAcKwh"))
+      rm = e / net_mi if (net_mi > 0.0 and e > 0.0) else 0.0
+      mile = f",1mi:{rm:.0f}m" if 0.0 < rm <= _RANGE_MAX_MI else ",1mi:--"
+    if charging:
+      return f"{ac_kw:.1f}kw,{now_t}{mile}"
+    return f"{now_t}{mile}{pack}"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):
