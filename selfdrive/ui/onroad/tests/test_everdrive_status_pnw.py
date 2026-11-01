@@ -717,3 +717,52 @@ class TestGrowthWhileMoving:
            effWhKm=1159.9)
     out = widget._build_text(s)
     assert "m/h,1mi:+" in out and len(out) <= 31, out
+
+
+class TestRoundThenBound:
+  """Gemini BLOCK on 7ee73b47 (2026-11-01): every printed number is bounded AFTER rounding."""
+
+  MOV = TestTheMovingForm.MOV
+  MI_PER_KWH = 1000.0 / (320.0 * 1.60934)
+
+  def test_charge_exactly_equal_to_load_never_prints_minus_zero(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 10.0}, mileKwh=0.15, mileAcKwh=0.15)
+    out = widget._build_text(s)
+    assert "-0" not in out and "+0.0" not in out, out
+    assert out == "10.0kw,112m,1mi:--", out
+
+  def test_a_gain_that_rounds_to_zero_is_not_printed(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 9.99}))
+    assert out == "10.0kw,112m", out
+    # positive control: 0.05 kW surplus = 0.097 m/h rounds to 0.1 and prints
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 9.95})) == "10.0kw,+0.1m/h"
+
+  def test_a_gain_that_rounds_to_one_hundred_is_dropped(self, widget, now):
+    ac = 99.96 / self.MI_PER_KWH                                # gain 99.96 -> "+100.0"
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "pNowKw": 0.0},
+                                mileKwh=0.0, mileAcKwh=99.96 / self.MI_PER_KWH / 62.0))
+    assert "100.0" not in out and out.endswith("kw,112m,1mi:--"), out
+    ac = 99.94 / self.MI_PER_KWH                                # control: 99.9 still prints
+    assert "+99.9m/h" in widget._build_text(st(now, **{**self.MOV, "acKw": ac, "pNowKw": 0.0}))
+
+  def test_the_stopped_gain_has_the_same_bound(self, widget, now):
+    ac = 99.96 / self.MI_PER_KWH
+    out = widget._build_text(st(now, acKw=ac, vMs=0.0))
+    assert "m/h" not in out, out
+
+  def test_a_range_of_exactly_half_a_mile_never_prints_zero(self, widget, now):
+    # r = e / p * mph = 0.5 exactly: format(0.5, ".0f") is "0" (round half to even)
+    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.5, "pNowKw": 62.0}))
+    assert "@0m" not in out and out.startswith("112m"), out
+    assert widget._build_text(st(now, rangeKm=0.5 * 1.60934, vMs=0.0, acSeen=False)).startswith("--,--m")
+
+  @pytest.mark.parametrize("field", ["pNowKw", "energyKwh", "acKw", "mileKwh", "rangeKm", "vMs"])
+  def test_an_infinite_or_nan_field_never_crashes(self, widget, now, field):
+    for bad in (float("inf"), float("-inf"), float("nan")):
+      out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "mileKwh": 0.5, "mileAcKwh": 0.0, field: bad}))
+      assert out is not None and "inf" not in out and "nan" not in out, out
+
+  def test_a_computed_overflow_never_crashes(self, widget, now):
+    """Finite inputs can still overflow: 59 kWh / 1e-320 kW is inf, and round(inf) raises."""
+    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 1e-320, "mileKwh": 1e-320, "mileAcKwh": 0.0}))
+    assert out == "112m(63.49kwh),1mi:--", out

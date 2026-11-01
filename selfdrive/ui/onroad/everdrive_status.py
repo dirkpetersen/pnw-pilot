@@ -61,6 +61,7 @@ formatting or text measurement, the exemplar measurement is deferred until the b
 shown, and _render is a single None check. The back-off never becomes permanent, because the driver
 can plug the charger in mid-drive.
 """
+import math
 import time
 import pyray as rl
 
@@ -215,9 +216,28 @@ def _f(v, d: float = 0.0) -> float:
   through dict.get(k, default), and float(None) would crash-loop the UI (this fork's documented brick
   scenario, ces_status.py:138). Every numeric read goes through this."""
   try:
-    return float(v)
+    x = float(v)
   except (TypeError, ValueError):
     return d
+  return x if math.isfinite(x) else d   # a JSON Infinity / NaN is no reading, like None
+
+
+def _miles(r: float) -> str | None:
+  """Whole miles as printed, or None. The bound is checked on the ROUNDED value (review 2026-11-01):
+  0.5 formats as "0" (round half to even), and a "0m" range is a lie the driver would act on.
+  Not finite (a JSON Infinity / NaN) is None too: round() would raise in the render loop."""
+  if not math.isfinite(r):
+    return None
+  m = round(r)
+  return str(m) if 1 <= m <= _RANGE_MAX_MI else None
+
+
+def _gain_text(gain: float) -> str | None:
+  """"+N.Nm/h", or None to drop the term. Rounded FIRST, then bounded (Gemini BLOCK 2026-11-01):
+  99.95 would print "+100.0" (three integer digits) and -0.0 / 0.04 would print "+-0.0" / "+0.0".
+  round(x, 1) passes inf / nan through and both fail the compare, so no finite check is needed."""
+  g = round(gain, 1)
+  return f"+{g:.1f}m/h" if 0.0 < g < _GAIN_MAX_MI_H else None
 
 
 class EverDriveStatusRenderer(Widget):
@@ -318,11 +338,12 @@ class EverDriveStatusRenderer(Widget):
     # grossKw could land here; the producer only publishes grossKw while moving, and moving now has its
     # own form below, so that path was dead and is removed. grossKw is still published as k's
     # calibration source.)
-    range_mi = truck_mi if truck_mi >= 0.5 else None   # under 0.5 would print "0m"
+    truck_txt = _miles(truck_mi)
+    range_mi = truck_mi if truck_txt is not None else None
     # today's assumed power: the truck's OWN reference efficiency, so the projection stays
     # internally consistent with the range printed beside it. No substituted default if it is gone.
     p_kw = (eff_wh_mi * mph / 1000.0) if (st.get("effOk") and eff_wh_km > 0.0) else None
-    rng = f"{range_mi:.0f}" if range_mi is not None else "--"   # never "0 m" from a dead signal
+    rng = truck_txt if truck_txt is not None else "--"   # never "0 m" from a dead signal
 
     # everdrive2pnw (driver req 2026-09-20): the pack's energy in kWh, beside the range it buys.
     # capKwh is DERIVED by the producer from the truck's own RngPerChrgAvg x VehElEffAvg, so there is
@@ -376,9 +397,10 @@ class EverDriveStatusRenderer(Widget):
     # effWhKm is implausibly small -- either way the inputs are wrong. Drop the term rather than print
     # a clipped one: showing LESS is honest, showing a truncated number is not (Rule 2). The change of
     # form is the visible signal, exactly as it is for the projection.
-    if gain >= _GAIN_MAX_MI_H:
+    gain_t = _gain_text(gain)
+    if gain_t is None:
       return f"{kw},{rng}m{pack}"
-    return f"{kw},{rng}m{pack},+{gain:.1f}m/h"
+    return f"{kw},{rng}m{pack},{gain_t}"
 
   @staticmethod
   def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, mph: float, pack: str,
@@ -391,28 +413,29 @@ class EverDriveStatusRenderer(Widget):
     e = _f(st.get("energyKwh"))
     net_now = _f(st.get("pNowKw")) - ac      # pNowKw None -> 0 -> not positive -> fallback
     r = e / net_now * mph if (net_now > 0.0 and e > 0.0) else 0.0
-    # 0.5, not 0.0: anything under it prints "@0m", a zero range the driver would act on
-    now_t = f"@{r:.0f}m" if 0.5 <= r <= _RANGE_MAX_MI else f"{rng}m"
+    r_t = _miles(r)                         # never "@0m"
+    now_t = f"@{r_t}m" if r_t is not None else f"{rng}m"
     # Option A: the charger covers the whole load -> the range GROWS. Needs a live pNowKw (None is
     # "no motor signal", not zero load) and the truck's efficiency, else the fallback above stays.
     if charging and net_now <= 0.0 and st.get("pNowKw") is not None and mi_per_kwh is not None:
-      gain = -net_now * mi_per_kwh
-      if gain < _GAIN_MAX_MI_H:
-        now_t = f"+{gain:.1f}m/h"
+      gain_t = _gain_text(-net_now * mi_per_kwh)
+      if gain_t is not None:
+        now_t = gain_t
     mile = ""
     if st.get("mileKwh") is not None:
       # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside
       # the mile still put real energy in, so with acSeen the whole mile's AC energy is netted.
       net_mi = _f(st.get("mileKwh")) - (_f(st.get("mileAcKwh")) if st.get("acSeen") else 0.0)
       rm = e / net_mi if (net_mi > 0.0 and e > 0.0) else 0.0
-      mile = f",1mi:{rm:.0f}m" if 0.5 <= rm <= _RANGE_MAX_MI else ",1mi:--"
+      rm_t = _miles(rm)
+      mile = f",1mi:{rm_t}m" if rm_t is not None else ",1mi:--"
       # Option A for the mile: it netted out as CHARGING when its mean AC input at this speed
       # (kWh/mi x mph = kW) is above _AC_ZERO_KW and covered the load. Regen alone stays "1mi:--".
       mile_ac_kw = _f(st.get("mileAcKwh")) * mph if st.get("acSeen") else 0.0
       if net_mi <= 0.0 and mile_ac_kw > _AC_ZERO_KW and mi_per_kwh is not None:
-        gain_mi = -net_mi * mph * mi_per_kwh
-        if gain_mi < _GAIN_MAX_MI_H:
-          mile = f",1mi:+{gain_mi:.1f}m/h"
+        gain_t = _gain_text(-net_mi * mph * mi_per_kwh)
+        if gain_t is not None:
+          mile = f",1mi:{gain_t}"
     if charging:
       return f"{ac_kw:.1f}kw,{now_t}{mile}"
     return f"{now_t}{pack}{mile}"
