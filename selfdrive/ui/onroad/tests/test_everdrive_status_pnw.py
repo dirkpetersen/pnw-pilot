@@ -766,3 +766,24 @@ class TestRoundThenBound:
     """Finite inputs can still overflow: 59 kWh / 1e-320 kW is inf, and round(inf) raises."""
     out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 1e-320, "mileKwh": 1e-320, "mileAcKwh": 0.0}))
     assert out == "112m(63.49kwh),1mi:--", out
+
+
+class TestPresenceIsAReading:
+  """Review of 63557d96 (2026-11-01): a present but non-finite or non-numeric value is no reading."""
+
+  MOV = TestTheMovingForm.MOV
+
+  @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "bad"])
+  def test_a_bad_capacity_or_soc_omits_the_kwh_never_zero(self, widget, now, bad):
+    for field in ("capKwh", "socPct"):
+      out = widget._build_text(st(now, vMs=0.0, **{field: bad}))
+      assert "kwh" not in out and "0.00" not in out, out
+
+  @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "bad"])
+  def test_a_bad_pNowKw_is_no_motor_signal_not_zero_load(self, widget, now, bad):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": bad})) == "10.0kw,112m"
+
+  @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "bad"])
+  def test_a_bad_mileKwh_is_no_mile_yet(self, widget, now, bad):
+    out = widget._build_text(st(now, **self.MOV, mileKwh=bad, mileAcKwh=0.0))
+    assert "1mi:" not in out, out

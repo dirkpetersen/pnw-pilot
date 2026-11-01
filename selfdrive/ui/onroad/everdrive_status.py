@@ -222,6 +222,13 @@ def _f(v, d: float = 0.0) -> float:
   return x if math.isfinite(x) else d   # a JSON Infinity / NaN is no reading, like None
 
 
+def _num(v) -> float | None:
+  """A REAL reading or None. Presence checks use this, never `is not None` (review 2026-11-01): a
+  NaN / Infinity / non-numeric value is present but is no reading, and _f would turn it into 0.0."""
+  x = _f(v, math.nan)
+  return None if math.isnan(x) else x
+
+
 def _miles(r: float) -> str | None:
   """Whole miles as printed, or None. The bound is checked on the ROUNDED value (review 2026-11-01):
   0.5 formats as "0" (round half to even), and a "0m" range is a lie the driver would act on.
@@ -358,7 +365,7 @@ class EverDriveStatusRenderer(Widget):
     cap_kwh = st.get("capKwh")
     soc_pct = st.get("socPct")
     pack = ""
-    if cap_kwh is not None and soc_pct is not None:
+    if _num(cap_kwh) is not None and _num(soc_pct) is not None:
       pack = f"({_f(soc_pct) / 100.0 * _f(cap_kwh):.2f}kwh)"
 
     # acSeen False == the EverDrive CAN message has not been received, so acKw is a pre-filled 0.0 and
@@ -417,12 +424,12 @@ class EverDriveStatusRenderer(Widget):
     now_t = f"@{r_t}m" if r_t is not None else f"{rng}m"
     # Option A: the charger covers the whole load -> the range GROWS. Needs a live pNowKw (None is
     # "no motor signal", not zero load) and the truck's efficiency, else the fallback above stays.
-    if charging and net_now <= 0.0 and st.get("pNowKw") is not None and mi_per_kwh is not None:
+    if charging and net_now <= 0.0 and _num(st.get("pNowKw")) is not None and mi_per_kwh is not None:
       gain_t = _gain_text(-net_now * mi_per_kwh)
       if gain_t is not None:
         now_t = gain_t
     mile = ""
-    if st.get("mileKwh") is not None:
+    if _num(st.get("mileKwh")) is not None:
       # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside
       # the mile still put real energy in, so with acSeen the whole mile's AC energy is netted.
       net_mi = _f(st.get("mileKwh")) - (_f(st.get("mileAcKwh")) if st.get("acSeen") else 0.0)
