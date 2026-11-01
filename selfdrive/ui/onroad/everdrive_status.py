@@ -305,7 +305,7 @@ class EverDriveStatusRenderer(Widget):
     # grossKw could land here; the producer only publishes grossKw while moving, and moving now has its
     # own form below, so that path was dead and is removed. grossKw is still published as k's
     # calibration source.)
-    range_mi = truck_mi if truck_mi > 0.0 else None
+    range_mi = truck_mi if truck_mi >= 0.5 else None   # under 0.5 would print "0m"
     # today's assumed power: the truck's OWN reference efficiency, so the projection stays
     # internally consistent with the range printed beside it. No substituted default if it is gone.
     p_kw = (eff_wh_mi * mph / 1000.0) if (st.get("effOk") and eff_wh_km > 0.0) else None
@@ -376,12 +376,15 @@ class EverDriveStatusRenderer(Widget):
     e = _f(st.get("energyKwh"))
     net_now = _f(st.get("pNowKw")) - ac      # pNowKw None -> 0 -> not positive -> fallback
     r = e / net_now * mph if (net_now > 0.0 and e > 0.0) else 0.0
-    now_t = f"@{r:.0f}m" if 0.0 < r <= _RANGE_MAX_MI else f"{rng}m"
+    # 0.5, not 0.0: anything under it prints "@0m", a zero range the driver would act on
+    now_t = f"@{r:.0f}m" if 0.5 <= r <= _RANGE_MAX_MI else f"{rng}m"
     mile = ""
     if st.get("mileKwh") is not None:
-      net_mi = _f(st.get("mileKwh")) - _f(st.get("mileAcKwh"))
+      # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside
+      # the mile still put real energy in, so with acSeen the whole mile's AC energy is netted.
+      net_mi = _f(st.get("mileKwh")) - (_f(st.get("mileAcKwh")) if st.get("acSeen") else 0.0)
       rm = e / net_mi if (net_mi > 0.0 and e > 0.0) else 0.0
-      mile = f",1mi:{rm:.0f}m" if 0.0 < rm <= _RANGE_MAX_MI else ",1mi:--"
+      mile = f",1mi:{rm:.0f}m" if 0.5 <= rm <= _RANGE_MAX_MI else ",1mi:--"
     if charging:
       return f"{ac_kw:.1f}kw,{now_t}{mile}"
     return f"{now_t}{pack}{mile}"

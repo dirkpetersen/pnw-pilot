@@ -639,3 +639,29 @@ class TestTheMovingForm:
       out = widget._build_text(s)
       assert len(out) <= 31, out
       assert all(32 <= ord(c) <= 126 for c in out), repr(out)
+
+
+class TestReviewFixes:
+  """Gemini 4 Argon review of a9e7ec1e (2026-11-01)."""
+
+  MOV = TestTheMovingForm.MOV
+
+  def test_a_computed_range_under_half_a_mile_never_prints_zero(self, widget, now):
+    """0.4 kWh at 40 kW and 20 mph is 0.2 mi: '@0m' is a zero range. Fall back instead."""
+    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.4, "pNowKw": 40.0, "vMs": 20 * MPH},
+                                mileKwh=1.0, mileAcKwh=0.0))
+    assert "@0m" not in out and "1mi:0m" not in out, out
+    assert out.startswith("112m(") and out.endswith(",1mi:--"), out
+    # positive control at the boundary: 0.6 mi still prints, as "1"
+    assert "@1m" in widget._build_text(st(now, **{**self.MOV, "energyKwh": 1.2, "pNowKw": 40.0, "vMs": 20 * MPH}))
+
+  def test_mileAcKwh_is_ignored_without_acSeen_but_used_after_the_charger_stops(self, widget, now):
+    s = st(now, **self.MOV, mileKwh=0.5, mileAcKwh=0.1)
+    assert widget._build_text({**s, "acSeen": False}).endswith(",1mi:119m"), "no acSeen: AC energy not trusted"
+    assert widget._build_text(s).endswith(",1mi:148m"), "acSeen, charger now off: the mile's AC energy counts"
+
+  @pytest.mark.parametrize("moving", [True, False])
+  def test_a_truck_range_under_half_a_mile_is_dashes_not_zero(self, widget, now, moving):
+    out = widget._build_text(st(now, **{**self.MOV, "moving": moving, "pNowKw": None, "vMs": 0.0},
+                                rangeKm=0.5, acSeen=False))
+    assert "--m" in out and ",0m" not in out and not out.startswith("0m"), out
