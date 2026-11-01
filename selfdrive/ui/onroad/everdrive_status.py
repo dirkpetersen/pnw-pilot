@@ -12,7 +12,7 @@ actually holds the constraint now is that the box is RIGHT-anchored and every te
 Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveinstant2pnw, owner
 2026-10-31):
     charger off:         @132m(55.35kwh),1mi:128m   (kWh right after the first range, as stopped)
-    charger on:          1.4kw,@137m,1mi:135m          (no kWh while charging and moving)
+    charger on:          10.8kw,@220m,1mi:135m         (no kWh while charging and moving)
     first mile not done: the ",1mi:" term is OMITTED, e.g. @132m(55.35kwh)
     "@" not usable:      112m(55.35kwh),1mi:128m   (the truck's own range, without the "@")
     charge >= load:      10.0kw,+4.3m/h,1mi:+2.1m/h  (growth rate; owner option A, 2026-11-01)
@@ -38,7 +38,11 @@ publish, with no window wait; see everdrive_pnw.py):
                 charger, regen and coasting keep the dash-range / "1mi:--" fallback: a regen gain is
                 momentary, not charging. Over _GAIN_MAX_MI_H, or with no efficiency (effOk False),
                 the term falls back the same way, as the stopped form drops its gain term.
-With the charger on, both ranges are net of its input, so they are the ranges WITH the charge.
+WITH THE CHARGER ON (owner 2026-11-01) the "@" term is different: the truck's DASH range scaled by the
+generator, dash x pNowKw / (pNowKw - acKw), e.g. dash 141 mi, 30 kW load, 10.8 kW in -> "@220m". It
+needs no capacity, and it falls back to the bare dash range only when pNowKw is None (no 0x441) or the
+projection is over _PROJ_MAX_RATIO x the dash range (see _charging_term). The last-mile term is net of
+the mile's AC energy in both cases, so both ranges are the ranges WITH the charge.
 The change of FORM is the signal, the same idiom the box already uses for "--" (no charger). There is
 deliberately no legend and no second line.
 
@@ -374,7 +378,7 @@ class EverDriveStatusRenderer(Widget):
     charging = bool(st.get("acSeen")) and ac_kw > _AC_ZERO_KW
     if st.get("moving") is True:
       mi_per_kwh = (1000.0 / eff_wh_mi) if (st.get("effOk") and eff_wh_km > 0.0) else None
-      return self._moving_text(st, charging, ac_kw, rng, mph, pack, mi_per_kwh)
+      return self._moving_text(st, charging, ac_kw, rng, range_mi, mph, pack, mi_per_kwh)
     if not charging:
       return f"--,{rng}m{pack}"
 
@@ -410,8 +414,8 @@ class EverDriveStatusRenderer(Widget):
     return f"{kw},{rng}m{pack},{gain_t}"
 
   @staticmethod
-  def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, mph: float, pack: str,
-                   mi_per_kwh: float | None) -> str:
+  def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, range_mi: float | None, mph: float,
+                   pack: str, mi_per_kwh: float | None) -> str:
     """everdriveinstant2pnw (owner 2026-10-31): the moving form. See the module docstring for the
     shapes. Net power must be positive AND the range under _RANGE_MAX_MI: at 60 mph on a 126 kWh pack
     that needs more than 15 kW net, so a near-zero denominator (coasting) falls back like regen does.
@@ -422,12 +426,8 @@ class EverDriveStatusRenderer(Widget):
     r = e / net_now * mph if (net_now > 0.0 and e > 0.0) else 0.0
     r_t = _miles(r)                         # never "@0m"
     now_t = f"@{r_t}m" if r_t is not None else f"{rng}m"
-    # Option A: the charger covers the whole load -> the range GROWS. Needs a live pNowKw (None is
-    # "no motor signal", not zero load) and the truck's efficiency, else the fallback above stays.
-    if charging and net_now <= 0.0 and _num(st.get("pNowKw")) is not None and mi_per_kwh is not None:
-      gain_t = _gain_text(-net_now * mi_per_kwh)
-      if gain_t is not None:
-        now_t = gain_t
+    if charging:
+      now_t = EverDriveStatusRenderer._charging_term(_num(st.get("pNowKw")), ac_kw, rng, range_mi, mi_per_kwh)
     mile = ""
     if _num(st.get("mileKwh")) is not None:
       # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside
@@ -446,6 +446,31 @@ class EverDriveStatusRenderer(Widget):
     if charging:
       return f"{ac_kw:.1f}kw,{now_t}{mile}"
     return f"{now_t}{pack}{mile}"
+
+  @staticmethod
+  def _charging_term(p_now: float | None, ac_kw: float, rng: str, range_mi: float | None,
+                     mi_per_kwh: float | None) -> str:
+    """Owner 2026-11-01: term 2 of the generator-ON moving form. The truck's DASH range scaled by the
+    generator, range x P / (P - acKw) -- the stopped form's projection, fed the live load instead of
+    the reference efficiency -- so it needs no capacity and is live from the first moving frame.
+      P > acKw, projection <= _PROJ_MAX_RATIO x range  -> "@220m"
+      P <= acKw (the generator covers the load)         -> "+N m/h" growth (needs effOk)
+      P None (no 0x441), no dash range, no efficiency   -> the bare dash range, the visible fallback
+    Over the ratio ceiling (the generator covers more than half the load) the projection diverges
+    toward the P = acKw pole and stops predicting anything. That surplus is still NEGATIVE (the pack
+    drains), so a growth form would claim a gain that is not there; and a near-zero drain rounds to
+    "+0.0", which _gain_text never prints. So it falls back to the bare dash range, as today."""
+    if p_now is None:
+      return f"{rng}m"
+    if p_now <= ac_kw:
+      gain_t = _gain_text((ac_kw - p_now) * mi_per_kwh) if mi_per_kwh is not None else None
+      return gain_t if gain_t is not None else f"{rng}m"
+    if range_mi is None:
+      return f"{rng}m"
+    proj = range_mi * p_now / (p_now - ac_kw)
+    if math.isfinite(proj) and proj <= range_mi * _PROJ_MAX_RATIO:
+      return f"@{round(proj)}m"
+    return f"{rng}m"
 
   # ---- render --------------------------------------------------------------
   def _render(self, rect: rl.Rectangle):

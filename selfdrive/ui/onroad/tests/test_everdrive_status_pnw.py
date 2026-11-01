@@ -582,7 +582,7 @@ class TestTheMovingForm:
 
   def test_generator_on_puts_the_kw_first_nets_the_charge_and_drops_the_kwh(self, widget, now):
     out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "pNowKw": 21.4}, mileKwh=0.5, mileAcKwh=0.0233))
-    assert out == "1.4kw,@184m,1mi:125m", out
+    assert out == "1.4kw,@120m,1mi:125m", out          # since 2026-11-01: dash 112 x 21.4 / 20.0
     assert "kwh" not in out, "the pack kWh is never shown while charging and moving"
 
   def test_acSeen_false_is_generator_off_whatever_acKw_says(self, widget, now):
@@ -787,3 +787,40 @@ class TestPresenceIsAReading:
   def test_a_bad_mileKwh_is_no_mile_yet(self, widget, now, bad):
     out = widget._build_text(st(now, **self.MOV, mileKwh=bad, mileAcKwh=0.0))
     assert "1mi:" not in out, out
+
+
+class TestGeneratorOnScalesTheDashRange:
+  """Owner 2026-11-01: generator ON, moving -> term 2 is the DASH range x P / (P - acKw)."""
+
+  MOV = TestTheMovingForm.MOV
+
+  def test_the_owners_example_141_mi_30_kw_10_8_kw_is_220(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0}, rangeKm=141.0 * 1.60934))
+    assert out == "10.8kw,@220m", out
+    assert round(141.0 * 30.0 / 19.2) == 220
+
+  def test_it_needs_no_capacity(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0, "energyKwh": None}, rangeKm=141.0 * 1.60934,
+           capKwh=None, socPct=None)
+    assert widget._build_text(s) == "10.8kw,@220m"
+
+  def test_no_motor_signal_is_the_bare_dash_range(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": None})) == "10.8kw,112m"
+
+  @pytest.mark.parametrize("p_now", [10.8, 5.0])
+  def test_the_generator_covering_the_load_is_the_growth_form(self, widget, now, p_now):
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": p_now}))
+    gain = (10.8 - p_now) * 1000.0 / (320.0 * 1.60934)
+    assert out == (f"10.8kw,+{gain:.1f}m/h" if gain > 0.05 else "10.8kw,112m"), out
+
+  def test_over_the_ratio_ceiling_falls_back_to_the_dash_range(self, widget, now):
+    # 15 kW load, 10.8 kW in: 3.6 x the dash range -- the pole, not a prediction; the pack still drains
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 15.0})) == "10.8kw,112m"
+    # control: just under 2x still prints
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 21.7})) == "10.8kw,@223m"
+
+  def test_no_dash_range_is_dashes(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0}, rangeKm=None)) == "10.8kw,--m"
+
+  def test_generator_off_is_unchanged(self, widget, now):
+    assert widget._build_text(st(now, **self.MOV)) == "@184m(63.49kwh)"
