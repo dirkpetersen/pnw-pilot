@@ -602,11 +602,12 @@ class TestTheMovingForm:
     # with no pack energy the last mile has nothing to divide either
     assert out == ("112m(63.49kwh),1mi:--" if "energyKwh" in over else "112m(63.49kwh),1mi:119m"), out
 
-  def test_net_charging_while_moving_falls_back_visibly(self, widget, now):
-    """9.6 kW in, 5 kW load: the pack is gaining, a range would be a division by a negative."""
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 9.6, "pNowKw": 5.0})) == "9.6kw,112m"
+  def test_net_charging_while_moving_shows_the_gain_not_a_range(self, widget, now):
+    """9.6 kW in, 5 kW load: the pack is gaining, a range would be a division by a negative.
+    Since owner option A (2026-11-01) that is the growth rate, 4.6 kW x 1.94 mi/kWh."""
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 9.6, "pNowKw": 5.0})) == "9.6kw,+8.9m/h"
 
-  @pytest.mark.parametrize("mile,ac", [(-0.1, 0.0), (0.0, 0.0), (0.5, 0.6), (0.1, 0.0)])
+  @pytest.mark.parametrize("mile,ac", [(-0.1, 0.0), (0.0, 0.0), (0.1, 0.0)])   # net charging: TestGrowthWhileMoving
   def test_an_unusable_last_mile_is_shown_as_dashes_not_a_number(self, widget, now, mile, ac):
     """Net regen / net charging over the mile, or 593 mi over the ceiling: '1mi:--', never a bent number."""
     out = widget._build_text(st(now, **self.MOV, mileKwh=mile, mileAcKwh=ac))
@@ -665,3 +666,54 @@ class TestReviewFixes:
     out = widget._build_text(st(now, **{**self.MOV, "moving": moving, "pNowKw": None, "vMs": 0.0},
                                 rangeKm=0.5, acSeen=False))
     assert "--m" in out and ",0m" not in out and not out.startswith("0m"), out
+
+
+class TestGrowthWhileMoving:
+  """Owner option A (2026-11-01): with the charger covering the whole load while moving, show the
+  range GAINED per hour instead of the dash range. Same efficiency and formula as the stopped form."""
+
+  MOV = TestTheMovingForm.MOV
+  MI_PER_KWH = 1000.0 / (320.0 * 1.60934)                       # BASE effWhKm, as the stopped form
+
+  def test_charge_above_load_shows_the_gain_rate(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 7.8}))
+    assert out == f"10.0kw,+{2.2 * self.MI_PER_KWH:.1f}m/h", out
+    assert out == "10.0kw,+4.3m/h"
+
+  def test_the_moving_gain_uses_the_same_formula_as_the_stopped_one(self, widget, now):
+    stopped = widget._build_text(st(now, acKw=1.4, vMs=0.0))
+    moving = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "pNowKw": 0.0}))
+    assert stopped.endswith(",+2.7m/h") and moving == "1.4kw,+2.7m/h", (stopped, moving)
+
+  def test_the_last_mile_netted_as_charging_shows_its_gain(self, widget, now):
+    # mile: load 0.10 kWh, AC 0.135 kWh -> 0.035 kWh/mi surplus x 62 mph x 1.94 mi/kWh = 4.2 m/h
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 7.8}, mileKwh=0.10, mileAcKwh=0.135))
+    assert out == f"10.0kw,+4.3m/h,1mi:+{0.035 * 62 * self.MI_PER_KWH:.1f}m/h", out
+
+  @pytest.mark.parametrize("p_now", [-5.0, 0.0, 0.03])
+  def test_regen_or_coasting_without_the_charger_keeps_the_dash_fallback(self, widget, now, p_now):
+    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, mileKwh=-0.05, mileAcKwh=0.0))
+    assert out == "112m(63.49kwh),1mi:--", out
+
+  def test_a_regen_mile_with_a_tiny_ac_residue_is_not_charging(self, widget, now):
+    """0.0005 kWh/mi x 62 mph = 0.03 kW: under _AC_ZERO_KW, so the mile is regen, not charging."""
+    out = widget._build_text(st(now, **self.MOV, mileKwh=-0.05, mileAcKwh=0.0005))
+    assert out.endswith(",1mi:--"), out
+
+  def test_no_motor_signal_is_not_zero_load(self, widget, now):
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": None})) == "10.0kw,112m"
+
+  def test_no_efficiency_drops_the_gain_visibly(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": 7.8}, mileKwh=0.10, mileAcKwh=0.135,
+           effOk=False, effWhKm=-100.0)
+    assert widget._build_text(s) == "10.0kw,112m,1mi:--"
+
+  def test_a_gain_over_the_bound_falls_back_like_the_stopped_form(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 60.0, "pNowKw": 1.0}, mileKwh=0.10, mileAcKwh=1.0)
+    assert widget._build_text(s) == "60.0kw,112m,1mi:--"
+
+  def test_the_widest_growth_form_stays_inside_the_char_bound(self, widget, now):
+    s = st(now, **{**self.MOV, "acKw": 27.7, "pNowKw": 0.0, "vMs": 99 * MPH}, mileKwh=0.0, mileAcKwh=0.15,
+           effWhKm=1159.9)
+    out = widget._build_text(s)
+    assert "m/h,1mi:+" in out and len(out) <= 31, out
