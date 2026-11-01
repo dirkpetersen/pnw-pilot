@@ -594,12 +594,15 @@ class TestTheMovingForm:
     {"pNowKw": 1.0},                     # coasting: 3680 mi, over the ceiling
     {"energyKwh": None},                 # no pack energy
   ])
-  def test_an_unusable_current_load_falls_back_to_the_trucks_range(self, widget, now, over):
+  def test_an_unusable_current_load_is_marked_never_bare(self, widget, now, over):
+    """Coordinator 2026-11-01: a bare range is always measured. Over the ceiling: the speed estimate;
+    no energy: nothing to divide, so the dash range. Both "?"."""
+    want = "?112m" if "energyKwh" in over else "?111m"
     out = widget._build_text(st(now, **{**self.MOV, **over}))
-    assert out == "112m(63.49kwh),1mi:112m", out
+    assert out == f"{want}(63.49kwh),1mi:{want}", out
     out = widget._build_text(st(now, **{**self.MOV, **over}, mileKwh=0.5, mileAcKwh=0.0))
     # with no pack energy the last mile has nothing to divide either
-    assert out == ("112m(63.49kwh),1mi:--" if "energyKwh" in over else "112m(63.49kwh),1mi:119m"), out
+    assert out == (f"{want}(63.49kwh),1mi:--" if "energyKwh" in over else f"{want}(63.49kwh),1mi:119m"), out
 
   def test_net_charging_while_moving_has_no_finite_range(self, widget, now):
     """9.6 kW in, 5 kW load: the pack is gaining. No "m/h" while moving (owner 2026-11-01)."""
@@ -652,7 +655,7 @@ class TestReviewFixes:
     out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.4, "pNowKw": 40.0, "vMs": 20 * MPH},
                                 mileKwh=1.0, mileAcKwh=0.0))
     assert "@0m" not in out and "1mi:0m" not in out, out
-    assert out.startswith("112m(") and out.endswith(",1mi:--"), out
+    assert out.startswith("?1m(") and out.endswith(",1mi:--"), out      # estimate 0.4 / 11.5 kW x 20 = 0.7
     # positive control at the boundary: 0.6 mi still prints, as "1"
     assert "1m" in widget._build_text(st(now, **{**self.MOV, "energyKwh": 1.2, "pNowKw": 40.0, "vMs": 20 * MPH}))
 
@@ -689,7 +692,7 @@ class TestRoundThenBound:
   def test_a_range_of_exactly_half_a_mile_never_prints_zero(self, widget, now):
     # r = e / p * mph = 0.5 exactly: format(0.5, ".0f") is "0" (round half to even)
     out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.5, "pNowKw": 62.0}))
-    assert "@0m" not in out and out.startswith("112m"), out
+    assert "0m" not in out.split("(")[0] and out.startswith("?1m("), out     # estimate 0.94 mi
     assert widget._build_text(st(now, rangeKm=0.5 * 1.60934, vMs=0.0, acSeen=False)).startswith("--,--m")
 
   @pytest.mark.parametrize("field", ["pNowKw", "energyKwh", "acKw", "mileKwh", "rangeKm", "vMs"])
@@ -701,7 +704,7 @@ class TestRoundThenBound:
   def test_a_computed_overflow_never_crashes(self, widget, now):
     """Finite inputs can still overflow: 59 kWh / 1e-320 kW is inf, and round(inf) raises."""
     out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 1e-320, "mileKwh": 1e-320, "mileAcKwh": 0.0}))
-    assert out == "112m(63.49kwh),1mi:--", out
+    assert out == "?111m(63.49kwh),1mi:--", out
 
 
 class TestPresenceIsAReading:
@@ -869,6 +872,26 @@ class TestEstimateMarker:
     assert out == "?111m(63.49kwh),1mi:119m", out           # the mile itself was measured
     out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, effOk=False))
     assert out == "?112m(63.49kwh),1mi:?112m", out          # no estimate either: the dash range, still "?"
+
+  def test_sweep_a_bare_generator_off_range_is_always_a_live_plausible_measurement(self, widget, now):
+    """Coordinator 2026-11-01: bare (no "?") first term only when pNowKw is live and the measured range
+    energyKwh / pNowKw x mph rounds into 1..499."""
+    n = bare = 0
+    for p_now in (None, float("nan"), -50.0, -5.0, 0.0, 0.01, 0.5, 1.0, 2.36, 2.4, 5.0, 20.0, 62.0, 200.0, 1e4):
+      for e in (None, 0.0, 0.4, 0.5, 1.2, 59.35, 120.0):
+        for eff in (True, False):
+          for rng_km in (None, 180.2):
+            out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now, "energyKwh": e}, effOk=eff,
+                                        rangeKm=rng_km))
+            first = out.split("(")[0].split(",")[0]
+            measured = None
+            if p_now is not None and p_now == p_now and p_now > 0 and e:
+              measured = round(e / p_now * 62.0)
+            if not first.startswith("?") and first != "--m":
+              bare += 1
+              assert measured is not None and 1 <= measured <= 499 and first == f"{measured}m", (p_now, e, out)
+            n += 1
+    assert n == 15 * 7 * 2 * 2 and bare > 0, "positive control: some bare ranges must exist"
 
   def test_generator_on_a_measured_load_under_the_charge_is_still_measured(self, widget, now):
     assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": -5.0})) == "10.8kw,>999m,1mi:>999m"

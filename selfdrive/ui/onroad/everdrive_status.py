@@ -27,9 +27,10 @@ everdrive_pnw.py), so the terms show at the first moving publish. With no live 0
 ESTIMATE effWhKm x km/h / 1000 + _P_ACC_KW (the truck's reference efficiency) and every figure built
 from it gets a leading "?"; it drops as soon as pNowKw is live again. With no efficiency either, the
 first term is the dash range, still "?".
-    term 1, charger off  energyKwh / P x mph. A measured P <= 0 (regen, coasting) uses the speed
-                         estimate, with "?". Otherwise not usable (no energyKwh, over _RANGE_MAX_MI):
-                         the truck's own dash range.
+    term 1, charger off  energyKwh / P x mph. Without "?" ONLY from a live P with a result in
+                         1.._RANGE_MAX_MI. Anything else (no reading, regen, coasting, over the
+                         ceiling, no energyKwh) is the speed estimate, or failing that the truck's
+                         dash range, both with "?".
     term 1, charger on   the DASH range scaled by the generator, dash x P / (P - acKw), e.g. dash
                          141 mi, 30 kW, 10.8 kW in -> "220m"; needs no capacity. ">999m" when the
                          measured P <= acKw or over 999; "?>999m" when the ESTIMATE is <= acKw.
@@ -439,13 +440,11 @@ class EverDriveStatusRenderer(Widget):
     `rng` is the truck's own range ("--" if it is gone); `eff_wh_km` is 0 when effOk is False."""
     e = _f(st.get("energyKwh"))
     ac = ac_kw if charging else 0.0
-    p = _num(st.get("pNowKw"))
-    # Generator off, measured P <= 0 (regen, coasting): no range at that load, and the bare dash range
-    # would look measured, so it takes the speed estimate with "?" like a missing reading.
-    est = p is None or (not charging and p <= 0.0)
-    if est:
-      # The speed estimate: the truck's reference efficiency at this speed + the accessory load.
-      p = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW if eff_wh_km > 0.0 else None
+    p_live = _num(st.get("pNowKw"))
+    # The speed estimate: the truck's reference efficiency at this speed + the accessory load.
+    p_est = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW if eff_wh_km > 0.0 else None
+    est = p_live is None
+    p = p_est if est else p_live
     mile_kwh = _num(st.get("mileKwh"))
     # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside the
     # mile still put real energy in, so with acSeen the whole mile's AC energy is netted.
@@ -472,11 +471,15 @@ class EverDriveStatusRenderer(Widget):
           t = _range_text(e / net_mi)
           r2 = _q(t, mile_est) if t is not None else r1
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
-    # Generator OFF. Regen, coasting or no energy: the truck's own dash range (">999m" is never shown
-    # here: there is no charge to cover the load).
-    r = e / p * mph if (p is not None and p > 0.0 and e > 0.0) else 0.0
-    r_t = _miles(r)
-    now_t = _q(f"{r_t}m" if r_t is not None else f"{rng}m", est)
+    # Generator OFF. A bare range is ALWAYS a measured one: live pNowKw and a result in 1.._RANGE_MAX_MI.
+    # Anything else (no reading, regen, coasting, over the ceiling, no energy) is the speed estimate,
+    # or failing that the dash range, both with "?". ">999m" is never shown: no charge covers the load.
+    r_t = _miles(e / p_live * mph) if (p_live is not None and p_live > 0.0 and e > 0.0) else None
+    if r_t is not None:
+      now_t = f"{r_t}m"
+    else:
+      r_e = _miles(e / p_est * mph) if (p_est is not None and e > 0.0) else None
+      now_t = _q(f"{r_e if r_e is not None else rng}m", True)
     mile = f",1mi:{now_t}"                   # before the first mile: the instant term, with its "?"
     if mile_kwh is not None:
       net_mi = mile_kwh - mile_ac
