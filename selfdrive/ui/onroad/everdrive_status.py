@@ -15,6 +15,11 @@ Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveins
     charger on:          10.8kw,343m,1mi:343m      (2026-11-02: dash 177.6 mi, 22.3 kW load, 10.75 kW in)
     window not filled:   10.8kw,?282m,1mi:?282m      ("?" = the speed estimate, 320 Wh/km at 54 mph)
     charge >= load:      10.8kw,>999m,1mi:>999m      (measured; "?>999m" from the estimate)
+    generator idle:      GEN 0kw!,?282m,1mi:?282m    (running, not supplying; no (kwh), for width)
+GENERATOR (everdrivegen2pnw, owner 2026-11-02): the kW term is GREEN while the producer's genState is
+"on"; "GEN 0kw!" is AMBER and also replaces the kW term in the stopped form ("GEN 0kw!,112m(63.49kwh)").
+A 5 s banner above the box marks each change: "Generator ON 10.8 kW", "Generator OFF",
+"Generator: NO POWER". See _GEN_STATES.
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
@@ -212,9 +217,35 @@ _CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a f
                           #   corners match regardless of how wide the line happens to be.
 
 
+# everdrivegen2pnw (owner 2026-11-02): the producer's `genState` ("off" / "idle" / "on", see
+# everdrive_pnw.py GEN_*). "on": the kW term is GREEN. "idle" (generator running, not supplying): the
+# kW term is replaced by an AMBER _GEN_IDLE_TERM. Every change between the three states shows a
+# _BANNER_S banner ABOVE the box, right-anchored like it (display only: no alert, no event, no sound).
+# The first state seen in a session is not a change, so it shows no banner.
+#
+# WIDTHS, same model and margins as the _FS table (Inter-Medium advances at atlas base 200, x _FS 52
+# x FONT_SCALE 1.16 / 200; reproduces that table to within 2.4 px, on the wide side):
+#     GEN 0kw!,?444m,1mi:?>999m     723.2 px text -> 771.2 box -> left 1318.8 -> +238.8 clear
+#     GEN 0kw!,444m(444.44kwh)      703.0              751.0           1339.0      +259.0
+#     Generator ON 44.4 kW          544.4              592.4           1497.6      +417.6   (banner)
+#     Generator: NO POWER           538.4              586.4           1503.6      +423.6   (banner)
+# The idle MOVING form drops the (kwh) term: with it, "GEN 0kw!,?444m(444.44kwh),1mi:?444m" is a
+# 1053.8 px box, over _MAX_BOX_W and 3.8 px INTO the driving path. Idle never shows a projection or a
+# gain rate either: the generator is supplying nothing, so there is nothing to project.
+_GEN_STATES = ("off", "idle", "on")
+_GEN_IDLE_TERM = "GEN 0kw!"
+_BANNER_S = 5.0
+_BANNER_TEXT = {"off": "Generator OFF", "idle": "Generator: NO POWER"}   # "on" carries the live kW
+
+
 class _C:
   WHITE = rl.Color(255, 255, 255, 235)
   BG = rl.Color(0, 0, 0, 140)
+  GREEN = rl.Color(90, 205, 115, 240)    # == ces_status._C.GREEN
+  AMBER = rl.Color(255, 149, 0, 240)     # == ces_status._C.ORANGE
+
+
+_BANNER_COLOR = {"off": _C.WHITE, "idle": _C.AMBER, "on": _C.GREEN}
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -288,6 +319,13 @@ class EverDriveStatusRenderer(Widget):
     self._poll_interval = _REFRESH_S
     self._too_wide_logged = False         # Rule 2 tripwire, fires at most once per session
     self._cached_layout: tuple[str, float, float] | None = None   # (text, box_w, text_w); None == hidden
+    # everdrivegen2pnw: the coloured first term (chars, px, colour) and the banner (text, box_w,
+    # text_w, colour); None == plain white line / no banner.
+    self._cached_head: tuple[int, float, rl.Color] | None = None
+    self._cached_banner: tuple[str, float, float, rl.Color] | None = None
+    self._gen_prev: str | None = None     # last genState seen; None = none seen since the key appeared
+    self._banner_kind: str | None = None
+    self._banner_until = 0.0
     # Log each DISTINCT read fault once (not 5x/s), with a flag per fault: sharing one flag would let
     # the second, different failure go completely unlogged.
     self._toggle_err_logged = False
@@ -297,8 +335,11 @@ class EverDriveStatusRenderer(Widget):
   @property
   def stack_height(self) -> float:
     """everdrive2pnw: how far augmented_road_view must lift the CES box so the two stack. Exactly 0.0
-    while this box is hidden, so the CES box renders where it does today."""
-    return (_BOX_H + _STACK_GAP) if self._cached_layout is not None else 0.0
+    while this box is hidden, so the CES box renders where it does today. While a generator banner
+    shows (above this box) the CES box is lifted by one more box height, so the two never overlap."""
+    if self._cached_layout is None:
+      return 0.0
+    return (_BOX_H + _STACK_GAP) * (2 if self._cached_banner is not None else 1)
 
   # ---- state ---------------------------------------------------------------
   def _update_state(self):
@@ -309,6 +350,8 @@ class EverDriveStatusRenderer(Widget):
     # Hidden until proven otherwise, and slow-polling until a payload actually shows up. Every early
     # return below therefore costs one param read and nothing else — no formatting, no measurement.
     self._cached_layout = None
+    self._cached_head = None
+    self._cached_banner = None
     self._poll_interval = _ABSENT_REFRESH_S
     if self._mem is None:
       return
@@ -334,11 +377,33 @@ class EverDriveStatusRenderer(Widget):
         cloudlog.exception("everdrive2pnw: EverDriveStatus read failed, box hidden")
       return
     if not isinstance(st, dict):
+      self._gen_prev = None   # module gone: when it comes back, its first state is not a "change"
       return          # key absent: NORMAL on the Tesla / a Lightning with no EverDrive. Stay quiet.
     self._poll_interval = _REFRESH_S   # a payload exists -> track the publisher at ~5 Hz from here on
+    # everdrivegen2pnw: a change between two KNOWN states starts the banner. A missing or unknown
+    # genState (older producer) changes nothing and starts nothing.
+    gen = st.get("genState") if st.get("genState") in _GEN_STATES else None
+    if gen is not None:
+      if self._gen_prev is not None and gen != self._gen_prev:
+        self._banner_kind, self._banner_until = gen, now + _BANNER_S
+      self._gen_prev = gen
     text = self._build_text(st)
     if text is None:
       return          # producer went silent (stale ts) -> hide; keep polling fast so it can come back
+    # The coloured first term: GREEN kW while the generator supplies, AMBER "GEN 0kw!" while idle.
+    kw_term = f"{_f(st.get('acKw')):.1f}kw"
+    if text.startswith(_GEN_IDLE_TERM):
+      head = (_GEN_IDLE_TERM, _C.AMBER)
+    elif gen == "on" and text.startswith(kw_term + ","):
+      head = (kw_term, _C.GREEN)
+    else:
+      head = None
+    if head is not None:
+      self._cached_head = (len(head[0]), measure_text_cached(self.font, head[0], _FS).x, head[1])
+    if now < self._banner_until and self._banner_kind is not None:
+      b = _BANNER_TEXT.get(self._banner_kind) or f"Generator ON {_f(st.get('acKw')):.1f} kW"
+      b_w = measure_text_cached(self.font, b, _FS).x
+      self._cached_banner = (b, b_w + _PAD * 2, b_w, _BANNER_COLOR[self._banner_kind])
     # Measured HERE (5 Hz) and cached, so _render does nothing but draw. A device with no EverDrive
     # never reaches this line at all, so it never pays for a text measurement.
     text_w = measure_text_cached(self.font, text, _FS).x
@@ -398,6 +463,14 @@ class EverDriveStatusRenderer(Widget):
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
     charging = bool(st.get("acSeen")) and ac_kw > _AC_ZERO_KW
+    # everdrivegen2pnw: generator running but not supplying. _GEN_IDLE_TERM replaces the kW term; the
+    # rest is the charger-OFF figure (a trickle under the producer's 0.5 kW is not a supply). Moving:
+    # the three-term shape WITHOUT the (kwh), for width (see the table at _GEN_IDLE_TERM).
+    if st.get("genState") == "idle":
+      if st.get("moving") is True:
+        return f"{_GEN_IDLE_TERM}," + self._moving_text(st, False, ac_kw, rng, range_mi, mph, "",
+                                                         eff_wh_km if st.get("effOk") else 0.0)
+      return f"{_GEN_IDLE_TERM},{rng}m{pack}"
     if st.get("moving") is True:
       return self._moving_text(st, charging, ac_kw, rng, range_mi, mph, pack,
                                eff_wh_km if st.get("effOk") else 0.0)
@@ -513,4 +586,21 @@ class EverDriveStatusRenderer(Widget):
     # passing ces_status's literal 0.12 would give this short, wide box only ~6.5 px and read square.
     roundness = min(1.0, 2.0 * _CORNER_R / min(box_w, _BOX_H))
     rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, _BOX_H), roundness, 8, _C.BG)
-    rl.draw_text_ex(self.font, text, rl.Vector2(bx + box_w - _PAD - text_w, by + _PAD), _FS, 0, _C.WHITE)
+    tx = bx + box_w - _PAD - text_w
+    if self._cached_head is None:
+      rl.draw_text_ex(self.font, text, rl.Vector2(tx, by + _PAD), _FS, 0, _C.WHITE)
+    else:
+      # everdrivegen2pnw: the first term in its colour, the rest white right after it. Spacing is 0 and
+      # raylib applies no kerning, so the two halves sit exactly where the one string would.
+      n, head_w, color = self._cached_head
+      rl.draw_text_ex(self.font, text[:n], rl.Vector2(tx, by + _PAD), _FS, 0, color)
+      rl.draw_text_ex(self.font, text[n:], rl.Vector2(tx + head_w, by + _PAD), _FS, 0, _C.WHITE)
+    if self._cached_banner is not None:
+      # Directly ABOVE the box, right-anchored the same way (so it can never reach further left than
+      # the box can); stack_height lifts the CES box clear of it.
+      b, b_box_w, b_w, b_color = self._cached_banner
+      b_x = rect.x + rect.width - b_box_w - _MARGIN
+      b_y = by - _STACK_GAP - _BOX_H
+      b_round = min(1.0, 2.0 * _CORNER_R / min(b_box_w, _BOX_H))
+      rl.draw_rectangle_rounded(rl.Rectangle(b_x, b_y, b_box_w, _BOX_H), b_round, 8, _C.BG)
+      rl.draw_text_ex(self.font, b, rl.Vector2(b_x + b_box_w - _PAD - b_w, b_y + _PAD), _FS, 0, b_color)

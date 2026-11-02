@@ -1040,3 +1040,103 @@ class TestTheSocLoad:
     """The motor-2 key is gone; a stale payload carrying it must not be read as a measured load."""
     out = widget._build_text(st(now, **{**self.TODAY, "grossKw": None, "pNowKw": 30.0}))
     assert out == "10.8kw,?282m,1mi:?282m", out
+
+
+class TestGeneratorState:
+  """everdrivegen2pnw (owner 2026-11-02): green kW while "on", amber "GEN 0kw!" while "idle", and a
+  5 s banner on each change between off / idle / on."""
+
+  MOV = TestTheMovingForm.MOV
+  ON = {"genState": "on", "acKw": 10.8, "acV": 234.0}
+  IDLE = {"genState": "idle", "acKw": 0.0, "acV": 234.0}
+  OFF = {"genState": "off", "acKw": 0.0, "acV": 0.0}
+
+  def test_idle_replaces_the_kw_term_moving_without_the_kwh(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, **self.IDLE}))
+    assert out == "GEN 0kw!,184m,1mi:184m", out
+    out = widget._build_text(st(now, **{**self.MOV, **self.IDLE, "grossKw": None}))
+    assert out == "GEN 0kw!,?111m,1mi:?111m", out
+
+  def test_idle_replaces_the_kw_term_stopped(self, widget, now):
+    assert widget._build_text(st(now, **self.IDLE, vMs=0.0)) == "GEN 0kw!,112m(63.49kwh)"
+    # a trickle under 0.5 kW while idle is not a supply: no projection, no gain rate
+    assert widget._build_text(st(now, **{**self.IDLE, "acKw": 0.3}, vMs=0.0)) == "GEN 0kw!,112m(63.49kwh)"
+
+  def test_colours_of_the_first_term(self, widget, now):
+    poll(widget, st(now, **{**self.MOV, **self.ON}))
+    n, _w, color = widget._cached_head
+    assert widget._cached_layout[0][:n] == "10.8kw" and color is ed._C.GREEN
+    poll(widget, st(now, **{**self.MOV, **self.IDLE}))
+    n, _w, color = widget._cached_head
+    assert widget._cached_layout[0][:n] == "GEN 0kw!" and color is ed._C.AMBER
+    poll(widget, st(now, **{**self.MOV, **self.OFF}))
+    assert widget._cached_head is None, "generator off: all white"
+
+  def test_an_older_producer_without_genState_is_the_old_white_line(self, widget, now):
+    poll(widget, st(now, **{**self.MOV, "acKw": 10.8}))
+    assert widget._cached_head is None and widget._cached_banner is None
+    assert widget._cached_layout[0].startswith("10.8kw,")
+
+  def test_the_first_state_of_a_session_shows_no_banner(self, widget, now):
+    poll(widget, st(now, **{**self.MOV, **self.ON}))
+    assert widget._cached_banner is None
+
+  def test_a_banner_shows_for_5_s_once_per_change(self, widget, now):
+    poll(widget, st(now, **{**self.MOV, **self.OFF}))
+    poll(widget, st(now, **{**self.MOV, **self.ON}))
+    assert widget._cached_banner[0] == "Generator ON 10.8 kW" and widget._cached_banner[3] is ed._C.GREEN
+    assert widget.stack_height == 2 * (ed._BOX_H + ed._STACK_GAP), "the CES box is lifted over the banner"
+    t0 = now[0]
+    for dt in (1.0, 2.5, 4.9):
+      now[0] = t0 + dt
+      poll(widget, st(now, **{**self.MOV, **self.ON, "acKw": 3.2}))
+      assert widget._cached_banner is not None and widget._cached_banner[0] == "Generator ON 3.2 kW"
+    now[0] = t0 + 5.1
+    poll(widget, st(now, **{**self.MOV, **self.ON}))
+    assert widget._cached_banner is None, "gone after 5 s, and the same state does not restart it"
+    assert widget.stack_height == ed._BOX_H + ed._STACK_GAP
+
+  @pytest.mark.parametrize("a,b,text,color", [
+    ("on", "idle", "Generator: NO POWER", "AMBER"),
+    ("idle", "off", "Generator OFF", "WHITE"),
+    ("off", "idle", "Generator: NO POWER", "AMBER"),
+    ("idle", "on", "Generator ON 10.8 kW", "GREEN"),
+    ("on", "off", "Generator OFF", "WHITE"),
+  ])
+  def test_every_change_has_its_banner(self, widget, now, a, b, text, color):
+    states = {"on": self.ON, "idle": self.IDLE, "off": self.OFF}
+    poll(widget, st(now, **{**self.MOV, **states[a]}))
+    poll(widget, st(now, **{**self.MOV, **states[b]}))
+    assert widget._cached_banner[0] == text and widget._cached_banner[3] is getattr(ed._C, color)
+
+  def test_inert_without_an_everdrive(self, widget, now):
+    """Tesla / no module: no key, so no banner, no head, no measurement -- and the module appearing
+    later is a first sighting, not a change."""
+    for _ in range(3):
+      assert poll(widget, None) is None
+    assert widget._cached_banner is None and widget._cached_head is None and MEASURED == []
+    assert widget.stack_height == 0.0 and LOG.calls == []
+    poll(widget, st(now, **{**self.MOV, **self.ON}))
+    assert widget._cached_banner is None
+    poll(widget, None)                                   # module gone again
+    poll(widget, st(now, **{**self.MOV, **self.OFF}))
+    assert widget._cached_banner is None, "a state after the key was absent is not a change"
+
+  def test_width_sweep_of_every_generator_form(self, widget, now):
+    """Char guard (the real px are in the table at _GEN_IDLE_TERM): no idle or on form is wider than
+    the stopped worst case, and the moving idle form never carries the (kwh)."""
+    n = 0
+    for gen in (self.ON, self.IDLE, self.OFF):
+      for moving in (True, False):
+        for p in (None, -5.0, 1.0, 20.0, 59.0):
+          for mile in ({}, {"mileKwh": 0.96, "mileAcKwh": 0.0}, {"mileKwh": 0.0, "mileAcKwh": 0.2}):
+            s = st(now, **{**self.MOV, **gen, "moving": moving, "grossKw": p, "energyKwh": 474.63,
+                           "vMs": (62 if moving else 0) * MPH}, socPct=100.0, capKwh=474.63, **mile)
+            out = widget._build_text(s)
+            assert len(out) <= 31 and all(32 <= ord(c) <= 126 for c in out), out
+            if gen is self.IDLE and moving:
+              assert "kwh" not in out and out.startswith("GEN 0kw!,"), out
+            n += 1
+    assert n == 3 * 2 * 5 * 3
+    for b in ("Generator ON 27.7 kW", "Generator: NO POWER", "Generator OFF"):
+      assert len(b) <= 20
