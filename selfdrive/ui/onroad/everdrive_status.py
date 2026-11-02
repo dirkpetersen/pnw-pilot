@@ -12,9 +12,9 @@ actually holds the constraint now is that the box is RIGHT-anchored and every te
 Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveinstant2pnw, owner
 2026-11-01). ALWAYS these shapes, never another while driving; no "@" and no "m/h" anywhere:
     charger off:         132m(55.35kwh),1mi:128m
-    charger on:          10.8kw,220m,1mi:135m
-    no live 0x441:       10.8kw,?220m,1mi:?218m      ("?" = built from the speed estimate)
-    charge >= load:      10.8kw,>999m,1mi:>999m
+    charger on:          10.8kw,343m,1mi:343m      (2026-11-02: dash 177.6 mi, 22.3 kW load, 10.75 kW in)
+    window not filled:   10.8kw,?282m,1mi:?282m      ("?" = the speed estimate, 320 Wh/km at 54 mph)
+    charge >= load:      10.8kw,>999m,1mi:>999m      (measured; "?>999m" from the estimate)
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
@@ -22,12 +22,14 @@ STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     effOk False:         1.4kw,100m(55.35kwh)
     no capKwh/socPct:    the (kwh) parenthetical is OMITTED, never shown as 0.000
 
-THE MOVING TERMS. P is the live measured load pNowKw (k x motor-2 power + accessories, see
-everdrive_pnw.py), so the terms show at the first moving publish. With no live 0x441 P is the SPEED
-ESTIMATE effWhKm x km/h / 1000 + _P_ACC_KW (the truck's reference efficiency) and every figure built
-from it gets a leading "?"; it drops as soon as pNowKw is live again. With no efficiency either, the
-first term is the dash range, still "?".
-    term 1, charger off  energyKwh / P x mph. Without "?" ONLY from a live P with a result in
+THE MOVING TERMS (everdrivesoc2pnw, owner 2026-11-02). P is the measured load grossKw: the pack SoC
+drop over the producer's 25-180 s window plus the AC input (see everdrive_pnw.py). Until that window
+has filled (the first ~25-60 s of a drive on the highway) P is the SPEED ESTIMATE effWhKm x km/h / 1000
++ _P_ACC_KW (the truck's reference efficiency) and every figure built from it gets a leading "?"; it
+drops as soon as grossKw is published. With no efficiency either, the first term is the dash range,
+still "?". (Until 2026-11-02 P was k x motor-2 power from 0x441. A drive showed that motor 2 does
+little at highway cruise, so that figure was not the pack load; it is gone.)
+    term 1, charger off  energyKwh / P x mph. Without "?" ONLY from a measured P with a result in
                          1.._RANGE_MAX_MI. Anything else (no reading, regen, coasting, over the
                          ceiling, no energyKwh) is the speed estimate, or failing that the truck's
                          dash range, both with "?".
@@ -35,8 +37,10 @@ first term is the dash range, still "?".
                          141 mi, 30 kW, 10.8 kW in -> "220m"; needs no capacity. ">999m" when the
                          measured P <= acKw or over 999; "?>999m" when the ESTIMATE is <= acKw.
                          ">999m" is never printed from a missing reading without "?".
-    "1mi:"               the last-mile range with the charge, energyKwh / (mileKwh - mileAcKwh).
-                         No "?" only when the whole mile had live pNowKw (producer mileEst False).
+    "1mi:"               the last-mile range with the charge, energyKwh / (mileKwh - mileAcKwh). The
+                         producer builds the mile from the SoC drop (mileKwh - mileAcKwh = SoC drop x
+                         capKwh per mile), so the figure moves in SoC steps. No "?" only when the whole
+                         mile had a SoC (producer mileEst False).
                          Before the first full mile it repeats term 1 (with its "?"). Charger on:
                          ">999m" when the mile netted out as charging or regen, or over 999; not
                          computable repeats term 1. Charger off: "1mi:--" when not usable, ">999m"
@@ -366,8 +370,7 @@ class EverDriveStatusRenderer(Widget):
 
     # Stopped-form first number: the truck's OWN range. (Until 2026-10-31 a measured "@" range from
     # grossKw could land here; the producer only publishes grossKw while moving, and moving now has its
-    # own form below, so that path was dead and is removed. grossKw is still published as k's
-    # calibration source.)
+    # own form below, so that path was dead and is removed. grossKw is the moving load since 2026-11-02.)
     truck_txt = _miles(truck_mi)
     range_mi = truck_mi if truck_txt is not None else None
     # today's assumed power: the truck's OWN reference efficiency, so the projection stays
@@ -436,11 +439,12 @@ class EverDriveStatusRenderer(Widget):
   def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, range_mi: float | None, mph: float,
                    pack: str, eff_wh_km: float) -> str:
     """everdriveinstant2pnw: the moving form, owner 2026-11-01. See the module docstring. No "@" and
-    no "m/h" ever; a leading "?" marks every figure NOT built from the live measured load pNowKw.
+    no "m/h" ever; a leading "?" marks every figure NOT built from the measured load grossKw
+    (everdrivesoc2pnw, 2026-11-02; it was pNowKw from motor 2 before).
     `rng` is the truck's own range ("--" if it is gone); `eff_wh_km` is 0 when effOk is False."""
     e = _f(st.get("energyKwh"))
     ac = ac_kw if charging else 0.0
-    p_live = _num(st.get("pNowKw"))
+    p_live = _num(st.get("grossKw"))
     # The speed estimate: the truck's reference efficiency at this speed + the accessory load.
     p_est = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW if eff_wh_km > 0.0 else None
     est = p_live is None
@@ -474,7 +478,7 @@ class EverDriveStatusRenderer(Widget):
         # stands in, and it is not the mile's own figure.
         r2 = _q(t, mile_est) if t is not None else _q(r1.removeprefix("?"), True)
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
-    # Generator OFF. A bare range is ALWAYS a measured one: live pNowKw and a result in 1.._RANGE_MAX_MI.
+    # Generator OFF. A bare range is ALWAYS a measured one: grossKw and a result in 1.._RANGE_MAX_MI.
     # Anything else (no reading, regen, coasting, over the ceiling, no energy) is the speed estimate,
     # or failing that the dash range, both with "?". ">999m" is never shown: no charge covers the load.
     r_t = _miles(e / p_live * mph) if (p_live is not None and p_live > 0.0 and e > 0.0) else None

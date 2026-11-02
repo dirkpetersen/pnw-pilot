@@ -563,11 +563,12 @@ class TestTheComputedRangeAtCurrentSpeed:
 
 class TestTheMovingForm:
   """everdriveinstant2pnw (owner 2026-10-31): while the producer says `moving`, the line is built from
-  the INSTANT pack load pNowKw and the last-mile energy -- no window wait, no projection."""
+  the measured pack load and the last-mile energy -- no projection. The load is grossKw (the SoC
+  window) since everdrivesoc2pnw (2026-11-02); it was pNowKw (motor 2) before."""
 
   # 59.35 kWh at 20 kW net and 62 mph -> 184 mi; last mile 0.5 kWh -> 118.7 mi
   # mileEst False: the mile fields in these tests are a fully measured mile unless a test says not.
-  MOV = {"moving": True, "vMs": 62 * MPH, "energyKwh": 59.35, "pNowKw": 20.0, "acKw": 0.0, "mileEst": False}
+  MOV = {"moving": True, "vMs": 62 * MPH, "energyKwh": 59.35, "grossKw": 20.0, "acKw": 0.0, "mileEst": False}
 
   def test_the_first_moving_payload_shows_the_current_load_range_at_once(self, widget, now):
     """THE owner requirement: no wait. No grossKw, no mile yet -- the number is there anyway."""
@@ -580,11 +581,11 @@ class TestTheMovingForm:
 
   def test_the_terms_track_their_inputs(self, widget, now):
     """Positive control: constants would not move."""
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 40.0, "vMs": 31 * MPH}, mileKwh=1.0, mileAcKwh=0.0))
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": 40.0, "vMs": 31 * MPH}, mileKwh=1.0, mileAcKwh=0.0))
     assert out == "46m(63.49kwh),1mi:59m", out
 
   def test_generator_on_puts_the_kw_first_nets_the_charge_and_drops_the_kwh(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "pNowKw": 21.4}, mileKwh=0.5, mileAcKwh=0.0233))
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "grossKw": 21.4}, mileKwh=0.5, mileAcKwh=0.0233))
     assert out == "1.4kw,120m,1mi:125m", out          # since 2026-11-01: dash 112 x 21.4 / 20.0
     assert "kwh" not in out, "the pack kWh is never shown while charging and moving"
 
@@ -592,7 +593,7 @@ class TestTheMovingForm:
     assert widget._build_text(st(now, **{**self.MOV, "acKw": 1.4}, acSeen=False)) == "184m(63.49kwh),1mi:184m"
 
   @pytest.mark.parametrize("over", [
-    {"pNowKw": 1.0},                     # coasting: 3680 mi, over the ceiling
+    {"grossKw": 1.0},                     # coasting: 3680 mi, over the ceiling
     {"energyKwh": None},                 # no pack energy
   ])
   def test_an_unusable_current_load_is_marked_never_bare(self, widget, now, over):
@@ -607,7 +608,7 @@ class TestTheMovingForm:
 
   def test_net_charging_while_moving_has_no_finite_range(self, widget, now):
     """9.6 kW in, 5 kW load: the pack is gaining. No "m/h" while moving (owner 2026-11-01)."""
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 9.6, "pNowKw": 5.0})) == "9.6kw,>999m,1mi:>999m"
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 9.6, "grossKw": 5.0})) == "9.6kw,>999m,1mi:>999m"
 
   @pytest.mark.parametrize("mile,ac", [(-0.1, 0.0), (0.0, 0.0), (0.1, 0.0)])   # net charging: TestGrowthWhileMoving
   def test_an_unusable_last_mile_is_shown_as_dashes_not_a_number(self, widget, now, mile, ac):
@@ -616,8 +617,8 @@ class TestTheMovingForm:
     assert out == "184m(63.49kwh),1mi:--", out
 
   def test_no_truck_range_falls_back_to_dashes_never_zero(self, widget, now):
-    # No 0x441 and no efficiency: no estimate either, and "?" is never put on "--m".
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": None}, rangeKm=None, effOk=False))
+    # No measured load and no efficiency: no estimate either, and "?" is never put on "--m".
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": None}, rangeKm=None, effOk=False))
     assert out == "--m(63.49kwh),1mi:--m", out
 
   def test_stopped_or_parked_is_exactly_the_old_form_and_ignores_the_instant_terms(self, widget, now):
@@ -629,16 +630,16 @@ class TestTheMovingForm:
       assert widget._build_text(s) == "--,112m(63.49kwh)"
 
   def test_the_stopped_form_ignores_grossKw(self, widget, now):
-    """The measured '@' path was removed from the stopped form; grossKw is calibration-only now."""
+    """The measured '@' path was removed from the stopped form; grossKw is only used while moving."""
     assert widget._build_text(st(now, energyKwh=59.35, grossKw=20.0, vMs=62 * MPH)) == "1.4kw,112m(63.49kwh)->117m"
 
   def test_moving_forms_stay_inside_the_stopped_worst_case(self, widget, now):
     """All-max moving payloads. The real-font table at _FS has the px numbers; this is the char guard."""
     cases = [
-      st(now, **{**self.MOV, "acKw": 27.7, "pNowKw": 27.8, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0),
-      st(now, **{**self.MOV, "pNowKw": 59.0, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0,
+      st(now, **{**self.MOV, "acKw": 27.7, "grossKw": 27.8, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0),
+      st(now, **{**self.MOV, "grossKw": 59.0, "energyKwh": 474.63}, mileKwh=0.96, mileAcKwh=0.0,
          socPct=100.0, capKwh=474.63),
-      st(now, **{**self.MOV, "pNowKw": -1.0}, mileKwh=-1.0, mileAcKwh=0.0, socPct=100.0, capKwh=474.63),
+      st(now, **{**self.MOV, "grossKw": -1.0}, mileKwh=-1.0, mileAcKwh=0.0, socPct=100.0, capKwh=474.63),
     ]
     for s in cases:
       out = widget._build_text(s)
@@ -653,12 +654,12 @@ class TestReviewFixes:
 
   def test_a_computed_range_under_half_a_mile_never_prints_zero(self, widget, now):
     """0.4 kWh at 40 kW and 20 mph is 0.2 mi: '@0m' is a zero range. Fall back instead."""
-    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.4, "pNowKw": 40.0, "vMs": 20 * MPH},
+    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.4, "grossKw": 40.0, "vMs": 20 * MPH},
                                 mileKwh=1.0, mileAcKwh=0.0))
     assert "@0m" not in out and "1mi:0m" not in out, out
     assert out.startswith("?1m(") and out.endswith(",1mi:--"), out      # estimate 0.4 / 11.5 kW x 20 = 0.7
     # positive control at the boundary: 0.6 mi still prints, as "1"
-    assert "1m" in widget._build_text(st(now, **{**self.MOV, "energyKwh": 1.2, "pNowKw": 40.0, "vMs": 20 * MPH}))
+    assert "1m" in widget._build_text(st(now, **{**self.MOV, "energyKwh": 1.2, "grossKw": 40.0, "vMs": 20 * MPH}))
 
   def test_mileAcKwh_is_ignored_without_acSeen_but_used_after_the_charger_stops(self, widget, now):
     s = st(now, **self.MOV, mileKwh=0.5, mileAcKwh=0.1)
@@ -667,7 +668,7 @@ class TestReviewFixes:
 
   @pytest.mark.parametrize("moving", [True, False])
   def test_a_truck_range_under_half_a_mile_is_dashes_not_zero(self, widget, now, moving):
-    out = widget._build_text(st(now, **{**self.MOV, "moving": moving, "pNowKw": None, "vMs": 0.0},
+    out = widget._build_text(st(now, **{**self.MOV, "moving": moving, "grossKw": None, "vMs": 0.0},
                                 rangeKm=0.5, acSeen=False))
     assert "--m" in out and ",0m" not in out and not out.startswith("0m"), out
 
@@ -692,11 +693,11 @@ class TestRoundThenBound:
 
   def test_a_range_of_exactly_half_a_mile_never_prints_zero(self, widget, now):
     # r = e / p * mph = 0.5 exactly: format(0.5, ".0f") is "0" (round half to even)
-    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.5, "pNowKw": 62.0}))
+    out = widget._build_text(st(now, **{**self.MOV, "energyKwh": 0.5, "grossKw": 62.0}))
     assert "0m" not in out.split("(")[0] and out.startswith("?1m("), out     # estimate 0.94 mi
     assert widget._build_text(st(now, rangeKm=0.5 * 1.60934, vMs=0.0, acSeen=False)).startswith("--,--m")
 
-  @pytest.mark.parametrize("field", ["pNowKw", "energyKwh", "acKw", "mileKwh", "rangeKm", "vMs"])
+  @pytest.mark.parametrize("field", ["grossKw", "energyKwh", "acKw", "mileKwh", "rangeKm", "vMs"])
   def test_an_infinite_or_nan_field_never_crashes(self, widget, now, field):
     for bad in (float("inf"), float("-inf"), float("nan")):
       out = widget._build_text(st(now, **{**self.MOV, "acKw": 1.4, "mileKwh": 0.5, "mileAcKwh": 0.0, field: bad}))
@@ -704,7 +705,7 @@ class TestRoundThenBound:
 
   def test_a_computed_overflow_never_crashes(self, widget, now):
     """Finite inputs can still overflow: 59 kWh / 1e-320 kW is inf, and round(inf) raises."""
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": 1e-320, "mileKwh": 1e-320, "mileAcKwh": 0.0}))
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": 1e-320, "mileKwh": 1e-320, "mileAcKwh": 0.0}))
     assert out == "?111m(63.49kwh),1mi:--", out
 
 
@@ -720,9 +721,9 @@ class TestPresenceIsAReading:
       assert "kwh" not in out and "0.00" not in out, out
 
   @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "bad"])
-  def test_a_bad_pNowKw_is_no_motor_signal_not_zero_load(self, widget, now, bad):
+  def test_a_bad_grossKw_is_no_measured_load_not_zero_load(self, widget, now, bad):
     # no reading -> the speed estimate, marked "?": 112 x 33.13 / 23.13 = 160
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "pNowKw": bad})) == \
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.0, "grossKw": bad})) == \
       "10.0kw,?160m,1mi:?160m"
 
   @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "bad"])
@@ -741,50 +742,50 @@ class TestGeneratorOnAlwaysThreeTerms:
     return widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, **over}))
 
   def test_the_owners_example_141_mi_30_kw_10_8_kw_is_220(self, widget, now):
-    assert self._on(widget, now, pNowKw=30.0, rangeKm=141.0 * 1.60934) == "10.8kw,220m,1mi:220m"
+    assert self._on(widget, now, grossKw=30.0, rangeKm=141.0 * 1.60934) == "10.8kw,220m,1mi:220m"
     assert round(141.0 * 30.0 / 19.2) == 220
 
   def test_R1_needs_no_capacity(self, widget, now):
-    out = self._on(widget, now, pNowKw=30.0, energyKwh=None, capKwh=None, socPct=None, rangeKm=141.0 * 1.60934)
+    out = self._on(widget, now, grossKw=30.0, energyKwh=None, capKwh=None, socPct=None, rangeKm=141.0 * 1.60934)
     assert out == "10.8kw,220m,1mi:220m", out
 
   @pytest.mark.parametrize("p_now", [10.8, 5.0, -20.0])
   def test_the_generator_covering_the_load_is_over_999(self, widget, now, p_now):
-    assert self._on(widget, now, pNowKw=p_now) == "10.8kw,>999m,1mi:>999m"
+    assert self._on(widget, now, grossKw=p_now) == "10.8kw,>999m,1mi:>999m"
 
-  def test_no_motor_signal_is_the_speed_estimate_marked(self, widget, now):
-    assert self._on(widget, now, pNowKw=None) == "10.8kw,?166m,1mi:?166m"     # 112 x 33.13 / 22.33
+  def test_no_measured_load_is_the_speed_estimate_marked(self, widget, now):
+    assert self._on(widget, now, grossKw=None) == "10.8kw,?166m,1mi:?166m"     # 112 x 33.13 / 22.33
 
   def test_before_the_first_mile_R2_repeats_R1(self, widget, now):
-    assert self._on(widget, now, pNowKw=15.0) == "10.8kw,400m,1mi:400m"
+    assert self._on(widget, now, grossKw=15.0) == "10.8kw,400m,1mi:400m"
 
   def test_a_mile_that_netted_charging_is_over_999(self, widget, now):
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.10, mileAcKwh=0.135) == "10.8kw,175m,1mi:>999m"
+    assert self._on(widget, now, grossKw=30.0, mileKwh=0.10, mileAcKwh=0.135) == "10.8kw,175m,1mi:>999m"
 
   def test_a_computable_mile_is_its_own_range(self, widget, now):
     # 59.35 kWh / (0.5 - 0.0233) kWh per mile = 124.5
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0233) == "10.8kw,175m,1mi:125m"
+    assert self._on(widget, now, grossKw=30.0, mileKwh=0.5, mileAcKwh=0.0233) == "10.8kw,175m,1mi:125m"
 
   def test_a_mile_that_cannot_be_computed_repeats_R1_marked(self, widget, now):
     """Gemini 2026-11-01: R1 standing in for a full mile is not the mile's figure: "?"."""
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=None) == "10.8kw,175m,1mi:?175m"
+    assert self._on(widget, now, grossKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=None) == "10.8kw,175m,1mi:?175m"
 
   def test_a_mile_range_under_half_a_mile_repeats_R1_never_zero(self, widget, now):
     # 0.2 kWh / 0.5 kWh per mile = 0.4 mi -> rounds to 0, not a range
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=0.2) == "10.8kw,175m,1mi:?175m"
+    assert self._on(widget, now, grossKw=30.0, mileKwh=0.5, mileAcKwh=0.0, energyKwh=0.2) == "10.8kw,175m,1mi:?175m"
 
   def test_over_999_on_either_term(self, widget, now):
-    assert self._on(widget, now, pNowKw=11.0) == "10.8kw,>999m,1mi:>999m"       # 112 x 11 / 0.2
-    assert self._on(widget, now, pNowKw=30.0, mileKwh=0.05, mileAcKwh=0.0) == "10.8kw,175m,1mi:>999m"
+    assert self._on(widget, now, grossKw=11.0) == "10.8kw,>999m,1mi:>999m"       # 112 x 11 / 0.2
+    assert self._on(widget, now, grossKw=30.0, mileKwh=0.05, mileAcKwh=0.0) == "10.8kw,175m,1mi:>999m"
 
   def test_the_999_bound_is_on_the_rounded_value(self, widget, now):
     for target, want in ((999.4, "999m"), (999.6, ">999m")):
       p = 10.8 * target / (target - self.DASH)
-      assert self._on(widget, now, pNowKw=p).startswith(f"10.8kw,{want},"), target
+      assert self._on(widget, now, grossKw=p).startswith(f"10.8kw,{want},"), target
 
   def test_no_dash_range_is_the_only_dashes(self, widget, now):
-    assert self._on(widget, now, pNowKw=30.0, rangeKm=None) == "10.8kw,--m,1mi:--m"
-    assert self._on(widget, now, pNowKw=30.0, rangeKm=None, mileKwh=0.5, mileAcKwh=0.0) == "10.8kw,--m,1mi:119m"
+    assert self._on(widget, now, grossKw=30.0, rangeKm=None) == "10.8kw,--m,1mi:--m"
+    assert self._on(widget, now, grossKw=30.0, rangeKm=None, mileKwh=0.5, mileAcKwh=0.0) == "10.8kw,--m,1mi:119m"
 
   def test_the_form_is_always_three_terms(self, widget, now):
     import re
@@ -792,7 +793,7 @@ class TestGeneratorOnAlwaysThreeTerms:
     for p_now in (None, -20.0, 0.0, 5.0, 10.8, 10.81, 11.0, 15.0, 30.0, 200.0, float("nan")):
       for mile in ({}, {"mileKwh": 0.5, "mileAcKwh": 0.0}, {"mileKwh": 0.0, "mileAcKwh": 0.2},
                    {"mileKwh": -0.1, "mileAcKwh": 0.0}, {"mileKwh": 0.5, "energyKwh": None}):
-        out = self._on(widget, now, pNowKw=p_now, **mile)
+        out = self._on(widget, now, grossKw=p_now, **mile)
         assert shape.match(out), out
 
   def test_no_moving_payload_ever_renders_m_per_h(self, widget, now):
@@ -802,7 +803,7 @@ class TestGeneratorOnAlwaysThreeTerms:
         for mile in ({}, {"mileKwh": 0.5, "mileAcKwh": 0.0}, {"mileKwh": 0.0, "mileAcKwh": 0.2},
                      {"mileKwh": -0.1, "mileAcKwh": 0.0}, {"mileKwh": 0.1, "mileAcKwh": 0.135}):
           for acseen in (True, False):
-            out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "pNowKw": p_now}, acSeen=acseen, **mile))
+            out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "grossKw": p_now}, acSeen=acseen, **mile))
             assert "m/h" not in out, out
 
   def test_generator_off_a_mile_that_netted_charging_is_over_999_not_a_rate(self, widget, now):
@@ -810,7 +811,7 @@ class TestGeneratorOnAlwaysThreeTerms:
     assert out == "184m(63.49kwh),1mi:>999m", out
 
   def test_the_widest_form_stays_inside_the_char_bound(self, widget, now):
-    out = self._on(widget, now, acKw=27.7, pNowKw=27.7, mileKwh=0.0, mileAcKwh=0.2)
+    out = self._on(widget, now, acKw=27.7, grossKw=27.7, mileKwh=0.0, mileAcKwh=0.2)
     assert out == "27.7kw,>999m,1mi:>999m" and len(out) <= 31, out
 
   def test_stopped_forms_keep_their_gain(self, widget, now):
@@ -818,7 +819,7 @@ class TestGeneratorOnAlwaysThreeTerms:
 
 
 class TestEstimateMarker:
-  """Owner 2026-11-01: no "@" anywhere; a leading "?" on every figure NOT from the live pNowKw.
+  """Owner 2026-11-01: no "@" anywhere; a leading "?" on every figure NOT from the measured grossKw.
   BASE: 320 Wh/km at 62 mph (99.78 km/h) = 31.93 kW + 1.2 kW accessories = 33.13 kW estimated."""
 
   MOV = TestTheMovingForm.MOV
@@ -827,63 +828,63 @@ class TestEstimateMarker:
   def test_the_estimate_mirrors_the_producer_accessory_load(self):
     assert ed._P_ACC_KW == 1.2, "change everdrive_pnw.P_ACC_KW (opendbc) together with this"
 
-  def test_no_pNowKw_is_the_speed_estimate_with_a_question_mark(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": None}))
+  def test_no_grossKw_is_the_speed_estimate_with_a_question_mark(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": None}))
     assert out == f"?{round(59.35 / self.P_EST * 62)}m(63.49kwh),1mi:?111m", out
     assert self.P_EST == pytest.approx(33.13, abs=0.01)
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": None})) == \
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": None})) == \
       f"10.8kw,?{round(112 * self.P_EST / (self.P_EST - 10.8))}m,1mi:?166m"
 
-  def test_the_question_mark_drops_as_soon_as_pNowKw_is_live(self, widget, now):
+  def test_the_question_mark_drops_as_soon_as_grossKw_is_published(self, widget, now):
     assert widget._build_text(st(now, **self.MOV)) == "184m(63.49kwh),1mi:184m"
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0})) == "10.8kw,175m,1mi:175m"
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": 30.0})) == "10.8kw,175m,1mi:175m"
 
   def test_over_999_without_a_question_mark_only_from_a_measured_load(self, widget, now):
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 10.0})) == "10.8kw,>999m,1mi:>999m"
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": 10.0})) == "10.8kw,>999m,1mi:>999m"
 
   def test_an_estimate_at_or_under_the_charge_is_question_over_999(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "acKw": 40.0, "pNowKw": None}))
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 40.0, "grossKw": None}))
     assert out == "40.0kw,?>999m,1mi:?>999m", out
 
   def test_a_missing_reading_never_prints_a_bare_over_999(self, widget, now):
     for ac in (0.0, 5.0, 33.0, 40.0, 60.0):
       for mile in ({}, {"mileKwh": 0.0, "mileAcKwh": 0.2, "mileEst": True}, {"mileKwh": 0.5, "mileEst": True}):
         for eff in (True, False):
-          out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "pNowKw": None, **mile}, effOk=eff))
+          out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "grossKw": None, **mile}, effOk=eff))
           assert ">999m" not in out.replace("?>999m", ""), out
 
   def test_a_fully_measured_mile_has_no_question_mark(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0}, mileKwh=0.5, mileAcKwh=0.0233))
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": 30.0}, mileKwh=0.5, mileAcKwh=0.0233))
     assert out == "10.8kw,175m,1mi:125m", out
 
   def test_a_partly_estimated_mile_has_a_question_mark(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0, "mileEst": True},
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": 30.0, "mileEst": True},
                                 mileKwh=0.5, mileAcKwh=0.0233))
     assert out == "10.8kw,175m,1mi:?125m", out
     out = widget._build_text(st(now, **{**self.MOV, "mileEst": True}, mileKwh=0.5, mileAcKwh=0.0))
     assert out == "184m(63.49kwh),1mi:?119m", out
-    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": 30.0, "mileEst": True},
+    out = widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": 30.0, "mileEst": True},
                                 mileKwh=0.1, mileAcKwh=0.135))
     assert out == "10.8kw,175m,1mi:?>999m", out
 
   @pytest.mark.parametrize("p_now", [-5.0, 0.0])
   def test_generator_off_regen_or_coasting_is_the_speed_estimate_not_the_bare_dash_range(self, widget, now, p_now):
     """Coordinator 2026-11-01: the bare dash range would look like a measured range."""
-    assert widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now})) == "?111m(63.49kwh),1mi:?111m"
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, mileKwh=0.5, mileAcKwh=0.0))
+    assert widget._build_text(st(now, **{**self.MOV, "grossKw": p_now})) == "?111m(63.49kwh),1mi:?111m"
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": p_now}, mileKwh=0.5, mileAcKwh=0.0))
     assert out == "?111m(63.49kwh),1mi:119m", out           # the mile itself was measured
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now}, effOk=False))
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": p_now}, effOk=False))
     assert out == "?112m(63.49kwh),1mi:?112m", out          # no estimate either: the dash range, still "?"
 
   def test_sweep_a_bare_generator_off_range_is_always_a_live_plausible_measurement(self, widget, now):
-    """Coordinator 2026-11-01: bare (no "?") first term only when pNowKw is live and the measured range
-    energyKwh / pNowKw x mph rounds into 1..499."""
+    """Coordinator 2026-11-01: bare (no "?") first term only when grossKw is published and the measured range
+    energyKwh / grossKw x mph rounds into 1..499."""
     n = bare = 0
     for p_now in (None, float("nan"), -50.0, -5.0, 0.0, 0.01, 0.5, 1.0, 2.36, 2.4, 5.0, 20.0, 62.0, 200.0, 1e4):
       for e in (None, 0.0, 0.4, 0.5, 1.2, 59.35, 120.0):
         for eff in (True, False):
           for rng_km in (None, 180.2):
-            out = widget._build_text(st(now, **{**self.MOV, "pNowKw": p_now, "energyKwh": e}, effOk=eff,
+            out = widget._build_text(st(now, **{**self.MOV, "grossKw": p_now, "energyKwh": e}, effOk=eff,
                                         rangeKm=rng_km))
             first = out.split("(")[0].split(",")[0]
             measured = None
@@ -896,7 +897,7 @@ class TestEstimateMarker:
     assert n == 15 * 7 * 2 * 2 and bare > 0, "positive control: some bare ranges must exist"
 
   def test_generator_on_a_measured_load_under_the_charge_is_still_measured(self, widget, now):
-    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "pNowKw": -5.0})) == "10.8kw,>999m,1mi:>999m"
+    assert widget._build_text(st(now, **{**self.MOV, "acKw": 10.8, "grossKw": -5.0})) == "10.8kw,>999m,1mi:>999m"
 
   def test_a_mile_from_an_older_producer_without_mileEst_is_not_called_measured(self, widget, now):
     mov = {k: v for k, v in self.MOV.items() if k != "mileEst"}
@@ -904,7 +905,7 @@ class TestEstimateMarker:
     assert out == "184m(63.49kwh),1mi:?119m", out
 
   def test_before_the_first_mile_the_term_carries_the_instant_question_mark(self, widget, now):
-    out = widget._build_text(st(now, **{**self.MOV, "pNowKw": None, "mileEst": None}))
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": None, "mileEst": None}))
     assert out == "?111m(63.49kwh),1mi:?111m", out
 
   def test_no_at_sign_and_no_m_per_h_in_any_moving_form(self, widget, now):
@@ -915,7 +916,7 @@ class TestEstimateMarker:
                      {"mileKwh": 0.1, "mileAcKwh": 0.135}):
           for mile_est in (True, False, None):
             for eff in (True, False):
-              out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "pNowKw": p_now, "mileEst": mile_est},
+              out = widget._build_text(st(now, **{**self.MOV, "acKw": ac, "grossKw": p_now, "mileEst": mile_est},
                                           effOk=eff, **mile))
               assert "@" not in out and "m/h" not in out and "?--" not in out, out
               n += 1
@@ -949,7 +950,7 @@ class TestNoBareFigureUnlessMeasured:
             for mile_est in (True, False, None):
               for eff in (True, False):
                 for rng_km in (None, 180.2):
-                  over = {"acKw": ac, "pNowKw": p_now, "energyKwh": e, "mileEst": mile_est}
+                  over = {"acKw": ac, "grossKw": p_now, "energyKwh": e, "mileEst": mile_est}
                   if mile is not None:
                     over.update(mileKwh=mile[0], mileAcKwh=mile[1])
                   out = widget._build_text(st(now, **{**self.MOV, **over}, effOk=eff, rangeKm=rng_km))
@@ -993,3 +994,49 @@ class TestNoBareFigureUnlessMeasured:
                     # before the first mile the term repeats a measured first term; after it, the mile's own
                     assert (r2 == m2) if mile is not None else (r2 == r1 == m1), case
     assert n == 3 * 9 * 3 * 7 * 3 * 2 * 2 and bare > 1000, (n, bare)
+
+
+class TestTheSocLoad:
+  """everdrivesoc2pnw (owner 2026-11-02): the moving load is grossKw from the SoC window; the speed
+  estimate stands in, marked "?", until that window has filled."""
+
+  MOV = TestTheMovingForm.MOV
+  DASH_KM = 177.6 * 1.60934
+  TODAY = {"moving": True, "vMs": 54 * MPH, "acKw": 10.75, "rangeKm": DASH_KM, "grossKw": 22.3, "mileEst": False}
+
+  def test_the_2026_11_02_highway_case(self, widget, now):
+    """Dash 177.6 mi, 22.3 kW load, 10.75 kW in: 177.6 x 22.3 / 11.55 = 342.9 -> 343, measured."""
+    out = widget._build_text(st(now, **self.TODAY))
+    assert out == "10.8kw,343m,1mi:343m", out
+
+  def test_window_not_filled_is_the_speed_estimate_marked(self, widget, now):
+    """320 Wh/km at 54 mph + 1.2 kW = 29.0 kW -> 177.6 x 29.0 / 18.26 = 282, with "?"."""
+    out = widget._build_text(st(now, **{**self.TODAY, "grossKw": None}))
+    assert out == "10.8kw,?282m,1mi:?282m", out
+
+  @pytest.mark.parametrize("gross", [10.75, 5.8, -3.0])
+  def test_a_measured_load_at_or_under_the_charge_is_a_bare_over_999(self, widget, now, gross):
+    out = widget._build_text(st(now, **{**self.TODAY, "grossKw": gross}))
+    assert out == "10.8kw,>999m,1mi:>999m", out
+
+  def test_generator_off_a_negative_measured_load_is_regen_and_uses_the_estimate(self, widget, now):
+    out = widget._build_text(st(now, **{**self.MOV, "grossKw": -15.0}))
+    assert out == "?111m(63.49kwh),1mi:?111m", out
+
+  def test_the_last_mile_from_soc_steps(self, widget, now):
+    """Producer: 0.30 kWh/mi SoC drop + 0.18 kWh/mi AC in -> mileKwh 0.48, mileAcKwh 0.18.
+    59.35 kWh / 0.30 = 197.8 -> 198; marked only when part of the mile had no SoC."""
+    mile = {"mileKwh": 0.48, "mileAcKwh": 0.18}
+    assert widget._build_text(st(now, **self.TODAY, energyKwh=59.35, **mile)) == "10.8kw,343m,1mi:198m"
+    out = widget._build_text(st(now, **{**self.TODAY, "mileEst": True}, energyKwh=59.35, **mile))
+    assert out == "10.8kw,343m,1mi:?198m", out
+
+  def test_a_mile_with_no_soc_step_is_over_999_not_a_flicker(self, widget, now):
+    """The producer publishes a zero net (mileKwh == mileAcKwh) when no SoC step came for a whole mile."""
+    out = widget._build_text(st(now, **self.TODAY, energyKwh=59.35, mileKwh=0.18, mileAcKwh=0.18))
+    assert out == "10.8kw,343m,1mi:>999m", out
+
+  def test_pNowKw_from_an_older_producer_is_ignored(self, widget, now):
+    """The motor-2 key is gone; a stale payload carrying it must not be read as a measured load."""
+    out = widget._build_text(st(now, **{**self.TODAY, "grossKw": None, "pNowKw": 30.0}))
+    assert out == "10.8kw,?282m,1mi:?282m", out
