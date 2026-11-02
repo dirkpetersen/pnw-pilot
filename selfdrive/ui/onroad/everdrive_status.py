@@ -21,6 +21,13 @@ GENERATOR (everdrivegen2pnw, owner 2026-11-02): the kW term is YELLOW while the 
 and also replaces the kW term in the stopped form ("GEN 0kw!,112m(63.49kwh)"). A 5 s banner above the
 box marks each change: "Generator ON 0.3 kW" (live kW), "Generator OFF", "Generator: NO POWER". No
 state, colour or banner without acSeen or from a stale payload. See _GEN_STATES.
+TWO LINES WHILE THE GENERATOR CHARGES (everdrivetwoline2pnw, owner 2026-11-02): moving, genState "on" and
+acKw above _AC_ZERO_KW. Every other case keeps the one-line forms above and below.
+    10.8kw,27kw,59kwh              generator kW (yellow), truck load P ("?" when estimated), pack kWh
+    227m,1mi:227m,d1m:187m         SoC instant energyKwh / (P - acKw) x mph, SoC mile energyKwh /
+                                   mileNetKwh, dash mile (the one-line "1mi:" of the charging form)
+Any of the three over 999 or with a net load <= 0 is a plain ">999m", never "?>999m" (owner: "if any of
+them reaches >999 just use that number"). Before the first full mile "1mi:" repeats the instant range.
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
@@ -147,7 +154,7 @@ _LINE_H = 65              # _FS * 1.25, the ratio ces_status.py and location_ser
 _PAD = 24                 # == ces_status._PAD, so the two stacked boxes have identical inner padding
 _MARGIN = 40              # == ces_status._MARGIN: same gap from the screen's right / bottom edges
 _STACK_GAP = 12           # vertical gap between this box and the CES box sitting on top of it
-_BOX_H = _LINE_H + _PAD * 2   # always exactly one line — the height never varies
+_BOX_H = _LINE_H + _PAD * 2   # one line; the two-line generator form adds one _LINE_H (178 px)
 
 # --- maths (see the everdrive2pnw spec; implemented literally) --------------------------------------
 # The spec's own conversion literals are used verbatim rather than common.constants.CV (CV.MPH_TO_KPH
@@ -229,6 +236,9 @@ _CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a f
 #     GEN 0kw!,?444m,1mi:?>999m     723.2 px text -> 771.2 box -> left 1318.8 -> +238.8 clear
 #     GEN 0kw!,444m(444.44kwh)      703.0              751.0           1339.0      +259.0
 #     Generator ON 44.4 kW          544.4              592.4           1497.6      +417.6   (banner)
+#     ?>999m,1mi:?>999m,d1m:?>999m  831.2              879.2           1210.8      +130.8   (line 2 bound)
+#     44.4kw,?444kw,444kwh          598.7              646.7           1443.3      +363.3   (line 1)
+# Two-line box: 178 px high (one more _LINE_H); stack_height lifts the CES box by it.
 #     Generator: NO POWER           538.4              586.4           1503.6      +423.6   (banner)
 # The idle MOVING form drops the (kwh) term: with it, "GEN 0kw!,?444m(444.44kwh),1mi:?444m" is a
 # 1053.8 px box, over _MAX_BOX_W and 3.8 px INTO the driving path. Idle never shows a projection or a
@@ -315,6 +325,42 @@ def _gain_text(gain: float) -> str | None:
   return f"+{g:.1f}m/h" if 0.0 < g < _GAIN_MAX_MI_H else None
 
 
+def _finite(v) -> float | None:
+  x = _num(v)
+  return x if x is not None and math.isfinite(x) else None
+
+
+def _soc_range(e: float | None, net: float, est: bool, scale: float) -> str:
+  """everdrivetwoline2pnw: e / net x scale as printed. Net <= 0 or over 999: a plain ">999m", never with
+  "?" (owner 2026-11-02: "if any of them reaches >999 just use that number"). "--m" without energy."""
+  if net <= 0.0:
+    return _OVER_RANGE
+  if e is None or e <= 0.0:
+    return "--m"
+  t = _range_text(e / net * scale)
+  return "--m" if t is None else (t if t == _OVER_RANGE else _q(t, est))
+
+
+def _two_lines(st: dict, ac_kw: float, p: float | None, est: bool, mph: float, mile_est: bool, d1m: str) -> str:
+  """everdrivetwoline2pnw (owner 2026-11-02): moving with the generator "on" AND current flowing (acKw
+  above _AC_ZERO_KW: "I only need the two lines if everdrive is actually charging"), two lines.
+    line 1: generator kW (yellow), the truck load P (grossKw, else the "?" speed estimate), pack kWh
+    line 2: the SoC instant range energyKwh / (P - acKw) x mph, "1mi:" energyKwh / mileNetKwh (the net
+            kWh per mile over the last mile; before it, the instant range), "d1m:" the dash-based mile
+            figure (the d77ffaf76 "1mi:" term, passed in). Any of the three over 999 is a plain ">999m"."""
+  e = _finite(st.get("energyKwh"))
+  load = "--kw" if p is None or not math.isfinite(p) else _q(f"{round(p)}kw", est)
+  line1 = f"{ac_kw:.1f}kw,{load}" + (f",{round(e)}kwh" if e is not None else "")
+  if p is None or not math.isfinite(p):
+    inst = "--m"
+  else:
+    inst = _soc_range(e, p - ac_kw, est, mph)
+  net = _finite(st.get("mileNetKwh"))
+  mile = inst if net is None else _soc_range(e, net, mile_est, 1.0)
+  d1m = d1m.removeprefix("?") if d1m.endswith(_OVER_RANGE) else d1m
+  return f"{line1}\n{inst},1mi:{mile},d1m:{d1m}"
+
+
 class EverDriveStatusRenderer(Widget):
   def __init__(self):
     super().__init__()
@@ -329,6 +375,9 @@ class EverDriveStatusRenderer(Widget):
     self._poll_interval = _REFRESH_S
     self._too_wide_logged = False         # Rule 2 tripwire, fires at most once per session
     self._cached_layout: tuple[str, float, float] | None = None   # (text, box_w, text_w); None == hidden
+    # everdrivetwoline2pnw: each line with its width, and the box height (one or two lines).
+    self._cached_lines: list[tuple[str, float]] = []
+    self._cached_box_h = _BOX_H
     # everdrivegen2pnw: the coloured first term (chars, px, colour) and the banner (text, box_w,
     # text_w, colour); None == plain white line / no banner.
     self._cached_head: tuple[int, float, rl.Color] | None = None
@@ -349,7 +398,7 @@ class EverDriveStatusRenderer(Widget):
     shows (above this box) the CES box is lifted by one more box height, so the two never overlap."""
     if self._cached_layout is None:
       return 0.0
-    return (_BOX_H + _STACK_GAP) * (2 if self._cached_banner is not None else 1)
+    return self._cached_box_h + _STACK_GAP + (_BOX_H + _STACK_GAP if self._cached_banner is not None else 0.0)
 
   # ---- state ---------------------------------------------------------------
   def _update_state(self):
@@ -420,7 +469,11 @@ class EverDriveStatusRenderer(Widget):
       self._cached_banner = (b, b_w + _PAD * 2, b_w, _BANNER_COLOR[self._banner_kind])
     # Measured HERE (5 Hz) and cached, so _render does nothing but draw. A device with no EverDrive
     # never reaches this line at all, so it never pays for a text measurement.
-    text_w = measure_text_cached(self.font, text, _FS).x
+    # everdrivetwoline2pnw: one line, or two while the generator charges a moving truck. Each line is
+    # measured on its own and right-aligned; the box hugs the widest.
+    self._cached_lines = [(ln, measure_text_cached(self.font, ln, _FS).x) for ln in text.split("\n")]
+    self._cached_box_h = _BOX_H + _LINE_H * (len(self._cached_lines) - 1)
+    text_w = max(w for _ln, w in self._cached_lines)
     box_w = text_w + _PAD * 2
     # Rule 2: the box must never reach into the green driving path. The producer's bands make this
     # unreachable, so if it ever fires an input is out of band -- say so rather than quietly drawing
@@ -490,7 +543,8 @@ class EverDriveStatusRenderer(Widget):
       return f"{_GEN_IDLE_TERM},{rng}m{pack}"
     if st.get("moving") is True:
       return self._moving_text(st, charging, ac_kw, rng, range_mi, mph, pack,
-                               eff_wh_km if st.get("effOk") else 0.0)
+                               eff_wh_km if st.get("effOk") else 0.0,
+                               two_line=gen == "on" and ac_kw > _AC_ZERO_KW)
     if not charging:
       return f"--,{rng}m{pack}"
 
@@ -527,7 +581,7 @@ class EverDriveStatusRenderer(Widget):
 
   @staticmethod
   def _moving_text(st: dict, charging: bool, ac_kw: float, rng: str, range_mi: float | None, mph: float,
-                   pack: str, eff_wh_km: float) -> str:
+                   pack: str, eff_wh_km: float, two_line: bool = False) -> str:
     """everdriveinstant2pnw: the moving form, owner 2026-11-01. See the module docstring. No "@" and
     no "m/h" ever; a leading "?" marks every figure NOT built from the measured load grossKw
     (everdrivesoc2pnw, 2026-11-02; it was pNowKw from motor 2 before).
@@ -567,6 +621,8 @@ class EverDriveStatusRenderer(Widget):
         t = _OVER_RANGE if mile_p <= mile_ac else _range_text(range_mi * mile_p / (mile_p - mile_ac))
         # None: a full mile that cannot be computed, so R1 stands in, and it is not the mile's own figure.
         r2 = _q(t, mile_est) if t is not None else _q(r1.removeprefix("?"), True)
+      if two_line:
+        return _two_lines(st, ac_kw, p, est, mph, mile_est, r2)
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
     # Generator OFF. A bare range is ALWAYS a measured one: grossKw and a result in 1.._RANGE_MAX_MI.
     # Anything else (no reading, regen, coasting, over the ceiling, no energy) is the speed estimate,
@@ -588,26 +644,29 @@ class EverDriveStatusRenderer(Widget):
   def _render(self, rect: rl.Rectangle):
     if self._cached_layout is None:
       return
-    text, box_w, text_w = self._cached_layout
+    _text, box_w, _text_w = self._cached_layout
+    box_h = self._cached_box_h
     # Anchored to the RIGHT EDGE and the bottom, exactly as ces_status.py does — this is what keeps the
     # box out of the green driving path down the middle of the screen. The text is right-aligned, so
     # its right edge sits at a fixed x and the TEXT never moves as digits or form change.
     bx = rect.x + rect.width - box_w - _MARGIN
-    by = rect.y + rect.height - _BOX_H - _MARGIN
+    by = rect.y + rect.height - box_h - _MARGIN
     # raylib: radius = roundness * min(w, h) / 2. Converting from a PIXEL radius keeps the corners
     # looking like the CES and location boxes regardless of how wide this line happens to be --
     # passing ces_status's literal 0.12 would give this short, wide box only ~6.5 px and read square.
-    roundness = min(1.0, 2.0 * _CORNER_R / min(box_w, _BOX_H))
-    rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, _BOX_H), roundness, 8, _C.BG)
-    tx = bx + box_w - _PAD - text_w
-    if self._cached_head is None:
-      rl.draw_text_ex(self.font, text, rl.Vector2(tx, by + _PAD), _FS, 0, _C.WHITE)
-    else:
-      # everdrivegen2pnw: the first term in its colour, the rest white right after it. Spacing is 0 and
-      # raylib applies no kerning, so the two halves sit exactly where the one string would.
-      n, head_w, color = self._cached_head
-      rl.draw_text_ex(self.font, text[:n], rl.Vector2(tx, by + _PAD), _FS, 0, color)
-      rl.draw_text_ex(self.font, text[n:], rl.Vector2(tx + head_w, by + _PAD), _FS, 0, _C.WHITE)
+    roundness = min(1.0, 2.0 * _CORNER_R / min(box_w, box_h))
+    rl.draw_rectangle_rounded(rl.Rectangle(bx, by, box_w, box_h), roundness, 8, _C.BG)
+    for i, (line, line_w) in enumerate(self._cached_lines):
+      tx = bx + box_w - _PAD - line_w
+      ty = by + _PAD + i * _LINE_H
+      if i > 0 or self._cached_head is None:
+        rl.draw_text_ex(self.font, line, rl.Vector2(tx, ty), _FS, 0, _C.WHITE)
+      else:
+        # everdrivegen2pnw: the first term in its colour, the rest white right after it. Spacing is 0 and
+        # raylib applies no kerning, so the two halves sit exactly where the one string would.
+        n, head_w, color = self._cached_head
+        rl.draw_text_ex(self.font, line[:n], rl.Vector2(tx, ty), _FS, 0, color)
+        rl.draw_text_ex(self.font, line[n:], rl.Vector2(tx + head_w, ty), _FS, 0, _C.WHITE)
     if self._cached_banner is not None:
       # Directly ABOVE the box, right-anchored the same way (so it can never reach further left than
       # the box can); stack_height lifts the CES box clear of it.

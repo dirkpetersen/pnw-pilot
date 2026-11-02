@@ -44,6 +44,29 @@ generator idle:   GEN 0kw!,?282m,1mi:?282m        (running, not supplying; no kw
   both terms; a term 1 that moves between 220 and 240 gives about 230.
 - `--m` only when the dash range is gone and nothing can stand in. "?" is never put on `--m` or `1mi:--`.
 
+**Moving with the generator charging (everdrivetwoline2pnw, owner 2026-11-02): two lines.** Only while
+moving, `genState` is `on` and `acKw` is above 0.05 kW (current flowing). Voltage with 0 kW, generator off,
+idle, stopped and parked keep the one-line forms.
+
+```
+10.8kw,27kw,59kwh            generator kW (yellow), truck load P, pack energy (white)
+227m,1mi:227m,d1m:187m       instant (SoC), last mile (SoC), last mile (dash)
+```
+
+- Load P: `grossKw`, else the speed estimate with "?". Rounded to whole kW; the kWh to whole kWh, and
+  omitted when `energyKwh` is missing.
+- Instant: `energyKwh / (P - acKw) x mph`.
+- `1mi:`: `energyKwh / mileNetKwh`. `mileNetKwh` is the net energy per mile over the last mile driven, the
+  time integral of (term-1 load - acKw), so at a steady speed and load it equals the instant range. "?"
+  when any of the mile used the estimate. Before the first full mile it repeats the instant range.
+- `d1m:`: the dash-based mile, the same figure as `1mi:` in the one-line charging form
+  (dash x mileLoadKw / (mileLoadKw - mileAcKw); before the first mile dash x P / (P - acKw)).
+- Any of the three over 999, or with a net load of 0 or less: a plain `>999m`, never `?>999m` (owner:
+  "if any of them reaches >999 just use that number"). Below 999 the "?" rules are as for term 1.
+- Width at font 52: worst line 2 `?>999m,1mi:?>999m,d1m:?>999m` 879 px box (131 px clear of the screen
+  centre), line 1 647 px. Box height 178 px (113 px for one line); the CES box lifts by it, and by one
+  more box during a banner.
+
 **Stopped, parked or below 10 mph.**
 
 ```
@@ -298,10 +321,11 @@ Mem param `EverDriveStatus`, registered `{CLEAR_ON_MANAGER_START, JSON}`, publis
 | `socPct`, `capKwh`, `capSrc`, `energyKwh` | SoC, usable capacity, its source (derived or measured), remaining energy (None if an input is None) |
 | `grossKw` | load from the SoC window; None until the window clears its floor, and while below 10 mph |
 | `moving`, `vMs` | producer moving flag (10 mph or more), speed in m/s |
+| `mileNetKwh` | net energy per mile over the last mile, kWh/mi: time integral of (term-1 load - acKw) scaled to one mile; the two-line `1mi:` |
 | `mileLoadKw`, `mileAcKw`, `mileEst` | distance-weighted mean of term 1's load and of `acKw` over the last mile (kW); `mileEst` True if any of the mile used the speed estimate. None before the first full mile |
 
 Removed 2026-11-02: `pNowKw`, `kCal`, `kFits`, `mileKwh`, `mileAcKwh`. Added: `acV`, `genState`,
-`mileLoadKw`, `mileAcKw`.
+`mileLoadKw`, `mileAcKw`, `mileNetKwh`.
 
 **Generator state** (from `0x2A7`, measured 2026-11-02 09:47 to 09:52 PT): off = 0 V and 0 A. On = 234 V at
 once with 1.2 to 3.2 A for about 5 s, then the current ramps about 0.9 A/s to about 46 A (10.8 kW) in
