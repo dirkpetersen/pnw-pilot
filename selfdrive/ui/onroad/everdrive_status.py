@@ -16,10 +16,11 @@ Driver-approved formats. MOVING (producer `moving`, i.e. >= 10 mph; everdriveins
     window not filled:   10.8kw,?282m,1mi:?282m      ("?" = the speed estimate, 320 Wh/km at 54 mph)
     charge >= load:      10.8kw,>999m,1mi:>999m      (measured; "?>999m" from the estimate)
     generator idle:      GEN 0kw!,?282m,1mi:?282m    (running, not supplying; no (kwh), for width)
-GENERATOR (everdrivegen2pnw, owner 2026-11-02): the kW term is GREEN while the producer's genState is
-"on"; "GEN 0kw!" is AMBER and also replaces the kW term in the stopped form ("GEN 0kw!,112m(63.49kwh)").
-A 5 s banner above the box marks each change: "Generator ON 10.8 kW", "Generator OFF",
-"Generator: NO POWER". See _GEN_STATES.
+GENERATOR (everdrivegen2pnw, owner 2026-11-02): the kW term is YELLOW while the producer's genState is
+"on" (from the first frame with voltage, so it may start at ~0.3 kW and ramp); "GEN 0kw!" is ORANGE-RED
+and also replaces the kW term in the stopped form ("GEN 0kw!,112m(63.49kwh)"). A 5 s banner above the
+box marks each change: "Generator ON 0.3 kW" (live kW), "Generator OFF", "Generator: NO POWER". No
+state, colour or banner without acSeen or from a stale payload. See _GEN_STATES.
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
     charging, crawling:  1.4kw,100m(55.35kwh)->104m
     charging, stopped:   1.4kw,100m(55.35kwh),+2.7m/h
@@ -42,14 +43,14 @@ little at highway cruise, so that figure was not the pack load; it is gone.)
                          141 mi, 30 kW, 10.8 kW in -> "220m"; needs no capacity. ">999m" when the
                          measured P <= acKw or over 999; "?>999m" when the ESTIMATE is <= acKw.
                          ">999m" is never printed from a missing reading without "?".
-    "1mi:"               the last-mile range with the charge, energyKwh / (mileKwh - mileAcKwh). The
-                         producer builds the mile from the SoC drop (mileKwh - mileAcKwh = SoC drop x
-                         capKwh per mile), so the figure moves in SoC steps. No "?" only when the whole
-                         mile had a SoC (producer mileEst False).
-                         Before the first full mile it repeats term 1 (with its "?"). Charger on:
-                         ">999m" when the mile netted out as charging or regen, or over 999; not
-                         computable repeats term 1. Charger off: "1mi:--" when not usable, ">999m"
-                         only when the mile netted out as charging after the charger was switched off.
+    "1mi:"               the AVERAGE of term 1 over the last mile (everdrivemile2pnw, owner 2026-11-02):
+                         term 1's formula on the producer's distance-weighted mile means of the load
+                         (mileLoadKw: grossKw, else the speed estimate) and of acKw (mileAcKw).
+                         Charger on: dash x mileLoadKw / (mileLoadKw - mileAcKw), ">999m" when
+                         mileLoadKw <= mileAcKw or over 999; not computable repeats term 1.
+                         Charger off: energyKwh / mileLoadKw x mph; "1mi:--" when not usable.
+                         "?" when any of the mile used the estimate (producer mileEst not False).
+                         Before the first full mile it repeats term 1 (with its "?").
     "--m"                only when the dash range itself is gone and nothing else can stand in.
                          "?" is never put on "--m" or "1mi:--": there is no figure to qualify.
 The change of FORM is the signal, the same idiom the box already uses for "--" (no charger). There is
@@ -218,8 +219,8 @@ _CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a f
 
 
 # everdrivegen2pnw (owner 2026-11-02): the producer's `genState` ("off" / "idle" / "on", see
-# everdrive_pnw.py GEN_*). "on": the kW term is GREEN. "idle" (generator running, not supplying): the
-# kW term is replaced by an AMBER _GEN_IDLE_TERM. Every change between the three states shows a
+# everdrive_pnw.py GEN_*). "on": the kW term is YELLOW. "idle" (generator running, not supplying): the
+# kW term is replaced by an ORANGE-RED _GEN_IDLE_TERM. Every change between the three states shows a
 # _BANNER_S banner ABOVE the box, right-anchored like it (display only: no alert, no event, no sound).
 # The first state seen in a session is not a change, so it shows no banner.
 #
@@ -241,11 +242,20 @@ _BANNER_TEXT = {"off": "Generator OFF", "idle": "Generator: NO POWER"}   # "on" 
 class _C:
   WHITE = rl.Color(255, 255, 255, 235)
   BG = rl.Color(0, 0, 0, 140)
-  GREEN = rl.Color(90, 205, 115, 240)    # == ces_status._C.GREEN
-  AMBER = rl.Color(255, 149, 0, 240)     # == ces_status._C.ORANGE
+  # Owner 2026-11-02: green was hard to read in daylight. Bright yellow for "on"; idle moves from amber
+  # (255, 149, 0) to orange-red, because amber sits too close to this yellow to tell apart at a glance.
+  YELLOW = rl.Color(255, 220, 0, 255)
+  ORANGE_RED = rl.Color(255, 110, 40, 255)
 
 
-_BANNER_COLOR = {"off": _C.WHITE, "idle": _C.AMBER, "on": _C.GREEN}
+_BANNER_COLOR = {"off": _C.WHITE, "idle": _C.ORANGE_RED, "on": _C.YELLOW}
+
+
+def _gen_state(st: dict) -> str | None:
+  """The producer's genState, or None when it is unknown or the 0x2A7 reading is not a real one
+  (acSeen not True): then there is no generator state to show, colour or announce."""
+  g = st.get("genState")
+  return g if st.get("acSeen") is True and g in _GEN_STATES else None
 
 
 def _f(v, d: float = 0.0) -> float:
@@ -361,6 +371,7 @@ class EverDriveStatusRenderer(Widget):
     # back to SHOWING (the documented default state) and can never crash the UI.
     try:
       if ui_state.params.get_bool("DisableEverDrive"):
+        self._gen_prev = self._banner_kind = None   # hidden: the first state after it is not a change
         return
     except Exception:
       if not self._toggle_err_logged:
@@ -377,25 +388,28 @@ class EverDriveStatusRenderer(Widget):
         cloudlog.exception("everdrive2pnw: EverDriveStatus read failed, box hidden")
       return
     if not isinstance(st, dict):
-      self._gen_prev = None   # module gone: when it comes back, its first state is not a "change"
+      self._gen_prev = self._banner_kind = None   # module gone: its first state back is not a change
       return          # key absent: NORMAL on the Tesla / a Lightning with no EverDrive. Stay quiet.
     self._poll_interval = _REFRESH_S   # a payload exists -> track the publisher at ~5 Hz from here on
-    # everdrivegen2pnw: a change between two KNOWN states starts the banner. A missing or unknown
-    # genState (older producer) changes nothing and starts nothing.
-    gen = st.get("genState") if st.get("genState") in _GEN_STATES else None
+    text = self._build_text(st)
+    if text is None:
+      # Producer went silent (stale ts) -> hide; keep polling fast so it can come back. The state is
+      # checked only AFTER this (Gemini 2026-11-02): a stale payload must not feed the banner.
+      self._gen_prev = self._banner_kind = None
+      return
+    # everdrivegen2pnw: a change between two KNOWN states of a fresh payload starts the banner. A missing
+    # or unknown genState (older producer), or acSeen not True, changes nothing and starts nothing.
+    gen = _gen_state(st)
     if gen is not None:
       if self._gen_prev is not None and gen != self._gen_prev:
         self._banner_kind, self._banner_until = gen, now + _BANNER_S
       self._gen_prev = gen
-    text = self._build_text(st)
-    if text is None:
-      return          # producer went silent (stale ts) -> hide; keep polling fast so it can come back
-    # The coloured first term: GREEN kW while the generator supplies, AMBER "GEN 0kw!" while idle.
+    # The coloured first term: YELLOW kW while the generator is on, ORANGE-RED "GEN 0kw!" while idle.
     kw_term = f"{_f(st.get('acKw')):.1f}kw"
     if text.startswith(_GEN_IDLE_TERM):
-      head = (_GEN_IDLE_TERM, _C.AMBER)
+      head = (_GEN_IDLE_TERM, _C.ORANGE_RED)
     elif gen == "on" and text.startswith(kw_term + ","):
-      head = (kw_term, _C.GREEN)
+      head = (kw_term, _C.YELLOW)
     else:
       head = None
     if head is not None:
@@ -462,11 +476,14 @@ class EverDriveStatusRenderer(Widget):
     # acSeen False == the EverDrive CAN message has not been received, so acKw is a pre-filled 0.0 and
     # NOT a measurement. acKw <= _AC_ZERO_KW is the opposite case: a real measured zero (unplugged).
     # Both read "not charging" to the driver, and neither may ever print a manufactured "0.0 kW".
-    charging = bool(st.get("acSeen")) and ac_kw > _AC_ZERO_KW
+    # everdrivegen2pnw: genState "on" is charging too, even at a measured ~0 kW: the producer says "on"
+    # from the first frame with voltage (owner 2026-11-02), and the kW figure then shows the ramp.
+    gen = _gen_state(st)
+    charging = bool(st.get("acSeen")) and (ac_kw > _AC_ZERO_KW or gen == "on")
     # everdrivegen2pnw: generator running but not supplying. _GEN_IDLE_TERM replaces the kW term; the
     # rest is the charger-OFF figure (a trickle under the producer's 0.5 kW is not a supply). Moving:
     # the three-term shape WITHOUT the (kwh), for width (see the table at _GEN_IDLE_TERM).
-    if st.get("genState") == "idle":
+    if gen == "idle":
       if st.get("moving") is True:
         return f"{_GEN_IDLE_TERM}," + self._moving_text(st, False, ac_kw, rng, range_mi, mph, "",
                                                          eff_wh_km if st.get("effOk") else 0.0)
@@ -522,10 +539,11 @@ class EverDriveStatusRenderer(Widget):
     p_est = eff_wh_km / 1000.0 * (mph / _MS_TO_MPH * 3.6) + _P_ACC_KW if eff_wh_km > 0.0 else None
     est = p_live is None
     p = p_est if est else p_live
-    mile_kwh = _num(st.get("mileKwh"))
-    # acSeen gates the AC energy as it gates acKw. NOT `charging`: a charger switched off inside the
-    # mile still put real energy in, so with acSeen the whole mile's AC energy is netted.
-    mile_ac = _f(st.get("mileAcKwh")) if st.get("acSeen") else 0.0
+    # everdrivemile2pnw (owner 2026-11-02): "1mi:" is the AVERAGE of term 1 over the last mile, built
+    # as term 1's formula on the producer's mile means of its load and of acKw. acSeen gates the AC
+    # mean as it gates acKw.
+    mile_p = _num(st.get("mileLoadKw"))
+    mile_ac = _f(st.get("mileAcKw")) if st.get("acSeen") else 0.0
     # Producer mileEst: any of the mile from the speed estimate. Missing (older producer) is NOT "measured".
     mile_est = st.get("mileEst") is not False
     if charging:
@@ -544,11 +562,10 @@ class EverDriveStatusRenderer(Widget):
           r1, est = f"{rng}m", True
       r1 = _q(r1, est)
       r2 = r1                                # before the first mile: R1, with its "?"
-      if mile_kwh is not None:
-        net_mi = mile_kwh - mile_ac
-        t = _OVER_RANGE if net_mi <= 0.0 else (_range_text(e / net_mi) if e > 0.0 else None)
-        # >999m: the mile netted out as charging. None: a full mile that cannot be computed, so R1
-        # stands in, and it is not the mile's own figure.
+      if mile_p is not None and range_mi is not None:
+        # Term 1's rule on the mile means: >999m when the mean load is covered by the mean charge.
+        t = _OVER_RANGE if mile_p <= mile_ac else _range_text(range_mi * mile_p / (mile_p - mile_ac))
+        # None: a full mile that cannot be computed, so R1 stands in, and it is not the mile's own figure.
         r2 = _q(t, mile_est) if t is not None else _q(r1.removeprefix("?"), True)
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
     # Generator OFF. A bare range is ALWAYS a measured one: grossKw and a result in 1.._RANGE_MAX_MI.
@@ -561,14 +578,10 @@ class EverDriveStatusRenderer(Widget):
       r_e = _miles(e / p_est * mph) if (p_est is not None and e > 0.0) else None
       now_t = _q(f"{r_e if r_e is not None else rng}m", True)
     mile = f",1mi:{now_t}"                   # before the first mile: the instant term, with its "?"
-    if mile_kwh is not None:
-      net_mi = mile_kwh - mile_ac
-      rm_t = _miles(e / net_mi if (net_mi > 0.0 and e > 0.0) else 0.0)
+    if mile_p is not None:
+      # Term 1's formula on the mile mean load, at the current speed. No usable figure: "1mi:--".
+      rm_t = _miles(e / mile_p * mph) if (mile_p > 0.0 and e > 0.0) else None
       mile = f",1mi:{_q(f'{rm_t}m', mile_est)}" if rm_t is not None else ",1mi:--"
-      # A mile that netted out as CHARGING (its mean AC input at this speed, kWh/mi x mph = kW, above
-      # _AC_ZERO_KW, after the charger was switched off) has no finite range. Regen alone stays "1mi:--".
-      if net_mi <= 0.0 and mile_ac * mph > _AC_ZERO_KW:
-        mile = f",1mi:{_q(_OVER_RANGE, mile_est)}"
     return f"{now_t}{pack}{mile}"
 
   # ---- render --------------------------------------------------------------

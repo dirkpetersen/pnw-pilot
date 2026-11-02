@@ -36,8 +36,12 @@ generator idle:   GEN 0kw!,?282m,1mi:?282m        (running, not supplying; no kw
   Regen, coasting, no reading or no energy: the speed estimate, or the dash range, both with "?".
 - `>999m`: shown when the measured P is at or below the charge (the generator covers the load) or the result
   is over 999. With the ESTIMATE it is `?>999m`. It is never printed from a missing reading without "?".
-- `1mi:` is the last-mile range with the charge. Before the first full mile it repeats term 1. Generator on:
-  `>999m` when the mile netted out as charging or regen. Generator off: `1mi:--` when not usable.
+- `1mi:` is the AVERAGE of term 1 over the last mile driven (owner 2026-11-02): term 1's formula on the
+  producer's distance-weighted mile means of the load (`mileLoadKw`) and of the charge (`mileAcKw`).
+  Generator on: dash x mileLoadKw / (mileLoadKw - mileAcKw), `>999m` when mileLoadKw <= mileAcKw.
+  Generator off: `energyKwh / mileLoadKw x mph`, `1mi:--` when not usable. "?" when any of the mile used
+  the speed estimate. Before the first full mile it repeats term 1. A steady load gives the same figure on
+  both terms; a term 1 that moves between 220 and 240 gives about 230.
 - `--m` only when the dash range is gone and nothing can stand in. "?" is never put on `--m` or `1mi:--`.
 
 **Stopped, parked or below 10 mph.**
@@ -51,10 +55,16 @@ generator idle:      GEN 0kw!,112m(63.49kwh)
 
 The kWh term is omitted (never shown as 0) when capacity or SoC is missing.
 
-**Generator state (colour and banner).** Green kW while the generator supplies power. Amber `GEN 0kw!`
-when voltage is present without power for more than 10 s. A 5 s banner above the box marks each change
-between two known states: `Generator ON 10.8 kW` (green), `Generator OFF` (white), `Generator: NO POWER`
-(amber). The first state seen in a session shows no banner. Display only: no alert, no sound.
+**Generator state (colour and banner).** Yellow kW (255, 220, 0) while the generator is on, from the first
+frame with voltage, so the figure can start at about 0.3 kW and ramp. Orange-red `GEN 0kw!` (255, 110, 40)
+while idle (rules in section 5.1). Green was hard to read in daylight (owner 2026-11-02), and the old amber
+was too close to the new yellow. A 5 s banner above the box marks each change between two known states:
+`Generator ON 0.3 kW` (yellow, live kW), `Generator OFF` (white), `Generator: NO POWER` (orange-red). The
+first state seen in a session, or after the box was hidden (stale payload, key absent, toggle), shows no
+banner. A stale payload or one without `acSeen` sets no state, no colour and no banner. Display only: no
+alert, no sound. Delay from the first frame with voltage: 0x2A7 is 1 Hz, the producer publishes at 5 Hz
+and the UI polls at 5 Hz while the key is present (the module sends 0 V frames while the generator is
+off, so the key is present), so the box and banner change within about 1.4 s.
 
 The change of form is the signal. There is no legend and no second line.
 
@@ -159,14 +169,20 @@ already has a figure.
    capacity by about 4 kWh, which would show as about 100 kW of artefact inside the plausibility cap.
 2. Shortening the window by discarding history is irreversible. Choose a newer baseline and keep the snapshots
    (replay of route `000001b8--a46fe398b3`: 10 on/off blocks of median 14 s became 5 blocks of median 72 s).
+3. The baseline is the NEWEST one at least 60 s old that clears the floor, not the last one before the first
+   that fails. Across a sign change (generator surplus, then a climb) the long window can net to under the
+   floor while the last 60 s clears it (Gemini 2026-11-02). A last minute of pure regen is therefore
+   reported as the negative it is; the UI reads a load <= 0 as no load.
 
-**Last mile.** The producer measures pack energy over the last 1 mile driven above 10 mph (distance from
-vEgo). SoC is a staircase, so a plain sliding mile would gain or lose a whole step depending on where its
-ends fall; with the generator on that flips between 0 and 1 step, that is between `>999m` and a number,
-every few seconds. So the window runs BETWEEN SoC STEP EDGES: boundaries are kept only where the SoC
-changed (or at an estimated sample). If no step came for a whole mile, the window ends now and the net is
-published as 0. Cost: the figure moves only when the SoC steps and may lag by up to one step's distance.
-Samples with no SoC use the speed estimate and set `mileEst` (the UI adds "?").
+**Last mile (everdrivemile2pnw, owner 2026-11-02).** The owner's rule: the last-mile figure is the average
+of the first figure over the last mile. The producer averages term 1's inputs over the last 1 mile driven
+above 10 mph, distance-weighted (distance from vEgo, only consecutive samples, so a stop or an unwatched
+gap adds nothing): `mileLoadKw` = mean of the load term 1 uses (`grossKw`, else the speed estimate, which
+also stands in for a `grossKw` <= 0 with the generator off, as in term 1) and `mileAcKw` = mean `acKw`.
+`mileEst` is True while any of the mile used the estimate. The UI applies term 1's formula to the means.
+Because `grossKw` is already a 60 s average, the mile mean does not step with the SoC.
+Replaced 2026-11-02: the SoC-step-edge mile energy (`mileKwh`, `mileAcKwh`). It measured the SoC drop per
+mile, a different quantity from term 1, and read 165 m beside a term 1 of 238 m on the road.
 
 **Speed estimate.** `effWhKm x km/h / 1000 + P_ACC_KW`. `effWhKm` is the truck reference efficiency
 (constant 320 Wh/km); `P_ACC_KW` = 1.2 kW is the accessory load (pack minus trip meter, 2026-09-19 drive).
@@ -282,15 +298,20 @@ Mem param `EverDriveStatus`, registered `{CLEAR_ON_MANAGER_START, JSON}`, publis
 | `socPct`, `capKwh`, `capSrc`, `energyKwh` | SoC, usable capacity, its source (derived or measured), remaining energy (None if an input is None) |
 | `grossKw` | load from the SoC window; None until the window clears its floor, and while below 10 mph |
 | `moving`, `vMs` | producer moving flag (10 mph or more), speed in m/s |
-| `mileKwh`, `mileAcKwh`, `mileEst` | last-mile load and AC energy per mile; `mileEst` True if any of the mile used the speed estimate |
+| `mileLoadKw`, `mileAcKw`, `mileEst` | distance-weighted mean of term 1's load and of `acKw` over the last mile (kW); `mileEst` True if any of the mile used the speed estimate. None before the first full mile |
 
-Removed 2026-11-02: `pNowKw`, `kCal`, `kFits`. Added: `acV`, `genState`.
+Removed 2026-11-02: `pNowKw`, `kCal`, `kFits`, `mileKwh`, `mileAcKwh`. Added: `acV`, `genState`,
+`mileLoadKw`, `mileAcKw`.
 
 **Generator state** (from `0x2A7`, measured 2026-11-02 09:47 to 09:52 PT): off = 0 V and 0 A. On = 234 V at
 once with 1.2 to 3.2 A for about 5 s, then the current ramps about 0.9 A/s to about 46 A (10.8 kW) in
-about 50 s. States: `off` below 100 V; `on` at 0.5 kW or more; `idle` when voltage stands without 0.5 kW for
-more than 10 s. Inside the first 10 s the previous state is kept, so a normal start goes off to on and never
-shows idle. Every change is logged once with U, I and kW.
+about 50 s. States (owner 2026-11-02, "when I turn on the generator it does not show immediately"):
+- `on` as soon as the voltage is present (100 V or more), at the first frame, whatever the power.
+- `idle` only when the voltage has been present for more than 60 s without ever reaching 0.5 kW (longer
+  than the measured ramp), or when it reached 0.5 kW and then stayed below it for more than 10 s.
+- `off` at once when the voltage is gone (below 100 V).
+A gap in `0x2A7` (not live) resets the timers, and an out-of-band frame restarts the low-power timer, so
+time without a valid reading never counts toward `idle`. Every change is logged once with U, I and kW.
 
 ### 5.2 Why `acSeen` exists (Rule 2)
 
@@ -342,8 +363,9 @@ use the same shape.
 ## 7. Open items
 
 1. Verify range and generator indicator on the next drive: expected first number with the generator on at
-   about 53 mph is 230 to 300 mi; banner on generator start; amber `GEN 0kw!` after 10 s of voltage without
-   power. Tracked in the workbench `WORK-PENDING.md`.
+   about 53 mph is 230 to 300 mi; yellow kW and `Generator ON` banner within about 1.4 s of generator start;
+   orange-red `GEN 0kw!` only after 60 s of voltage without power, or 10 s after power stops; `1mi:` close
+   to the average of term 1 over the last mile. Tracked in the workbench `WORK-PENDING.md`.
 2. Ship `506b70644d` went out without the Gemini pre-push review and without the Rule 9 channel-tip run
    (owner approved the skipped review for that one push). Post-push review and tip run are tracked in
    `WORK-PENDING.md`.
