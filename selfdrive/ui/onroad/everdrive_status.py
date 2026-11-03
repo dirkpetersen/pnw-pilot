@@ -24,8 +24,8 @@ state, colour or banner without acSeen or from a stale payload. See _GEN_STATES.
 TWO LINES WHILE THE GENERATOR CHARGES (everdrivetwoline2pnw, owner 2026-11-02): moving, genState "on" and
 acKw above _AC_ZERO_KW. Every other case keeps the one-line forms above and below.
     10.8kw 27kw 59kwh              generator kW (yellow), truck load P ("?" when estimated), pack kWh
-    227m 1mi:227m d1m:187m         SoC instant energyKwh / (P - acKw) x mph, SoC mile energyKwh /
-                                   mileNetKwh, dash mile (the one-line "1mi:" of the charging form)
+    227m 1mi:227m d:187m           SoC instant energyKwh / (P - acKw) x mph, SoC mile energyKwh /
+                                   mileNetKwh, dash x P / (P - acKw) from the current load
 Any of the three over 999 or with a net load <= 0 is a plain ">999m", never "?>999m" (owner: "if any of
 them reaches >999 just use that number"). Before the first full mile "1mi:" repeats the instant range.
 STOPPED, PARKED or below 10 mph (2026-09-20 revision, unchanged):
@@ -236,7 +236,7 @@ _CORNER_R = 12.0          # corner radius in PIXELS. raylib's `roundness` is a f
 #     GEN 0kw!,?444m,1mi:?>999m     723.2 px text -> 771.2 box -> left 1318.8 -> +238.8 clear
 #     GEN 0kw!,444m(444.44kwh)      703.0              751.0           1339.0      +259.0
 #     Generator ON 44.4 kW          544.4              592.4           1497.6      +417.6   (banner)
-#     ?>999m 1mi:?>999m d1m:?>999m  828.8              876.8           1213.2      +133.2   (line 2 bound)
+#     ?>999m 1mi:?>999m d:?>999m    761.2              809.2           1280.8      +200.8   (line 2 bound)
 #     44.4kw ?444kw 444kwh          596.3              644.3           1445.7      +365.7   (line 1)
 # Two-line box: 178 px high (one more _LINE_H); stack_height lifts the CES box by it.
 #     Generator: NO POWER           538.4              586.4           1503.6      +423.6   (banner)
@@ -341,13 +341,15 @@ def _soc_range(e: float | None, net: float, est: bool, scale: float) -> str:
   return "--m" if t is None else (t if t == _OVER_RANGE else _q(t, est))
 
 
-def _two_lines(st: dict, ac_kw: float, p: float | None, est: bool, mph: float, mile_est: bool, d1m: str) -> str:
+def _two_lines(st: dict, ac_kw: float, p: float | None, est: bool, mph: float, mile_est: bool, dash: str) -> str:
   """everdrivetwoline2pnw (owner 2026-11-02): moving with the generator "on" AND current flowing (acKw
   above _AC_ZERO_KW: "I only need the two lines if everdrive is actually charging"), two lines.
     line 1: generator kW (yellow), the truck load P (grossKw, else the "?" speed estimate), pack kWh
     line 2: the SoC instant range energyKwh / (P - acKw) x mph, "1mi:" energyKwh / mileNetKwh (the net
-            kWh per mile over the last mile; before it, the instant range), "d1m:" the dash-based mile
-            figure (the d77ffaf76 "1mi:" term, passed in). Any of the three over 999 is a plain ">999m"."""
+            kWh per mile over the last mile; before it, the instant range), "d:" the dash-based figure
+            from the CURRENT load, dash x P / (P - acKw) (term 1 of the one-line charging form, passed in;
+            owner 2026-11-03: the generator load does not change much within a mile, so no mile average).
+            Any of the three over 999 is a plain ">999m"."""
   e = _finite(st.get("energyKwh"))
   load = "--kw" if p is None or not math.isfinite(p) else _q(f"{round(p)}kw", est)
   # Owner 2026-11-02: spaces between the terms in the two-line form only.
@@ -358,8 +360,8 @@ def _two_lines(st: dict, ac_kw: float, p: float | None, est: bool, mph: float, m
     inst = _soc_range(e, p - ac_kw, est, mph)
   net = _finite(st.get("mileNetKwh"))
   mile = inst if net is None else _soc_range(e, net, mile_est, 1.0)
-  d1m = d1m.removeprefix("?") if d1m.endswith(_OVER_RANGE) else d1m
-  return f"{line1}\n{inst} 1mi:{mile} d1m:{d1m}"
+  dash = dash.removeprefix("?") if dash.endswith(_OVER_RANGE) else dash
+  return f"{line1}\n{inst} 1mi:{mile} d:{dash}"
 
 
 class EverDriveStatusRenderer(Widget):
@@ -623,7 +625,7 @@ class EverDriveStatusRenderer(Widget):
         # None: a full mile that cannot be computed, so R1 stands in, and it is not the mile's own figure.
         r2 = _q(t, mile_est) if t is not None else _q(r1.removeprefix("?"), True)
       if two_line:
-        return _two_lines(st, ac_kw, p, est, mph, mile_est, r2)
+        return _two_lines(st, ac_kw, p, est, mph, mile_est, r1)
       return f"{ac_kw:.1f}kw,{r1},1mi:{r2}"
     # Generator OFF. A bare range is ALWAYS a measured one: grossKw and a result in 1.._RANGE_MAX_MI.
     # Anything else (no reading, regen, coasting, over the ceiling, no energy) is the speed estimate,

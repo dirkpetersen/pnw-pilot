@@ -50,7 +50,7 @@ idle, stopped and parked keep the one-line forms.
 
 ```
 10.8kw 27kw 59kwh            generator kW (yellow), truck load P, pack energy (white)
-227m 1mi:227m d1m:187m       instant (SoC), last mile (SoC), last mile (dash)
+227m 1mi:227m d:187m         instant (SoC), last mile (SoC), dash x current load
 ```
 
 - Load P: `grossKw`, else the speed estimate with "?". Rounded to whole kW; the kWh to whole kWh, and
@@ -59,12 +59,14 @@ idle, stopped and parked keep the one-line forms.
 - `1mi:`: `energyKwh / mileNetKwh`. `mileNetKwh` is the net energy per mile over the last mile driven, the
   time integral of (term-1 load - acKw), so at a steady speed and load it equals the instant range. "?"
   when any of the mile used the estimate. Before the first full mile it repeats the instant range.
-- `d1m:`: the dash-based mile, the same figure as `1mi:` in the one-line charging form
-  (dash x mileLoadKw / (mileLoadKw - mileAcKw); before the first mile dash x P / (P - acKw)).
+- `d:`: dash range x P / (P - acKw) from the CURRENT load P (owner 2026-11-03: the generator load does not
+  change much within a mile, so no mile average). It is the first number of the one-line charging form,
+  with its "?" when P is the estimate. Replaced `d1m:` (the mile-averaged dash figure). `mileLoadKw` and
+  `mileAcKw` stay: the one-line `1mi:` forms read them.
 - Any of the three over 999, or with a net load of 0 or less: a plain `>999m`, never `?>999m` (owner:
   "if any of them reaches >999 just use that number"). Below 999 the "?" rules are as for term 1.
 - The terms are separated by spaces in this form only (owner 2026-11-02); the one-line forms keep commas.
-- Width at font 52: worst line 2 `?>999m 1mi:?>999m d1m:?>999m` 877 px box (133 px clear of the screen
+- Width at font 52: worst line 2 `?>999m 1mi:?>999m d:?>999m` 809 px box (201 px clear of the screen
   centre), line 1 644 px. Box height 178 px (113 px for one line); the CES box lifts by it, and by one
   more box during a banner.
 

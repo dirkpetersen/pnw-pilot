@@ -1204,7 +1204,7 @@ class TestGeneratorState:
 
 class TestTwoLinesWhileCharging:
   """everdrivetwoline2pnw (owner 2026-11-02): moving, genState "on" and current flowing -> two lines,
-  terms separated by SPACES: "<acKw>kw <P>kw <kWh>kwh" / "<instant> 1mi:<SoC mile> d1m:<dash mile>".
+  terms separated by SPACES: "<acKw>kw <P>kw <kWh>kwh" / "<instant> 1mi:<SoC mile> d:<dash x current P>".
   Everything else is unchanged, with commas."""
 
   MOV = TestTheMovingForm.MOV
@@ -1218,8 +1218,8 @@ class TestTwoLinesWhileCharging:
     l1, l2 = self._lines(widget, now)
     assert l1 == "10.8kw 27kw 59kwh", l1
     inst = round(59.35 / (27.0 - 10.8) * 62.0)              # 227
-    d1 = round(180.2 / 1.60934 * 27.0 / (27.0 - 10.8))       # before the first mile: dash x P / (P - A)
-    assert l2 == f"{inst}m 1mi:{inst}m d1m:{d1}m", l2
+    d = round(180.2 / 1.60934 * 27.0 / (27.0 - 10.8))        # dash x P / (P - A), current P
+    assert l2 == f"{inst}m 1mi:{inst}m d:{d}m", l2
 
   def test_colours_yellow_kw_then_white(self, widget, now):
     poll(widget, st(now, **self.ON))
@@ -1235,13 +1235,23 @@ class TestTwoLinesWhileCharging:
     inst, mile, _d = l2.split(" ")
     assert mile == f"1mi:{inst}", l2
 
-  def test_d1m_equals_the_shipped_1mi_for_the_same_input(self, widget, now):
-    """The third number is exactly the single-line generator-on "1mi:" figure (d77ffaf76)."""
-    mile = {"mileLoadKw": 25.0, "mileAcKw": 10.8, "mileNetKwh": 0.2}
-    old = widget._build_text(st(now, **{**self.ON, "genState": None}, **mile))   # the single-line form
-    assert old.count(",") == 2 and "\n" not in old
-    _l1, l2 = self._lines(widget, now, **mile)
-    assert l2.split(" d1m:")[1] == old.split(",1mi:")[1], (old, l2)
+  def test_d_is_dash_times_the_current_load_not_the_mile_average(self, widget, now):
+    """Owner 2026-11-03: "d:" = dash x P / (P - acKw) with the CURRENT P; the mile means play no part.
+    It is the first number of the one-line charging form for the same input."""
+    dash = 180.2 / 1.60934
+    want = f"d:{round(dash * 27.0 / (27.0 - 10.8))}m"
+    for mile in ({}, {"mileLoadKw": 15.0, "mileAcKw": 10.8, "mileNetKwh": 0.2}):
+      _l1, l2 = self._lines(widget, now, **mile)
+      assert l2.split(" ")[2] == want, (mile, l2)
+    old = widget._build_text(st(now, **{**self.ON, "genState": None}))    # the one-line charging form
+    assert want == "d:" + old.split(",")[1], (old, want)
+    _l1, l2 = self._lines(widget, now, grossKw=30.0)
+    assert l2.split(" ")[2] == f"d:{round(dash * 30.0 / (30.0 - 10.8))}m", "it follows the current P"
+
+  def test_d_with_the_estimate_carries_the_mark(self, widget, now):
+    p_est = 320.0 / 1000.0 * (62.0 / 2.23694 * 3.6) + 1.2
+    _l1, l2 = self._lines(widget, now, grossKw=None)
+    assert l2.split(" ")[2] == f"d:?{round(180.2 / 1.60934 * p_est / (p_est - 10.8))}m", l2
 
   def test_the_soc_mile_is_energy_over_net_per_mile(self, widget, now):
     _l1, l2 = self._lines(widget, now, mileNetKwh=0.25, mileLoadKw=27.0, mileAcKw=10.8)
@@ -1253,7 +1263,7 @@ class TestTwoLinesWhileCharging:
     assert l1 == f"10.8kw ?{round(p_est)}kw 59kwh", l1
     inst, mile, d1 = l2.split(" ")
     assert inst == f"?{round(59.35 / (p_est - 10.8) * 62.0)}m" and mile == f"1mi:?{round(59.35 / 0.2)}m", l2
-    assert d1.startswith("d1m:?"), l2
+    assert d1.startswith("d:?"), l2
 
   def test_before_the_first_mile_1mi_repeats_the_instant_with_its_mark(self, widget, now):
     _l1, l2 = self._lines(widget, now, grossKw=None, mileEst=None)
@@ -1265,13 +1275,13 @@ class TestTwoLinesWhileCharging:
     """Owner: "if any of them reaches >999 just use that number": no "?" on ">999m", measured or not."""
     _l1, l2 = self._lines(widget, now, acKw=40.0, grossKw=gross if gross is None else 30.0,
                           mileNetKwh=-0.1, mileLoadKw=30.0, mileAcKw=40.0, mileEst=True)
-    assert l2 == ">999m 1mi:>999m d1m:>999m", l2
+    assert l2 == ">999m 1mi:>999m d:>999m", l2
     _l1, l2 = self._lines(widget, now, grossKw=10.81, mileNetKwh=1e-5, mileLoadKw=10.81, mileAcKw=10.8, mileEst=True)
-    assert l2 == ">999m 1mi:>999m d1m:>999m", l2              # over 999 by size, not by sign
+    assert l2 == ">999m 1mi:>999m d:>999m", l2              # over 999 by size, not by sign
 
   def test_no_energy_drops_the_kwh_and_the_soc_ranges_show_dashes(self, widget, now):
     l1, l2 = self._lines(widget, now, energyKwh=None, mileNetKwh=0.2)
-    assert l1 == "10.8kw 27kw" and l2.startswith("--m 1mi:--m d1m:"), (l1, l2)
+    assert l1 == "10.8kw 27kw" and l2.startswith("--m 1mi:--m d:"), (l1, l2)
 
   @pytest.mark.parametrize("field", ["grossKw", "energyKwh", "mileNetKwh", "acKw", "vMs"])
   def test_non_finite_inputs_never_crash_or_print_inf(self, widget, now, field):
