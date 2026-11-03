@@ -49,8 +49,8 @@ moving, `genState` is `on` and `acKw` is above 0.05 kW (current flowing). Voltag
 idle, stopped and parked keep the one-line forms.
 
 ```
-10.8kw,27kw,59kwh            generator kW (yellow), truck load P, pack energy (white)
-227m,1mi:227m,d1m:187m       instant (SoC), last mile (SoC), last mile (dash)
+10.8kw 27kw 59kwh            generator kW (yellow), truck load P, pack energy (white)
+227m 1mi:227m d1m:187m       instant (SoC), last mile (SoC), last mile (dash)
 ```
 
 - Load P: `grossKw`, else the speed estimate with "?". Rounded to whole kW; the kWh to whole kWh, and
@@ -63,8 +63,9 @@ idle, stopped and parked keep the one-line forms.
   (dash x mileLoadKw / (mileLoadKw - mileAcKw); before the first mile dash x P / (P - acKw)).
 - Any of the three over 999, or with a net load of 0 or less: a plain `>999m`, never `?>999m` (owner:
   "if any of them reaches >999 just use that number"). Below 999 the "?" rules are as for term 1.
-- Width at font 52: worst line 2 `?>999m,1mi:?>999m,d1m:?>999m` 879 px box (131 px clear of the screen
-  centre), line 1 647 px. Box height 178 px (113 px for one line); the CES box lifts by it, and by one
+- The terms are separated by spaces in this form only (owner 2026-11-02); the one-line forms keep commas.
+- Width at font 52: worst line 2 `?>999m 1mi:?>999m d1m:?>999m` 877 px box (133 px clear of the screen
+  centre), line 1 644 px. Box height 178 px (113 px for one line); the CES box lifts by it, and by one
   more box during a banner.
 
 **Stopped, parked or below 10 mph.**
