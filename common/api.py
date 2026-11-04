@@ -48,7 +48,9 @@ class Api:
     return token
 
 
-def api_get(endpoint, method='GET', timeout=None, access_token=None, session=None, **params):
+def api_get(endpoint, method='GET', timeout=None, access_token=None, session=None, host=None, **params):
+  # host: per-call API host override (default API_HOST). Used by registration to send v2/pilotauth to comma
+  # while the PNW gateway, which does not implement it, stays the host for everything else.
   headers = {}
   if access_token is not None:
     headers['Authorization'] = "JWT " + access_token
@@ -57,7 +59,7 @@ def api_get(endpoint, method='GET', timeout=None, access_token=None, session=Non
 
   # TODO: add session to Api
   req = requests if session is None else session
-  return req.request(method, API_HOST + "/" + endpoint, timeout=timeout, headers=headers, params=params)
+  return req.request(method, (host or API_HOST) + "/" + endpoint, timeout=timeout, headers=headers, params=params)
 
 
 def get_key_pair() -> tuple[str, str, str] | tuple[None, None, None]:
