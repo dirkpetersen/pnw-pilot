@@ -12,6 +12,7 @@ module), with only its six leaf dependencies replaced -- and sys.modules is rest
 afterwards so nothing leaks into the rest of the suite. What is NOT covered by this choice is stated
 plainly: the raylib draw calls in `_render`, and the real font metrics behind `measure_text_cached`.
 """
+import collections
 import contextlib
 import math
 import importlib.util
@@ -100,7 +101,8 @@ try:
   import pyray as _rl                                        # noqa: F401  (real when available)
   _PYRAY = {}
 except Exception:                                            # pragma: no cover - CI without raylib
-  _PYRAY = {"pyray": _mod("pyray", Color=lambda *a: a, Rectangle=lambda *a: a, Vector2=lambda *a: a)}
+  _PYRAY = {"pyray": _mod("pyray", Color=collections.namedtuple("Color", "r g b a"),   # r/g/b/a like the real cffi struct
+                          Rectangle=lambda *a: a, Vector2=lambda *a: a)}
 
 
 _STUBS = {
@@ -1167,7 +1169,8 @@ class TestGeneratorState:
 
   def test_idle_and_on_colours_are_clearly_apart(self):
     """Owner 2026-11-02: yellow for on, a clearly different orange-red for idle."""
-    assert ed._C.YELLOW[:3] == (255, 220, 0) and ed._C.ORANGE_RED[:3] == (255, 110, 40)   # stub Color = tuple
+    y, o = ed._C.YELLOW, ed._C.ORANGE_RED   # the real raylib Color is a cffi struct: read its fields, do not slice it
+    assert (y.r, y.g, y.b) == (255, 220, 0) and (o.r, o.g, o.b) == (255, 110, 40)
 
   def test_inert_without_an_everdrive(self, widget, now):
     """Tesla / no module: no key, so no banner, no head, no measurement -- and the module appearing
