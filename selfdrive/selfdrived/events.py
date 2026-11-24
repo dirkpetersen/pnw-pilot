@@ -409,7 +409,7 @@ def tesla_fsd_selected_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.
   # fsdguard2pnw: a missing status blocks too (Rule 2), but says so instead of claiming FSD is selected.
   # Owner wording shortened by two words: "...to use the comma" is 2204 px, wider than the 1860 px a mid alert line has.
   if CS.teslaAutopilot == car.CarState.TeslaAutopilot.missing:
-    return NoEntryAlert("Autopilot status missing", "FSD/Autosteer selected")
+    return NoEntryAlert("Comma cannot check the FSD setting", "Tesla Autopilot status missing")
   return NoEntryAlert("Unplug comma to use FSD, or select TACC only for comma", "FSD/Autosteer selected")
 
 

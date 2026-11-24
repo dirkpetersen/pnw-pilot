@@ -56,7 +56,8 @@ def test_owner_wording_and_missing_says_missing():
   ev = events_for(TA.selected)
   assert alert_texts(ev, [ET.NO_ENTRY], TA.selected) == [
     ("FSD/Autosteer selected", "Unplug comma to use FSD, or select TACC only for comma")]
-  assert alert_texts(events_for(TA.missing), [ET.NO_ENTRY], TA.missing) == [("FSD/Autosteer selected", "Autopilot status missing")]
+  assert alert_texts(events_for(TA.missing), [ET.NO_ENTRY], TA.missing) == [
+    ("Tesla Autopilot status missing", "Comma cannot check the FSD setting")]
 
 
 def test_engaged_then_stock_starts_warns_and_keeps_steering():
