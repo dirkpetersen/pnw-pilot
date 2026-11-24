@@ -182,6 +182,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // controlsd at ~1 Hz, and an unreadable value means NO nudge (logged); only on a car with
     // PnwVehicle.coop_steer -- never read on the Lightning.
     {"DisableCoopSteer", {PERSISTENT, BOOL, "0"}},
+    // fsdguard2pnw: Tesla Raven. Default "0" = the guard: openpilot engages only with stock Autosteer/FSD off (TACC only).
+    // "1" = the comma engages whatever the car has selected (the behaviour before fsdguard2pnw). selfdrived re-reads it at 10 Hz.
+    {"TeslaCommaOverridesFsd", {PERSISTENT, BOOL, "0"}},
     // angleenable: Ford angle-primary lateral (BluePilot bp-7.0 LateralAngleExt), F-150 Lightning only
     // (opendbc pnw_vehicle.angle_lat gates on four_signal_lat). toggles-invert2pnw: this key is now a
     // LIVE MIRROR, not the driver-facing toggle -- NoFordAngleSteering below is what the UI shows/writes.

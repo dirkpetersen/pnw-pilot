@@ -124,6 +124,8 @@ struct OnroadEventPnw @0x84ddbb3c1051f1d9 {
     sharpTurnHands @6;               # handsready2pnw: "Keep hands ready: sharp turn" (display only)
     wheelWeightLeft @7;              # wheelweight2pnw: "Wheel weight detected: left" (display only)
     wheelWeightRight @8;             # wheelweight2pnw: "Wheel weight detected: right" (display only)
+    teslaFsdSelected @9;             # fsdguard2pnw: NO_ENTRY, stock Autosteer/FSD selected or its status missing
+    teslaStockSteering @10;          # fsdguard2pnw: WARNING, the stock system started while the comma is engaged
   }
 }
 

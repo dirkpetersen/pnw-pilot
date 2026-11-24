@@ -59,6 +59,17 @@ STEER_SAT_MODE_STALE_S = 5.0
 WHEEL_WEIGHT_SHOW_S = 6.0   # wheelweight2pnw: how long the one-time "Wheel weight detected" message shows
 
 
+def fsd_guard_events(state, comma_overrides_fsd: bool) -> list[int]:
+  """fsdguard2pnw: carState.teslaAutopilot -> pnw events. Not TACC-only = no entry. Stock steering = also a warning while
+  engaged (no disengage: the panda blocks the stock steering, so dropping openpilot would leave nobody steering). Not latched.
+  TeslaCommaOverridesFsd ON = no events, the behaviour before this feature."""
+  if comma_overrides_fsd or state in (TeslaAutopilot.unavailable, TeslaAutopilot.taccOnly):
+    return []
+  if state == TeslaAutopilot.stockSteering:
+    return [EventNamePnw.teslaFsdSelected, EventNamePnw.teslaStockSteering]
+  return [EventNamePnw.teslaFsdSelected]
+
+
 def steer_sat_verdict(desired_lat: float, actual_lat: float, saturated: bool, floor: float,
                       ang_err_deg: float = 0.0, sup_s: float = 0.0) -> str | None:
   """steersatfloor2pnw: the steerSaturated demand test, unchanged except the 1.0 m/s2 floor is now a parameter.
@@ -104,6 +115,7 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 EventName = log.OnroadEvent.EventName
 ButtonType = car.CarState.ButtonEvent.Type
+TeslaAutopilot = car.CarState.TeslaAutopilot  # fsdguard2pnw
 SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
@@ -226,6 +238,7 @@ class SelfdriveD:
     self.sharp_turn = None
     self.sharp_turn_err_n = 0
     self.disable_sharp_turn = self.params.get_bool("DisableSharpTurnHandsAlert")
+    self.comma_overrides_fsd = self.params.get_bool("TeslaCommaOverridesFsd")  # fsdguard2pnw
     # wheelweight2pnw: None = this car does not have the capability, so the detector never runs.
     self.wheel_weight = None
     self.wheel_weight_shown: set[str] = set()   # sides already shown to the driver this drive
@@ -430,6 +443,10 @@ class SelfdriveD:
 
     if not self.CP.notCar:
       self.events.add_from_msg(self.sm['driverMonitoringState'].events)
+
+    # fsdguard2pnw: outside the canValid gate on purpose -- a missing status must block and say so even then.
+    for e in fsd_guard_events(CS.teslaAutopilot, self.comma_overrides_fsd):
+      self.events.add(e)
 
     # Add car events, ignore if CAN isn't valid
     if CS.canValid:
@@ -1274,6 +1291,7 @@ class SelfdriveD:
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.disable_sharp_turn = self.params.get_bool("DisableSharpTurnHandsAlert")  # handsready2pnw
+      self.comma_overrides_fsd = self.params.get_bool("TeslaCommaOverridesFsd")  # fsdguard2pnw
       self.manual_experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl  # ces2xnor
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)

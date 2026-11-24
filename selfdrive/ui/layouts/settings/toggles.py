@@ -200,6 +200,12 @@ DESCRIPTIONS = {
     "away over several seconds if you keep pushing, and goes back to openpilot's line when you let go. " +
     "Turn this ON to disable it. Tesla Model S HW3 only -- no effect on the F-150 Lightning."
   ),
+  # fsdguard2pnw: OFF (default) = the guard is on.
+  "TeslaCommaOverridesFsd": tr_noop(
+    "By default the comma engages only with stock Autosteer and FSD switched off (TACC only), and shows " +
+    "\"FSD/Autosteer selected\" otherwise: the comma and FSD cannot both drive. When on, the comma engages even with " +
+    "FSD or Autosteer selected (FSD cannot drive while the comma is connected). Tesla Model S HW3 only."
+  ),
   # angleenable / toggles-invert2pnw: EXPERIMENTAL angle-primary lateral is ON by default on the
   # F-150 Lightning; this is the opt-OUT toggle.
   # Intentional two-param bridge: NoFordAngleSteering (here) is the only param the driver sees/writes.
@@ -262,6 +268,7 @@ DESCRIPTIONS = {
 # sends a convenience frame. See docs/pnw/TOGGLE-CONVENTIONS.md.
 CAR_GATED = {
   "DisableCoopSteer": (lambda v: v.coop_steer, tr_noop("Tesla Model S HW3 only")),
+  "TeslaCommaOverridesFsd": (lambda v: v.fsd_guard, tr_noop("Tesla Model S HW3 only")),
   "NoFordAngleSteering": (lambda v: v.stock_acc_buttons, tr_noop("Ford F-150 Lightning only")),
   "DisableFordSignSpeedLimit": (lambda v: v.camera_speed_limit, tr_noop("Ford F-150 Lightning only")),
   "DisableEverDrive": (lambda v: v.everdrive, tr_noop("Ford F-150 Lightning only")),
@@ -372,6 +379,13 @@ class TogglesLayout(Widget):
       "DisableCoopSteer": (
         lambda: tr("Disable Cooperative Steering (Tesla)"),
         DESCRIPTIONS["DisableCoopSteer"],
+        "chffr_wheel.png",
+        False,
+      ),
+      # fsdguard2pnw: no restart (selfdrived re-reads it at 10 Hz); greyed (CAR_GATED) without PnwVehicle.fsd_guard.
+      "TeslaCommaOverridesFsd": (
+        lambda: tr("Tesla: Comma overrides FSD"),
+        DESCRIPTIONS["TeslaCommaOverridesFsd"],
         "chffr_wheel.png",
         False,
       ),
@@ -768,7 +782,8 @@ class TogglesLayout(Widget):
     car_ok = {}
     for param in CAR_GATED:
       car_ok[param], self._grey_reason[param] = car_gate(veh, param)
-    for param in ("DisableCoopSteer", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableMapdCarGps", "DisableSharpTurnHandsAlert"):
+    for param in ("DisableCoopSteer", "TeslaCommaOverridesFsd", "DisableFordSignSpeedLimit", "DisableEverDrive", "DisableMapdCarGps",
+                  "DisableSharpTurnHandsAlert"):
       if param in self._toggles:
         self._toggles[param].action_item.set_enabled(car_ok[param])
 

@@ -405,6 +405,14 @@ def wrong_car_mode_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubM
   return NoEntryAlert(text)
 
 
+def tesla_fsd_selected_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  # fsdguard2pnw: a missing status blocks too (Rule 2), but says so instead of claiming FSD is selected.
+  # Owner wording shortened by two words: "...to use the comma" is 2204 px, wider than the 1860 px a mid alert line has.
+  if CS.teslaAutopilot == car.CarState.TeslaAutopilot.missing:
+    return NoEntryAlert("Autopilot status missing", "FSD/Autosteer selected")
+  return NoEntryAlert("Unplug comma to use FSD, or select TACC only for comma", "FSD/Autosteer selected")
+
+
 def joystick_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   gb = sm['carControl'].actuators.accel / 4.
   steer = sm['carControl'].actuators.torque
@@ -634,6 +642,21 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2),
+  },
+
+  # fsdguard2pnw: the Raven may engage only with stock Autosteer/FSD off (TACC only). "Comma or FSD, not both" (owner 2026-11-23).
+  EventNamePnw.teslaFsdSelected: {
+    ET.NO_ENTRY: tesla_fsd_selected_alert,
+  },
+
+  # fsdguard2pnw: the stock system started while the comma is engaged. The panda blocks the stock steering frames, so
+  # openpilot KEEPS steering (dropping it would leave nobody steering). ET.WARNING only: no disengage, tells the driver who drives.
+  EventNamePnw.teslaStockSteering: {
+    ET.WARNING: Alert(
+      "The comma is steering, not FSD",
+      "Stock Autopilot started; its steering is blocked",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.prompt, .2),
   },
 
   EventName.ldw: {

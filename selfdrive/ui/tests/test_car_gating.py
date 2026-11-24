@@ -24,6 +24,7 @@ CARS = {"lightning": cp(LIGHTNING, "ford"), "tesla": cp(TESLA, "tesla"), "none":
 # param -> the cars on which it is OPERABLE when the car is known
 OPERABLE_ON = {
   "DisableCoopSteer": {"tesla"},
+  "TeslaCommaOverridesFsd": {"tesla"},
   "NoFordAngleSteering": {"lightning"},
   "DisableFordSignSpeedLimit": {"lightning"},
   "DisableEverDrive": {"lightning"},
@@ -104,12 +105,14 @@ def run_update(monkeypatch, car, stored=None):
 
 @pytest.mark.parametrize("car", ["tesla", "lightning"])
 def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
-  stored = {"DisableCoopSteer": True, "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableMapdCarGps": True, "DisableFordConvenience": True,
+  stored = {"DisableCoopSteer": True, "TeslaCommaOverridesFsd": True,
+            "DisableEverDrive": True, "DisableFordSignSpeedLimit": True, "DisableMapdCarGps": True, "DisableFordConvenience": True,
             "DisableSharpTurnHandsAlert": True, "FordAngleLateral": False}
   me, params = run_update(monkeypatch, car, dict(stored))
   for param, cars in OPERABLE_ON.items():
     assert param in me._toggles, "greyed means present, never removed"
-    if param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableSharpTurnHandsAlert"):
+    if param in ("DisableCoopSteer", "TeslaCommaOverridesFsd", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps",
+                 "DisableSharpTurnHandsAlert"):
       assert me._toggles[param].enabled == (car in cars), param
     assert (me._grey_reason[param] is None) == (car in cars), param
     if car not in cars:
@@ -117,16 +120,16 @@ def test_update_toggles_greys_never_hides_and_never_writes(monkeypatch, car):
   assert SETTABLE_EVERYWHERE in me._toggles and SETTABLE_EVERYWHERE not in me._grey_reason, "never greyed, on either car"
   assert me._toggles[SETTABLE_EVERYWHERE].enabled is True
   assert params.writes == [], "greying is display only: the stored params are never written"
-  for k in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps", "DisableFordConvenience",
-            "DisableSharpTurnHandsAlert"):
+  for k in ("DisableCoopSteer", "TeslaCommaOverridesFsd", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableMapdCarGps",
+            "DisableFordConvenience", "DisableSharpTurnHandsAlert"):
     assert params.vals[k] is True
 
 
 @pytest.mark.parametrize("car", ["none", "mock", "empty"])
 def test_unknown_car_leaves_everything_enabled_and_unforced(monkeypatch, car):
   me, params = run_update(monkeypatch, car)
-  for param in ("DisableCoopSteer", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience", "NoFordAngleSteering",
-                "NudgeForLaneChange"):
+  for param in ("DisableCoopSteer", "TeslaCommaOverridesFsd", "DisableEverDrive", "DisableFordSignSpeedLimit", "DisableFordConvenience",
+                "NoFordAngleSteering", "NudgeForLaneChange"):
     assert me._toggles[param].enabled is True, param
   assert me._toggles["NoFordAngleSteering"].state is False, "an unknown car must not paint 'no angle steering' ON"
   assert me._toggles["NudgeForLaneChange"].state is False
@@ -180,3 +183,18 @@ def test_sharp_turn_hands_row_exists_defaults_off_and_is_registered():
   assert T.CAR_GATED["DisableSharpTurnHandsAlert"][1] == "Ford F-150 Lightning only"
   hdr = (Path(__file__).resolve().parents[3] / "common" / "params_keys.h").read_text()
   assert re.search(r'\{"DisableSharpTurnHandsAlert", \{PERSISTENT, BOOL, "0"\}\}', hdr)
+
+
+def test_fsd_guard_row_exists_defaults_off_and_is_registered():
+  """fsdguard2pnw: owner title, greyed off the Tesla with a reason, default "0" in params_keys.h, no restart."""
+  import inspect
+  import re
+  from pathlib import Path
+  assert "FSD cannot drive while the comma is connected" in T.DESCRIPTIONS["TeslaCommaOverridesFsd"]
+  assert T.CAR_GATED["TeslaCommaOverridesFsd"][1] == "Tesla Model S HW3 only"
+  hdr = (Path(__file__).resolve().parents[3] / "common" / "params_keys.h").read_text()
+  assert re.search(r'\{"TeslaCommaOverridesFsd", \{PERSISTENT, BOOL, "0"\}\}', hdr)
+  init = inspect.getsource(T.TogglesLayout.__init__)
+  i = init.index('"TeslaCommaOverridesFsd": (')
+  block = init[i:init.index("\n      ),", i)]
+  assert "Tesla: Comma overrides FSD" in block and block.rstrip().rstrip(",").endswith("False")  # no restart

@@ -954,6 +954,9 @@ class PnwVehicle:
     # gate the shadow would run there too and pollute the Lightning's cp* telemetry (actuation-inert
     # either way -- the Ford carcontroller consumes actuators.curvature, never steeringAngleDeg).
     self.coop_steer: bool = fp == "TESLA_MODEL_S_HW3"
+    # fsdguard2pnw: carstate decodes carState.teslaAutopilot here (opendbc PnwVehicle.fsd_guard); greys the
+    # TeslaCommaOverridesFsd toggle elsewhere. Same car as the opendbc capability.
+    self.fsd_guard: bool = fp == "TESLA_MODEL_S_HW3"
 
     # steersatfloor2pnw (owner 2026-10-14): in ANGLE lateral mode the Lightning delivers only ~0.87-0.93 of the commanded
     # curvature at 25-45 mph, so the stock "Take Control" test (desired lat accel > 1.0) fires on ordinary canyon curves
