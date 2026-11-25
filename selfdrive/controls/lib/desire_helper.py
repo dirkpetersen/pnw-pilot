@@ -213,7 +213,10 @@ class DesireHelper:
         # (torque_applied below) still starts the change; BSM still blocks both.
         edge_detected = ((left_edge and self.lane_change_direction == LaneChangeDirection.left) or
                          (right_edge and self.lane_change_direction == LaneChangeDirection.right))
-        if edge_detected and self.nudgeless_lane_change and not self.edge_block_logged:
+        # log only when the edge is what holds the change: the auto path is live (nudgeless, highway, no blind spot) and
+        # no nudge is starting it anyway
+        if (edge_detected and self.nudgeless_lane_change and on_highway and not blindspot_detected and not torque_applied
+            and not self.edge_block_logged):
           self.edge_block_logged = True
           cloudlog.event("lane_change_edge_block", error=False, v_ego=round(v_ego, 2), on_highway=on_highway,
                          direction="left" if self.lane_change_direction == LaneChangeDirection.left else "right")
@@ -264,6 +267,10 @@ class DesireHelper:
           self.lane_change_direction = LaneChangeDirection.none
           if one_blinker:
             self.lane_change_state = LaneChangeState.preLaneChange
+            # roadedge2pnw: a held blinker starts a NEW episode -- the next auto change needs its own full hold, and a
+            # road edge at the next lane is logged again
+            self.auto_lane_change_timer = 0.0
+            self.edge_block_logged = False
           else:
             self.lane_change_state = LaneChangeState.off
 

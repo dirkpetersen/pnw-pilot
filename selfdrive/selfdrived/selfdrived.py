@@ -30,6 +30,7 @@ from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuie
 from openpilot.selfdrive.selfdrived.sharp_turn_pnw import SharpTurnHands, ego_lane_prob, plan_curvature  # handsready2pnw
 from openpilot.selfdrive.selfdrived.wheel_weight_pnw import LEFT, RIGHT, WheelWeight  # wheelweight2pnw
 from openpilot.selfdrive.controls.lib.road_edge_pnw import RoadEdgeLaneChange  # roadedge2pnw
+from openpilot.selfdrive.controls.lib.desire_helper import HIGHWAY_MIN_SPEED  # roadedge2pnw
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -248,6 +249,8 @@ class SelfdriveD:
     # roadedge2pnw: the alert side of road_edge_pnw.py. None = no nudgeless lane change on this car, so nothing to explain.
     self.road_edge = None
     self.road_edge_err_n = 0
+    self.road_edge_frame = 0
+    self.nudge_required = self.params.get_bool("NudgeForLaneChange")  # roadedge2pnw: re-read at 1 Hz, as DesireHelper does
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -1115,6 +1118,15 @@ class SelfdriveD:
         if self.road_edge_err_n == 1 or self.road_edge_err_n % 200 == 0:
           cloudlog.exception(f"roadedge2pnw: modelV2 unreadable ({self.road_edge_err_n} frames) -- road-edge alert NOT deciding")
         self.road_edge.reset()
+    # Show the alert only where DesireHelper's auto change would really have run, so it never claims a block that did not
+    # happen: nudgeless on (NudgeForLaneChange off) and highway speed.
+    # shortcut: speed alone is a subset of DesireHelper's on_highway (a fresh freeway map class also allows it below
+    # 45 mph); there the driver gets the plain "Steer to Start Lane Change" prompt. Upgrade by sharing that gate.
+    self.road_edge_frame += 1
+    if self.road_edge_frame % 100 == 0:
+      self.nudge_required = self.params.get_bool("NudgeForLaneChange")
+    if self.nudge_required or CS.vEgo < HIGHWAY_MIN_SPEED:
+      return False, False
     return self.road_edge.left, self.road_edge.right
 
   def _sharp_turn_step(self, CS, lat_active: bool, k_meas: float) -> None:

@@ -9,7 +9,7 @@ from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import AUTO_LANE_CHANGE_DELAY, LaneChangeState
 from openpilot.selfdrive.controls.lib.road_edge_pnw import EDGE_CLEAR_TIME, EDGE_REACTION_TIME, RoadEdgeLaneChange
-from openpilot.selfdrive.controls.lib.tests.test_desire_helper import V50, _CS, _dh
+from openpilot.selfdrive.controls.lib.tests.test_desire_helper import V35, V50, _CS, _dh
 
 V15 = 15 * CV.MPH_TO_MS
 
@@ -132,3 +132,60 @@ def test_selfdrived_detector_on_both_cars_and_fails_loudly(monkeypatch):
     sd.sm.data['modelV2'] = SimpleNamespace(roadEdgeStds=[], laneLineProbs=[], roadEdges=[])  # malformed
     assert sd._road_edge_step(SimpleNamespace(vEgo=V50)) == (False, False)
     assert len(logged) == 1 and "NOT deciding" in logged[0]
+
+
+def _edge_logs(monkeypatch):
+  import openpilot.selfdrive.controls.lib.desire_helper as dh_mod
+  logs = []
+  monkeypatch.setattr(dh_mod.cloudlog, "event", lambda name, **kw: logs.append(name) if name == "lane_change_edge_block" else None)
+  return logs
+
+
+def test_edge_log_only_when_the_edge_is_what_blocks(monkeypatch):
+  logs = _edge_logs(monkeypatch)
+  d = _dh(monkeypatch, highway_class="residential")       # off highway: the highway gate blocks, not the edge
+  _run_edge(d, _CS(V35, left_blinker=True), 1.0, left_edge=True)
+  d = _dh(monkeypatch, highway_class="motorway")           # blind spot blocks
+  _run_edge(d, _CS(V50, left_blinker=True, left_blindspot=True), 1.0, left_edge=True)
+  d = _dh(monkeypatch, highway_class="motorway", nudge_required=True)  # no auto change at all
+  _run_edge(d, _CS(V50, left_blinker=True), 1.0, left_edge=True)
+  assert logs == []
+  d = _dh(monkeypatch, highway_class="motorway")
+  _run_edge(d, _CS(V50, left_blinker=True), 1.0, left_edge=True)
+  assert logs == ["lane_change_edge_block"]
+
+
+def _finish(d, cs):
+  """Drive a started lane change to its end with the blinker still held (the model reports the change done)."""
+  for _ in range(_steps(3.0)):
+    d.update(cs, True, 0.0)
+    if d.lane_change_state == LaneChangeState.preLaneChange:
+      return
+  raise AssertionError(f"lane change did not finish: {d.lane_change_state}")
+
+
+def test_held_blinker_second_change_is_a_new_episode(monkeypatch):
+  logs = _edge_logs(monkeypatch)
+  d = _dh(monkeypatch, highway_class="motorway")
+  cs = _CS(V50, left_blinker=True)
+  _run_edge(d, cs, 0.4, left_edge=True)                    # edge seen and logged early in the first episode
+  assert logs == ["lane_change_edge_block"]
+  assert _run_edge(d, cs, AUTO_LANE_CHANGE_DELAY + 0.3) == LaneChangeState.laneChangeStarting
+  _finish(d, cs)
+  assert d.auto_lane_change_timer == 0.0 and not d.edge_block_logged
+  assert _run_edge(d, cs, 1.0, left_edge=True) == LaneChangeState.preLaneChange  # the next lane ends at an edge
+  assert logs == ["lane_change_edge_block"] * 2
+
+
+def test_selfdrived_alert_only_when_the_auto_change_would_run(monkeypatch):
+  from openpilot.common.prefix import OpenpilotPrefix
+  with OpenpilotPrefix():
+    sd = _sd("ford", "FORD_F_150_LIGHTNING_MK1")
+    sd.sm.data['modelV2'] = _model(left_edge=True)
+    sd.sm.updated['modelV2'] = True
+    for _ in range(_steps(EDGE_REACTION_TIME) + 2):
+      sd._road_edge_step(SimpleNamespace(vEgo=V50))
+    assert sd._road_edge_step(SimpleNamespace(vEgo=V50)) == (True, False)
+    assert sd._road_edge_step(SimpleNamespace(vEgo=V35)) == (False, False)  # below the highway speed: no auto change to block
+    sd.nudge_required = True
+    assert sd._road_edge_step(SimpleNamespace(vEgo=V50)) == (False, False)  # NudgeForLaneChange on: nothing is blocked
