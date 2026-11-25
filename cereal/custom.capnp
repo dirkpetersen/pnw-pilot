@@ -126,6 +126,7 @@ struct OnroadEventPnw @0x84ddbb3c1051f1d9 {
     wheelWeightRight @8;             # wheelweight2pnw: "Wheel weight detected: right" (display only)
     teslaFsdSelected @9;             # fsdguard2pnw: NO_ENTRY, stock Autosteer/FSD selected or its status missing
     teslaStockSteering @10;          # fsdguard2pnw: WARNING, the stock system started while the comma is engaged
+    laneChangeRoadEdge @11;          # roadedge2pnw: WARNING, auto lane change held off by a road edge (display only)
   }
 }
 

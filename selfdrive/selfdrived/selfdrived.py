@@ -29,6 +29,7 @@ from openpilot.selfdrive.selfdrived.mads_pnw import (MadsPnw, has_blocking_event
 from openpilot.selfdrive.selfdrived.madsquiet_pnw import ChimeDecision, MadsQuiet, apply_chime_decision
 from openpilot.selfdrive.selfdrived.sharp_turn_pnw import SharpTurnHands, ego_lane_prob, plan_curvature  # handsready2pnw
 from openpilot.selfdrive.selfdrived.wheel_weight_pnw import LEFT, RIGHT, WheelWeight  # wheelweight2pnw
+from openpilot.selfdrive.controls.lib.road_edge_pnw import RoadEdgeLaneChange  # roadedge2pnw
 from openpilot.selfdrive.controls.lib.madsresume_pnw import MadsResumeBrain, ResumeInputs, speed_unit_name  # madsresume2pnw
 from openpilot.selfdrive.controls.lib.pnw_vehicle import PnwVehicle  # madsresume2pnw: capability view
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -244,6 +245,9 @@ class SelfdriveD:
     self.wheel_weight_shown: set[str] = set()   # sides already shown to the driver this drive
     self.wheel_weight_err = False                 # the step raised on the last frame (logged once per change)
     self.wheel_weight_show_until = 0.0
+    # roadedge2pnw: the alert side of road_edge_pnw.py. None = no nudgeless lane change on this car, so nothing to explain.
+    self.road_edge = None
+    self.road_edge_err_n = 0
     try:
       # Fable S2: gate on the SAME capability the executor gates on. `mads.available` alone is not
       # enough -- PnwVehicle.mads_resume additionally requires button_management (stock-ACC buttons
@@ -258,6 +262,8 @@ class SelfdriveD:
         self.sharp_turn = SharpTurnHands()
       if veh.wheel_weight_detect:
         self.wheel_weight = WheelWeight()
+      if veh.nudgeless:
+        self.road_edge = RoadEdgeLaneChange()
       if self.steer_sat_floor > 1.0 or self.sharp_turn is not None:
         self.latstat_mem = Params("/dev/shm/params")
       if not veh.mads_resume:
@@ -533,11 +539,14 @@ class SelfdriveD:
     # ******************************************************************************************
 
     # Handle lane change
+    edge_left, edge_right = self._road_edge_step(CS)
     if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
       direction = self.sm['modelV2'].meta.laneChangeDirection
       if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
          (CS.rightBlindspot and direction == LaneChangeDirection.right):
         self.events.add(EventName.laneChangeBlocked)
+      elif (edge_left and direction == LaneChangeDirection.left) or (edge_right and direction == LaneChangeDirection.right):
+        self.events.add(EventNamePnw.laneChangeRoadEdge)  # roadedge2pnw
       else:
         if direction == LaneChangeDirection.left:
           self.events.add(EventName.preLaneChangeLeft)
@@ -1090,6 +1099,23 @@ class SelfdriveD:
       cloudlog.warning("steersatfloor2pnw: lateral mode now %r -> Take Control demand floor %.2f",
                        mode, self.steer_sat_floor if mode == "angle" else 1.0)
     self.steer_sat_floor_now = self.steer_sat_floor if mode == "angle" else 1.0
+
+  def _road_edge_step(self, CS) -> tuple[bool, bool]:
+    """roadedge2pnw: step the road-edge detector on each new modelV2 frame. modeld runs the same detector on the same frames for
+    the actual block (DesireHelper); this copy only picks the alert text, so a one-frame disagreement shows the plain
+    "Steer to Start Lane Change" prompt instead, which asks for the same nudge."""
+    if self.road_edge is None:
+      return False, False
+    if self.sm.updated['modelV2']:
+      try:
+        self.road_edge.update(self.sm['modelV2'], float(CS.vEgo))
+      except Exception:
+        # Rule 2: a malformed model message is not "no edge". Say so (throttled) and show no edge alert.
+        self.road_edge_err_n += 1
+        if self.road_edge_err_n == 1 or self.road_edge_err_n % 200 == 0:
+          cloudlog.exception(f"roadedge2pnw: modelV2 unreadable ({self.road_edge_err_n} frames) -- road-edge alert NOT deciding")
+        self.road_edge.reset()
+    return self.road_edge.left, self.road_edge.right
 
   def _sharp_turn_step(self, CS, lat_active: bool, k_meas: float) -> None:
     """handsready2pnw: "Keep hands ready: sharp turn" (sharp_turn_pnw.py). Display only. Runs only on a car with the capability,

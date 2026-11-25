@@ -90,6 +90,7 @@ class DesireHelper:
     self.auto_lane_change_timer = 0.0
     self._param_read_counter = 0
     self.against_ticks = 0  # lcabort2pnw: consecutive laneChangeStarting ticks with torque against the change
+    self.edge_block_logged = False  # roadedge2pnw
 
     # nudgelesshighway2pnw: highway/freeway gate for the auto (nudgeless) path — mem-param read of
     # mapd's bridged road class, same guarded-import pattern speedadjust_controller.py uses (a mem
@@ -116,7 +117,7 @@ class DesireHelper:
     return CS.steeringPressed and ((CS.steeringTorque < 0 and direction == LaneChangeDirection.left) or
                                    (CS.steeringTorque > 0 and direction == LaneChangeDirection.right))
 
-  def update(self, carstate, lateral_active, lane_change_prob):
+  def update(self, carstate, lateral_active, lane_change_prob, left_edge=False, right_edge=False):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
@@ -182,6 +183,7 @@ class DesireHelper:
         self.lane_change_state = LaneChangeState.preLaneChange
         self.lane_change_ll_prob = 1.0
         self.auto_lane_change_timer = 0.0  # auto2xnor: reset nudgeless timer on entry
+        self.edge_block_logged = False  # roadedge2pnw: one log line per blinker episode
         # Initialize lane change direction to prevent UI alert flicker
         self.lane_change_direction = self.get_lane_change_direction(carstate)
 
@@ -206,7 +208,17 @@ class DesireHelper:
         # off-highway) and then fire on the very first tick on_highway flips true (a single-tick 45.0 mph
         # speed blip, or a momentary mapd way-match flicker to "motorway"). Gating accumulation itself
         # means a full continuous AUTO_LANE_CHANGE_DELAY of on_highway is required, not just one tick.
-        if self.nudgeless_lane_change and not blindspot_detected and on_highway:
+        # roadedge2pnw (road_edge_pnw.py): a road edge on the blinker side holds off ONLY the auto change. The timer
+        # restarts while the edge is seen, so a full AUTO_LANE_CHANGE_DELAY is needed once it clears; a nudge
+        # (torque_applied below) still starts the change; BSM still blocks both.
+        edge_detected = ((left_edge and self.lane_change_direction == LaneChangeDirection.left) or
+                         (right_edge and self.lane_change_direction == LaneChangeDirection.right))
+        if edge_detected and self.nudgeless_lane_change and not self.edge_block_logged:
+          self.edge_block_logged = True
+          cloudlog.event("lane_change_edge_block", error=False, v_ego=round(v_ego, 2), on_highway=on_highway,
+                         direction="left" if self.lane_change_direction == LaneChangeDirection.left else "right")
+
+        if self.nudgeless_lane_change and not blindspot_detected and not edge_detected and on_highway:
           self.auto_lane_change_timer += DT_MDL
         else:
           self.auto_lane_change_timer = 0.0

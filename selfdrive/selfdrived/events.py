@@ -636,6 +636,16 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2),
   },
 
+  # roadedge2pnw: the blinker is on toward a road edge (road_edge_pnw.py), so the AUTO lane change is held off; a nudge
+  # still starts it. Replaces the "Steer Left/Right to Start Lane Change" prompt for that frame. ET.WARNING only.
+  EventNamePnw.laneChangeRoadEdge: {
+    ET.WARNING: Alert(
+      "Road Edge: Steer to Change Lanes",
+      "",
+      AlertStatus.userPrompt, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
   EventNamePnw.wheelWeightRight: {
     ET.WARNING: Alert(
       "Wheel weight detected: right",
