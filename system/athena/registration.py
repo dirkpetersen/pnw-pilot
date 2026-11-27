@@ -20,6 +20,12 @@ from openpilot.common.connect_backend import BACKEND_PNW, BACKEND_OFFLINE, recon
 
 UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
+# The PNW gateway (common/api.py API_HOST default) has no v2/pilotauth/ route: it answers 404 with a plain-text
+# body, json.loads() raises, and register() retries forever, so a device without a DongleId (factory reset, or a
+# C3/early C3X with no /persist/comma/dongle_id) sits on "registering device" indefinitely. Registration is
+# identity only -- comma issues the same dongle ID for the same key pair -- so on the PNW backend it goes to comma.
+PNW_PILOTAUTH_HOST = "https://api.commadotai.com"
+
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
   return dongle not in (None, UNREGISTERED_DONGLE_ID)
@@ -85,6 +91,7 @@ def register(show_spinner=False) -> str | None:
                                     cast(str, private_key), algorithm=jwt_algo)
         cloudlog.info("getting pilotauth")
         resp = api_get("v2/pilotauth/", method='POST', timeout=15,
+                       host=PNW_PILOTAUTH_HOST if backend == BACKEND_PNW else None,
                        imei=imei1, imei2=imei2, serial=serial, public_key=public_key, register_token=register_token)
 
         if resp.status_code in (402, 403):
